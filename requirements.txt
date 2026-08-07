@@ -1,0 +1,38 @@
+# Mohobot — Multi-Bot AI Framework
+# OneBot v11 Reverse WebSocket
+
+# Async & Networking
+websockets>=12.0
+aiofiles>=23.0
+
+# HTTP/API
+httpx>=0.25.0
+openai>=1.0.0
+
+# Web Panel
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+# python-jose[cryptography]>=3.3.0  # Not available on some mirrors, using bcrypt directly
+# bcrypt>=4.1.0  # Not on all mirrors; using hashlib as fallback
+passlib>=1.7.4
+sse-starlette>=1.6.0
+
+# Config
+PyYAML>=6.0
+
+# Logging
+loguru>=0.7.0
+
+# Image Processing
+Pillow>=10.0.0
+# imagehash>=4.3.0  # Not on all mirrors; phash is soft-fallback
+
+# CQ Code parsing (regex)
+# (stdlib only)
+
+# System stats (optional — provides detailed /status output)
+psutil>=5.9.0
+
+# Type hints
+pydantic>=2.0.0

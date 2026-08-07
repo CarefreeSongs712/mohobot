@@ -1,0 +1,36 @@
+# Mohobot Global Configuration
+# =============================
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  max_size: 10485760  # 10 MB
+
+llm:
+  # Chat model — DeepSeek V4 Flash
+  chat_model: "deepseek-chat"
+  chat_base_url: "https://api.deepseek.com"
+  chat_api_key: ""           # Set via env MOHOBOT_LLM_API_KEY or here
+  chat_max_tokens: 4096
+  chat_temperature: 0.7
+
+  # Vision model — Qwen 3.5 122B A10B
+  vision_model: "qwen-vl-plus"
+  vision_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  vision_api_key: ""          # Set via env MOHOBOT_VISION_API_KEY or here
+
+web_panel:
+  enabled: true
+  host: "127.0.0.1"
+  port: 9090
+  username: "admin"
+  password_hash: ""           # Format: pbkdf2_sha256$salt$hexhash
+                              # Generate: python -c "import hashlib,secrets; salt=secrets.token_hex(16); h=hashlib.pbkdf2_hmac('sha256',b'your_password',salt.encode(),100000).hex(); print(f'pbkdf2_sha256${salt}${h}')"
+
+interceptor:
+  keyword_file: "./data/keywords.json"
+
+log_dir: "./logs"
+data_dir: "./data"
+plugins_dir: "./plugins"
+context_max_rounds: 30
