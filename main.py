@@ -78,7 +78,10 @@ class MohobotApplication:
         )
 
         # 4. Load plugins
+        # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
+        self._plugin_system.set_runtime_refs(bot_manager=self._bot_manager)
         plugin_count = await self._plugin_system.load_plugins()
+        logger.info(f"Loaded {plugin_count} plugin(s)")
 
         # 5. Database + Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
         if self._config.database.enabled:
@@ -98,19 +101,6 @@ class MohobotApplication:
             else:
                 logger.info("Agent subsystem disabled — using legacy LLM reply path")
 
-        # Inject bot manager into plugins that need it (e.g. status plugin).
-        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
-        # because re-importing the plugin module would create a second
-        # module object whose globals the loaded instance doesn't see.
-        for meta in self._plugin_system._plugins:
-            inst = meta.get("instance")
-            if inst is not None:
-                injector = getattr(inst.__class__, "inject_bot_manager", None)
-                if injector:
-                    injector(self._bot_manager)
-                    logger.debug(f"Injected bot_manager into plugin {meta['name']}")
-
-        logger.info(f"Loaded {plugin_count} plugin(s)")
         # 6. Initialize message handler
         self._message_handler = MessageHandler(
             ws_server=None,  # Will be set after WS server creation
@@ -147,17 +137,9 @@ class MohobotApplication:
         self._message_handler._ws = self._ws_server
         command_handler._ws = self._ws_server
 
-        # Inject WS server into plugins that need it (e.g. praise plugin).
-        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
-        # because re-importing the plugin module would create a second
-        # module object whose globals the loaded instance doesn't see.
-        for meta in self._plugin_system._plugins:
-            inst = meta.get("instance")
-            if inst is not None:
-                injector = getattr(inst.__class__, "inject_ws_server", None)
-                if injector:
-                    injector(self._ws_server)
-                    logger.debug(f"Injected ws_server into plugin {meta['name']}")
+        # 注入 WS server 到插件(热重载后由 PluginSystem 自动重新注入)
+        self._plugin_system.set_runtime_refs(ws_server=self._ws_server)
+        self._plugin_system.apply_injections()
 
         # Set event callback from WS server to message handler
         self._ws_server.set_event_callback(self._message_handler.handle_event)

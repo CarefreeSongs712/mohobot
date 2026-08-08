@@ -300,8 +300,11 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   <!-- 4. Plugins -->
   <div class="page" id="page-plugins">
     <h2>🧩 插件管理</h2>
-    <div class="subtitle">启用 / 禁用插件（重启后生效）</div>
+    <div class="subtitle">启用 / 禁用 / 热重载插件（无需重启）</div>
     <div class="card">
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="reloadPlugins()">🔄 重新加载插件</button>
+      </div>
       <table>
         <thead><tr><th>插件</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
         <tbody id="plugins-table-body"></tbody>
@@ -824,8 +827,17 @@ async function loadPlugins() {
 async function togglePlugin(name, enabled) {
   try {
     await apiJSON('/api/plugins/toggle', { method: 'POST', body: { name, enabled } });
-    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（重启后生效）`);
+    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（热生效）`);
+    loadPlugins();
   } catch (e) { showToast('操作失败: ' + e.message, false); loadPlugins(); }
+}
+
+async function reloadPlugins() {
+  try {
+    const r = await apiJSON('/api/plugins/reload', { method: 'POST' });
+    showToast(`插件已重新加载: ${r.count} 个生效`);
+    loadPlugins();
+  } catch (e) { showToast('重载失败: ' + e.message, false); }
 }
 
 // ═══════════════ 5. Contexts ═══════════════

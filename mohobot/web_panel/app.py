@@ -327,20 +327,6 @@ class WebPanel:
                 "unbound": self._get_unbound_list(),
             }
 
-        def _get_unbound_list(self) -> list[dict[str, Any]]:
-            """未绑定 bot 的在线连接(接受但不处理消息)。"""
-            if not self._bot_manager:
-                return []
-            return [
-                {
-                    "qq": inst.qq,
-                    "nickname": inst.nickname,
-                    "online": True,
-                    "bound": False,
-                }
-                for inst in self._bot_manager.unbound_connections
-            ]
-
         @app.post("/api/bots")
         async def create_bot(request: Request, body: BotConfigUpdateRequest):
             """面板手动创建新 bot(可选绑定 QQ)。"""
@@ -469,10 +455,19 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            ok = self._plugin_system.set_enabled(body.name, body.enabled)
-            if not ok:
-                raise HTTPException(status_code=404, detail=f"插件不存在: {body.name}")
+            await self._plugin_system.set_enabled(body.name, body.enabled)
+            logger.info(f"Web panel: plugin {body.name} {'enabled' if body.enabled else 'disabled'} (hot)")
             return {"status": "ok", "name": body.name, "enabled": body.enabled}
+
+        @app.post("/api/plugins/reload")
+        async def reload_plugins(request: Request):
+            """热重载插件: 新增/修改/删除插件文件立即生效, 无需重启。"""
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=500, detail="插件系统未启用")
+            count = await self._plugin_system.reload_plugins()
+            logger.info(f"Web panel: plugins hot-reloaded ({count} active)")
+            return {"status": "ok", "count": count, "plugins": self._plugin_system.list_plugins()}
 
         # ── 5. Conversations (对话数据) ──────────────────────
 
@@ -953,6 +948,20 @@ class WebPanel:
                                         if f.suffix == ".json":
                                             result["context_files"] += 1
         return result
+
+    def _get_unbound_list(self) -> list[dict[str, Any]]:
+        """未绑定 bot 的在线连接(接受但不处理消息)。"""
+        if not self._bot_manager:
+            return []
+        return [
+            {
+                "qq": inst.qq,
+                "nickname": inst.nickname,
+                "online": True,
+                "bound": False,
+            }
+            for inst in self._bot_manager.unbound_connections
+        ]
 
     async def _get_bot_list(self) -> list[dict[str, Any]]:
         """List bots with online status and message counts."""
