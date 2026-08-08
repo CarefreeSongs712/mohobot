@@ -102,20 +102,48 @@ class MessageHandler:
     async def _should_respond_to_group(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """Check if the bot should respond in a group setting.
 
-        Returns True if:
-          - The bot is @mentioned (by QQ or @all)
-          - The message contains a 'reply' segment (quoting bot's message)
+        Returns True ONLY if:
           - The message starts with command prefix (/)
+          - The bot is @mentioned DIRECTLY (by its own QQ, not @all)
+          - The message is a reply (quote) of a message the BOT ITSELF sent
         """
         # Always respond to commands
         text = extract_plain_text(event.message)
         if text.startswith("/"):
             return True
 
-        # Check @mention or reply-quote
+        # Direct @mention of the bot
         if event.is_mentioned(bot_id):
             return True
 
+        # Reply quoting the bot's own message
+        if await self._is_reply_to_bot(bot_id, event):
+            return True
+
+        return False
+
+    async def _is_reply_to_bot(self, bot_id: str, event: GroupMessageEvent) -> bool:
+        """Check if the message quotes a message that the bot itself sent.
+
+        Uses the sent-message tracking on BotInstance: a reply only counts
+        if its quoted message_id matches one the bot has sent in this group.
+        """
+        if not isinstance(event.message, list):
+            return False
+
+        instance = None
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+        if instance is None:
+            return False
+
+        for seg in event.message:
+            if not isinstance(seg, dict):
+                continue
+            if seg.get("type") == "reply":
+                quoted_id = seg.get("data", {}).get("id")
+                if quoted_id and instance.is_my_message("group", event.group_id, quoted_id):
+                    return True
         return False
 
     async def _check_image_rate_limit(self, bot_id: str, event: PrivateMessageEvent, raw: dict) -> bool:
@@ -186,7 +214,8 @@ class MessageHandler:
         # Save context after streaming completes
         if full_reply.strip():
             user_msg = {
-                "role": "user",
+                # Role = "QQ号-昵称" so the LLM knows WHO said it
+                "role": self._speaker_role(event),
                 "content": extract_plain_text(event.message) or str(event.message),
                 "timestamp": event.time,
             }
@@ -199,6 +228,15 @@ class MessageHandler:
                 bot_id, chat_type, chat_id, [user_msg, ai_msg],
                 max_rounds=self._context_max_rounds,
             )
+
+    @staticmethod
+    def _speaker_role(event: MessageEvent) -> str:
+        """Build a speaker role string: \"{qq}-{nickname}\" (e.g. 3831097597-墨染荷韵)."""
+        if isinstance(event, GroupMessageEvent):
+            nickname = event.sender.card or event.sender.nickname or f"User-{event.user_id}"
+        else:
+            nickname = event.sender.nickname or f"User-{event.user_id}"
+        return f"{event.user_id}-{nickname}"
 
     # ── Streaming reply with punctuation+length segmentation ──
 

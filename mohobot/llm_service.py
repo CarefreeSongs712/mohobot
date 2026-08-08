@@ -324,14 +324,21 @@ class LLMService:
 
         messages.append({"role": "system", "content": system_content})
 
-        # 2. Session context — insert as alternating user/assistant messages
+        # 2. Session context — insert as alternating user/assistant messages.
+        #    Context roles are either "user"/"assistant" or "{qq}-{nickname}"
+        #    (e.g. "3831097597-墨染荷韵") — named roles are prefixed so the
+        #    model knows exactly who said what.
         for entry in context:
             role = entry.get("role", "user")
             content = entry.get("content", "")
-            messages.append({
-                "role": role if role in ("user", "assistant") else "user",
-                "content": content,
-            })
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": content})
+            else:
+                # Named speaker role, e.g. "3831097597-墨染荷韵"
+                messages.append({
+                    "role": "user",
+                    "content": f"[{role}]: {content}",
+                })
 
         # 3. Current time
         now = time.strftime("%Y-%m-%d %H:%M:%S %A")

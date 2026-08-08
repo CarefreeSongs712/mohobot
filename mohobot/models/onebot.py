@@ -177,11 +177,11 @@ class GroupMessageEvent(MessageEvent):
         )
 
     def is_mentioned(self, self_id: int | str) -> bool:
-        """Check if the bot was @mentioned or the message is a reply to another message.
-        
-        Returns True if:
-        1. The bot is @mentioned (by QQ or @all)
-        2. The message contains a 'reply' segment (indicating it's quoting a previous message)
+        """Check if the bot was @mentioned DIRECTLY (by its QQ, not @all).
+
+        Note: reply-quote triggers are NOT checked here — they require
+        knowing whether the quoted message was sent by the bot, which is
+        handled in message_handler via sent-message tracking.
         """
         if isinstance(self_id, str):
             self_id = int(self_id)
@@ -189,14 +189,10 @@ class GroupMessageEvent(MessageEvent):
             for seg in self.message:
                 if not isinstance(seg, dict):
                     continue
-                seg_type = seg.get("type", "")
-                # Check @mention
-                if seg_type == "at":
-                    if seg.get("data", {}).get("qq") in (str(self_id), "all"):
+                if seg.get("type") == "at":
+                    # Only a direct @mention of the bot itself counts
+                    if seg.get("data", {}).get("qq") == str(self_id):
                         return True
-                # Check reply-quote — any reply segment means user is engaging
-                if seg_type == "reply":
-                    return True
         return False
 
 

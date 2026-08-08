@@ -119,29 +119,70 @@ class WSServer:
         logger.debug(f"Unknown message from bot {bot_id}: {data}")
 
     async def send_to_bot(
-        self, bot_id: str, action: str, params: dict[str, Any] | None = None
-    ) -> None:
-        """Send an API call to a specific bot."""
+        self,
+        bot_id: str,
+        action: str,
+        params: dict[str, Any] | None = None,
+        wait_response: bool = False,
+        timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        """Send an API call to a specific bot.
+
+        If wait_response=True, waits for the OneBot client's response
+        (via echo) and returns it; otherwise returns None.
+        """
         instance = self._bot_manager.get(bot_id)
-        if instance:
-            await instance.send({"action": action, "params": params or {}})
-        else:
+        if not instance:
             logger.warning(f"Cannot send to bot {bot_id}: not connected")
+            return None
+
+        payload = {"action": action, "params": params or {}}
+
+        if not wait_response:
+            await instance.send(payload)
+            return None
+
+        # Generate unique echo and wait for the response
+        import uuid
+        echo = f"api_{uuid.uuid4().hex}"
+        payload["echo"] = echo
+        future = self._bot_manager.create_response_future(echo)
+        await instance.send(payload)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"API response timeout for {action} (bot {bot_id})")
+            return None
 
     async def send_group_msg(
         self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]
     ) -> None:
-        """Send a group message via a specific bot."""
-        await self.send_to_bot(bot_id, "send_group_msg", {
-            "group_id": int(group_id),
-            "message": message,
-        })
+        """Send a group message via a specific bot (records message_id for reply detection)."""
+        resp = await self.send_to_bot(
+            bot_id, "send_group_msg",
+            {"group_id": int(group_id), "message": message},
+            wait_response=True,
+        )
+        # Record the sent message_id so replies quoting it can trigger the bot
+        if resp and isinstance(resp.get("data"), dict):
+            mid = resp["data"].get("message_id")
+            if mid is not None:
+                instance = self._bot_manager.get(bot_id)
+                if instance:
+                    instance.record_sent_message("group", group_id, mid)
 
     async def send_private_msg(
         self, bot_id: str, user_id: int | str, message: str | list[dict[str, Any]]
     ) -> None:
-        """Send a private message via a specific bot."""
-        await self.send_to_bot(bot_id, "send_private_msg", {
-            "user_id": int(user_id),
-            "message": message,
-        })
+        """Send a private message via a specific bot (records message_id)."""
+        resp = await self.send_to_bot(
+            bot_id, "send_private_msg",
+            {"user_id": int(user_id), "message": message},
+            wait_response=True,
+        )
+        if resp and isinstance(resp.get("data"), dict):
+            mid = resp["data"].get("message_id")
+            if mid is not None:
+                instance = self._bot_manager.get(bot_id)
+                if instance:
+                    instance.record_sent_message("private", user_id, mid)

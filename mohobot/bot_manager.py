@@ -28,6 +28,18 @@ class BotInstance:
         self.connected_at: float = asyncio.get_event_loop().time()
         self.message_count: int = 0
         self._send_lock: asyncio.Lock = asyncio.Lock()
+        # Track message IDs this bot has SENT, per chat: {"group:123": {"456", "789"}}
+        self._sent_messages: dict[str, set[str]] = {}
+
+    def record_sent_message(self, chat_type: str, chat_id: int | str, message_id: int | str) -> None:
+        """Record a message ID the bot sent, so replies quoting it can be detected."""
+        key = f"{chat_type}:{chat_id}"
+        self._sent_messages.setdefault(key, set()).add(str(message_id))
+
+    def is_my_message(self, chat_type: str, chat_id: int | str, message_id: int | str) -> bool:
+        """Check if a given message_id was sent by this bot in the given chat."""
+        key = f"{chat_type}:{chat_id}"
+        return str(message_id) in self._sent_messages.get(key, set())
 
     async def send(self, data: dict[str, Any]) -> None:
         """Send a JSON message to this bot via WebSocket (thread-safe)."""

@@ -1,0 +1,26 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Mohobot runtime data (never commit) ──
+data/
+logs/
+
+# ── Secrets / local config overrides ──
+.env
+*.local.yaml
+config/global.yaml
+
+# ── Editor / OS ──
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── Tests / scratch ──
+_test_*.py
