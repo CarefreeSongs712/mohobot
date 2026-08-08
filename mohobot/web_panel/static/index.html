@@ -10,6 +10,7 @@
   --bg-panel: #171a21;
   --bg-card: #1e222b;
   --bg-input: #14171d;
+  --bg2: #14171d;
   --border: #2a2f3a;
   --text: #d7dce4;
   --text-dim: #8b93a3;
@@ -111,6 +112,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .btn.danger { background: transparent; color: var(--red); border: 1px solid var(--border); }
 .btn.danger:hover { background: rgba(248,81,73,.1); }
 .btn.small { padding: 5px 12px; font-size: 12px; }
+.btn.btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 /* ── Toggle switch ── */
 .switch { position: relative; width: 40px; height: 22px; display: inline-block; }
@@ -267,8 +269,13 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
           <label>选择 Bot</label>
           <select id="config-bot-select" onchange="loadBotConfig()"></select>
         </div>
+        <div class="form-row">
+          <button class="btn" onclick="createBotPrompt()" style="margin-right:8px">➕ 创建 Bot</button>
+          <button class="btn" onclick="bindBotPrompt()">🔗 绑定 QQ</button>
+        </div>
         <div id="config-bot-form"></div>
         <button class="btn" onclick="saveBotConfig()">保存 Bot 配置</button>
+        <div id="unbound-list" style="margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -326,6 +333,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       <span style="flex:1"></span>
       <button class="btn secondary small" onclick="clearLogs()">清空</button>
       <button class="btn secondary small" onclick="toggleLogPause()" id="log-pause-btn">暂停</button>
+      <button class="btn secondary small" onclick="toggleLogAutoScroll()" id="log-scroll-btn" style="background:var(--accent);color:#fff">⤓ 自动滚动</button>
     </div>
     <div class="log-container" id="log-container"></div>
   </div>
@@ -598,10 +606,64 @@ async function loadConfigPage() {
       formField('database.file', '数据库文件名', globalConfigCache.database?.file);
 
     const sel = document.getElementById('config-bot-select');
-    sel.innerHTML = botListCache.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq})</option>`).join('');
-    if (botListCache.length) loadBotConfig();
-    else document.getElementById('config-bot-form').innerHTML = '<div class="conv-empty">暂无连接中的 Bot</div>';
+    const bots = (botListCache.bots || []).slice();
+    const unbound = botListCache.unbound || [];
+    sel.innerHTML = bots.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq || '未绑定'})${b.online ? ' ●' : ''}</option>`).join('');
+    if (bots.length) loadBotConfig();
+    else document.getElementById('config-bot-form').innerHTML = '<div class="conv-empty">暂无 Bot,点击"➕ 创建 Bot"新建</div>';
+    // 未绑定连接列表(接受连接但不处理消息)
+    const ubEl = document.getElementById('unbound-list');
+    if (unbound.length) {
+      ubEl.innerHTML = '<div class="card-title" style="font-size:13px">📡 未绑定连接(消息被忽略)</div>' +
+        unbound.map(u => `<div class="form-row" style="justify-content:space-between">
+          <span>QQ ${u.qq}</span>
+          <button class="btn btn-sm" onclick="bindToNewBot(${u.qq})">创建并绑定</button></div>`).join('');
+    } else {
+      ubEl.innerHTML = '';
+    }
   } catch (e) { showToast('加载配置失败: ' + e.message, false); }
+}
+
+// ── Bot 创建 / 绑定 ───────────────────────────────────────────
+
+async function createBotPrompt() {
+  const nickname = prompt('新 Bot 昵称(可留空自动编号):');
+  if (nickname === null) return;
+  try {
+    const r = await apiJSON('/api/bots', { method: 'POST', body: { data: { nickname } } });
+    showToast(`已创建 Bot: ${r.bot_id}`);
+    loadConfigPage();
+  } catch (e) { showToast('创建失败: ' + e.message, false); }
+}
+
+async function bindBotPrompt() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId) { showToast('请先选择 Bot', false); return; }
+  const qq = prompt(`输入要绑定到 ${botId} 的 QQ 号(QQ 唯一绑定, 会解绑其他 bot):`);
+  if (!qq || !/^\d+$/.test(qq.trim())) return;
+  try {
+    await apiJSON(`/api/bots/${botId}/bind`, { method: 'PUT', body: { data: { qq: parseInt(qq.trim()) } } });
+    showToast(`已绑定 QQ ${qq}`);
+    loadConfigPage();
+  } catch (e) { showToast('绑定失败: ' + e.message, false); }
+}
+
+async function bindToNewBot(qq) {
+  try {
+    const r = await apiJSON('/api/bots', { method: 'POST', body: { data: { nickname: '', qq } } });
+    showToast(`已创建 ${r.bot_id} 并绑定 QQ ${qq}`);
+    loadConfigPage();
+  } catch (e) { showToast('创建绑定失败: ' + e.message, false); }
+}
+
+async function unbindBotPrompt() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId || !confirm(`解绑 ${botId} 的 QQ? 连接将降级为未绑定`)) return;
+  try {
+    await apiJSON(`/api/bots/${botId}/unbind`, { method: 'POST' });
+    showToast('已解绑');
+    loadConfigPage();
+  } catch (e) { showToast('解绑失败: ' + e.message, false); }
 }
 
 async function loadBotConfig() {
@@ -611,9 +673,13 @@ async function loadBotConfig() {
     botConfigCache = await apiJSON(`/api/bots/${botId}/config`);
     const b = botConfigCache;
     document.getElementById('config-bot-form').innerHTML =
+      `<div class="form-row"><label>Bot ID(内部标识)</label><input type="text" value="${b.bot_id}" readonly style="background:var(--bg2)"></div>` +
       formField('nickname', '昵称', b.nickname) +
-      formField('qq', 'QQ 号', b.qq) +
-      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为') +
+      (b.qq
+        ? `<div class="form-row"><label>绑定 QQ</label><input type="text" value="${b.qq}" readonly style="background:var(--bg2)">
+             <button class="btn btn-sm" onclick="unbindBotPrompt()" style="margin-left:8px">解绑</button></div>`
+        : '<div class="hint" style="margin:6px 0">⚠️ 未绑定 QQ — 点击上方"🔗 绑定 QQ"</div>') +
+      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为(子系统默认使用此人设)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
       formField('command_prefix', '指令前缀', b.command_prefix) +
@@ -673,7 +739,6 @@ async function saveBotConfig() {
   if (!botId) return;
   const data = {
     nickname: document.getElementById('cfg-nickname').value,
-    qq: parseInt(document.getElementById('cfg-qq').value) || 0,
     persona: document.getElementById('cfg-persona').value,
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
     vision_model_override: document.getElementById('cfg-vision_model_override').value,
@@ -893,6 +958,22 @@ async function deleteCurrentSession() {
 
 // ═══════════════ 6. Logs ═══════════════
 let logSource = null;
+let logAutoScroll = true;  // 自动滚动开关(默认开启)
+
+function toggleLogAutoScroll() {
+  logAutoScroll = !logAutoScroll;
+  const btn = document.getElementById('log-scroll-btn');
+  if (logAutoScroll) {
+    btn.style.background = 'var(--accent)';
+    btn.style.color = '#fff';
+    // 重新开启时立即滚到底部
+    const container = document.getElementById('log-container');
+    container.scrollTop = container.scrollHeight;
+  } else {
+    btn.style.background = '';
+    btn.style.color = '';
+  }
+}
 
 function setLogFilter(btn) {
   const lv = btn.dataset.filter;
@@ -932,7 +1013,7 @@ function appendLog(entry) {
   el.className = 'log-entry';
   el.innerHTML = `<span class="t">${entry.time}</span><span class="lvl ${entry.level}">[${entry.level}]</span><span>${esc(entry.message)}</span>`;
   container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
+  if (logAutoScroll) container.scrollTop = container.scrollHeight;
   while (container.children.length > 800) container.removeChild(container.firstChild);
 }
 

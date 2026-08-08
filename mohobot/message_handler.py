@@ -145,8 +145,12 @@ class MessageHandler:
         if text.startswith("/"):
             return True
 
-        # Direct @mention of the bot
-        if event.is_mentioned(bot_id):
+        # Direct @mention of the bot (bot_id 是内部编号, @ 的是绑定 QQ)
+        instance = None
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+        bot_qq = str(instance.qq) if instance else bot_id
+        if event.is_mentioned(bot_qq):
             return True
 
         # Reply quoting the bot's own message

@@ -1,30 +1,39 @@
-"""Bot lifecycle management.
+"""Bot lifecycle management — bot_id 与 QQ 分离。
 
-Maintains a registry of connected bots (keyed by bot QQ / X-Self-ID),
-loads/saves per-bot configuration, and provides API call routing.
+- bot_id: 内部标识(自动编号 bot_001...), 决定 data/bots/{bot_id}/ 目录
+  与数据库 character_id。
+- qq: bot 绑定的 QQ 号(一个 bot 只能绑定一个 QQ; QQ 唯一绑定 ——
+  一个 QQ 只能被一个 bot 绑定, 换绑需先解绑)。
+- 未绑定 QQ 的 WS 连接: 接受连接但不处理任何消息, 在面板显示"待绑定"。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-import aiofiles
-import aiofiles.os
 from loguru import logger
 
 from mohobot.models.config import BotConfig
 
 
 class BotInstance:
-    """Represents a connected bot instance."""
+    """Represents a connected bot instance (bound) or unbound connection."""
 
-    def __init__(self, bot_id: str, websocket: "websockets.WebSocketServerProtocol", config: BotConfig):
+    def __init__(
+        self,
+        bot_id: str,
+        websocket: "websockets.WebSocketServerProtocol",
+        config: BotConfig,
+        bound: bool = True,
+    ):
         self.bot_id: str = bot_id
         self.ws: "websockets.WebSocketServerProtocol" = websocket
         self.config: BotConfig = config
+        self.bound: bool = bound
         self.connected_at: float = asyncio.get_event_loop().time()
         self.message_count: int = 0
         self._send_lock: asyncio.Lock = asyncio.Lock()
@@ -66,63 +75,268 @@ class BotInstance:
 
     @property
     def nickname(self) -> str:
-        return self.config.nickname if self.config.nickname else f"Bot-{self.bot_id}"
+        if self.config.nickname:
+            return self.config.nickname
+        if self.bound and self.bot_id:
+            return f"Bot-{self.bot_id}"
+        return f"QQ{self.config.qq}"
 
 
 class BotManager:
-    """Manages all connected bot instances."""
+    """Manages all connected bot instances and bot↔QQ bindings."""
 
     def __init__(self, data_dir: str = "./data"):
-        self._bots: dict[str, BotInstance] = {}
+        self._bots: dict[str, BotInstance] = {}   # bot_id -> instance (已绑定)
+        self._unbound: dict[str, BotInstance] = {}  # qq(str) -> instance (未绑定连接)
         self._data_dir = data_dir
+        self._bots_dir = Path(data_dir) / "bots"
         self._pending_responses: dict[str, asyncio.Future] = {}
         # Track sent messages awaiting message_id: echo -> (bot_id, chat_type, chat_id)
         self._pending_sent: dict[str, tuple[str, str, str]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
 
-    def register(self, bot_id: str, websocket: "websockets.WebSocketServerProtocol") -> BotInstance:
-        """Register a newly connected bot."""
-        config_path = Path(self._data_dir) / "bots" / bot_id / "config.json"
-        config = BotConfig.load(config_path)
+    # ── Bot↔QQ 绑定与磁盘配置 ────────────────────────────────
 
-        # Auto-fill QQ from bot_id if not set, and persist so the web panel
-        # can list this bot (qq/nickname) even after it disconnects.
-        if config.qq == 0:
-            config.qq = int(bot_id)
-        if not config.nickname:
-            config.nickname = f"Bot-{bot_id}"
-        if not config_path.exists():
-            config.save(config_path)
+    def _bot_config_path(self, bot_id: str) -> Path:
+        return self._bots_dir / bot_id / "config.json"
 
-        instance = BotInstance(bot_id, websocket, config)
-        self._bots[bot_id] = instance
-        logger.info(f"Bot registered: {bot_id} (QQ={config.qq}, nickname={config.nickname})")
+    def next_bot_id(self) -> str:
+        """生成下一个自动编号 bot_id (bot_001, bot_002, ...)。"""
+        existing: list[int] = []
+        if self._bots_dir.exists():
+            for entry in self._bots_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                m = re.fullmatch(r"bot_(\d+)", entry.name)
+                if m:
+                    existing.append(int(m.group(1)))
+        n = max(existing, default=0) + 1
+        return f"bot_{n:03d}"
+
+    def find_bot_by_qq(self, qq: int | str) -> BotConfig | None:
+        """扫描磁盘配置, 返回绑定了该 QQ 的 bot (QQ 唯一绑定)。"""
+        qq_str = str(qq)
+        if not self._bots_dir.exists():
+            return None
+        for entry in sorted(self._bots_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            cfg = BotConfig.load(entry / "config.json")
+            if cfg.bot_id and str(cfg.qq) == qq_str:
+                return cfg
+        return None
+
+    def load_bot_config(self, bot_id: str) -> BotConfig:
+        return BotConfig.load(self._bot_config_path(bot_id))
+
+    def save_bot_config(self, bot_id: str) -> None:
+        """Save the bot's config to disk."""
+        instance = self._bots.get(bot_id)
+        if instance:
+            config_path = self._bot_config_path(bot_id)
+            instance.config.save(config_path)
+            logger.info(f"Bot config saved: {bot_id}")
+
+    def list_bot_configs(self) -> list[BotConfig]:
+        """扫描磁盘上的全部 bot 配置(含未绑定 QQ 的)。"""
+        result: list[BotConfig] = []
+        if not self._bots_dir.exists():
+            return result
+        for entry in sorted(self._bots_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            cfg = BotConfig.load(entry / "config.json")
+            if cfg.bot_id:
+                result.append(cfg)
+        return result
+
+    # ── 创建 / 绑定 / 解绑 ───────────────────────────────────
+
+    def create_bot(self, nickname: str = "", qq: int | str = 0) -> BotConfig:
+        """面板手动创建新 bot (可选绑定 QQ)。QQ 唯一: 会解绑其他 bot。"""
+        qq_int = int(qq or 0)
+        bot_id = self.next_bot_id()
+        cfg = BotConfig(bot_id=bot_id, nickname=nickname or bot_id, qq=qq_int)
+        if qq_int:
+            self._unbind_qq_from_others(qq_int, exclude_bot_id=bot_id)
+        self._bots_dir.mkdir(parents=True, exist_ok=True)
+        cfg.save(self._bot_config_path(bot_id))
+        logger.info(f"Bot created: {bot_id} (nickname={cfg.nickname}, qq={qq_int or '未绑定'})")
+        return cfg
+
+    def bind_qq(self, bot_id: str, qq: int | str) -> bool:
+        """把 QQ 绑定到指定 bot。QQ 唯一绑定: 自动解绑其他 bot。
+
+        若该 QQ 有未绑定连接, 连接直接晋升为 bot 实例。
+        """
+        qq_int = int(qq or 0)
+        cfg_path = self._bot_config_path(bot_id)
+        cfg = BotConfig.load(cfg_path)
+        if not cfg.bot_id:
+            logger.warning(f"Bind failed: bot {bot_id} 不存在")
+            return False
+
+        old_qq = cfg.qq
+        # QQ 唯一: 解绑其他 bot 对该 QQ 的绑定
+        self._unbind_qq_from_others(qq_int, exclude_bot_id=bot_id)
+        cfg.qq = qq_int
+        cfg.save(cfg_path)
+
+        # 连接迁移: 未绑定连接晋升 / 旧连接降级
+        qq_str = str(qq_int)
+        if qq_str in self._unbound:
+            inst = self._unbound.pop(qq_str)
+            inst.bound = True
+            inst.bot_id = bot_id
+            inst.config = cfg
+            self._bots[bot_id] = inst
+            logger.info(f"QQ {qq_int} 的未绑定连接已晋升为 {bot_id}")
+        else:
+            inst = self._bots.get(bot_id)
+            if inst is not None:
+                inst.config = cfg
+                if old_qq and old_qq != qq_int:
+                    # 旧 QQ 的连接不再属于本 bot → 降级为未绑定
+                    self._bots.pop(bot_id, None)
+                    inst.bound = False
+                    inst.bot_id = ""
+                    self._unbound[str(old_qq)] = inst
+                    logger.info(f"{bot_id} 换绑: QQ{old_qq} 连接降级为未绑定")
+
+        logger.info(f"Bot {bot_id} 绑定 QQ {qq_int}")
+        return True
+
+    def unbind_qq(self, bot_id: str) -> bool:
+        """解绑 bot 的 QQ (qq 置 0)。若 bot 在线, 连接降级为未绑定。"""
+        cfg_path = self._bot_config_path(bot_id)
+        cfg = BotConfig.load(cfg_path)
+        if not cfg.bot_id:
+            return False
+        old_qq = cfg.qq
+        cfg.qq = 0
+        cfg.save(cfg_path)
+
+        inst = self._bots.get(bot_id)
+        if inst is not None:
+            self._bots.pop(bot_id, None)
+            inst.bound = False
+            inst.bot_id = ""
+            inst.config = cfg
+            if old_qq:
+                self._unbound[str(old_qq)] = inst
+            logger.info(f"{bot_id} 解绑 QQ{old_qq}, 连接降级为未绑定")
+
+        logger.info(f"Bot {bot_id} 已解绑 QQ")
+        return True
+
+    def _unbind_qq_from_others(self, qq: int, exclude_bot_id: str) -> None:
+        """QQ 唯一绑定: 把该 QQ 从其他 bot 上解绑。"""
+        qq_str = str(qq)
+        if not self._bots_dir.exists():
+            return
+        for entry in sorted(self._bots_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            cfg = BotConfig.load(entry / "config.json")
+            if cfg.bot_id and cfg.bot_id != exclude_bot_id and str(cfg.qq) == qq_str:
+                cfg.qq = 0
+                cfg.save(entry / "config.json")
+                inst = self._bots.get(cfg.bot_id)
+                if inst is not None:
+                    self._bots.pop(cfg.bot_id, None)
+                    inst.bound = False
+                    inst.bot_id = ""
+                    inst.config = cfg
+                    self._unbound[qq_str] = inst
+                logger.info(f"QQ 唯一绑定: {cfg.bot_id} 已被解绑 (QQ {qq} 转给 {exclude_bot_id})")
+
+    # ── 旧格式迁移 ────────────────────────────────────────────
+
+    def migrate_legacy_bots(self) -> int:
+        """启动迁移: 旧版 data/bots/{qq}/config.json (无 bot_id) → bot_id 目录。
+
+        为每个旧 bot 分配自动编号 bot_id 并写入 config, 目录改名;
+        返回迁移数量。
+        """
+        if not self._bots_dir.exists():
+            return 0
+        migrated = 0
+        for entry in sorted(self._bots_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            cfg_path = entry / "config.json"
+            cfg = BotConfig.load(cfg_path)
+            if cfg.bot_id:
+                continue  # 已是新格式
+
+            if entry.name.isdigit():
+                # 旧格式: 目录名即 QQ 号
+                qq = int(entry.name)
+                cfg.qq = qq
+            cfg.bot_id = self.next_bot_id()
+            if not cfg.nickname:
+                cfg.nickname = cfg.bot_id
+            cfg.save(cfg_path)
+
+            new_dir = self._bots_dir / cfg.bot_id
+            if new_dir != entry and not new_dir.exists():
+                entry.rename(new_dir)
+            migrated += 1
+            logger.info(f"迁移旧 bot: QQ={cfg.qq or '?'} → {cfg.bot_id} (目录 {entry.name})")
+        if migrated:
+            logger.info(f"Legacy bot migration complete: {migrated} bot(s)")
+        return migrated
+
+    # ── 连接注册 / 注销 ───────────────────────────────────────
+
+    def register(self, qq: int | str, websocket: "websockets.WebSocketServerProtocol") -> BotInstance:
+        """按 QQ 号注册连接: 已绑定 → bot 实例; 未绑定 → 未绑定连接(不处理消息)。"""
+        qq_str = str(qq)
+        bot_cfg = self.find_bot_by_qq(qq)
+
+        if bot_cfg is not None:
+            instance = BotInstance(bot_cfg.bot_id, websocket, bot_cfg, bound=True)
+            self._bots[bot_cfg.bot_id] = instance
+            self._unbound.pop(qq_str, None)
+            logger.info(
+                f"Bot {bot_cfg.bot_id} connected (QQ={bot_cfg.qq}, nickname={bot_cfg.nickname})"
+            )
+            return instance
+
+        # 未绑定: 接受连接但不处理消息
+        unbound_cfg = BotConfig(qq=int(qq), nickname=f"QQ{qq}")
+        instance = BotInstance("", websocket, unbound_cfg, bound=False)
+        self._unbound[qq_str] = instance
+        logger.warning(
+            f"QQ {qq} 已连接但未绑定任何 bot — 消息将被忽略, "
+            f"请在 Web 面板创建 bot 并绑定该 QQ"
+        )
         return instance
 
-    def unregister(self, bot_id: str, instance: BotInstance | None = None) -> None:
-        """Remove a disconnected bot.
+    def unregister(self, instance: BotInstance) -> None:
+        """Remove a disconnected bot instance (bound or unbound).
 
-        instance 可选: 传入后只在其仍为当前实例时移除。
-        防止"旧连接断开 → unregister"误删同 bot_id 的新连接实例(重连竞态)。
+        传实例而非 key, 防止旧连接断开误删同 QQ 的新实例(重连竞态)。
         """
-        if bot_id not in self._bots:
-            return
-        if instance is not None and self._bots[bot_id] is not instance:
-            logger.debug(f"Bot {bot_id}: stale connection closed, keep current instance")
-            return
-        del self._bots[bot_id]
-        logger.info(f"Bot unregistered: {bot_id}")
+        if instance.bound:
+            if self._bots.get(instance.bot_id) is instance:
+                del self._bots[instance.bot_id]
+                logger.info(f"Bot unregistered: {instance.bot_id}")
+        else:
+            if self._unbound.get(str(instance.qq)) is instance:
+                del self._unbound[str(instance.qq)]
+                logger.info(f"Unbound connection unregistered: QQ {instance.qq}")
 
     def get(self, bot_id: str) -> BotInstance | None:
-        """Get a bot instance by ID."""
+        """Get a bound bot instance by bot_id."""
         return self._bots.get(bot_id)
 
     def get_by_qq(self, qq: int | str) -> BotInstance | None:
-        """Find a bot by its QQ number."""
+        """Get the bound bot instance connected via the given QQ."""
         qq_str = str(qq)
-        for bot in self._bots.values():
-            if str(bot.config.qq) == qq_str:
-                return bot
+        for inst in self._bots.values():
+            if str(inst.qq) == qq_str:
+                return inst
         return None
 
     @property
@@ -133,13 +347,11 @@ class BotManager:
     def bot_count(self) -> int:
         return len(self._bots)
 
-    async def save_bot_config(self, bot_id: str) -> None:
-        """Save the bot's config to disk."""
-        instance = self._bots.get(bot_id)
-        if instance:
-            config_path = Path(self._data_dir) / "bots" / bot_id / "config.json"
-            instance.config.save(config_path)
-            logger.info(f"Bot config saved: {bot_id}")
+    @property
+    def unbound_connections(self) -> list[BotInstance]:
+        return list(self._unbound.values())
+
+    # ── API 响应路由 ─────────────────────────────────────────
 
     async def handle_api_response(self, bot_id: str, response: dict[str, Any]) -> None:
         """Route an API response to the waiting caller, and record sent message IDs."""

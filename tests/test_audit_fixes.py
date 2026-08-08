@@ -18,16 +18,16 @@ async def test_reconnect_race() -> None:
     from mohobot.models.config import BotConfig
 
     bm = BotManager(data_dir=tempfile.mkdtemp(prefix="bm_"))
-    old = BotInstance("123", None, BotConfig(qq=123))
-    new = BotInstance("123", None, BotConfig(qq=123))
+    old = BotInstance("123", None, BotConfig(qq=123), bound=True)
+    new = BotInstance("123", None, BotConfig(qq=123), bound=True)
     # 旧连接在线,新连接注册(替换实例)
     bm._bots["123"] = old
     bm._bots["123"] = new
     # 旧连接关闭 → 不得误删新实例
-    bm.unregister("123", old)
+    bm.unregister(old)
     assert bm.get("123") is new, "stale unregister must keep the new instance"
     # 当前实例关闭 → 正常移除
-    bm.unregister("123", new)
+    bm.unregister(new)
     assert bm.get("123") is None
     print("[1] reconnect race OK")
 

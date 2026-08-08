@@ -12,14 +12,14 @@ server:
 llm:
   # Chat model
   chat_model: "DeepSeek-V4-Flash"
-  chat_base_url: "http://127.0.0.1:36712/v1"
+  chat_base_url: "https://api.openai.com/v1"
   chat_api_key: ""           # 必填，或设置环境变量 MOHOBOT_LLM_API_KEY
   chat_max_tokens: 131072    # 注意：过大的 max_tokens 会导致部分网关返回空流
   chat_temperature: 0.7
 
   # Vision model
   vision_model: "Qwen3.5-122B-A10B"
-  vision_base_url: "http://127.0.0.1:36712/v1"
+  vision_base_url: "https://api.openai.com/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 
 # ── 回复行为（系统级） ────────────────────────────────────────

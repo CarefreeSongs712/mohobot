@@ -75,16 +75,21 @@ ws://127.0.0.1:8081/ws
 
 ### 2. 添加 Bot 配置
 
+**Bot 与 QQ 分离**：bot 使用自动编号的内部标识（`bot_001`…），一个 bot 绑定一个 QQ 号（QQ 唯一绑定）。新 QQ 连接默认**不分配** bot，需在 Web 面板"配置文件 → 创建 Bot / 绑定 QQ"操作；启动时会自动迁移旧版（`data/bots/{qq}`）配置。
+
 框架启动后，`data/bots/{bot_id}/config.json` 会自动创建，可编辑：
 
 ```json
 {
+  "bot_id": "bot_001",
   "qq": 123456789,
   "nickname": "我的机器人",
   "persona": "你是 Mohobot，一个有用的 AI 助手。",
   "enabled": true
 }
 ```
+
+> `qq` 为 0 表示未绑定；`persona` 同时作为该 bot 的 Agent 子系统默认人设。
 
 ### 3. 验证
 

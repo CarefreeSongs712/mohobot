@@ -302,8 +302,14 @@ class GlobalConfig:
 
 @dataclass
 class BotConfig:
-    """Per-bot configuration, stored in data/bots/{bot_id}/config.json."""
-    qq: int = 0
+    """Per-bot configuration, stored in data/bots/{bot_id}/config.json.
+
+    bot_id 与 QQ 分离: bot_id 为内部标识(自动编号 bot_001...),
+    qq 为绑定的 QQ 号(0 = 未绑定, 一个 bot 只能绑定一个 QQ,
+    QQ 唯一绑定 —— 一个 QQ 只能被一个 bot 绑定)。
+    """
+    bot_id: str = ""  # 内部标识(自动编号), 决定数据目录名
+    qq: int = 0       # 绑定的 QQ 号 (0 = 未绑定)
     nickname: str = ""
     persona: str = "你是 Mohobot，一个有用的 AI 助手。"  # System prompt
     enabled: bool = True
@@ -328,6 +334,7 @@ class BotConfig:
             raw = json.load(f)
 
         return cls(
+            bot_id=raw.get("bot_id", ""),
             qq=raw.get("qq", 0),
             nickname=raw.get("nickname", ""),
             persona=raw.get("persona", "你是 Mohobot，一个有用的 AI 助手。"),
@@ -350,6 +357,7 @@ class BotConfig:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for web panel editing)."""
         return {
+            "bot_id": self.bot_id,
             "qq": self.qq,
             "nickname": self.nickname,
             "persona": self.persona,

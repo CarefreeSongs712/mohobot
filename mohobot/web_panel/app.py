@@ -294,26 +294,76 @@ class WebPanel:
 
             # Scan data/bots/*/config.json — returns ALL configured bots
             # (online or not), with qq + nickname from their config.
-            bots_dir = self._data_dir / "bots"
             bots = []
             online_ids = set()
             if self._bot_manager:
                 online_ids = {inst.bot_id for inst in self._bot_manager.all_bots}
-
-            if bots_dir.exists():
-                for entry in sorted(bots_dir.iterdir()):
-                    if not entry.is_dir():
-                        continue
-                    bot_id = entry.name
-                    cfg = BotConfig.load(entry / "config.json")
+                for cfg in self._bot_manager.list_bot_configs():
                     bots.append({
-                        "bot_id": bot_id,
+                        "bot_id": cfg.bot_id,
                         "qq": cfg.qq,
                         "nickname": cfg.nickname,
-                        "online": bot_id in online_ids,
+                        "online": cfg.bot_id in online_ids,
                         "enabled": cfg.enabled,
+                        "bound": bool(cfg.qq),
                     })
-            return bots
+            return {
+                "bots": bots,
+                "unbound": self._get_unbound_list(),
+            }
+
+        def _get_unbound_list(self) -> list[dict[str, Any]]:
+            """未绑定 bot 的在线连接(接受但不处理消息)。"""
+            if not self._bot_manager:
+                return []
+            return [
+                {
+                    "qq": inst.qq,
+                    "nickname": inst.nickname,
+                    "online": True,
+                    "bound": False,
+                }
+                for inst in self._bot_manager.unbound_connections
+            ]
+
+        @app.post("/api/bots")
+        async def create_bot(request: Request, body: BotConfigUpdateRequest):
+            """面板手动创建新 bot(可选绑定 QQ)。"""
+            await _require_auth(request)
+            if not self._bot_manager:
+                raise HTTPException(status_code=500, detail="Bot 管理器不可用")
+            data = body.data or {}
+            nickname = str(data.get("nickname", "") or "")
+            qq = int(data.get("qq", 0) or 0)
+            cfg = self._bot_manager.create_bot(nickname=nickname, qq=qq)
+            logger.info(f"Web panel: bot created {cfg.bot_id}")
+            return {"status": "ok", "bot_id": cfg.bot_id}
+
+        @app.put("/api/bots/{bot_id}/bind")
+        async def bind_bot_qq(bot_id: str, request: Request, body: ConfigUpdateRequest):
+            """把 QQ 绑定到 bot(QQ 唯一绑定, 自动解绑其他 bot)。"""
+            await _require_auth(request)
+            if not self._bot_manager:
+                raise HTTPException(status_code=500, detail="Bot 管理器不可用")
+            qq = int((body.data or {}).get("qq", 0) or 0)
+            if not qq:
+                raise HTTPException(status_code=400, detail="QQ 不能为空")
+            ok = self._bot_manager.bind_qq(bot_id, qq)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"Bot 不存在: {bot_id}")
+            logger.info(f"Web panel: {bot_id} 绑定 QQ {qq}")
+            return {"status": "ok", "bot_id": bot_id, "qq": qq}
+
+        @app.post("/api/bots/{bot_id}/unbind")
+        async def unbind_bot_qq(bot_id: str, request: Request):
+            await _require_auth(request)
+            if not self._bot_manager:
+                raise HTTPException(status_code=500, detail="Bot 管理器不可用")
+            ok = self._bot_manager.unbind_qq(bot_id)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"Bot 不存在: {bot_id}")
+            logger.info(f"Web panel: {bot_id} 解绑 QQ")
+            return {"status": "ok", "bot_id": bot_id}
 
         @app.get("/api/bots/{bot_id}/config")
         async def get_bot_config(bot_id: str, request: Request):

@@ -67,42 +67,51 @@ class WSServer:
     async def _handle_connection(
         self, websocket: websockets.asyncio.server.ServerConnection
     ) -> None:
-        """Handle an incoming WebSocket connection from a OneBot instance."""
+        """Handle an incoming WebSocket connection from a OneBot instance.
+
+        X-Self-ID = QQ 号 → 按绑定关系注册为 bot 实例或未绑定连接。
+        """
         # Extract headers
         headers = dict(websocket.request.headers)
-        bot_id = headers.get("x-self-id", headers.get("X-Self-ID", "unknown"))
+        qq = headers.get("x-self-id", headers.get("X-Self-ID", ""))
         client_role = headers.get(
             "x-client-role", headers.get("X-Client-Role", "Universal")
         )
 
         logger.info(
-            f"New connection: bot_id={bot_id}, role={client_role}, "
+            f"New connection: qq={qq}, role={client_role}, "
             f"remote={websocket.remote_address}"
         )
 
-        # Register bot
-        instance = self._bot_manager.register(bot_id, websocket)
-        logger.info(f"Bot {bot_id} ({instance.nickname}) connected")
+        # Register bot (按 QQ 查找绑定; 未绑定则接受但不处理)
+        instance = self._bot_manager.register(qq, websocket)
 
         try:
             async for raw_message in websocket:
                 try:
                     data = json.loads(raw_message)
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Invalid JSON from bot {bot_id}: {e}")
+                    logger.warning(f"Invalid JSON from {instance.bot_id or f'QQ{instance.qq}'}: {e}")
                     continue
 
-                await self._dispatch(bot_id, data)
+                await self._dispatch(instance, data)
         except websockets.exceptions.ConnectionClosed as e:
-            logger.info(f"Bot {bot_id} disconnected: {e.code} {e.reason}")
+            logger.info(f"{instance.bot_id or f'QQ{instance.qq}'} disconnected: {e.code} {e.reason}")
         except Exception as e:
-            logger.error(f"Connection error for bot {bot_id}: {e}")
+            logger.error(f"Connection error for {instance.bot_id or f'QQ{instance.qq}'}: {e}")
         finally:
-            # 传 instance: 若期间同 bot_id 已建立新连接,不要误删新实例
-            self._bot_manager.unregister(bot_id, instance)
+            # 传实例: 若期间同 QQ 已建立新连接,不要误删新实例
+            self._bot_manager.unregister(instance)
 
-    async def _dispatch(self, bot_id: str, data: dict[str, Any]) -> None:
+    async def _dispatch(self, instance, data: dict[str, Any]) -> None:
         """Dispatch an incoming message — event or API response."""
+        # 未绑定连接: 接受但不处理任何消息
+        if not instance.bound:
+            logger.debug(f"Ignoring message from unbound connection QQ {instance.qq}: {data.get('post_type') or data.get('action')}")
+            return
+
+        bot_id = instance.bot_id
+
         # API response: has 'status' field (echo may be absent if the request
         # didn't carry one, e.g. some clients omit echo on error responses).
         if "status" in data:

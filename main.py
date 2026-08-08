@@ -67,6 +67,8 @@ class MohobotApplication:
 
         # 3. Initialize core services
         self._bot_manager = BotManager(data_dir=self._config.data_dir)
+        # 旧格式迁移: data/bots/{qq} (无 bot_id) → 自动编号 bot_id 目录
+        self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._llm_service = LLMService(global_config=self._config)
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
