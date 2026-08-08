@@ -53,11 +53,13 @@ pip install -r requirements.txt
 cp config/global.example.yaml config/global.yaml   # 生成本地配置（已被 .gitignore 排除）
 # 编辑 config/global.yaml 填入 API Key，或设置环境变量：
 export MOHOBOT_LLM_API_KEY="sk-xxx"      # Chat 模型
-export MOHOBOT_VISION_API_KEY="sk-xxx"   # Vision 模型
+export MOHOBOT_VISION_API_KEY="sk-xxx"   # Vision 模型（无视觉需求可留空）
 
 # 4. 启动
 python main.py
 ```
+
+> 当前开发分支为 `beta`（Agent 子系统 + 数据库存储），主分支 `main` 为旧版文件存储架构。
 
 ## 🚀 快速开始
 
@@ -86,7 +88,80 @@ ws://127.0.0.1:8081/ws
 
 ### 3. 验证
 
-私聊机器人发送任意消息即可得到流式分段回复。
+私聊机器人发送任意消息即可得到回复。默认启用 Agent 流水线（话题提取 → 回复，回复按行分段发送、首段引用触发消息）；若在 `config/global.yaml` 中设置 `agent.enabled: false`，则回退到旧版直接流式回复路径。
+
+## 🤖 Agent 子系统（beta）
+
+回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi)，`config/global.yaml` 的 `agent:` 段配置：
+
+```yaml
+agent:
+  enabled: true                # false = 旧版直接流式回复
+  persona:
+    character_name: "Mohobot"  # 角色名（注入提示词模板）
+    character_persona: "你是 Mohobot，..."  # 角色设定
+    speaking_style: "自然、简洁、亲切"
+  llm_modules:                 # 各模块可独立覆盖模型；留空继承 llm.* 全局配置
+    main_chat:                 # 回复生成
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.7
+      max_tokens: 2048
+    topic_extractor:           # 话题提取（JSON 模式）
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+    memory_writer:             # 记忆抽取（JSON 模式）
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+    user_profile_updater:      # 用户画像更新
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+  memory:
+    user_memory_dedup_threshold: 0.72
+    vector_store:              # ChromaDB 向量存储（未配置 key 自动降级）
+      enabled: false
+      provider: chroma
+      persist_dir: "./data/database/chroma"
+      collection_name: "mohobot_memories"
+      embedding_model: "BAAI/bge-large-zh-v1.5"   # SiliconFlow 等 OpenAI 兼容端点
+      embedding_base_url: ""
+      embedding_api_key: ""
+  main_chat:
+    max_output_lines: 12
+  topic_planner:
+    listen_timer:
+      timeout: 1.5             # 等待用户说完的静默时长（秒）
+    unread_store:
+      max_size: 50
+  topic_replier: {}
+  reflection_worker:
+    enabled: true              # 回合后反思
+    write_memory: true         # 写入长期记忆
+    update_user_profile: true  # 更新用户画像
+  reflex:
+    enabled: true              # 戳一戳反射回复
+```
+
+### 数据库配置
+
+```yaml
+database:
+  enabled: true
+  folder: "./data/database"
+  file: "luotianyi.db"         # 与 Agent-LuoTianyi 共享同一数据库文件
+```
+
+> 记忆写入采用"向量索引 + 数据库正本"双写：向量检索仅用于召回线索，数据库正本为最终依据；未配置 embedding 时检索自动降级为空实现，记忆仍会写入数据库正本。
 
 ## 📁 目录结构
 
@@ -97,37 +172,62 @@ mohobot/
 │   ├── global.example.yaml        # 配置模板（复制为 global.yaml 使用）
 │   └── global.yaml                # 本地配置（已 gitignore，含密钥）
 ├── mohobot/
+│   ├── agent/                     # Agent 子系统（beta，移植自 Agent-LuoTianyi）
+│   │   ├── topic_planner.py       # 未读消息缓冲 + 静默计时 + 话题提取调度
+│   │   ├── topic_extractor.py     # LLM 话题提取（含群聊说话人标注）
+│   │   ├── attention.py           # 注意力规划（记忆/事实/唱歌并行检索）
+│   │   ├── main_chat.py           # 结构化回复（[tone]内容 每行一句）
+│   │   ├── topic_replier.py       # 话题回复队列
+│   │   ├── reflection_worker.py   # 回合后反思（写记忆 + 更新画像）
+│   │   ├── character_mind.py      # 潜意识门面（召回/规划/写入）
+│   │   ├── character_reflex.py    # 低延迟反射（戳一戳）
+│   │   ├── subconscious_memory.py # 记忆门面（向量检索 + DB 正本回查）
+│   │   ├── memory_writer.py       # 记忆抽取与双写（批量去重）
+│   │   ├── user_profile_updater.py# 用户画像更新
+│   │   ├── vector_store.py        # ChromaDB 向量存储（可降级为空实现）
+│   │   ├── llm_module.py          # 模块化 LLM 调用（Jinja2 模板）
+│   │   ├── runtime.py             # 按 bot 组装（BotAgentRuntime + 会话流水线）
+│   │   ├── domain.py / prompts.py # 数据模型与提示词模板
+│   ├── db/                        # 数据库层（与 Agent-LuoTianyi 共享 SQLite）
+│   │   ├── sql_database.py        # SQLAlchemy 模型 + 迁移
+│   │   └── database_manager.py    # 用户/会话记录/记忆正本读写
 │   ├── ws_server.py               # 反向 WebSocket 服务器
 │   ├── bot_manager.py             # Bot 生命周期与连接管理
-│   ├── message_handler.py         # 消息处理管线
-│   ├── context_manager.py         # 会话上下文管理
-│   ├── llm_service.py             # LLM 服务（流式、工具调用、视觉）
+│   ├── message_handler.py         # 消息处理管线（拦截器 → Agent 流水线）
+│   ├── context_manager.py         # 会话上下文管理（JSON，不变）
+│   ├── llm_service.py             # LLM 服务（旧路径：流式、工具调用、视觉）
 │   ├── file_store.py              # 异步文件存储（锁保护）
 │   ├── image_cache.py             # 图片缓存与 phash 去重
 │   ├── interceptors/              # 拦截器（指令、关键词、插件系统）
 │   ├── models/                    # OneBot 协议与配置模型
 │   ├── utils/                     # 日志、CQ 码解析等工具
-│   └── web_panel/                 # FastAPI 管理面板
-├── plugins/                       # 插件目录（动态加载）
+│   └── web_panel/                 # FastAPI 管理面板（7 板块）
+├── plugins/                       # 插件目录（动态加载：status / praise）
+├── tests/                         # 冒烟测试（smoke_*）与单测
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
 │   ├── history/{bot_id}/          # 【只读】原始聊天记录 JSONL
 │   ├── contexts/{bot_id}/         # 【可读写】会话上下文
+│   ├── database/                  # SQLite（luotianyi.db，与洛天依共享）
 │   └── cache/images/              # 图片缓存
 └── logs/                          # 日志（自动生成，勿提交）
 ```
 
 ## 🧠 数据架构
 
-**原则：原始数据不可变，工作数据可变。**
+**原则：原始数据不可变，工作数据可变；历史入库，上下文不变。**
 
-| 数据 | 目录 | 性质 | 格式 | 用途 |
+| 数据 | 位置 | 性质 | 格式 | 用途 |
 |------|------|------|------|------|
 | 聊天历史 | `data/history/` | 只读归档 | JSONL（每行一个事件） | 审计、全量回溯、训练导出 |
-| 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆 |
+| 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
+| 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库，与 Agent-LuoTianyi 共享同一 `luotianyi.db` |
+| 长期记忆 | SQLite `agent_memory_records`/`memory_chunks` | 可读写 | SQL | 记忆正本（向量库仅作索引，可降级） |
+| 向量索引 | `data/database/chroma/`（可选） | 可读写 | ChromaDB | 记忆语义检索（未配置 embedding 时自动降级为空实现） |
 
 - **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；每个上下文仅保留最近 30 轮
+- **数据库隔离**：mohobot 用户以 `qq_{QQ}` 前缀写入共享库，与洛天依用户互不干扰；记忆按 bot（`owner_character_id`）隔离
 
 ## 💬 聊天指令
 
@@ -139,15 +239,22 @@ mohobot/
 | `/sess del <id>` | 删除会话 |
 | `/forget <n>` | 删除当前会话最近 n 条记录 |
 | `/hist` | 打印当前会话内容（调试） |
+| `/clear` | 清空当前会话 |
+| `/help` | 显示全部可用指令 |
 | `/status` | 显示框架与系统状态（插件） |
+| `赞我` / `zanwo` | 给自己点 20 个赞（插件，每日上限 10 次/人） |
 
 ## 🖥️ Web 管理面板
 
-启动后访问 `http://127.0.0.1:9090`（默认 `admin`，密码在 `config/global.yaml` 的 `password_hash` 中配置）：
-- 📋 实时日志流（SSE）
-- 📁 文件浏览器（查看 `history` / `contexts` 下的 JSON/JSONL）
-- ✏️ 在线编辑配置文件
-- 📊 统计看板（消息数、Bot 数等）
+启动后访问 `http://127.0.0.1:9090`（默认用户名 `admin`，密码在 `config/global.yaml` 的 `web_panel.password_hash` 中配置）：
+
+1. 📊 **数据总览** — 系统/框架/Bot/LLM token 统计
+2. ⚙️ **配置文件** — 全局 + 每 Bot 配置可视化编辑（含 Agent 子系统与数据库配置）
+3. 🧠 **模型配置** — Chat / Vision 模型、端点与密钥
+4. 🔌 **插件管理** — 启停插件
+5. 💬 **对话数据** — 浏览/编辑各会话上下文
+6. 📋 **实时日志** — SSE 日志流，支持多选级别筛选（DEBUG/INFO/WARN/ERROR）
+7. 🔧 **系统设置** — 修改密码、重启服务
 
 生成密码哈希：
 
@@ -176,16 +283,22 @@ class Plugin:
 
 ## ⚠️ 开发状态
 
-- [x] 反向 WebSocket 多 Bot 接入
-- [x] LLM 流式对话（分段回复、工具调用、视觉识别）
-- [x] 会话上下文管理（多会话、裁剪、说话人记录）
-- [x] 群聊触发门控（@机器人 / 引用机器人消息）
-- [ ] Web 管理面板
-- [x] 插件系统
-- [ ] 消息发送限流与队列
-- [ ] 会话上下文持久化索引增强
-- [ ] 单元测试与 CI
+当前处于 **beta 开发阶段**：Agent 子系统为实验性功能，API、数据格式与配置均可能发生破坏性变更，请谨慎用于生产环境。
+
+- [x] 反向 WebSocket 多 Bot 接入（重连竞态防护）
+- [x] Agent 子系统（beta）：话题规划 → 注意力 → 结构化回复 → 反思记忆，按 bot 隔离
+- [x] 历史对话入库（SQLite，与 Agent-LuoTianyi 共享 `luotianyi.db`，`qq_` 前缀隔离）
+- [x] 长期记忆：向量检索（ChromaDB，未配置时优雅降级）+ 数据库正本 + 用户画像
+- [x] LLM 流式对话（旧路径：分段回复、工具调用、视觉识别）
+- [x] VLM 图片理解（agent 路径自动描述图片；base64:// 兼容）
+- [x] 会话上下文管理（多会话、裁剪、说话人记录，context 机制不变）
+- [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳反射回复
+- [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置）
+- [x] 插件系统（status / praise）
+- [ ] 消息发送限流与队列（当前仅图片突发限流）
+- [ ] 单元测试与 CI（当前为本地冒烟测试 `tests/`）
 - [ ] Docker 部署
+- [ ] Agent 子系统由 beta 转正前：真实多 bot 长期运行验证
 
 ## 📄 License
 
@@ -194,3 +307,4 @@ class Plugin:
 ## 🙏 致谢
 
 - [OneBot 标准](https://github.com/botuniverse/onebot-11) — 聊天机器人应用接口标准
+- [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) — Agent 子系统架构参考（话题规划/潜意识/反思记忆）
