@@ -76,6 +76,8 @@ class BotManager:
         self._bots: dict[str, BotInstance] = {}
         self._data_dir = data_dir
         self._pending_responses: dict[str, asyncio.Future] = {}
+        # Track sent messages awaiting message_id: echo -> (bot_id, chat_type, chat_id)
+        self._pending_sent: dict[str, tuple[str, str, str]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
 
     def register(self, bot_id: str, websocket: "websockets.WebSocketServerProtocol") -> BotInstance:
@@ -127,12 +129,24 @@ class BotManager:
             logger.info(f"Bot config saved: {bot_id}")
 
     async def handle_api_response(self, bot_id: str, response: dict[str, Any]) -> None:
-        """Route an API response to the waiting caller."""
+        """Route an API response to the waiting caller, and record sent message IDs."""
         echo = response.get("echo")
+
+        # Resolve any future waiting on this echo
         if echo and echo in self._pending_responses:
             future = self._pending_responses.pop(echo)
             if not future.done():
                 future.set_result(response)
+
+        # Record message_id for a tracked sent message (reply-quote detection)
+        if echo and echo in self._pending_sent:
+            pending_bot, chat_type, chat_id = self._pending_sent.pop(echo)
+            data = response.get("data") or {}
+            mid = data.get("message_id")
+            if mid is not None:
+                instance = self._bots.get(pending_bot)
+                if instance:
+                    instance.record_sent_message(chat_type, chat_id, mid)
 
     def create_response_future(self, echo: str) -> asyncio.Future:
         """Create a future for awaiting an API response."""

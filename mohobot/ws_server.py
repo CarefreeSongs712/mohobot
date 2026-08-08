@@ -154,35 +154,41 @@ class WSServer:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
             return None
 
+    async def _send_tracked(
+        self, bot_id: str, action: str, params: dict[str, Any],
+        chat_type: str, chat_id: int | str,
+    ) -> None:
+        """Send a message WITHOUT waiting for the response.
+
+        The echo is registered so that when the OneBot client responds,
+        handle_api_response records the message_id (for reply-quote detection).
+        This keeps streaming fast — no 10s timeout blocking every segment.
+        """
+        import uuid
+        instance = self._bot_manager.get(bot_id)
+        if not instance:
+            logger.warning(f"Cannot send to bot {bot_id}: not connected")
+            return
+        echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
+        self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
+        await instance.send({"action": action, "params": params, "echo": echo})
+
     async def send_group_msg(
         self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]
     ) -> None:
         """Send a group message via a specific bot (records message_id for reply detection)."""
-        resp = await self.send_to_bot(
+        await self._send_tracked(
             bot_id, "send_group_msg",
             {"group_id": int(group_id), "message": message},
-            wait_response=True,
+            "group", group_id,
         )
-        # Record the sent message_id so replies quoting it can trigger the bot
-        if resp and isinstance(resp.get("data"), dict):
-            mid = resp["data"].get("message_id")
-            if mid is not None:
-                instance = self._bot_manager.get(bot_id)
-                if instance:
-                    instance.record_sent_message("group", group_id, mid)
 
     async def send_private_msg(
         self, bot_id: str, user_id: int | str, message: str | list[dict[str, Any]]
     ) -> None:
         """Send a private message via a specific bot (records message_id)."""
-        resp = await self.send_to_bot(
+        await self._send_tracked(
             bot_id, "send_private_msg",
             {"user_id": int(user_id), "message": message},
-            wait_response=True,
+            "private", user_id,
         )
-        if resp and isinstance(resp.get("data"), dict):
-            mid = resp["data"].get("message_id")
-            if mid is not None:
-                instance = self._bot_manager.get(bot_id)
-                if instance:
-                    instance.record_sent_message("private", user_id, mid)

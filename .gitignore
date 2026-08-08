@@ -231,3 +231,6 @@ config/global.yaml
 
 # ── Tests / scratch ──
 _test_*.py
+
+# ── Local reference docs (kept locally, not pushed) ──
+onebot-11-doc/

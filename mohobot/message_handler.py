@@ -12,6 +12,8 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
+import random
 import time as time_module
 from typing import Any
 
@@ -240,19 +242,26 @@ class MessageHandler:
 
     # ── Streaming reply with punctuation+length segmentation ──
 
-    # Strong break punctuation (sentence end)
-    _PUNCT_STRONG = "。！？!?…\n"
+    # Strong break punctuation (sentence end). NOTE: single \n is NOT a break —
+    # double newline (\n\n) is handled separately in _find_cut as a paragraph break.
+    _PUNCT_STRONG = "。！？!?…"
     # Soft break punctuation (clause end)
     _PUNCT_SOFT = "；;，,、"
     # Minimum chars before a segment may be flushed (below this, keep buffering)
     _SEG_MIN_LEN = 12
     # Hard cap: segment is force-flushed at this length even without punctuation
     _SEG_MAX_LEN = 60
+    # Delay between consecutive segment messages (random seconds)
+    _SEND_DELAY_MIN = 0.2
+    _SEND_DELAY_MAX = 0.5
 
     async def _stream_llm_reply(self, bot_id, event, context, raw) -> str:
         """Stream the LLM reply, sending punctuation+length segmented messages.
 
-        First segment quotes the triggering message (reply segment).
+        - Segments are stripped of leading/trailing whitespace (empty ones skipped)
+        - Double newline (\n\n) forces a segment break
+        - First segment quotes the triggering message (reply segment)
+        - Consecutive segments are sent 0.2~0.5s apart (random)
         Returns the full assembled reply text (for context save).
         """
         buffer = ""
@@ -275,30 +284,12 @@ class MessageHandler:
             buffer = flushed["rest"]
             for seg in flushed["segments"]:
                 segments_sent += 1
-                if not first_sent:
-                    # First segment quotes the user's message
-                    message = [
-                        {"type": "reply", "data": {"id": str(event.message_id)}},
-                        {"type": "text", "data": {"text": seg}},
-                    ]
-                    first_sent = True
-                else:
-                    message = seg
-                await self._send_message(bot_id, event, message)
+                first_sent = await self._send_segment(bot_id, event, seg, first_sent)
 
-            if is_final and buffer.strip():
+            if is_final and buffer:
                 # Stream ended with text left in the buffer — always flush it
                 segments_sent += 1
-                if not first_sent:
-                    # Nothing sent yet — quote the original message
-                    message = [
-                        {"type": "reply", "data": {"id": str(event.message_id)}},
-                        {"type": "text", "data": {"text": buffer}},
-                    ]
-                    first_sent = True
-                else:
-                    message = buffer
-                await self._send_message(bot_id, event, message)
+                first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
                 buffer = ""
 
         logger.debug(
@@ -307,36 +298,75 @@ class MessageHandler:
         )
         return full_reply
 
+    async def _send_segment(self, bot_id, event, seg: str, first_sent: bool) -> bool:
+        """Send one segmented message, stripped of whitespace.
+
+        Returns the updated first_sent flag.
+        """
+        seg = seg.strip()
+        if not seg:
+            return first_sent  # Empty after strip — skip
+
+        if first_sent:
+            # 0.2~0.5s delay between consecutive messages
+            await asyncio.sleep(random.uniform(self._SEND_DELAY_MIN, self._SEND_DELAY_MAX))
+            message: str | list[dict] = seg
+        else:
+            # First segment quotes the user's message
+            message = [
+                {"type": "reply", "data": {"id": str(event.message_id)}},
+                {"type": "text", "data": {"text": seg}},
+            ]
+            first_sent = True
+
+        await self._send_message(bot_id, event, message)
+        return first_sent
+
     def _flush_ready_segments(self, buffer: str) -> dict:
         """Split buffered text into ready-to-send segments.
 
         Rules (标点符号+长度分隔法):
-          - A segment must be ≥ _SEG_MIN_LEN chars to flush
-          - Within the hard cap, cut at the LAST strong punctuation;
-            if none, fall back to the last soft punctuation;
-            if none, cut at the hard cap (_SEG_MAX_LEN)
+          1. Double newline (\n\n) — paragraph break, ALWAYS splits (no min length)
+          2. Hard cap: force-flush at _SEG_MAX_LEN, cutting at last punctuation
+          3. Segment ≥ _SEG_MIN_LEN may flush at last strong/soft punctuation
         """
         segments: list[str] = []
 
-        while len(buffer) >= self._SEG_MAX_LEN:
-            # Hard cap reached — cut at last punctuation within the cap, else force
-            search_region = buffer[: self._SEG_MAX_LEN]
-            cut = self._find_cut(search_region)
-            if cut is None:
-                cut = self._SEG_MAX_LEN
-            segments.append(buffer[:cut])
-            buffer = buffer[cut:]
-
-        if len(buffer) >= self._SEG_MIN_LEN:
-            cut = self._find_cut(buffer)
-            if cut is not None and cut >= self._SEG_MIN_LEN:
+        while True:
+            # 1. Double newline paragraph break — split regardless of length
+            idx = buffer.find("\n\n")
+            if idx != -1:
+                cut = idx + 2
                 segments.append(buffer[:cut])
                 buffer = buffer[cut:]
+                continue
+
+            # 2. Hard cap reached — cut at last punctuation within cap, else force
+            if len(buffer) >= self._SEG_MAX_LEN:
+                cut = self._find_cut(buffer[: self._SEG_MAX_LEN])
+                if cut is None:
+                    cut = self._SEG_MAX_LEN
+                segments.append(buffer[:cut])
+                buffer = buffer[cut:]
+                continue
+
+            # 3. Min length + punctuation break
+            if len(buffer) >= self._SEG_MIN_LEN:
+                cut = self._find_cut(buffer)
+                if cut is not None and cut >= self._SEG_MIN_LEN:
+                    segments.append(buffer[:cut])
+                    buffer = buffer[cut:]
+                    continue
+
+            break
 
         return {"segments": segments, "rest": buffer}
 
     def _find_cut(self, text: str) -> int | None:
-        """Find the cut position: last strong punctuation, else last soft."""
+        """Find the cut position: last \\n\\n, else last strong, else last soft punct."""
+        idx = text.rfind("\n\n")
+        if idx != -1 and idx + 2 <= len(text):
+            return idx + 2
         for i in range(len(text) - 1, -1, -1):
             if text[i] in self._PUNCT_STRONG:
                 return i + 1
