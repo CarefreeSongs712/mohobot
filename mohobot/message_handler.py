@@ -278,24 +278,29 @@ class MessageHandler:
     # ── Agent 子系统路径 ───────────────────────────────────────
 
     def _ensure_agent_runtime(self, bot_id: str):
-        """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。"""
-        runtime = self._agent_manager.get(bot_id)
-        if runtime is not None:
-            return runtime
+        """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。
 
+        每次调用都同步 bot 的最新昵称/人设(web 面板修改 config.json 后
+        立即生效), 各 bot 的子系统人设彼此独立。
+        """
         instance = None
         if self._ws and self._ws._bot_manager:
             instance = self._ws._bot_manager.get(bot_id)
         nickname = instance.nickname if instance else f"Bot-{bot_id}"
         persona = instance.config.persona if instance else ""
-        runtime = self._agent_manager.get_or_create(
-            bot_id,
-            bot_nickname=nickname,
-            persona=persona,
-            context_provider=self._agent_context_provider,
-        )
-        runtime.set_reply_handler(self._agent_reply_handler)
-        logger.info(f"Agent runtime wired for bot {bot_id}")
+
+        runtime = self._agent_manager.get(bot_id)
+        if runtime is None:
+            runtime = self._agent_manager.get_or_create(
+                bot_id,
+                bot_nickname=nickname,
+                persona=persona,
+                context_provider=self._agent_context_provider,
+            )
+            runtime.set_reply_handler(self._agent_reply_handler)
+            logger.info(f"Agent runtime wired for bot {bot_id}")
+        else:
+            runtime.sync_persona(nickname, persona)
         return runtime
 
     async def _handle_agent_path(

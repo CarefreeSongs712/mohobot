@@ -278,9 +278,11 @@ class BotAgentRuntime:
 
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
         persona_cfg = agent_cfg.get("persona", {})
+        self._persona_cfg = persona_cfg
+        self._bot_persona = persona  # bot 自己的 persona (BotConfig.persona)
         self.character_name = persona_cfg.get("character_name") or self.bot_nickname
         self.character_persona = persona_cfg.get("character_persona") or persona
-        self.speaking_style = persona_cfg.get("speaking_style") or ""
+        self.speaking_style = persona_cfg.get("speaking_style") or "自然、简洁"
 
         # 向量存储(可降级)
         memory_cfg = agent_cfg.get("memory", {})
@@ -371,6 +373,45 @@ class BotAgentRuntime:
         return modules
 
     # ── 会话管理 ──────────────────────────────────────────────
+
+    def sync_persona(self, bot_nickname: str = "", persona: str = "") -> bool:
+        """按 bot 的最新昵称/人设同步本 runtime 的人设(若发生变化)。
+
+        优先级: agent.persona 显式配置 > bot 自己的 persona(BotConfig.persona)
+        > bot 昵称。返回是否发生了更新。
+        """
+        bot_nickname = bot_nickname or self.bot_nickname
+        persona = persona or self._bot_persona
+        changed = False
+
+        new_name = self._persona_cfg.get("character_name") or bot_nickname
+        new_persona = self._persona_cfg.get("character_persona") or persona
+        new_style = self._persona_cfg.get("speaking_style") or "自然、简洁"
+
+        if new_name != self.character_name or new_persona != self.character_persona \
+                or new_style != self.speaking_style:
+            changed = True
+        if new_persona != self._bot_persona:
+            changed = True
+
+        self.bot_nickname = bot_nickname
+        self._bot_persona = persona
+        self.character_name = new_name
+        self.character_persona = new_persona
+        self.speaking_style = new_style
+
+        # 同步到意识层 MainChat(回复提示词使用)
+        if self.main_chat is not None:
+            self.main_chat.character_name = self.character_name
+            self.main_chat.character_persona = self.character_persona
+            self.main_chat.speaking_style = self.speaking_style
+
+        if changed:
+            self.logger.info(
+                f"Persona synced: name={self.character_name}, "
+                f"style={self.speaking_style}"
+            )
+        return changed
 
     def session_key_for(self, chat_type: str, chat_id: str) -> str:
         return f"{chat_type}:{chat_id}"

@@ -98,9 +98,12 @@ ws://127.0.0.1:8081/ws
 agent:
   enabled: true                # false = 旧版直接流式回复
   persona:
-    character_name: "Mohobot"  # 角色名（注入提示词模板）
-    character_persona: "你是 Mohobot，..."  # 角色设定
-    speaking_style: "自然、简洁、亲切"
+    # 默认留空: 每个 bot 使用各自的 data/bots/{bot_id}/config.json 的
+    # persona / 昵称作为子系统人设(按 bot 隔离, 互不影响)。
+    # 如需全局统一人设, 在此填写即可覆盖所有 bot。
+    character_name: ""         # 留空 = 使用各 bot 昵称
+    character_persona: ""      # 留空 = 使用各 bot 自己的 persona
+    speaking_style: ""         # 留空 = 自然、简洁
   llm_modules:                 # 各模块可独立覆盖模型；留空继承 llm.* 全局配置
     main_chat:                 # 回复生成
       model: ""

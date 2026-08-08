@@ -52,10 +52,13 @@ database:
 # ── Agent 子系统（移植自 Agent-LuoTianyi，按 bot 隔离） ─────────
 agent:
   enabled: true               # false = 使用旧版直接流式回复路径
+  # 人设: 默认留空 —— 每个 bot 使用各自的 data/bots/{bot_id}/config.json
+  # 中的 persona(角色名回退到 bot 昵称, 说话风格默认"自然、简洁")。
+  # 如需全局统一人设, 在这里填写即可覆盖所有 bot。
   persona:
-    character_name: "Mohobot"
-    character_persona: "你是 Mohobot，一个多机器人 AI 框架中的助手，性格友好、乐于助人。"
-    speaking_style: "自然、简洁、亲切"
+    character_name: ""        # 留空 = 使用各 bot 昵称
+    character_persona: ""     # 留空 = 使用各 bot 自己的 persona
+    speaking_style: ""        # 留空 = 自然、简洁
   # 各 LLM 模块配置；留空继承顶部 llm.* 全局配置
   llm_modules:
     main_chat:
