@@ -14,24 +14,29 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import platform
 import secrets
+import shutil
 import socket
 import sys
+import tempfile
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.background import BackgroundTask
 
 try:
     import psutil
@@ -74,6 +79,16 @@ class MessageUpdateRequest(BaseModel):
     index: int
     content: str
     role: str | None = None
+
+
+def _remove_file_background(path: str):
+    """FileResponse 下载完成后删除临时文件。"""
+    def _cleanup() -> None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return _cleanup
 
 
 # ── Web Panel App ─────────────────────────────────────────────
@@ -635,6 +650,147 @@ class WebPanel:
             asyncio.create_task(_delayed_restart())
             return {"status": "ok", "message": "服务即将重启..."}
 
+        # ── 8. Data management (数据管理: 备份/恢复/清理) ──────
+
+        DATA_SCOPES = {"cache", "history", "contexts"}
+
+        def _parse_data_scope(scope: Any) -> tuple[list[str] | None, set[str]]:
+            """解析范围: 返回 (bots 列表或 None=全部, dirs 集合)。"""
+            if not isinstance(scope, dict):
+                raise HTTPException(status_code=400, detail="范围参数无效")
+            bots_raw = scope.get("bots", "all")
+            if bots_raw == "all" or bots_raw is None:
+                bot_list: list[str] | None = None
+            elif isinstance(bots_raw, list):
+                bot_list = [str(b) for b in bots_raw if str(b)]
+                if not bot_list:
+                    raise HTTPException(status_code=400, detail="未选择任何 Bot")
+            else:
+                raise HTTPException(status_code=400, detail="bots 参数无效")
+            dirs_raw = scope.get("dirs")
+            if not isinstance(dirs_raw, list):
+                raise HTTPException(status_code=400, detail="dirs 参数无效")
+            dir_set = {str(d) for d in dirs_raw} & DATA_SCOPES
+            if not dir_set:
+                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts)")
+            return bot_list, dir_set
+
+        def _collect_data_files(
+            bot_list: list[str] | None, dir_set: set[str],
+        ) -> list[tuple[str, Path]]:
+            """收集选定范围内的文件: (zip 内相对路径, 磁盘路径)。"""
+            files: list[tuple[str, Path]] = []
+            root = self._data_dir
+
+            if "cache" in dir_set:
+                cache_dir = root / "cache"
+                if cache_dir.exists():
+                    for f in cache_dir.rglob("*"):
+                        if f.is_file():
+                            files.append((f"cache/{f.relative_to(cache_dir).as_posix()}", f))
+
+            for d in ("history", "contexts"):
+                if d not in dir_set:
+                    continue
+                base = root / d
+                if not base.exists():
+                    continue
+                if bot_list is None:
+                    bot_dirs = [e for e in base.iterdir() if e.is_dir()]
+                else:
+                    bot_dirs = [base / b for b in bot_list]
+                for bot_dir in bot_dirs:
+                    if not bot_dir.exists() or not bot_dir.is_dir():
+                        continue
+                    for f in bot_dir.rglob("*"):
+                        if f.is_file():
+                            files.append((
+                                f"{d}/{bot_dir.name}/{f.relative_to(bot_dir).as_posix()}",
+                                f,
+                            ))
+            return files
+
+        @app.post("/api/data/backup")
+        async def backup_data(request: Request, body: ConfigUpdateRequest):
+            """按选定范围打包下载 zip 备份。"""
+            await _require_auth(request)
+            bot_list, dir_set = _parse_data_scope(body.data)
+            files = _collect_data_files(bot_list, dir_set)
+            if not files:
+                raise HTTPException(status_code=400, detail="所选范围没有数据")
+
+            tmp_path = tempfile.NamedTemporaryFile(suffix=".zip", delete=False).name
+            try:
+                with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for arcname, path in files:
+                        zf.write(path, arcname)
+            except Exception as e:
+                os.remove(tmp_path)
+                raise HTTPException(status_code=500, detail=f"备份失败: {e}")
+
+            fname = f"mohobot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            logger.info(f"Web panel: 备份完成 ({len(files)} 个文件, 范围={sorted(dir_set)})")
+            return FileResponse(
+                tmp_path,
+                media_type="application/zip",
+                filename=fname,
+                background=BackgroundTask(_remove_file_background(tmp_path)),
+            )
+
+        @app.post("/api/data/restore")
+        async def restore_data(request: Request):
+            """上传 zip 备份并恢复到选定范围(需再次输入密码)。"""
+            await _require_auth(request)
+            form = await request.form()
+            password = str(form.get("password", ""))
+            if not _verify_password(password, self._password_hash):
+                raise HTTPException(status_code=400, detail="密码错误")
+
+            try:
+                scope = json.loads(str(form.get("scope", "{}")))
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="scope 无效")
+            bot_list, dir_set = _parse_data_scope(scope)
+
+            upload = form.get("file")
+            if upload is None:
+                raise HTTPException(status_code=400, detail="未上传备份文件")
+            content = await upload.read()
+
+            tmp_dir = Path(tempfile.mkdtemp(prefix="mohobot_restore_"))
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    # zip slip 防护: 拒绝包含绝对路径/.. 的成员
+                    for member in zf.namelist():
+                        target = (tmp_dir / member).resolve()
+                        if not str(target).startswith(str(tmp_dir.resolve())) or ".." in member.split("/"):
+                            raise HTTPException(status_code=400, detail="备份文件包含非法路径")
+                    zf.extractall(tmp_dir)
+
+                restored = self._restore_from(tmp_dir, bot_list, dir_set)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"恢复失败: {e}")
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            logger.info(f"Web panel: 恢复完成 ({restored} 个文件, 范围={sorted(dir_set)})")
+            return {"status": "ok", "restored": restored}
+
+        @app.post("/api/data/cleanup")
+        async def cleanup_data(request: Request, body: ConfigUpdateRequest):
+            """清理选定范围的数据(需再次输入密码)。"""
+            await _require_auth(request)
+            data = body.data or {}
+            password = str(data.get("password", ""))
+            if not _verify_password(password, self._password_hash):
+                raise HTTPException(status_code=400, detail="密码错误")
+            bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
+            removed = self._cleanup_data(bot_list, dir_set)
+            logger.info(f"Web panel: 清理完成 (移除 {removed} 个文件, 范围={sorted(dir_set)})")
+            return {"status": "ok", "removed": removed}
+
         # ── Static frontend ───────────────────────────────────
 
         static_dir = Path(__file__).parent / "static"
@@ -651,8 +807,81 @@ class WebPanel:
         async def health():
             return {"status": "ok", "time": datetime.now().isoformat()}
 
+    # ── 数据管理辅助 ──────────────────────────────────────────
+
+    def _restore_from(
+        self, tmp_dir: Path, bot_list: list[str] | None, dir_set: set[str],
+    ) -> int:
+        """把解压出的备份覆盖到 data 目录(先清空目标再复制)。返回文件数。"""
+        restored = 0
+        root = self._data_dir
+
+        if "cache" in dir_set:
+            src = tmp_dir / "cache"
+            dst = root / "cache"
+            if src.exists():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst)
+                restored += sum(1 for _ in src.rglob("*") if _.is_file())
+
+        for d in ("history", "contexts"):
+            if d not in dir_set:
+                continue
+            src_base = tmp_dir / d
+            if not src_base.exists():
+                continue
+            if bot_list is None:
+                src_bots = [e for e in src_base.iterdir() if e.is_dir()]
+            else:
+                src_bots = [src_base / b for b in bot_list]
+            for src_bot in src_bots:
+                if not src_bot.exists() or not src_bot.is_dir():
+                    continue
+                dst_bot = root / d / src_bot.name
+                if dst_bot.exists():
+                    shutil.rmtree(dst_bot)
+                dst_bot.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src_bot, dst_bot)
+                restored += sum(1 for _ in src_bot.rglob("*") if _.is_file())
+        return restored
+
+    def _cleanup_data(
+        self, bot_list: list[str] | None, dir_set: set[str],
+    ) -> int:
+        """删除选定范围的数据。返回移除的文件数。"""
+        removed = 0
+        root = self._data_dir
+
+        if "cache" in dir_set:
+            cache_dir = root / "cache"
+            if cache_dir.exists():
+                for f in cache_dir.rglob("*"):
+                    if f.is_file():
+                        removed += 1
+                shutil.rmtree(cache_dir)
+                logger.info("Web panel: cache 已清理")
+
+        for d in ("history", "contexts"):
+            if d not in dir_set:
+                continue
+            base = root / d
+            if not base.exists():
+                continue
+            if bot_list is None:
+                bot_dirs = [e for e in base.iterdir() if e.is_dir()]
+            else:
+                bot_dirs = [base / b for b in bot_list]
+            for bot_dir in bot_dirs:
+                if not bot_dir.exists() or not bot_dir.is_dir():
+                    continue
+                removed += sum(1 for _ in bot_dir.rglob("*") if _.is_file())
+                shutil.rmtree(bot_dir)
+                logger.info(f"Web panel: 已清理 {d}/{bot_dir.name}")
+        return removed
+
     async def _get_system_stats(self) -> dict[str, Any]:
-        """System-level stats (CPU/mem/disk via psutil, or fallbacks)."""
         result: dict[str, Any] = {
             "platform": platform.platform(),
             "python": sys.version.split()[0],

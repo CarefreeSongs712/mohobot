@@ -1,7 +1,7 @@
-"""共享数据库 — 与 Agent-LuoTianyi 使用同一个 SQLite (SQLAlchemy)。
+"""mohobot 数据库 — 独立 SQLite (SQLAlchemy)。
 
-表结构与 Agent-LuoTianyi (server/src/system/database/sql_database.py) 保持一致,
-mohobot 直接读写同一数据库文件,互不冲突。
+表结构借鉴 Agent-LuoTianyi 的设计, 但为 mohobot 独立使用,
+不与任何外部项目共享数据库文件。
 """
 
 from __future__ import annotations
@@ -114,8 +114,8 @@ _engine: Engine | None = None
 _SessionLocal: sessionmaker | None = None
 
 
-def init_sql_db(db_folder: str = "data/database", db_file: str = "luotianyi.db") -> Engine:
-    """初始化 SQLite 引擎(与 Agent-LuoTianyi 相同参数)。"""
+def init_sql_db(db_folder: str = "data/database", db_file: str = "mohobot.db") -> Engine:
+    """初始化 SQLite 引擎(独立库, 参数与 Agent-LuoTianyi 风格一致)。"""
     global _engine, _SessionLocal
     if not os.path.exists(db_folder):
         os.makedirs(db_folder, exist_ok=True)
@@ -142,7 +142,7 @@ def init_sql_db(db_folder: str = "data/database", db_file: str = "luotianyi.db")
 
 
 def _migrate_sqlite_schema(db_engine: Engine) -> None:
-    """对已有的共享数据库做增量迁移(与 Agent-LuoTianyi 兼容)。"""
+    """对已有数据库做增量迁移(旧库可能缺少新列)。"""
     with db_engine.begin() as connection:
         # conversations 表可能缺少 character_id(旧库)
         conversation_columns = {

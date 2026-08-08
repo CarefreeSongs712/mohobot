@@ -362,6 +362,17 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         </div>
       </div>
     </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">🗄️ 数据管理（备份 / 恢复 / 清理）</div>
+      <div id="data-scope-form"></div>
+      <div class="form-row" style="margin-top:8px">
+        <button class="btn" onclick="backupData()">💾 备份下载</button>
+        <button class="btn secondary" onclick="document.getElementById('restore-file').click()">📥 选择备份文件</button>
+        <input type="file" id="restore-file" accept=".zip" style="display:none" onchange="restoreData()">
+        <button class="btn danger" onclick="cleanupData()">🗑️ 清理数据</button>
+      </div>
+      <div class="hint">恢复/清理为危险操作，需要再次输入管理员密码。备份范围为 zip 打包下载。</div>
+    </div>
   </div>
 
 </main>
@@ -378,7 +389,8 @@ let logPaused = false;
 async function api(path, options = {}) {
   const headers = options.headers || {};
   headers['Authorization'] = 'Bearer ' + token;
-  if (options.body && typeof options.body === 'object') {
+  // raw=true 时 body 原样发送(如 FormData), 不设 Content-Type
+  if (options.body && typeof options.body === 'object' && !options.raw) {
     headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(options.body);
   }
@@ -1027,6 +1039,98 @@ function toggleLogPause() {
 // ═══════════════ 7. Settings ═══════════════
 function loadSettings() {
   document.getElementById('set-status').innerHTML = '<span class="badge online">● 运行中</span>';
+  renderDataScope();
+}
+
+// ── 数据管理 (备份/恢复/清理) ────────────────────────────────
+
+async function renderDataScope() {
+  const el = document.getElementById('data-scope-form');
+  let bots = [];
+  try {
+    const r = await apiJSON('/api/bots');
+    bots = r.bots || [];
+  } catch (e) { /* 加载失败时仅显示目录范围 */ }
+  el.innerHTML =
+    '<div class="form-row"><label>数据范围</label>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-cache" checked> 缓存(cache)</label>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-history" checked> 聊天历史(history)</label>' +
+    '<label><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label></div>' +
+    (bots.length
+      ? `<div class="form-row"><label>Bot 范围</label>
+         <label style="margin-right:10px"><input type="checkbox" id="ds-all" checked onchange="dsToggleAll(this)"> 全部</label>` +
+        bots.map(b => `<label style="margin-right:8px"><input type="checkbox" class="ds-bot" value="${b.bot_id}" checked> ${b.nickname}</label>`).join('') +
+        '</div>'
+      : '<div class="hint">暂无 Bot</div>');
+}
+
+function dsToggleAll(el) {
+  document.querySelectorAll('.ds-bot').forEach(cb => { cb.checked = el.checked; });
+}
+
+function dsScope() {
+  const dirs = [];
+  if (document.getElementById('ds-cache')?.checked) dirs.push('cache');
+  if (document.getElementById('ds-history')?.checked) dirs.push('history');
+  if (document.getElementById('ds-contexts')?.checked) dirs.push('contexts');
+  let bots = 'all';
+  const allBtn = document.getElementById('ds-all');
+  if (allBtn && !allBtn.checked) {
+    bots = [...document.querySelectorAll('.ds-bot:checked')].map(cb => cb.value);
+  }
+  return { bots, dirs };
+}
+
+async function backupData() {
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  try {
+    const res = await api('/api/data/backup', { method: 'POST', body: { data: scope } });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || ('HTTP ' + res.status));
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mohobot_backup_' + new Date().toISOString().slice(0, 19).replace(/[-T:]/g, '') + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+    showToast('备份已下载');
+  } catch (e) { showToast('备份失败: ' + e.message, false); }
+}
+
+async function restoreData() {
+  const fileEl = document.getElementById('restore-file');
+  const file = fileEl.files && fileEl.files[0];
+  if (!file) { showToast('请先选择备份文件', false); return; }
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  const pwd = prompt('输入管理员密码确认恢复（将覆盖所选范围的数据）:');
+  if (pwd === null) { fileEl.value = ''; return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('password', pwd);
+  fd.append('scope', JSON.stringify(scope));
+  try {
+    const r = await apiJSON('/api/data/restore', { method: 'POST', body: fd, raw: true });
+    showToast(`恢复完成: ${r.restored} 个文件`);
+  } catch (e) { showToast('恢复失败: ' + e.message, false); }
+  fileEl.value = '';
+}
+
+async function cleanupData() {
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！')) return;
+  const pwd = prompt('输入管理员密码确认清理:');
+  if (pwd === null) return;
+  try {
+    const r = await apiJSON('/api/data/cleanup', { method: 'POST', body: { data: { password: pwd, scope } } });
+    showToast(`清理完成: 移除 ${r.removed} 个文件`);
+  } catch (e) { showToast('清理失败: ' + e.message, false); }
 }
 
 async function changePassword() {

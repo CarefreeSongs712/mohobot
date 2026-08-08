@@ -1,12 +1,14 @@
 """数据库管理器 — 用户/会话/记忆的读写操作。
 
-history 从 JSONL 迁移到数据库:写入 conversations 表(与 Agent-LuoTianyi 同库)。
-用户以 QQ 号为外部标识,username 存为 "qq_{qq}",与洛天依注册用户隔离。
+history 从 JSONL 迁移到数据库: 写入 conversations 表(mohobot 独立 SQLite,
+架构借鉴 Agent-LuoTianyi)。
+用户以 QQ 号为外部标识,username 存为 "qq_{qq}"。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Any
@@ -22,9 +24,18 @@ from mohobot.agent.domain import MemoryRecord, MemoryType, MemoryVisibility
 
 
 class DatabaseManager:
-    """封装共享 SQLite 的读写。"""
+    """封装独立 SQLite 的读写。"""
 
-    def __init__(self, db_folder: str = "data/database", db_file: str = "luotianyi.db"):
+    def __init__(self, db_folder: str = "data/database", db_file: str = "mohobot.db"):
+        # 旧库迁移: 早期版本名为 luotianyi.db, 改名后自动迁移
+        legacy = os.path.join(db_folder, "luotianyi.db")
+        target = os.path.join(db_folder, db_file)
+        if db_file != "luotianyi.db" and os.path.exists(legacy) and not os.path.exists(target):
+            try:
+                os.rename(legacy, target)
+                logger.info(f"数据库迁移: luotianyi.db → {db_file}")
+            except OSError as e:
+                logger.warning(f"数据库迁移失败({e}), 将新建 {db_file}")
         self._engine = sqldb.init_sql_db(db_folder, db_file)
         logger.info(f"DatabaseManager initialized: {db_folder}/{db_file}")
 
@@ -345,7 +356,7 @@ class DatabaseManager:
         db = sqldb.new_session()
         try:
             from mohobot.db.sql_database import Base
-            # 该表在洛天依库中已存在;这里用原生 SQL 写入,避免引入额外模型
+            # 该表可能不存在(旧库);这里用原生 SQL 写入,避免引入额外模型
             db.execute(
                 text(
                     "INSERT INTO memory_update_records (update_cmd_uuid, user_id, update_command, created_at) "

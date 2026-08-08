@@ -4,7 +4,7 @@
 
 基于 Python 异步框架 + [OneBot v11](https://github.com/botuniverse/onebot-11) 标准的**多 Bot AI 框架**。支持同时接入多个 QQ 机器人，通过 LLM 驱动对话。
 
-> **Agent 子系统（beta）**：回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的意识/潜意识双层架构（话题规划 → 注意力 → 风格化回复 → 反思记忆），按 bot 隔离；历史对话写入 SQLite（与 Agent-LuoTianyi 共享同一数据库文件），会话上下文仍由 JSON/JSONL 管理。
+> **Agent 子系统（beta）**：回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的意识/潜意识双层架构（话题规划 → 注意力 → 风格化回复 → 反思记忆），按 bot 隔离；历史对话写入独立 SQLite（架构借鉴 Agent-LuoTianyi），会话上下文仍由 JSON/JSONL 管理。
 
 ## ✨ 功能特性
 
@@ -18,7 +18,7 @@
   - `SubconsciousMemory` 向量检索（ChromaDB，未配置时优雅降级）+ 数据库记忆正本
 - **LLM 驱动对话** — OpenAI 兼容 API，支持流式回复（标点+长度分段发送）、函数调用（Tools）、视觉识别（Vision）
 - **会话上下文管理** — 私聊支持多会话切换，群聊单一会话；上下文自动裁剪（最近 30 轮），记录每条消息的说话人（QQ号-昵称）
-- **历史对话入库** — 聊天记录写入 SQLite `conversations` 表（与 Agent-LuoTianyi 共用 `luotianyi.db`，用户名以 `qq_` 前缀隔离），原始事件另以 JSONL 只读归档
+- **历史对话入库** — 聊天记录写入独立 SQLite `conversations` 表（`mohobot.db`），原始事件另以 JSONL 只读归档
 - **智能群聊触发** — 群聊中仅在 @机器人 或 引用机器人自己的消息 时才触发 LLM 回复
 - **图片缓存与去重** — phash 感知哈希去重 + LRU 缓存（300MB 上限），图片消息只解析首张
 - **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件
@@ -166,7 +166,7 @@ agent:
 database:
   enabled: true
   folder: "./data/database"
-  file: "luotianyi.db"         # 与 Agent-LuoTianyi 共享同一数据库文件
+  file: "mohobot.db"           # 独立数据库文件
 ```
 
 > 记忆写入采用"向量索引 + 数据库正本"双写：向量检索仅用于召回线索，数据库正本为最终依据；未配置 embedding 时检索自动降级为空实现，记忆仍会写入数据库正本。
@@ -196,7 +196,7 @@ mohobot/
 │   │   ├── llm_module.py          # 模块化 LLM 调用（Jinja2 模板）
 │   │   ├── runtime.py             # 按 bot 组装（BotAgentRuntime + 会话流水线）
 │   │   ├── domain.py / prompts.py # 数据模型与提示词模板
-│   ├── db/                        # 数据库层（与 Agent-LuoTianyi 共享 SQLite）
+│   ├── db/                        # 数据库层（独立 SQLite）
 │   │   ├── sql_database.py        # SQLAlchemy 模型 + 迁移
 │   │   └── database_manager.py    # 用户/会话记录/记忆正本读写
 │   ├── ws_server.py               # 反向 WebSocket 服务器
@@ -216,7 +216,7 @@ mohobot/
 │   ├── bots/{bot_id}/             # Bot 配置与状态
 │   ├── history/{bot_id}/          # 【只读】原始聊天记录 JSONL
 │   ├── contexts/{bot_id}/         # 【可读写】会话上下文
-│   ├── database/                  # SQLite（luotianyi.db，与洛天依共享）
+│   ├── database/                  # SQLite（mohobot.db）
 │   └── cache/images/              # 图片缓存
 └── logs/                          # 日志（自动生成，勿提交）
 ```
@@ -229,13 +229,13 @@ mohobot/
 |------|------|------|------|------|
 | 聊天历史 | `data/history/` | 只读归档 | JSONL（每行一个事件） | 审计、全量回溯、训练导出 |
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
-| 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库，与 Agent-LuoTianyi 共享同一 `luotianyi.db` |
+| 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 | 长期记忆 | SQLite `agent_memory_records`/`memory_chunks` | 可读写 | SQL | 记忆正本（向量库仅作索引，可降级） |
 | 向量索引 | `data/database/chroma/`（可选） | 可读写 | ChromaDB | 记忆语义检索（未配置 embedding 时自动降级为空实现） |
 
 - **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；每个上下文仅保留最近 30 轮
-- **数据库隔离**：mohobot 用户以 `qq_{QQ}` 前缀写入共享库，与洛天依用户互不干扰；记忆按 bot（`owner_character_id`）隔离
+- **数据隔离**：记忆按 bot（`owner_character_id`）隔离，会话数据按 bot_id 分目录
 
 ## 💬 聊天指令
 
@@ -295,7 +295,7 @@ class Plugin:
 
 - [x] 反向 WebSocket 多 Bot 接入（重连竞态防护）
 - [x] Agent 子系统（beta）：话题规划 → 注意力 → 结构化回复 → 反思记忆，按 bot 隔离
-- [x] 历史对话入库（SQLite，与 Agent-LuoTianyi 共享 `luotianyi.db`，`qq_` 前缀隔离）
+- [x] 历史对话入库（独立 SQLite `mohobot.db`）
 - [x] 长期记忆：向量检索（ChromaDB，未配置时优雅降级）+ 数据库正本 + 用户画像
 - [x] LLM 流式对话（旧路径：分段回复、工具调用、视觉识别）
 - [x] VLM 图片理解（agent 路径自动描述图片；base64:// 兼容）

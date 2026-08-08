@@ -43,11 +43,11 @@ web_panel:
 interceptor:
   keyword_file: "./data/keywords.json"
 
-# ── 数据库（与 Agent-LuoTianyi 共享同一个 SQLite） ───────────────
+# ── 数据库（mohobot 独立 SQLite，架构借鉴 Agent-LuoTianyi） ─────
 database:
   enabled: true
   folder: "./data/database"   # SQLite 文件所在目录
-  file: "luotianyi.db"        # 与 Agent-LuoTianyi 相同文件名 → 共用同一数据库
+  file: "mohobot.db"          # 独立数据库文件
 
 # ── Agent 子系统（移植自 Agent-LuoTianyi，按 bot 隔离） ─────────
 agent:
