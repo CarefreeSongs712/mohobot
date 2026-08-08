@@ -147,11 +147,13 @@ class ChromaVectorStore(VectorStore):
 
     async def search(self, user_id: str, query: str, k: int = 5, **kwargs) -> List[Tuple[BaseDocument, float]]:
         try:
+            where = {"user_id": user_id} if "where" not in kwargs else kwargs.get("where")
+
             def _do_query():
                 return self._collection.query(
                     query_texts=[query],
                     n_results=k,
-                    where={"user_id": user_id} if "where" not in kwargs else kwargs.get("where"),
+                    where=self._normalize_where(where),
                 )
 
             results = await asyncio.get_event_loop().run_in_executor(self._executor, _do_query)
@@ -195,6 +197,20 @@ class ChromaVectorStore(VectorStore):
             logger.error(f"Chroma delete_user_records failed: {e}")
             return 0
 
+    @staticmethod
+    def _normalize_where(where: dict | None) -> dict | None:
+        """Chroma 的 where 只接受"单运算符"表达式。
+
+        多字段普通 dict(如 {"user_id": .., "owner_character_id": ..})
+        会报 "Expected where to have exactly one operator" —
+        必须用 $and 组合: {"$and": [{"user_id": ..}, {"owner_character_id": ..}]}
+        """
+        if not where:
+            return where
+        if len(where) == 1:
+            return where
+        return {"$and": [{k: v} for k, v in where.items()]}
+
 
 class _OpenAICompatEmbedding:
     """OpenAI 兼容 embedding 函数(Chroma EmbeddingFunction 接口)。
@@ -216,6 +232,14 @@ class _OpenAICompatEmbedding:
 
     def __call__(self, input):
         return self._impl(input)
+
+    # chromadb >= 1.5 的 query 路径会调用 embed_query / embed_documents
+    # (文档与查询分开嵌入), 必须委托给底层实现
+    def embed_query(self, input):
+        return self._impl.embed_query(input)
+
+    def embed_documents(self, input):
+        return self._impl.embed_documents(input)
 
 
 def create_vector_store(config: Dict[str, Any] | None) -> VectorStore:
