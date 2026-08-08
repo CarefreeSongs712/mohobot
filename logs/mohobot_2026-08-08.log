@@ -1,0 +1,967 @@
+2026-08-08 09:37:56.198 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:37:56.199 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:37:56.201 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:37:57.912 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:37:57.912 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:37:57.913 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:37:57.914 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:37:57.914 | ERROR    | __main__:main:214 | Fatal error: [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。
+Traceback (most recent call last):
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 219, in <module>
+    main()
+    └ <function main at 0x000001E14F219EE0>
+
+> File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 209, in main
+    asyncio.run(app.startup())
+    │       │   │   └ <function MohobotApplication.startup at 0x000001E15333A160>
+    │       │   └ <__main__.MohobotApplication object at 0x000001E15461B950>
+    │       └ <function run at 0x000001E150FE0680>
+    └ <module 'asyncio' from 'C:\\Program Files\\Python312\\Lib\\asyncio\\__init__.py'>
+
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 194, in run
+    return runner.run(main)
+           │      │   └ <coroutine object MohobotApplication.startup at 0x000001E1546296D0>
+           │      └ <function Runner.run at 0x000001E151478180>
+           └ <asyncio.runners.Runner object at 0x000001E1546D5670>
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           │    │                        └ <Task finished name='Task-1' coro=<MohobotApplication.startup() done, defined at c:\Users\Liyuan\Desktop\develop\mohobot\main...
+           │    └ None
+           └ <asyncio.runners.Runner object at 0x000001E1546D5670>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
+    return future.result()
+           │      └ <method 'result' of '_asyncio.Task' objects>
+           └ <Task finished name='Task-1' coro=<MohobotApplication.startup() done, defined at c:\Users\Liyuan\Desktop\develop\mohobot\main...
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 116, in startup
+    await self._ws_server.start()
+          │    │          └ <function WSServer.start at 0x000001E1546DC220>
+          │    └ <mohobot.ws_server.WSServer object at 0x000001E1546D5C40>
+          └ <__main__.MohobotApplication object at 0x000001E15461B950>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 50, in start
+    self._server = await websockets.asyncio.server.serve(
+    │    │               │          │       │      └ <class 'websockets.asyncio.server.serve'>
+    │    │               │          │       └ <module 'websockets.asyncio.server' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\...
+    │    │               │          └ <module 'websockets.asyncio' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\asyncio...
+    │    │               └ <module 'websockets' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\__init__.py'>
+    │    └ None
+    └ <mohobot.ws_server.WSServer object at 0x000001E1546D5C40>
+
+  File "C:\Users\Liyuan\AppData\Roaming\Python\Python312\site-packages\websockets\asyncio\server.py", line 831, in __await_impl__
+    server = await self.create_server
+                   │    └ <coroutine object BaseEventLoop.create_server at 0x000001E15488E820>
+                   └ <websockets.asyncio.server.serve object at 0x000001E1546D5DF0>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 1571, in create_server
+    raise OSError(err.errno, msg) from None
+                             └ "error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。"
+
+OSError: [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。
+2026-08-08 09:38:53.194 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:38:53.195 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:38:53.198 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:38:53.754 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:38:53.754 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:38:53.755 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:38:53.755 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:38:53.757 | ERROR    | __main__:main:214 | Fatal error: [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。
+Traceback (most recent call last):
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 219, in <module>
+    main()
+    └ <function main at 0x0000023876839EE0>
+
+> File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 209, in main
+    asyncio.run(app.startup())
+    │       │   │   └ <function MohobotApplication.startup at 0x000002387A96A160>
+    │       │   └ <__main__.MohobotApplication object at 0x000002387BCB4A10>
+    │       └ <function run at 0x0000023878600680>
+    └ <module 'asyncio' from 'C:\\Program Files\\Python312\\Lib\\asyncio\\__init__.py'>
+
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 194, in run
+    return runner.run(main)
+           │      │   └ <coroutine object MohobotApplication.startup at 0x000002387BC59800>
+           │      └ <function Runner.run at 0x0000023878A98180>
+           └ <asyncio.runners.Runner object at 0x000002387BD0DAF0>
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           │    │                        └ <Task finished name='Task-1' coro=<MohobotApplication.startup() done, defined at c:\Users\Liyuan\Desktop\develop\mohobot\main...
+           │    └ None
+           └ <asyncio.runners.Runner object at 0x000002387BD0DAF0>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 687, in run_until_complete
+    return future.result()
+           │      └ <method 'result' of '_asyncio.Task' objects>
+           └ <Task finished name='Task-1' coro=<MohobotApplication.startup() done, defined at c:\Users\Liyuan\Desktop\develop\mohobot\main...
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 116, in startup
+    await self._ws_server.start()
+          │    │          └ <function WSServer.start at 0x000002387BD1C220>
+          │    └ <mohobot.ws_server.WSServer object at 0x000002387BDE7B00>
+          └ <__main__.MohobotApplication object at 0x000002387BCB4A10>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 50, in start
+    self._server = await websockets.asyncio.server.serve(
+    │    │               │          │       │      └ <class 'websockets.asyncio.server.serve'>
+    │    │               │          │       └ <module 'websockets.asyncio.server' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\...
+    │    │               │          └ <module 'websockets.asyncio' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\asyncio...
+    │    │               └ <module 'websockets' from 'C:\\Users\\Liyuan\\AppData\\Roaming\\Python\\Python312\\site-packages\\websockets\\__init__.py'>
+    │    └ None
+    └ <mohobot.ws_server.WSServer object at 0x000002387BDE7B00>
+
+  File "C:\Users\Liyuan\AppData\Roaming\Python\Python312\site-packages\websockets\asyncio\server.py", line 831, in __await_impl__
+    server = await self.create_server
+                   │    └ <coroutine object BaseEventLoop.create_server at 0x000002387BF02820>
+                   └ <websockets.asyncio.server.serve object at 0x000002387BD0DD60>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 1571, in create_server
+    raise OSError(err.errno, msg) from None
+                             └ "error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。"
+
+OSError: [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8080): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。
+2026-08-08 09:40:36.969 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:40:36.970 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:40:36.972 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:40:37.481 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:40:37.481 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:40:37.482 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:40:37.482 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:40:37.483 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:40:37.484 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:40:37.485 | INFO     | mohobot.web_panel.app:start:554 | Starting web panel...
+2026-08-08 09:41:54.972 | INFO     | __main__:shutdown:146 | Shutting down Mohobot...
+2026-08-08 09:41:54.972 | INFO     | mohobot.web_panel.app:stop:570 | Web panel stopped
+2026-08-08 09:41:54.986 | INFO     | __main__:main:212 | Interrupted by user
+2026-08-08 09:42:16.676 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:42:16.677 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:42:16.679 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:42:17.183 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:42:17.185 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:42:17.186 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:42:17.186 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:42:17.186 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:42:17.188 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:42:17.188 | INFO     | mohobot.web_panel.app:start:554 | Starting web panel...
+2026-08-08 09:42:17.201 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 09:43:59.658 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:43:59.659 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:43:59.661 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:44:00.172 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:44:00.173 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:44:00.174 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:44:00.174 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:44:00.174 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:44:00.177 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:44:00.177 | INFO     | mohobot.web_panel.app:start:554 | Starting web panel...
+2026-08-08 09:44:00.190 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 09:46:21.694 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:46:21.696 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:46:21.698 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:46:21.698 | WARNING  | mohobot.llm_service:__init__:45 | LLM chat API key not configured — LLM calls will fail
+2026-08-08 09:46:21.707 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:46:21.707 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:46:21.708 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:46:21.708 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:46:21.709 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:46:21.710 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:46:21.711 | INFO     | mohobot.web_panel.app:start:555 | Starting web panel...
+2026-08-08 09:46:21.725 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 09:47:01.104 | INFO     | __main__:shutdown:146 | Shutting down Mohobot...
+2026-08-08 09:47:01.105 | INFO     | mohobot.web_panel.app:stop:571 | Web panel stopped
+2026-08-08 09:47:01.105 | INFO     | mohobot.ws_server:stop:65 | WebSocket server stopped
+2026-08-08 09:47:01.105 | INFO     | __main__:shutdown:169 | Mohobot shutdown complete.
+2026-08-08 09:47:01.105 | INFO     | __main__:main:226 | Interrupted by user
+2026-08-08 09:50:00.095 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:50:00.096 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:50:00.098 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:50:00.099 | WARNING  | mohobot.llm_service:__init__:45 | LLM chat API key not configured — LLM calls will fail
+2026-08-08 09:50:00.110 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:50:00.110 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:50:00.112 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:50:00.112 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:50:00.112 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:50:00.115 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:50:00.116 | INFO     | mohobot.web_panel.app:start:555 | Starting web panel...
+2026-08-08 09:50:00.136 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 09:50:05.363 | INFO     | mohobot.ws_server:_handle_connection:78 | New connection: bot_id=2192362623, role=Universal, remote=('192.168.31.175', 64114)
+2026-08-08 09:50:05.364 | INFO     | mohobot.bot_manager:register:80 | Bot registered: 2192362623 (QQ=2192362623, nickname=)
+2026-08-08 09:50:05.364 | INFO     | mohobot.ws_server:_handle_connection:85 | Bot 2192362623 (Bot-2192362623) connected
+2026-08-08 09:50:05.369 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: connect
+2026-08-08 09:50:05.369 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: enable
+2026-08-08 09:50:05.370 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:50:05.508 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:50:05.873 | INFO     | mohobot.ws_server:_handle_connection:78 | New connection: bot_id=2192362623, role=Universal, remote=('192.168.31.175', 64026)
+2026-08-08 09:50:05.873 | INFO     | mohobot.bot_manager:register:80 | Bot registered: 2192362623 (QQ=2192362623, nickname=)
+2026-08-08 09:50:05.873 | INFO     | mohobot.ws_server:_handle_connection:85 | Bot 2192362623 (Bot-2192362623) connected
+2026-08-08 09:50:05.874 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: connect
+2026-08-08 09:50:05.874 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: enable
+2026-08-08 09:50:05.874 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:50:10.835 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你的今日老婆是：
+
+【卡斯巴尔·雷姆·戴肯】
+
+请好好对待她哦❤️~ 
+剩余抽取次数：0次'
+2026-08-08 09:50:10.835 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:10.835 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你的今日老婆是：
+
+【卡斯巴尔·雷姆·戴肯】
+
+请好好对待她哦❤️~ 
+剩余抽取次数：0次'
+2026-08-08 09:50:10.835 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:14.201 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=550754248, type=group, text='占卜'
+2026-08-08 09:50:14.201 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=550754248
+2026-08-08 09:50:14.202 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=550754248, type=group, text='占卜'
+2026-08-08 09:50:14.202 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=550754248
+2026-08-08 09:50:14.627 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='@深海(开学勿踢), 这是你的占卜结果，言和祝你生活快乐哦
+财运: 35
+事业: 87
+姻缘: 74
+健康: 56
+出行: 52
+学业: 85
+运'
+2026-08-08 09:50:14.629 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='@深海(开学勿踢), 这是你的占卜结果，言和祝你生活快乐哦
+财运: 35
+事业: 87
+姻缘: 74
+健康: 56
+出行: 52
+学业: 85
+运'
+2026-08-08 09:50:15.038 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -88089313}}
+2026-08-08 09:50:15.046 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1747125222}}
+2026-08-08 09:50:15.077 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1136341052}}
+2026-08-08 09:50:15.152 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1021013858}}
+2026-08-08 09:50:21.058 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错我可处理不了。'
+2026-08-08 09:50:21.058 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:21.059 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错我可处理不了。'
+2026-08-08 09:50:21.059 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:23.016 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你找管理员吧。'
+2026-08-08 09:50:23.016 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:23.017 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你找管理员吧。'
+2026-08-08 09:50:23.017 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:29.322 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='又发一遍。'
+2026-08-08 09:50:29.323 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:29.323 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='又发一遍。'
+2026-08-08 09:50:29.323 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:31.343 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错不归我管，别刷屏了。'
+2026-08-08 09:50:31.344 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:31.344 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错不归我管，别刷屏了。'
+2026-08-08 09:50:31.344 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:50:35.508 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:50:35.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:50:54.977 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='？'
+2026-08-08 09:50:54.977 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:50:54.978 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='？'
+2026-08-08 09:50:54.978 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:50:59.869 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text=''
+2026-08-08 09:50:59.869 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text=''
+2026-08-08 09:51:00.281 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1157823957}}
+2026-08-08 09:51:00.301 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 804542009}}
+2026-08-08 09:51:00.302 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1379831352}}
+2026-08-08 09:51:00.397 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 596062952}}
+2026-08-08 09:51:05.207 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='？'
+2026-08-08 09:51:05.207 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:05.207 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='？'
+2026-08-08 09:51:05.207 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:05.508 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:51:05.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:51:07.461 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='你好'
+2026-08-08 09:51:07.461 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:51:07.462 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='你好'
+2026-08-08 09:51:07.462 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:51:11.619 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你好。'
+2026-08-08 09:51:11.619 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:51:11.619 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你好。'
+2026-08-08 09:51:11.620 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:51:17.351 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='模型没接上？'
+2026-08-08 09:51:17.351 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:17.353 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='模型没接上？'
+2026-08-08 09:51:17.353 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:19.669 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text=''
+2026-08-08 09:51:19.669 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:19.669 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text=''
+2026-08-08 09:51:19.669 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3784809426
+2026-08-08 09:51:35.510 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:51:35.510 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:52:05.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:52:05.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:52:05.877 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=550754248, type=group, text='/强娶'
+2026-08-08 09:52:05.879 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=550754248, type=group, text='/强娶'
+2026-08-08 09:52:06.279 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1228782173}}
+2026-08-08 09:52:06.288 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1194776030}}
+2026-08-08 09:52:06.380 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -852030581}}
+2026-08-08 09:52:06.401 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1492106740}}
+2026-08-08 09:52:06.492 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你已经强娶过啦！
+请等待：1天22小时7分后再试。
+(重置时间：08-10 00:00)'
+2026-08-08 09:52:06.493 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你已经强娶过啦！
+请等待：1天22小时7分后再试。
+(重置时间：08-10 00:00)'
+2026-08-08 09:52:06.885 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 739592782}}
+2026-08-08 09:52:06.895 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -585725737}}
+2026-08-08 09:52:06.946 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1731638230}}
+2026-08-08 09:52:06.952 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1932482271}}
+2026-08-08 09:52:11.441 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='第三次了。'
+2026-08-08 09:52:11.441 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:11.442 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='第三次了。'
+2026-08-08 09:52:11.442 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:13.289 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错真不归我管。'
+2026-08-08 09:52:13.289 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:13.290 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错真不归我管。'
+2026-08-08 09:52:13.290 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:19.211 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='还来。'
+2026-08-08 09:52:19.211 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:19.211 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='还来。'
+2026-08-08 09:52:19.213 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:21.164 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错真的不归我管，你找管理员去。'
+2026-08-08 09:52:21.164 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:21.165 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错真的不归我管，你找管理员去。'
+2026-08-08 09:52:21.165 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:31.052 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='/ban  7121099h'
+2026-08-08 09:52:31.053 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='/ban  7121099h'
+2026-08-08 09:52:31.464 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 907233151}}
+2026-08-08 09:52:31.520 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 791446264}}
+2026-08-08 09:52:31.530 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1005688494}}
+2026-08-08 09:52:31.555 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -818982410}}
+2026-08-08 09:52:31.610 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.611 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.625 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text=':(
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(2192362623'
+2026-08-08 09:52:31.626 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text=':(
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(2192362623'
+2026-08-08 09:52:31.656 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text=':(
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(2192362623'
+2026-08-08 09:52:31.656 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text=':(
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(2192362623'
+2026-08-08 09:52:31.724 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.724 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.743 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.745 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.787 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.788 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text=':(
+
+在调用插件 astrbot_plugin_reneban 的处理函数 ban_user 时出现异常：非法的时间字符串格式: 'bot(219236262'
+2026-08-08 09:52:31.978 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1475885100}}
+2026-08-08 09:52:31.991 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1073926074}}
+2026-08-08 09:52:31.991 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -330101635}}
+2026-08-08 09:52:32.001 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 333384527}}
+2026-08-08 09:52:32.030 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1066028927}}
+2026-08-08 09:52:32.083 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1412540556}}
+2026-08-08 09:52:32.109 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 557126401}}
+2026-08-08 09:52:32.119 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 2075874216}}
+2026-08-08 09:52:32.134 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -609404307}}
+2026-08-08 09:52:32.146 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -704781673}}
+2026-08-08 09:52:32.156 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 538222823}}
+2026-08-08 09:52:32.157 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -860032197}}
+2026-08-08 09:52:32.163 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -632248234}}
+2026-08-08 09:52:32.189 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -764709657}}
+2026-08-08 09:52:32.189 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1984076626}}
+2026-08-08 09:52:32.202 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1606885856}}
+2026-08-08 09:52:32.202 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1279722486}}
+2026-08-08 09:52:32.213 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1169242534}}
+2026-08-08 09:52:32.213 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1973360563}}
+2026-08-08 09:52:32.221 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -828417579}}
+2026-08-08 09:52:32.221 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 2105204970}}
+2026-08-08 09:52:32.256 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -500675515}}
+2026-08-08 09:52:32.258 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1372547683}}
+2026-08-08 09:52:32.289 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -2116426508}}
+2026-08-08 09:52:35.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:52:35.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:52:36.323 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='欸？'
+2026-08-08 09:52:36.324 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='欸？'
+2026-08-08 09:52:36.768 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 273081289}}
+2026-08-08 09:52:36.768 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1958221720}}
+2026-08-08 09:52:36.768 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1330046533}}
+2026-08-08 09:52:36.787 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1432940633}}
+2026-08-08 09:52:37.111 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这是bot报错了吧？'
+2026-08-08 09:52:37.112 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:37.112 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这是bot报错了吧？'
+2026-08-08 09:52:37.113 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:37.717 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='看来管理员得修修了…'
+2026-08-08 09:52:37.717 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:37.718 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='看来管理员得修修了…'
+2026-08-08 09:52:37.718 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:37.798 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='/强娶'
+2026-08-08 09:52:37.799 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3784809426, type=group, text='/强娶'
+2026-08-08 09:52:38.180 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1769842239}}
+2026-08-08 09:52:38.201 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1750159976}}
+2026-08-08 09:52:38.232 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1317411584}}
+2026-08-08 09:52:38.242 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1698563383}}
+2026-08-08 09:52:41.586 | DEBUG    | mohobot.message_handler:_handle_notice:233 | Notice from bot 2192362623: group_ban
+2026-08-08 09:52:41.586 | DEBUG    | mohobot.message_handler:_handle_notice:233 | Notice from bot 2192362623: group_ban
+2026-08-08 09:52:41.941 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这个bot坏掉了诶…'
+2026-08-08 09:52:41.941 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这个bot坏掉了诶…'
+2026-08-08 09:52:42.253 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:42.303 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:42.303 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:42.332 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:42.658 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='一直在刷屏，天依帮你呼叫管理员！'
+2026-08-08 09:52:42.658 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:42.659 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='一直在刷屏，天依帮你呼叫管理员！'
+2026-08-08 09:52:42.659 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:45.721 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='嗯？'
+2026-08-08 09:52:45.721 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:45.722 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='嗯？'
+2026-08-08 09:52:45.722 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:47.660 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='这是什么报错信息？'
+2026-08-08 09:52:47.660 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:47.660 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='这是什么报错信息？'
+2026-08-08 09:52:47.660 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:49.459 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='测试bot出故障了？'
+2026-08-08 09:52:49.459 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:49.460 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='测试bot出故障了？'
+2026-08-08 09:52:49.460 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:50.319 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3992352811, type=group, text=''
+2026-08-08 09:52:50.319 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3992352811
+2026-08-08 09:52:50.319 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3992352811, type=group, text=''
+2026-08-08 09:52:50.319 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3992352811
+2026-08-08 09:52:51.571 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='反正阿绫看不懂这些代码，你们谁来管管！'
+2026-08-08 09:52:51.572 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:51.572 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='反正阿绫看不懂这些代码，你们谁来管管！'
+2026-08-08 09:52:51.572 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 09:52:54.409 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='好啦好啦知道啦，bot别刷屏了！'
+2026-08-08 09:52:54.410 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='好啦好啦知道啦，bot别刷屏了！'
+2026-08-08 09:52:54.753 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:54.803 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:54.803 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:54.813 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:54.949 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='系统报错都发到群里啦？'
+2026-08-08 09:52:54.949 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:52:54.949 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='系统报错都发到群里啦？'
+2026-08-08 09:52:54.951 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:52:55.189 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='天依帮你@群主去！'
+2026-08-08 09:52:55.189 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:55.189 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='天依帮你@群主去！'
+2026-08-08 09:52:55.189 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:55.501 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这机器人怕是卡住了。'
+2026-08-08 09:52:55.501 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:55.501 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这机器人怕是卡住了。'
+2026-08-08 09:52:55.501 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:55.794 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='这些是bot的报错信息，星尘不太懂技术上的东西呢。'
+2026-08-08 09:52:55.794 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:52:55.794 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='这些是bot的报错信息，星尘不太懂技术上的东西呢。'
+2026-08-08 09:52:55.794 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:52:56.844 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='这个我可修不了，得找管理员看看配置。'
+2026-08-08 09:52:56.845 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:52:56.845 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='这个我可修不了，得找管理员看看配置。'
+2026-08-08 09:52:56.845 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:52:57.421 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='报错连环发，我这边没辙。'
+2026-08-08 09:52:57.421 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:57.422 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='报错连环发，我这边没辙。'
+2026-08-08 09:52:57.422 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:52:57.926 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这个bot坏得好严重…'
+2026-08-08 09:52:57.926 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='这个bot坏得好严重…'
+2026-08-08 09:52:58.258 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:58.311 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:58.311 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:58.322 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:52:58.856 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='天依先撤了，等修好再来玩！'
+2026-08-08 09:52:58.856 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:58.856 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='天依先撤了，等修好再来玩！'
+2026-08-08 09:52:58.856 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 09:52:59.524 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='诶？？'
+2026-08-08 09:52:59.524 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:52:59.525 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='诶？？'
+2026-08-08 09:52:59.525 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:01.425 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='/ban 2192362623 7121099h'
+2026-08-08 09:53:01.426 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='/ban 2192362623 7121099h'
+2026-08-08 09:53:01.494 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='这是什么奇怪的消息呀…'
+2026-08-08 09:53:01.495 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:01.495 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='这是什么奇怪的消息呀…'
+2026-08-08 09:53:01.495 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:01.737 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:01.746 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:01.786 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:01.826 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:02.091 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='同样的报错又出现了。'
+2026-08-08 09:53:02.092 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:53:02.092 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='同样的报错又出现了。'
+2026-08-08 09:53:02.092 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:53:03.416 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='不回了。'
+2026-08-08 09:53:03.416 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:03.416 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='不回了。'
+2026-08-08 09:53:03.416 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:03.465 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依看不懂诶！'
+2026-08-08 09:53:03.465 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:03.466 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依看不懂诶！'
+2026-08-08 09:53:03.466 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:03.970 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='星尘真的帮不上忙呢。'
+2026-08-08 09:53:03.970 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:53:03.971 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='星尘真的帮不上忙呢。'
+2026-08-08 09:53:03.971 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 09:53:05.323 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错刷个没完。'
+2026-08-08 09:53:05.323 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:05.323 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='这报错刷个没完。'
+2026-08-08 09:53:05.324 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:05.365 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='已在 sl:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:05.365 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='已在 sl:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:05.425 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='测试 bot 你是不是把什么按钮弄坏了？'
+2026-08-08 09:53:05.426 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:05.426 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='测试 bot 你是不是把什么按钮弄坏了？'
+2026-08-08 09:53:05.426 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:05.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:53:05.509 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:53:05.667 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:05.709 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:05.718 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:05.749 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:07.932 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依只会唱歌和吃小笼包啦！'
+2026-08-08 09:53:07.932 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:07.934 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依只会唱歌和吃小笼包啦！'
+2026-08-08 09:53:07.934 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:09.844 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='嘿嘿！'
+2026-08-08 09:53:09.844 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:09.845 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='嘿嘿！'
+2026-08-08 09:53:09.845 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:10.938 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你今天强娶了【洛天依（b5.6）】哦❤️~
+请对她好一点哦~。'
+2026-08-08 09:53:10.938 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:10.939 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='你今天强娶了【洛天依（b5.6）】哦❤️~
+请对她好一点哦~。'
+2026-08-08 09:53:10.939 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 09:53:12.867 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='又报了一遍同样的错。'
+2026-08-08 09:53:12.868 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:53:12.868 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='又报了一遍同样的错。'
+2026-08-08 09:53:12.868 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:53:12.967 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:12.968 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:13.370 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:13.423 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:13.423 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:13.436 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:14.827 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='看来这个测试bot卡住了，管理员还没看到吧。'
+2026-08-08 09:53:14.827 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:53:14.827 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='看来这个测试bot卡住了，管理员还没看到吧。'
+2026-08-08 09:53:14.828 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 09:53:19.534 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='又、又是这条消息！'
+2026-08-08 09:53:19.535 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:19.535 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='又、又是这条消息！'
+2026-08-08 09:53:19.535 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:21.312 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='测试 bot 你是不是卡住啦？'
+2026-08-08 09:53:21.312 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:21.312 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='测试 bot 你是不是卡住啦？'
+2026-08-08 09:53:21.312 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:21.556 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:21.556 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:21.849 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:21.903 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:21.948 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:21.959 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:23.023 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:23.024 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:53:23.255 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依都说了看不懂嘛！'
+2026-08-08 09:53:23.255 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:23.255 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='天依都说了看不懂嘛！'
+2026-08-08 09:53:23.255 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:23.323 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:23.343 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:23.354 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:23.364 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:53:25.355 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='要不…'
+2026-08-08 09:53:25.356 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:25.356 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='要不…'
+2026-08-08 09:53:25.356 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 09:53:55.166 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 09:53:55.167 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 09:53:55.171 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 09:53:55.723 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 09:53:55.723 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 09:53:55.724 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 09:53:55.724 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 09:53:55.725 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 09:53:55.727 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 09:53:55.727 | INFO     | mohobot.web_panel.app:start:555 | Starting web panel...
+2026-08-08 09:53:55.740 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 09:54:07.281 | INFO     | mohobot.ws_server:_handle_connection:78 | New connection: bot_id=2192362623, role=Universal, remote=('192.168.31.175', 64056)
+2026-08-08 09:54:07.282 | INFO     | mohobot.bot_manager:register:80 | Bot registered: 2192362623 (QQ=2192362623, nickname=)
+2026-08-08 09:54:07.282 | INFO     | mohobot.ws_server:_handle_connection:85 | Bot 2192362623 (Bot-2192362623) connected
+2026-08-08 09:54:07.282 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: connect
+2026-08-08 09:54:07.283 | INFO     | mohobot.message_handler:_handle_meta:256 | Bot 2192362623 lifecycle: enable
+2026-08-08 09:54:07.283 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:54:10.868 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='6'
+2026-08-08 09:54:10.868 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:54:11.969 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='6=5+2+0+1+3-1-4
+所以你一定是在喜欢我吧(偷笑)'
+2026-08-08 09:54:11.977 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=46, context_len=44
+2026-08-08 09:54:23.791 | ERROR    | mohobot.llm_service:chat_stream:221 | LLM stream call failed: Connection error.
+2026-08-08 09:54:23.798 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='你好'
+2026-08-08 09:54:23.800 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=2, context_len=0
+2026-08-08 09:54:31.250 | ERROR    | mohobot.llm_service:chat_stream:221 | LLM stream call failed: Connection error.
+2026-08-08 09:54:31.263 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:54:31.263 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'send group message rejected: result=120 err='}
+2026-08-08 09:54:31.465 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1434888822}}
+2026-08-08 09:54:31.476 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -154635968}}
+2026-08-08 09:54:35.511 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:54:37.295 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2640535972, type=group, text='密钥都没有就上来了吗？'
+2026-08-08 09:54:37.297 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2640535972
+2026-08-08 09:55:00.700 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2640535972, type=group, text=''
+2026-08-08 09:55:00.712 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:55:05.512 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:55:24.953 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='已在 default:GroupMessage:398870315 禁用以下用户 2192362623，时限：296712天11小时，理由：None'
+2026-08-08 09:55:24.955 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:55:35.512 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:55:38.410 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='没保存'
+2026-08-08 09:55:38.411 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 09:55:53.788 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='1'
+2026-08-08 09:55:53.790 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=4, context_len=2
+2026-08-08 09:56:05.515 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:56:35.515 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:56:43.974 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='你好'
+2026-08-08 09:56:43.976 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=4, context_len=2
+2026-08-08 09:56:45.927 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2640535972, type=group, text=''
+2026-08-08 09:56:45.927 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2640535972
+2026-08-08 09:56:51.530 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2595583484, type=group, text='赞我'
+2026-08-08 09:56:51.530 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2595583484
+2026-08-08 09:56:53.299 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='赞到成功！10个赞已送达'
+2026-08-08 09:56:53.302 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:56:55.167 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='赞不完，根本赞不完！又点了10个'
+2026-08-08 09:56:55.169 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:56:57.046 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='赞不完，根本赞不完！又点了10个'
+2026-08-08 09:56:57.048 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:56:58.811 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='今日份的20个赞已安排~'
+2026-08-08 09:56:58.812 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:57:00.652 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='赞送出去啦！一共20个哦！'
+2026-08-08 09:57:00.654 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46
+2026-08-08 09:57:05.516 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:57:17.124 | DEBUG    | mohobot.message_handler:_handle_notice:233 | Notice from bot 2192362623: group_decrease
+2026-08-08 09:57:33.262 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='1'
+2026-08-08 09:57:33.264 | DEBUG    | mohobot.llm_service:chat_stream:204 | LLM stream call: model=DeepSeek-V4-Flash, messages=4, context_len=2
+2026-08-08 09:57:35.517 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:58:05.517 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:58:35.518 | DEBUG    | mohobot.message_handler:_handle_meta:254 | Heartbeat from bot 2192362623
+2026-08-08 09:58:44.821 | INFO     | __main__:shutdown:146 | Shutting down Mohobot...
+2026-08-08 09:58:44.821 | INFO     | mohobot.web_panel.app:stop:571 | Web panel stopped
+2026-08-08 09:58:44.823 | INFO     | mohobot.bot_manager:unregister:87 | Bot unregistered: 2192362623
+2026-08-08 09:58:44.823 | INFO     | mohobot.ws_server:stop:65 | WebSocket server stopped
+2026-08-08 09:58:44.824 | INFO     | __main__:shutdown:169 | Mohobot shutdown complete.
+2026-08-08 09:58:44.825 | INFO     | __main__:main:226 | Interrupted by user
+2026-08-08 10:04:33.784 | INFO     | mohobot.utils.logger:setup_logger:44 | Logger initialized — file rotation at 10 MB, 7 day retention
+2026-08-08 10:04:33.786 | INFO     | __main__:startup:51 | Mohobot v0.1.0 starting up...
+2026-08-08 10:04:33.788 | INFO     | mohobot.bot_manager:__init__:67 | BotManager initialized (data_dir=./data)
+2026-08-08 10:04:34.312 | INFO     | mohobot.interceptors.plugin_system:load_plugins:74 | Loaded plugin: status.Plugin
+2026-08-08 10:04:34.312 | INFO     | mohobot.interceptors.plugin_system:load_plugins:79 | Plugin system loaded 1 plugin(s)
+2026-08-08 10:04:34.314 | INFO     | __main__:startup:78 | Loaded 1 plugin(s)
+2026-08-08 10:04:34.314 | INFO     | mohobot.message_handler:set_interceptors:61 | MessageHandler: 3 interceptor(s) registered
+2026-08-08 10:04:34.315 | INFO     | mohobot.ws_server:start:58 | WebSocket server listening on ws://0.0.0.0:8081
+2026-08-08 10:04:34.318 | INFO     | __main__:startup:131 | Mohobot v0.1.0 is running! WS: ws://0.0.0.0:8081 | Panel: http://127.0.0.1:9090
+2026-08-08 10:04:34.318 | INFO     | mohobot.web_panel.app:start:555 | Starting web panel...
+2026-08-08 10:04:34.332 | INFO     | mohobot.web_panel.app:startup:81 | Web panel started
+2026-08-08 10:04:37.553 | INFO     | mohobot.ws_server:_handle_connection:78 | New connection: bot_id=2192362623, role=Universal, remote=('192.168.31.175', 64112)
+2026-08-08 10:04:37.554 | INFO     | mohobot.bot_manager:register:80 | Bot registered: 2192362623 (QQ=2192362623, nickname=)
+2026-08-08 10:04:37.554 | INFO     | mohobot.ws_server:_handle_connection:85 | Bot 2192362623 (Bot-2192362623) connected
+2026-08-08 10:04:37.554 | INFO     | mohobot.message_handler:_handle_meta:335 | Bot 2192362623 lifecycle: connect
+2026-08-08 10:04:37.554 | INFO     | mohobot.message_handler:_handle_meta:335 | Bot 2192362623 lifecycle: enable
+2026-08-08 10:04:37.554 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:04:55.524 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='你好'
+2026-08-08 10:04:55.526 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=4, context_len=2, max_tokens=131072
+2026-08-08 10:05:01.184 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 3 segment(s), total 83 chars
+2026-08-08 10:05:01.368 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1942560192}}
+2026-08-08 10:05:01.459 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1759022463}}
+2026-08-08 10:05:01.469 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1119468752}}
+2026-08-08 10:05:05.521 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:05:35.521 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:06:05.521 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:06:35.522 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:07:05.522 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:07:35.522 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:08:05.522 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:08:07.116 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text=''
+2026-08-08 10:08:07.118 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=6, context_len=4, max_tokens=131072
+2026-08-08 10:08:10.470 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 1 segment(s), total 26 chars
+2026-08-08 10:08:10.474 | INFO     | mohobot.message_handler:_handle_request:317 | Request from bot 2192362623: group from 3831097597
+2026-08-08 10:08:10.538 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'failed', 'retcode': 100, 'data': None, 'wording': 'OIDB error 120161001 on 0x10c8_1: handle async message fail'}
+2026-08-08 10:08:10.670 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 298030163}}
+2026-08-08 10:08:35.522 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:08:38.676 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='自我介绍'
+2026-08-08 10:08:38.685 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=8, context_len=6, max_tokens=131072
+2026-08-08 10:08:44.857 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 14 segment(s), total 331 chars
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1136010905}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -382188093}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -75894195}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -895348466}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -2081414062}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1312706409}}
+2026-08-08 10:08:44.861 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1683401467}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 2054814256}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -223925921}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 899696936}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1981821761}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1432971195}}
+2026-08-08 10:08:44.862 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -139854731}}
+2026-08-08 10:08:45.070 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -506285556}}
+2026-08-08 10:08:56.713 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=private, text='我第一条给你发的消息是什么'
+2026-08-08 10:08:56.720 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=10, context_len=8, max_tokens=131072
+2026-08-08 10:09:01.186 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 6 segment(s), total 80 chars
+2026-08-08 10:09:01.387 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -763320253}}
+2026-08-08 10:09:01.397 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1730175822}}
+2026-08-08 10:09:01.430 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -71845617}}
+2026-08-08 10:09:01.455 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1247559838}}
+2026-08-08 10:09:01.455 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 117877278}}
+2026-08-08 10:09:01.463 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1054625002}}
+2026-08-08 10:09:02.559 | DEBUG    | mohobot.message_handler:_handle_notice:312 | Notice from bot 2192362623: group_increase
+2026-08-08 10:09:05.523 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:09:35.523 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:09:42.128 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2640535972, type=group, text='？'
+2026-08-08 10:09:42.129 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2640535972
+2026-08-08 10:10:05.523 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:10:10.417 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='2'
+2026-08-08 10:10:10.417 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 10:10:18.155 | DEBUG    | mohobot.message_handler:_handle_notice:312 | Notice from bot 2192362623: notify
+2026-08-08 10:10:23.895 | DEBUG    | mohobot.message_handler:_handle_notice:312 | Notice from bot 2192362623: notify
+2026-08-08 10:10:28.468 | DEBUG    | mohobot.message_handler:_handle_notice:312 | Notice from bot 2192362623: notify
+2026-08-08 10:10:29.508 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='看出来啦，这招我认得。'
+2026-08-08 10:10:29.508 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 10:10:31.921 | DEBUG    | mohobot.message_handler:_handle_notice:312 | Notice from bot 2192362623: notify
+2026-08-08 10:10:35.524 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:10:55.226 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='#napcat'
+2026-08-08 10:10:55.226 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 10:10:55.635 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='SnowLuma 状态
+版本: 1.12.10
+平台: linux-x64
+运行时长: 8天 21小时 44分钟'
+2026-08-08 10:10:55.635 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2137074986
+2026-08-08 10:10:55.650 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='NapCat 信息
+版本: 4.17.55
+平台: linux (64-bit)
+运行时间: 9天 22小时 56分钟'
+2026-08-08 10:10:55.651 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3839186911
+2026-08-08 10:10:55.683 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='NapCat 信息
+版本: 4.18.13
+平台: linux (64-bit)
+运行时间: 7天 20小时 31分钟'
+2026-08-08 10:10:55.683 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3135911351
+2026-08-08 10:10:55.703 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='NapCat 信息
+版本: 4.18.13
+平台: linux
+运行时间: 7天 20小时 27分钟'
+2026-08-08 10:10:55.703 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2557594386
+2026-08-08 10:10:55.734 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='NapCat 信息
+版本: 4.18.9
+平台: linux (64-bit)
+运行时间: 9天 18小时 18分钟'
+2026-08-08 10:10:55.735 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3616174427
+2026-08-08 10:10:55.813 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='SnowLuma 状态
+版本: 1.12.9
+平台: linux-arm64
+运行时长: 13天 10小时 51分钟'
+2026-08-08 10:10:55.813 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3125606254
+2026-08-08 10:11:01.801 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='ping'
+2026-08-08 10:11:01.801 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 10:11:02.308 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='PONG'
+2026-08-08 10:11:02.310 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=48, context_len=46, max_tokens=131072
+2026-08-08 10:11:16.152 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 9 segment(s), total 177 chars
+2026-08-08 10:11:16.157 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='PONG'
+2026-08-08 10:11:16.169 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=50, context_len=48, max_tokens=131072
+2026-08-08 10:11:22.310 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 8 segment(s), total 147 chars
+2026-08-08 10:11:22.315 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3839186911, type=group, text='PONG'
+2026-08-08 10:11:22.327 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=52, context_len=50, max_tokens=131072
+2026-08-08 10:11:28.757 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 9 segment(s), total 181 chars
+2026-08-08 10:11:28.764 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2557594386, type=group, text='PONG'
+2026-08-08 10:11:28.781 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=54, context_len=52, max_tokens=131072
+2026-08-08 10:11:35.006 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 8 segment(s), total 204 chars
+2026-08-08 10:11:35.012 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3135911351, type=group, text='PONG'
+2026-08-08 10:11:35.024 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=56, context_len=54, max_tokens=131072
+2026-08-08 10:11:39.382 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 1 segment(s), total 26 chars
+2026-08-08 10:11:39.387 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3125606254, type=group, text='PONG'
+2026-08-08 10:11:39.399 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=58, context_len=56, max_tokens=131072
+2026-08-08 10:11:46.475 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 10 segment(s), total 229 chars
+2026-08-08 10:11:46.480 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:11:46.482 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3831097597, type=group, text='你好'
+2026-08-08 10:11:46.483 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3831097597
+2026-08-08 10:11:46.483 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2137074986, type=group, text='LLM 响应错误: All chat models failed: APIStatusError: Error code: 402 - {'code': 300'
+2026-08-08 10:11:46.495 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=60, context_len=58, max_tokens=131072
+2026-08-08 10:11:52.584 | INFO     | mohobot.ws_server:_handle_connection:78 | New connection: bot_id=2192362623, role=Universal, remote=('192.168.31.175', 64114)
+2026-08-08 10:11:52.584 | INFO     | mohobot.bot_manager:register:80 | Bot registered: 2192362623 (QQ=2192362623, nickname=)
+2026-08-08 10:11:52.584 | INFO     | mohobot.ws_server:_handle_connection:85 | Bot 2192362623 (Bot-2192362623) connected
+2026-08-08 10:11:52.585 | INFO     | mohobot.message_handler:_handle_meta:335 | Bot 2192362623 lifecycle: connect
+2026-08-08 10:11:52.585 | INFO     | mohobot.message_handler:_handle_meta:335 | Bot 2192362623 lifecycle: enable
+2026-08-08 10:11:52.585 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:11:57.581 | ERROR    | mohobot.bot_manager:send:39 | Failed to send to bot 2192362623: sent 1011 (internal error) keepalive ping timeout; no close frame received
+2026-08-08 10:11:57.581 | ERROR    | mohobot.message_handler:handle_event:82 | Error handling event from bot 2192362623: sent 1011 (internal error) keepalive ping timeout; no close frame received
+TimeoutError: timed out while closing connection
+
+
+The above exception was the direct cause of the following exception:
+
+
+Traceback (most recent call last):
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 233, in <module>
+    main()
+    └ <function main at 0x00000268F2FAAAC0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\main.py", line 224, in main
+    asyncio.run(_run())
+    │       │   └ <function main.<locals>._run at 0x00000268F8478E00>
+    │       └ <function run at 0x00000268F4D80720>
+    └ <module 'asyncio' from 'C:\\Program Files\\Python312\\Lib\\asyncio\\__init__.py'>
+
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 194, in run
+    return runner.run(main)
+           │      │   └ <coroutine object main.<locals>._run at 0x00000268F8326B00>
+           │      └ <function Runner.run at 0x00000268F5218220>
+           └ <asyncio.runners.Runner object at 0x00000268F704CD10>
+  File "C:\Program Files\Python312\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           │    │     │                  └ <Task pending name='Task-1' coro=<main.<locals>._run() running at c:\Users\Liyuan\Desktop\develop\mohobot\main.py:221> wait_f...
+           │    │     └ <function BaseEventLoop.run_until_complete at 0x00000268F520DE40>
+           │    └ <ProactorEventLoop running=True closed=False debug=False>
+           └ <asyncio.runners.Runner object at 0x00000268F704CD10>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 674, in run_until_complete
+    self.run_forever()
+    │    └ <function ProactorEventLoop.run_forever at 0x00000268F52D9580>
+    └ <ProactorEventLoop running=True closed=False debug=False>
+  File "C:\Program Files\Python312\Lib\asyncio\windows_events.py", line 322, in run_forever
+    super().run_forever()
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 641, in run_forever
+    self._run_once()
+    │    └ <function BaseEventLoop._run_once at 0x00000268F520FBA0>
+    └ <ProactorEventLoop running=True closed=False debug=False>
+  File "C:\Program Files\Python312\Lib\asyncio\base_events.py", line 1986, in _run_once
+    handle._run()
+    │      └ <function Handle._run at 0x00000268F4D5A0C0>
+    └ <Handle Task.task_wakeup(<Future finished result=None>)>
+  File "C:\Program Files\Python312\Lib\asyncio\events.py", line 88, in _run
+    self._context.run(self._callback, *self._args)
+    │    │            │    │           │    └ <member '_args' of 'Handle' objects>
+    │    │            │    │           └ <Handle Task.task_wakeup(<Future finished result=None>)>
+    │    │            │    └ <member '_callback' of 'Handle' objects>
+    │    │            └ <Handle Task.task_wakeup(<Future finished result=None>)>
+    │    └ <member '_context' of 'Handle' objects>
+    └ <Handle Task.task_wakeup(<Future finished result=None>)>
+  File "C:\Users\Liyuan\AppData\Roaming\Python\Python312\site-packages\websockets\asyncio\server.py", line 376, in conn_handler
+    await self.handler(connection)
+          │    │       └ <websockets.asyncio.server.ServerConnection object at 0x00000268F8984A40>
+          │    └ <bound method WSServer._handle_connection of <mohobot.ws_server.WSServer object at 0x00000268F846E510>>
+          └ <websockets.asyncio.server.Server object at 0x00000268F890AAE0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 95, in _handle_connection
+    await self._dispatch(bot_id, data)
+          │    │         │       └ {'time': 1786155068, 'self_id': 2192362623, 'post_type': 'message', 'message_type': 'group', 'sub_type': 'normal', 'message_i...
+          │    │         └ '2192362623'
+          │    └ <function WSServer._dispatch at 0x00000268F8478900>
+          └ <mohobot.ws_server.WSServer object at 0x00000268F846E510>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 115, in _dispatch
+    await self._on_event(bot_id, event, data)
+          │    │         │       │      └ {'time': 1786155068, 'self_id': 2192362623, 'post_type': 'message', 'message_type': 'group', 'sub_type': 'normal', 'message_i...
+          │    │         │       └ GroupMessageEvent(time=1786155068, self_id=2192362623, post_type='message', message_type='group', sub_type='normal', message_...
+          │    │         └ '2192362623'
+          │    └ <bound method MessageHandler.handle_event of <mohobot.message_handler.MessageHandler object at 0x00000268F88CD0D0>>
+          └ <mohobot.ws_server.WSServer object at 0x00000268F846E510>
+
+> File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\message_handler.py", line 72, in handle_event
+    await self._handle_message(bot_id, event, raw)
+          │    │               │       │      └ {'time': 1786155068, 'self_id': 2192362623, 'post_type': 'message', 'message_type': 'group', 'sub_type': 'normal', 'message_i...
+          │    │               │       └ GroupMessageEvent(time=1786155068, self_id=2192362623, post_type='message', message_type='group', sub_type='normal', message_...
+          │    │               └ '2192362623'
+          │    └ <function MessageHandler._handle_message at 0x00000268F70DDBC0>
+          └ <mohobot.message_handler.MessageHandler object at 0x00000268F88CD0D0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\message_handler.py", line 184, in _handle_message
+    full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
+                       │    │                 │       │      │        └ {'time': 1786155068, 'self_id': 2192362623, 'post_type': 'message', 'message_type': 'group', 'sub_type': 'normal', 'message_i...
+                       │    │                 │       │      └ [{'role': 'user', 'content': '@深海(开学勿踢), 这是你的占卜结果，言和祝你生活快乐哦\r\n财运: 35\r\n事业: 87\r\n姻缘: 74\r\n健康: 56\r\n出行: 52\r\n学业: 85\r\n运气...
+                       │    │                 │       └ GroupMessageEvent(time=1786155068, self_id=2192362623, post_type='message', message_type='group', sub_type='normal', message_...
+                       │    │                 └ '2192362623'
+                       │    └ <function MessageHandler._stream_llm_reply at 0x00000268F70DDC60>
+                       └ <mohobot.message_handler.MessageHandler object at 0x00000268F88CD0D0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\message_handler.py", line 249, in _stream_llm_reply
+    await self._send_message(bot_id, event, message)
+          │    │             │       │      └ [{'type': 'reply', 'data': {'id': '-2098392192'}}, {'type': 'text', 'data': {'text': '哈哈，这个提示也太真实了吧！'}}]
+          │    │             │       └ GroupMessageEvent(time=1786155068, self_id=2192362623, post_type='message', message_type='group', sub_type='normal', message_...
+          │    │             └ '2192362623'
+          │    └ <function MessageHandler._send_message at 0x00000268F70DE020>
+          └ <mohobot.message_handler.MessageHandler object at 0x00000268F88CD0D0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\message_handler.py", line 345, in _send_message
+    await self._ws.send_group_msg(bot_id, event.group_id, message)
+          │    │   │              │       │     │         └ [{'type': 'reply', 'data': {'id': '-2098392192'}}, {'type': 'text', 'data': {'text': '哈哈，这个提示也太真实了吧！'}}]
+          │    │   │              │       │     └ 398870315
+          │    │   │              │       └ GroupMessageEvent(time=1786155068, self_id=2192362623, post_type='message', message_type='group', sub_type='normal', message_...
+          │    │   │              └ '2192362623'
+          │    │   └ <function WSServer.send_group_msg at 0x00000268F8478A40>
+          │    └ <mohobot.ws_server.WSServer object at 0x00000268F846E510>
+          └ <mohobot.message_handler.MessageHandler object at 0x00000268F88CD0D0>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 135, in send_group_msg
+    await self.send_to_bot(bot_id, "send_group_msg", {
+          │    │           └ '2192362623'
+          │    └ <function WSServer.send_to_bot at 0x00000268F84789A0>
+          └ <mohobot.ws_server.WSServer object at 0x00000268F846E510>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\ws_server.py", line 127, in send_to_bot
+    await instance.send({"action": action, "params": params or {}})
+          │        │               │                 └ {'group_id': 398870315, 'message': [{'type': 'reply', 'data': {'id': '-2098392192'}}, {'type': 'text', 'data': {'text': '哈哈，这...
+          │        │               └ 'send_group_msg'
+          │        └ <function BotInstance.send at 0x00000268F54B2D40>
+          └ <mohobot.bot_manager.BotInstance object at 0x00000268F8984F80>
+
+  File "c:\Users\Liyuan\Desktop\develop\mohobot\mohobot\bot_manager.py", line 37, in send
+    await self.ws.send(payload)
+          │    │  │    └ '{"action": "send_group_msg", "params": {"group_id": 398870315, "message": [{"type": "reply", "data": {"id": "-2098392192"}},...
+          │    │  └ <function Connection.send at 0x00000268F8466840>
+          │    └ <websockets.asyncio.server.ServerConnection object at 0x00000268F8984A40>
+          └ <mohobot.bot_manager.BotInstance object at 0x00000268F8984F80>
+
+  File "C:\Users\Liyuan\AppData\Roaming\Python\Python312\site-packages\websockets\asyncio\connection.py", line 476, in send
+    async with self.send_context():
+               │    └ <function Connection.send_context at 0x00000268F8466F20>
+               └ <websockets.asyncio.server.ServerConnection object at 0x00000268F8984A40>
+  File "C:\Program Files\Python312\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+                       │    └ <async_generator object Connection.send_context at 0x00000268F90B6130>
+                       └ <contextlib._AsyncGeneratorContextManager object at 0x00000268F93F8A70>
+  File "C:\Users\Liyuan\AppData\Roaming\Python\Python312\site-packages\websockets\asyncio\connection.py", line 957, in send_context
+    raise self.protocol.close_exc from original_exc
+          │    │        │              └ TimeoutError('timed out while closing connection')
+          │    │        └ <property object at 0x00000268F844F100>
+          │    └ <websockets.server.ServerProtocol object at 0x00000268F890AC90>
+          └ <websockets.asyncio.server.ServerConnection object at 0x00000268F8984A40>
+
+websockets.exceptions.ConnectionClosedError: sent 1011 (internal error) keepalive ping timeout; no close frame received
+2026-08-08 10:11:57.615 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 566939669}}
+2026-08-08 10:11:57.615 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 71153037}}
+2026-08-08 10:11:57.615 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1675778350}}
+2026-08-08 10:11:57.615 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -1461528494}}
+2026-08-08 10:11:57.615 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 63296025}}
+2026-08-08 10:11:57.616 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': -2094284571}}
+2026-08-08 10:11:57.616 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 2508351}}
+2026-08-08 10:11:57.616 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 849783301}}
+2026-08-08 10:11:57.616 | DEBUG    | mohobot.ws_server:_dispatch:119 | Unknown message from bot 2192362623: {'status': 'ok', 'retcode': 0, 'data': {'message_id': 1603605965}}
+2026-08-08 10:11:57.616 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3834766901, type=group, text=''
+2026-08-08 10:11:57.616 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=3834766901
+2026-08-08 10:11:57.617 | INFO     | mohobot.ws_server:_handle_connection:97 | Bot 2192362623 disconnected: 1006 
+2026-08-08 10:11:57.617 | INFO     | mohobot.bot_manager:unregister:87 | Bot unregistered: 2192362623
+2026-08-08 10:12:03.654 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=2145824082, type=group, text='不是bro我一句话你能几百条'
+2026-08-08 10:12:03.654 | DEBUG    | mohobot.message_handler:_handle_message:155 | Skipping group message (not mentioned): user=2145824082
+2026-08-08 10:12:05.524 | DEBUG    | mohobot.message_handler:_handle_meta:333 | Heartbeat from bot 2192362623
+2026-08-08 10:12:16.205 | INFO     | mohobot.message_handler:_handle_message:147 | Message from bot=2192362623, user=3616174427, type=group, text='AstrBot v4.26.2(WebUI: v4.26.2)
+/name - Set display name for current UMO
+/new - '
+2026-08-08 10:12:16.207 | DEBUG    | mohobot.llm_service:chat_stream:208 | LLM stream call: model=DeepSeek-V4-Flash, messages=60, context_len=58, max_tokens=131072
+2026-08-08 10:12:20.166 | INFO     | __main__:shutdown:146 | Shutting down Mohobot...
+2026-08-08 10:12:20.167 | INFO     | mohobot.web_panel.app:stop:571 | Web panel stopped
+2026-08-08 10:12:23.703 | ERROR    | mohobot.llm_service:chat_stream:225 | LLM stream call failed: Connection error.
+2026-08-08 10:12:23.703 | WARNING  | mohobot.ws_server:send_to_bot:129 | Cannot send to bot 2192362623: not connected
+2026-08-08 10:12:23.703 | DEBUG    | mohobot.message_handler:_stream_llm_reply:266 | Streamed reply done: 1 segment(s), total 29 chars
+2026-08-08 10:12:23.706 | INFO     | mohobot.ws_server:stop:65 | WebSocket server stopped
+2026-08-08 10:12:23.707 | INFO     | __main__:shutdown:169 | Mohobot shutdown complete.
+2026-08-08 10:12:23.708 | INFO     | __main__:main:226 | Interrupted by user

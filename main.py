@@ -177,16 +177,23 @@ class MohobotApplication:
             stop_event.set()
 
         # Platform-specific signal handling
+        loop = asyncio.get_running_loop()
         if sys.platform != "win32":
-            loop = asyncio.get_event_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 try:
                     loop.add_signal_handler(sig, _signal_handler)
-                except NotImplementedError:
+                except (NotImplementedError, RuntimeError):
                     pass
         else:
-            # Windows: use a simple keyboard interrupt handler
-            pass
+            # Windows (Python 3.8+): SIGINT / SIGTERM / SIGBREAK supported
+            sigs = [signal.SIGINT, signal.SIGTERM]
+            if hasattr(signal, "SIGBREAK"):
+                sigs.append(signal.SIGBREAK)
+            for sig in sigs:
+                try:
+                    loop.add_signal_handler(sig, _signal_handler)
+                except (NotImplementedError, RuntimeError):
+                    pass
 
         try:
             await stop_event.wait()
@@ -205,9 +212,16 @@ def main():
 
     app = MohobotApplication(config_path=config_path)
 
+    async def _run() -> None:
+        # IMPORTANT: startup + run_forever must share ONE event loop.
+        # Using two separate asyncio.run() calls kills all servers when
+        # the first loop closes (the web panel task is cancelled mid-startup
+        # and the WS server is bound to a dead loop).
+        await app.startup()
+        await app.run_forever()
+
     try:
-        asyncio.run(app.startup())
-        asyncio.run(app.run_forever())
+        asyncio.run(_run())
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:

@@ -201,9 +201,13 @@ class LLMService:
 
         messages = await self._build_messages(bot_id, event, context, bot_config)
 
+        # Cap max_tokens — some gateways return an EMPTY stream for huge values
+        # (verified: 409600 → 0 chunks, 4096~131072 all work)
+        max_tokens = min(self._cfg.llm.chat_max_tokens, 131072)
+
         logger.debug(
             f"LLM stream call: model={model}, messages={len(messages)}, "
-            f"context_len={len(context)}"
+            f"context_len={len(context)}, max_tokens={max_tokens}"
         )
 
         try:
@@ -224,6 +228,7 @@ class LLMService:
 
         full_content = ""
         tool_calls_buffer: dict[int, dict] = {}
+        got_any_data = False
 
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -232,6 +237,7 @@ class LLMService:
 
             # Accumulate text content
             if delta.content:
+                got_any_data = True
                 full_content += delta.content
                 yield (delta.content, False)
 
@@ -255,6 +261,7 @@ class LLMService:
 
         # After stream ends, execute tool calls if any
         if tool_calls_buffer:
+            got_any_data = True
             tool_results = []
             for idx, tc_data in sorted(tool_calls_buffer.items()):
                 args_str = tc_data.get("arguments", "{}") or "{}"
@@ -265,6 +272,16 @@ class LLMService:
             if tool_results:
                 yield (f"\n[工具: {'; '.join(tool_results)}]", True)
                 return
+
+        # Empty stream guard: some gateways return 0 chunks for unsupported
+        # max_tokens / model combos — surface the problem instead of staying silent
+        if not got_any_data:
+            logger.warning(
+                f"LLM stream returned NO data (model={model}, max_tokens={max_tokens}) — "
+                "gateway may not support this combo"
+            )
+            yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
+            return
 
         yield ("", True)  # Signal completion with no extra text
 

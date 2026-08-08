@@ -15,7 +15,7 @@ import yaml
 class ServerConfig:
     """WebSocket server configuration."""
     host: str = "0.0.0.0"
-    port: int = 8080
+    port: int = 8060
     max_size: int = 10 * 1024 * 1024  # 10 MB max message size
 
 

@@ -3,29 +3,28 @@
 
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 8081  # 8080 被 Everything.exe 占用，改用 8081
   max_size: 10485760  # 10 MB
 
 llm:
   # Chat model — DeepSeek V4 Flash
-  chat_model: "deepseek-chat"
-  chat_base_url: "https://api.deepseek.com"
-  chat_api_key: ""           # Set via env MOHOBOT_LLM_API_KEY or here
-  chat_max_tokens: 4096
+  chat_model: "DeepSeek-V4-Flash"
+  chat_base_url: "http://127.0.0.1:36712/v1"
+  chat_api_key: "sk-test-6kstqpu7chxu"           # Set via env MOHOBOT_LLM_API_KEY or here
+  chat_max_tokens: 131072  # 409600 会导致网关返回空流(已验证)，131072 为安全上限
   chat_temperature: 0.7
 
   # Vision model — Qwen 3.5 122B A10B
-  vision_model: "qwen-vl-plus"
-  vision_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  vision_api_key: ""          # Set via env MOHOBOT_VISION_API_KEY or here
+  vision_model: "Qwen3.5-122B-A10B"
+  vision_base_url: "http://127.0.0.1:36712/v1"
+  vision_api_key: "sk-test-6kstqpu7chxu"          # Set via env MOHOBOT_VISION_API_KEY or here
 
 web_panel:
   enabled: true
   host: "127.0.0.1"
   port: 9090
   username: "admin"
-  password_hash: ""           # Format: pbkdf2_sha256$salt$hexhash
-                              # Generate: python -c "import hashlib,secrets; salt=secrets.token_hex(16); h=hashlib.pbkdf2_hmac('sha256',b'your_password',salt.encode(),100000).hex(); print(f'pbkdf2_sha256${salt}${h}')"
+  password_hash: "pbkdf2_sha256$d46c7b1dafb031dac3aedd21b4ea6c62$b399b82de8cb9391cdeab8027a996a003f0394fb9d6aba4439bf18030aa06407"  # 密码: "0"
 
 interceptor:
   keyword_file: "./data/keywords.json"

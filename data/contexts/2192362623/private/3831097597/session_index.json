@@ -1,0 +1,10 @@
+{
+  "sessions": [
+    {
+      "id": "sess_main",
+      "name": "默认会话",
+      "created": 1786154063
+    }
+  ],
+  "active": "sess_main"
+}

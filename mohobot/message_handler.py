@@ -180,36 +180,8 @@ class MessageHandler:
         # Load session context
         context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
 
-        # Stream response
-        full_reply = ""
-        first_chunk = True
-
-        async for chunk, is_final in self._llm.chat_stream(
-            bot_id=bot_id,
-            event=event,
-            context=context,
-            raw_event=raw,
-        ):
-            if not chunk and not is_final:
-                continue
-
-            full_reply += chunk
-
-            if first_chunk and chunk:
-                # First chunk: send as reply-quote referencing the original message
-                quoted = [
-                    {"type": "reply", "data": {"id": str(event.message_id)}},
-                    {"type": "text", "data": {"text": chunk}},
-                ]
-                await self._send_message(bot_id, event, quoted)
-                first_chunk = False
-            elif chunk:
-                # Subsequent chunks: send as plain text
-                await self._send_message(bot_id, event, chunk)
-
-            # Final chunk with tool results, etc.
-            if is_final and chunk:
-                await self._send_message(bot_id, event, chunk)
+        # Stream response — split by punctuation + length (标点符号+长度分隔法)
+        full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
 
         # Save context after streaming completes
         if full_reply.strip():
@@ -227,6 +199,113 @@ class MessageHandler:
                 bot_id, chat_type, chat_id, [user_msg, ai_msg],
                 max_rounds=self._context_max_rounds,
             )
+
+    # ── Streaming reply with punctuation+length segmentation ──
+
+    # Strong break punctuation (sentence end)
+    _PUNCT_STRONG = "。！？!?…\n"
+    # Soft break punctuation (clause end)
+    _PUNCT_SOFT = "；;，,、"
+    # Minimum chars before a segment may be flushed (below this, keep buffering)
+    _SEG_MIN_LEN = 12
+    # Hard cap: segment is force-flushed at this length even without punctuation
+    _SEG_MAX_LEN = 60
+
+    async def _stream_llm_reply(self, bot_id, event, context, raw) -> str:
+        """Stream the LLM reply, sending punctuation+length segmented messages.
+
+        First segment quotes the triggering message (reply segment).
+        Returns the full assembled reply text (for context save).
+        """
+        buffer = ""
+        full_reply = ""
+        first_sent = False
+        segments_sent = 0
+
+        async for chunk, is_final in self._llm.chat_stream(
+            bot_id=bot_id,
+            event=event,
+            context=context,
+            raw_event=raw,
+        ):
+            if chunk:
+                buffer += chunk
+                full_reply += chunk
+
+            # Flush complete segments from the buffer
+            flushed = self._flush_ready_segments(buffer)
+            buffer = flushed["rest"]
+            for seg in flushed["segments"]:
+                segments_sent += 1
+                if not first_sent:
+                    # First segment quotes the user's message
+                    message = [
+                        {"type": "reply", "data": {"id": str(event.message_id)}},
+                        {"type": "text", "data": {"text": seg}},
+                    ]
+                    first_sent = True
+                else:
+                    message = seg
+                await self._send_message(bot_id, event, message)
+
+            if is_final and buffer.strip():
+                # Stream ended with text left in the buffer — always flush it
+                segments_sent += 1
+                if not first_sent:
+                    # Nothing sent yet — quote the original message
+                    message = [
+                        {"type": "reply", "data": {"id": str(event.message_id)}},
+                        {"type": "text", "data": {"text": buffer}},
+                    ]
+                    first_sent = True
+                else:
+                    message = buffer
+                await self._send_message(bot_id, event, message)
+                buffer = ""
+
+        logger.debug(
+            f"Streamed reply done: {segments_sent} segment(s), "
+            f"total {len(full_reply)} chars"
+        )
+        return full_reply
+
+    def _flush_ready_segments(self, buffer: str) -> dict:
+        """Split buffered text into ready-to-send segments.
+
+        Rules (标点符号+长度分隔法):
+          - A segment must be ≥ _SEG_MIN_LEN chars to flush
+          - Within the hard cap, cut at the LAST strong punctuation;
+            if none, fall back to the last soft punctuation;
+            if none, cut at the hard cap (_SEG_MAX_LEN)
+        """
+        segments: list[str] = []
+
+        while len(buffer) >= self._SEG_MAX_LEN:
+            # Hard cap reached — cut at last punctuation within the cap, else force
+            search_region = buffer[: self._SEG_MAX_LEN]
+            cut = self._find_cut(search_region)
+            if cut is None:
+                cut = self._SEG_MAX_LEN
+            segments.append(buffer[:cut])
+            buffer = buffer[cut:]
+
+        if len(buffer) >= self._SEG_MIN_LEN:
+            cut = self._find_cut(buffer)
+            if cut is not None and cut >= self._SEG_MIN_LEN:
+                segments.append(buffer[:cut])
+                buffer = buffer[cut:]
+
+        return {"segments": segments, "rest": buffer}
+
+    def _find_cut(self, text: str) -> int | None:
+        """Find the cut position: last strong punctuation, else last soft."""
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in self._PUNCT_STRONG:
+                return i + 1
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in self._PUNCT_SOFT:
+                return i + 1
+        return None
 
     async def _handle_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Handle notice events — dispatch to plugins."""

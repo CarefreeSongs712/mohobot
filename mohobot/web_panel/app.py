@@ -164,11 +164,12 @@ class WebPanel:
         @app.get("/api/files")
         async def list_files(request: Request, path: str = ""):
             await require_auth(request)
-            base = self._data_dir / ".."  # Allow browsing project root
+            # Resolve to absolute path — relative "data/.." breaks relative_to()
+            base = (self._data_dir / "..").resolve()
             target = (base / path).resolve()
 
             # Ensure we don't escape the project directory
-            if not str(target).startswith(str(base.resolve())):
+            if not str(target).startswith(str(base)):
                 raise HTTPException(status_code=403, detail="Access denied")
 
             if target.is_file():
@@ -203,10 +204,10 @@ class WebPanel:
         @app.post("/api/files")
         async def save_file(request: Request, req: ConfigUpdateRequest):
             await require_auth(request)
-            base = self._data_dir / ".."
+            base = (self._data_dir / "..").resolve()
             target = (base / req.path).resolve()
 
-            if not str(target).startswith(str(base.resolve())):
+            if not str(target).startswith(str(base)):
                 raise HTTPException(status_code=403, detail="Access denied")
 
             target.write_text(req.content, encoding="utf-8")
