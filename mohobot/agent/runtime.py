@@ -54,6 +54,15 @@ class SessionPipeline:
 
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
 
+        # 反射 / 反思开关(来自 agent 配置)
+        self._reflex_enabled = bool(
+            (agent_cfg.get("reflex", {}) or {}).get("enabled", True)
+        )
+        reflection_cfg = agent_cfg.get("reflection_worker", {}) or {}
+        self._reflection_enabled = bool(reflection_cfg.get("enabled", True))
+        self._reflection_write_memory = bool(reflection_cfg.get("write_memory", True))
+        self._reflection_update_profile = bool(reflection_cfg.get("update_user_profile", True))
+
         self.planner = TopicPlanner(
             agent_cfg.get("topic_planner", {}),
             character_id=runtime.bot_id,
@@ -102,7 +111,7 @@ class SessionPipeline:
     async def handle_event(self, user_id: str, event: ChatInputEvent) -> None:
         """入口: 反射短路 → 话题规划。"""
         # 反射: 戳一戳等低延迟事件
-        if await self.runtime.reflex.try_handle(event, self._send_reflex_reply):
+        if self._reflex_enabled and await self.runtime.reflex.try_handle(event, self._send_reflex_reply):
             return
 
         if event.event_type != ChatInputEventType.USER_MESSAGE:
@@ -184,11 +193,15 @@ class SessionPipeline:
 
     async def _send_reflex_reply(self, text: str) -> None:
         from mohobot.agent.domain import OneSentenceChat
+        # 反射回复不引用任何消息(清掉上一个话题留下的 trigger id)
+        self._trigger_message_id = ""
         await self._send_reply_items([OneSentenceChat(content=text)])
 
     async def _submit_reflection(
         self, topic: ExtractedTopic, reply_items: List[OneResponseLine],
     ) -> None:
+        if not self._reflection_enabled:
+            return
         turn = CompletedTurn(
             user_id=self.chat_id,
             character_id=self.runtime.bot_id,
@@ -200,6 +213,8 @@ class SessionPipeline:
         await self.reflection.submit_completed_turn(turn)
 
     async def _write_topic_memories(self, turn: CompletedTurn) -> None:
+        if not self._reflection_write_memory:
+            return
         current_dialogue = ReflectionWorker.build_current_dialogue(turn.topic, turn.reply_items)
         memory_hits = getattr(turn.attention_plan, "memory_hits", None) or []
         await self.runtime.agent.write_topic_memories(
@@ -210,6 +225,8 @@ class SessionPipeline:
         )
 
     async def _update_user_profile(self, turn: CompletedTurn) -> None:
+        if not self._reflection_update_profile:
+            return
         snapshot = self.runtime.database_manager.get_context_snapshot(
             turn.user_id, self.runtime.bot_id,
         )

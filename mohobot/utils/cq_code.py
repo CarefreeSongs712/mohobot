@@ -120,7 +120,15 @@ def extract_plain_text(message: str | list[dict[str, Any]]) -> str:
 
 
 def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
-    """Extract image URLs from a message."""
+    """Extract usable image references from a message.
+
+    Supports:
+      - data["url"] (OneBot 标准字段, NapCat 等通常有值)
+      - data["file"] 以 "base64://" 开头 (部分实现不发 url,只给 base64)
+    返回可直接传给视觉模型的内容引用 (http url 或 data URI)。
+    """
+    import base64 as _base64
+
     if isinstance(message, str):
         segments = parse_cq_code(message)
     else:
@@ -128,8 +136,28 @@ def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
 
     urls: list[str] = []
     for seg in segments:
-        if seg.get("type") == "image":
-            url = seg.get("data", {}).get("url", "")
-            if url:
-                urls.append(url)
+        if seg.get("type") != "image":
+            continue
+        data = seg.get("data", {}) or {}
+        url = str(data.get("url", "") or "").strip()
+        if url:
+            urls.append(url)
+            continue
+        file_ref = str(data.get("file", "") or "")
+        if file_ref.startswith("base64://"):
+            b64 = file_ref[len("base64://"):]
+            mime = "image/jpeg"
+            try:
+                head = _base64.b64decode(b64[:64])
+                if head[:4] == b"\x89PNG":
+                    mime = "image/png"
+                elif head[:3] == b"GIF":
+                    mime = "image/gif"
+                elif head[:2] == b"BM":
+                    mime = "image/bmp"
+                elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                    mime = "image/webp"
+            except Exception:
+                pass
+            urls.append(f"data:{mime};base64,{b64}")
     return urls

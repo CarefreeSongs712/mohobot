@@ -59,6 +59,13 @@ class FakePlugins:
     async def dispatch_meta(self, *a, **kw): pass
 
 
+class FakeLLMService:
+    """模拟 LLMService: 只有视觉描述能力。"""
+
+    async def describe_image(self, url: str) -> str:
+        return "一只猫坐在窗台上"
+
+
 async def main() -> None:
     tmp = tempfile.mkdtemp(prefix="mohobot_handler_")
 
@@ -86,7 +93,7 @@ async def main() -> None:
     handler = MessageHandler(
         ws_server=fake_ws,
         context_manager=ctx_mgr,
-        llm_service=None,
+        llm_service=FakeLLMService(),
         plugin_system=FakePlugins(),
         data_dir=tmp,
         context_max_rounds=30,
@@ -170,6 +177,52 @@ async def main() -> None:
         await asyncio.sleep(0.1)
     assert len(fake_ws.sent) > sent_before, "@mention should trigger a reply"
     print(f"[7] group @mention OK, sent={len(fake_ws.sent) - sent_before} message(s)")
+
+    # ── 图片消息 → VLM 描述进入流水线 ──
+    await asyncio.sleep(0.5)  # 等上一轮反射/流水线静默
+    sent_before = len(fake_ws.sent)
+    raw_image = {
+        "time": 1754030003, "self_id": 123456, "post_type": "message",
+        "message_type": "private", "sub_type": "friend",
+        "message_id": 3001, "user_id": 10001,
+        "message": [{"type": "image", "data": {"url": "http://example.com/cat.jpg"}}],
+        "raw_message": "[CQ:image,url=http://example.com/cat.jpg]",
+        "sender": {"user_id": 10001, "nickname": "小明"},
+    }
+    await handler.handle_event("123456", Event.from_dict(raw_image), raw_image)
+    for _ in range(80):
+        if len(fake_ws.sent) > sent_before:
+            break
+        await asyncio.sleep(0.1)
+    assert len(fake_ws.sent) > sent_before, "image message should trigger a reply"
+    print(f"[8] image message → VLM reply OK ({len(fake_ws.sent) - sent_before} message(s))")
+
+    # ── 戳一戳 → 反射回复(无引用) ──
+    await asyncio.sleep(0.5)
+    sent_before = len(fake_ws.sent)
+    poke = {
+        "time": 1754030004, "self_id": 123456, "post_type": "notice",
+        "notice_type": "notify", "sub_type": "poke",
+        "user_id": 10001, "target_id": 123456,
+    }
+    await handler.handle_event("123456", Event.from_dict(poke), poke)
+    for _ in range(50):
+        if len(fake_ws.sent) > sent_before:
+            break
+        await asyncio.sleep(0.1)
+    assert len(fake_ws.sent) > sent_before, "poke should trigger a reflex reply"
+    poke_msg = fake_ws.sent[-1][3]
+    assert isinstance(poke_msg, str), "reflex reply should be plain text (no quote)"
+    print(f"[9] poke → reflex reply OK: '{poke_msg}'")
+
+    # ── 戳别人 → 不回复 ──
+    sent_before = len(fake_ws.sent)
+    poke_other = dict(poke)
+    poke_other["target_id"] = 999999
+    await handler.handle_event("123456", Event.from_dict(poke_other), poke_other)
+    await asyncio.sleep(0.8)
+    assert len(fake_ws.sent) == sent_before, "poking someone else must NOT trigger a reply"
+    print("[10] poke other user ignored OK")
 
     await agent_manager.stop_all()
     print("\nALL HANDLER TESTS PASSED")

@@ -306,23 +306,36 @@ class MessageHandler:
 
         会话上下文(contexts)仍由 ContextManager 管理(不变):
         用户消息立即入上下文, agent 回复在发送时入上下文。
+        图片消息: 调用视觉模型描述首张图片,描述作为消息内容。
         """
         from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
+        from mohobot.utils.cq_code import extract_image_urls
 
         text = extract_plain_text(event.message) or ""
-        if not text:
-            from mohobot.utils.cq_code import extract_image_urls
-            if extract_image_urls(event.message):
-                text = "[图片]"
+        image_urls = extract_image_urls(event.message)
+
+        # VLM: 描述首张图片(限流已剔除图片时此处为空,不会重复描述)
+        vision_desc = ""
+        if image_urls:
+            vision_desc = await self._describe_first_image(bot_id, image_urls[0])
+
+        if text and vision_desc:
+            content = f"{text}（图片内容：{vision_desc}）"
+        elif vision_desc:
+            content = f"[图片]（{vision_desc}）"
+        elif image_urls:
+            content = text or "[图片]"
+        else:
+            content = text
 
         speaker = self._speaker_role(event)
         chat_event = ChatInputEvent(
             event_type=ChatInputEventType.USER_MESSAGE,
             user_id=chat_id,          # 会话即"用户"(私聊=QQ号, 群聊=群号)
             character_id=bot_id,
-            content=text,
+            content=content,
             message_id=str(event.message_id),
-            message_type="image" if (not text or text == "[图片]") else "text",
+            message_type="image" if image_urls else "text",
             timestamp=float(event.time or 0),
             payload={
                 "speaker": speaker,
@@ -335,12 +348,28 @@ class MessageHandler:
         # 用户消息写入会话上下文(context 不变, 仍由 ContextManager 管理)
         await self._ctx_mgr.append_context(
             bot_id, chat_type, chat_id,
-            [{"role": speaker, "content": text or "[图片]", "timestamp": event.time}],
+            [{"role": speaker, "content": content or "[图片]", "timestamp": event.time}],
             max_rounds=self._context_max_rounds,
         )
 
         runtime = self._agent_manager.get(bot_id)
         await runtime.handle_event(chat_type, chat_id, chat_event)
+
+    async def _describe_first_image(self, bot_id: str, url: str) -> str:
+        """用视觉模型描述图片(带超时保护),失败降级为空串。"""
+        if self._llm is None:
+            return ""
+        try:
+            return await asyncio.wait_for(
+                self._llm.describe_image(url),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Vision describe timeout for bot {bot_id}")
+            return ""
+        except Exception as e:
+            logger.warning(f"Vision describe failed for bot {bot_id}: {e}")
+            return ""
 
     async def _agent_context_provider(
         self, bot_id: str, chat_type: str, chat_id: str,
@@ -633,8 +662,49 @@ class MessageHandler:
 
     async def _handle_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Handle notice events — dispatch to plugins."""
+        # 戳一戳(OneBot: notice_type=notify, sub_type=poke) → 反射通道
+        if event.notice_type == "notify" and event.sub_type == "poke":
+            await self._handle_poke(bot_id, event)
+
         logger.debug(f"Notice from bot {bot_id}: {event.notice_type}")
         await self._plugins.dispatch_notice(bot_id, event, raw)
+
+    async def _handle_poke(self, bot_id: str, event: NoticeEvent) -> None:
+        """戳一戳: 确认戳的是本 bot 后,路由到 agent 反射通道 (USER_TOUCH)。"""
+        if self._agent_manager is None:
+            return
+
+        # 判断被戳对象是不是本 bot(target_id 可能缺省)
+        bot_qq = bot_id
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+            if instance is not None:
+                bot_qq = str(instance.qq)
+        target = str(event.target_id or "")
+        if target and target not in ("0", "0.0") and target != bot_qq:
+            return  # 戳的是别人,忽略
+
+        from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
+
+        chat_type = "group" if event.group_id else "private"
+        chat_id = str(event.group_id) if event.group_id else str(event.user_id)
+        chat_event = ChatInputEvent(
+            event_type=ChatInputEventType.USER_TOUCH,
+            user_id=chat_id,
+            character_id=bot_id,
+            content="[用户戳了戳机器人]",
+            message_id=f"poke-{event.user_id}-{event.time}",
+            message_type="touch",
+            timestamp=float(event.time or 0),
+            payload={
+                "speaker": f"{event.user_id}-用户",
+                "chat_type": chat_type,
+                "chat_id": chat_id,
+                "qq": str(event.user_id),
+            },
+        )
+        runtime = self._ensure_agent_runtime(bot_id)
+        await runtime.handle_event(chat_type, chat_id, chat_event)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
         """Handle request events (friend add, group invite) — auto-approve for now."""

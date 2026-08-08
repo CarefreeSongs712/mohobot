@@ -57,6 +57,12 @@ class LLMService:
         else:
             self._vision_client = None
 
+        # 视觉能力可用性: 有 key(含环境变量/回退 chat key)且配置了视觉模型。
+        # 注意: 不能用 self._cfg.llm.vision_api_key 判断——env 变量/回退会被漏掉。
+        self._vision_available = bool(
+            vision_key and self._cfg.llm.vision_model and self._vision_client
+        )
+
         # System prompt building blocks
         self._tools_schemas: list[dict] = [
             {
@@ -116,7 +122,7 @@ class LLMService:
 
         # Check for image content — use vision model if images present
         has_images = bool(extract_image_urls(event.message))
-        if has_images and self._cfg.llm.vision_api_key:
+        if has_images and self._vision_available:
             model = self._cfg.llm.vision_model
             client = self._vision_client
             logger.debug(f"Using vision model {model} for message with images")
@@ -198,7 +204,7 @@ class LLMService:
 
         # Check for image content
         has_images = bool(extract_image_urls(event.message))
-        if has_images and self._cfg.llm.vision_api_key and self._vision_client:
+        if has_images and self._vision_available:
             model = self._cfg.llm.vision_model
             client = self._vision_client
             logger.debug(f"Using vision model {model} for streaming with images")
@@ -438,8 +444,8 @@ class LLMService:
 
         user_content: str | list = user_text or ""
 
-        if image_urls:
-            # Multi-modal message: text + first image only
+        if image_urls and self._vision_available:
+            # Multi-modal message: text + first image only (仅视觉模型可处理)
             content_parts: list[dict] = []
             if user_text:
                 content_parts.append({"type": "text", "text": user_text})
@@ -449,6 +455,11 @@ class LLMService:
                     "image_url": {"url": url},
                 })
             user_content = content_parts
+        elif image_urls:
+            # 无视觉能力: 不给纯文本模型塞 image_url 内容(会报错),降级为占位文本
+            placeholder = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
+            logger.debug("Vision unavailable — image content degraded to text placeholder")
+            user_content = placeholder
 
         # 5. Final user message — the @mention check is now done in message_handler.py
         if isinstance(user_content, list):
@@ -460,6 +471,34 @@ class LLMService:
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    async def describe_image(self, url: str, max_tokens: int = 256) -> str:
+        """用视觉模型描述一张图片,供 agent 流水线使用。
+
+        返回简短描述;视觉不可用或调用失败时返回空串(调用方降级为占位符)。
+        """
+        if not self._vision_available or self._vision_client is None:
+            return ""
+        try:
+            response = await self._vision_client.chat.completions.create(
+                model=self._cfg.llm.vision_model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请用一句简短、客观的话描述这张图片的内容。"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ],
+                }],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            if not text:
+                logger.debug("Vision describe returned empty")
+            return text
+        except Exception as e:
+            logger.warning(f"Vision describe failed: {e}")
+            return ""
 
     async def _execute_tool(self, func_name: str, args_json: str) -> str:
         """Execute a tool/function call and return the result."""

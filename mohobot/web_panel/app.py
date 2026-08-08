@@ -267,6 +267,18 @@ class WebPanel:
                 for k, v in data["reply"].items():
                     if hasattr(cfg.reply, k):
                         setattr(cfg.reply, k, v)
+            if "database" in data:
+                for k, v in data["database"].items():
+                    if hasattr(cfg.database, k):
+                        setattr(cfg.database, k, v)
+            if "agent" in data:
+                agent_data = data["agent"] or {}
+                if "enabled" in agent_data:
+                    cfg.agent.enabled = bool(agent_data["enabled"])
+                for k in ("persona", "llm_modules", "memory", "main_chat",
+                          "topic_planner", "topic_replier", "reflection_worker", "reflex"):
+                    if k in agent_data and isinstance(agent_data[k], dict):
+                        setattr(cfg.agent, k, agent_data[k] or {})
             for key in ("log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])

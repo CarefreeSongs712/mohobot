@@ -85,8 +85,12 @@ class AgentConfig:
     reflex: dict = field(default_factory=dict)
 
     def to_config_dict(self) -> dict:
-        """转成 agent 模块读取的嵌套 dict(供 runtime 使用)。"""
+        """转成 agent 模块读取的嵌套 dict(供 runtime 使用)。
+
+        注意: 必须包含 enabled,否则 save() 写入 yaml 后会丢开关。
+        """
         return {
+            "enabled": self.enabled,
             "persona": self.persona or {},
             "llm_modules": self.llm_modules or {},
             "memory": self.memory or {},

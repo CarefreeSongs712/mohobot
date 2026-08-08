@@ -584,7 +584,18 @@ async function loadConfigPage() {
       formField('reply.segment_min_len', '分段最小长度', globalConfigCache.reply?.segment_min_len, { hint: '字符数,低于此长度不切分' }) +
       formField('reply.segment_max_len', '分段硬上限', globalConfigCache.reply?.segment_max_len, { hint: '字符数,超过即使无标点也强制切' }) +
       formField('reply.segment_delay_min', '分段延迟下限(秒)', globalConfigCache.reply?.segment_delay_min) +
-      formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max);
+      formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🤖 Agent 子系统</div>' +
+      checkField('agent.enabled', '启用 Agent 流水线', globalConfigCache.agent?.enabled, 'false = 使用旧版直接流式回复路径') +
+      formField('agent.persona.character_name', '角色名', globalConfigCache.agent?.persona?.character_name) +
+      textareaField('agent.persona.character_persona', '角色人设', globalConfigCache.agent?.persona?.character_persona) +
+      formField('agent.persona.speaking_style', '说话风格', globalConfigCache.agent?.persona?.speaking_style) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🗄️ 数据库</div>' +
+      checkField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite(与 Agent-LuoTianyi 共享)') +
+      formField('database.folder', '数据库目录', globalConfigCache.database?.folder) +
+      formField('database.file', '数据库文件名', globalConfigCache.database?.file);
 
     const sel = document.getElementById('config-bot-select');
     sel.innerHTML = botListCache.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq})</option>`).join('');
@@ -636,6 +647,19 @@ async function saveGlobalConfig() {
       segment_max_len: num('cfg-reply.segment_max_len', 60),
       segment_delay_min: num('cfg-reply.segment_delay_min', 0.2),
       segment_delay_max: num('cfg-reply.segment_delay_max', 0.5),
+    },
+    agent: {
+      enabled: document.getElementById('cfg-agent.enabled')?.checked ?? true,
+      persona: {
+        character_name: document.getElementById('cfg-agent.persona.character_name')?.value ?? '',
+        character_persona: document.getElementById('cfg-agent.persona.character_persona')?.value ?? '',
+        speaking_style: document.getElementById('cfg-agent.persona.speaking_style')?.value ?? '',
+      },
+    },
+    database: {
+      enabled: document.getElementById('cfg-database.enabled')?.checked ?? true,
+      folder: document.getElementById('cfg-database.folder')?.value ?? '',
+      file: document.getElementById('cfg-database.file')?.value ?? '',
     },
   };
   try {
