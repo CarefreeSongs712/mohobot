@@ -58,15 +58,36 @@ class Plugin:
         if ws_server is None:
             return (True, "点赞服务未配置,无法发送点赞。")
 
-        # Send 20 likes: two calls of 10 (OneBot limit: max 10 per friend per day)
+        # Send 20 likes: two calls of 10 (OneBot limit: max 10 per friend per day).
+        # Wait for each response and report the REAL result — do not claim
+        # success when the platform rejects it (e.g. daily like limit reached).
+        errors: list[str] = []
+        ok_count = 0
         try:
-            for _ in range(2):
-                await ws_server.send_to_bot(bot_id, "send_like", {
-                    "user_id": int(user_id),
-                    "times": 10,
-                })
+            for i in range(2):
+                resp = await ws_server.send_to_bot(
+                    bot_id, "send_like",
+                    {"user_id": int(user_id), "times": 10},
+                    wait_response=True,
+                    timeout=5.0,
+                )
+                if resp is None:
+                    errors.append(f"第 {i + 1} 次无响应(超时)")
+                elif resp.get("status") != "ok" or resp.get("retcode") != 0:
+                    wording = resp.get("wording") or resp.get("message") or "未知错误"
+                    errors.append(f"第 {i + 1} 次失败: {wording}")
+                    # First failure already tells the story (e.g. daily limit) —
+                    # no point sending the second batch.
+                    break
+                else:
+                    ok_count += 1
                 await asyncio.sleep(0.5)
-            return (True, "✅ 已给你点了 20 个赞,去名片看看吧~")
         except Exception as e:
             logger.error(f"send_like failed: {e}")
             return (True, f"❌ 点赞失败: {e}")
+
+        if errors:
+            detail = "；".join(errors)
+            logger.warning(f"Praise failed for {user_id}: {detail}")
+            return (True, f"❌ 点赞失败: {detail}")
+        return (True, f"✅ 已给你点了 {ok_count * 10} 个赞,去名片看看吧~")

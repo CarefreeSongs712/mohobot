@@ -102,9 +102,9 @@ class WSServer:
 
     async def _dispatch(self, bot_id: str, data: dict[str, Any]) -> None:
         """Dispatch an incoming message — event or API response."""
-        # Check if it's an API response (has 'status' field and 'echo')
-        if "status" in data and "echo" in data:
-            # Route API response
+        # API response: has 'status' field (echo may be absent if the request
+        # didn't carry one, e.g. some clients omit echo on error responses).
+        if "status" in data:
             await self._bot_manager.handle_api_response(bot_id, data)
             return
 

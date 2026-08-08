@@ -142,6 +142,13 @@ class BotManager:
             future = self._pending_responses.pop(echo)
             if not future.done():
                 future.set_result(response)
+        elif not echo and len(self._pending_responses) == 1:
+            # Some clients omit echo on error responses — if exactly one API
+            # call is pending, match it (safe under sequential usage).
+            key, future = next(iter(self._pending_responses.items()))
+            self._pending_responses.pop(key)
+            if not future.done():
+                future.set_result(response)
 
         # Record message_id for a tracked sent message (reply-quote detection)
         if echo and echo in self._pending_sent:
