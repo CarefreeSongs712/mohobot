@@ -109,10 +109,14 @@ class PluginSystem(Interceptor):
                 meta["instance"] = plugin_instance
                 meta["loaded"] = True
                 meta["loaded_at"] = time.time()
-                # Collect plugin info from class docstring
+                # Collect plugin info: class docstring + optional class-level `info` dict
+                # (plugins may declare info = {"commands": [{"name": "...", "desc": "..."}]})
                 meta["info"] = {
                     "description": inspect.getdoc(plugin_instance.__class__) or "",
                 }
+                cls_info = getattr(plugin_instance.__class__, "info", None)
+                if isinstance(cls_info, dict):
+                    meta["info"].update(cls_info)
                 self._plugins.append(meta)
                 count += 1
                 logger.info(f"Loaded plugin: {plugin_name}")

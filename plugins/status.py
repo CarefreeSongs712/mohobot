@@ -23,8 +23,19 @@ except ImportError:
 class Plugin:
     """Plugin that responds to /status with system and framework status."""
 
+    info = {
+        "commands": [
+            {"name": "status", "desc": "显示框架与系统状态"},
+        ],
+    }
+
     def __init__(self):
         self._start_time = time.time()
+
+    @classmethod
+    def inject_bot_manager(cls, bot_manager) -> None:
+        """Set the bot manager reference for status reporting (called from main.py)."""
+        cls._bot_manager = bot_manager
 
     async def on_message(
         self,
@@ -70,10 +81,8 @@ class Plugin:
         lines.append("📦 框架状态:")
         lines.append(f"  Bot ID: {bot_id}")
 
-        # Get bot manager from global reference (injected via main.py)
-        from mohobot.bot_manager import BotManager
-        # We access it through the module-level reference set by main.py
-        bm = getattr(self, "_bot_manager", None)
+        # Bot manager injected via inject_bot_manager() classmethod (main.py)
+        bm = self._bot_manager
         if bm:
             lines.append(f"  已连接 Bot 数: {bm.bot_count}")
             for b in bm.all_bots:
@@ -160,10 +169,3 @@ class Plugin:
         lines.append("═══════════════════════════════")
 
         return "\n".join(lines)
-
-
-def inject_bot_manager(bot_manager) -> None:
-    """Set the bot manager reference on the Plugin class for status reporting.
-    Called from main.py during initialization.
-    """
-    Plugin._bot_manager = bot_manager

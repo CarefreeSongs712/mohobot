@@ -18,18 +18,41 @@ from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent, Messag
 class CommandHandler(Interceptor):
     """Handles slash commands for session management and utilities."""
 
-    def __init__(self, context_manager, llm_service, ws_server):
+    def __init__(self, context_manager, llm_service, ws_server, plugin_system=None):
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._ws = ws_server
+        self._plugin_system = plugin_system
         # Command registry: {name: (handler_func, help_text)}
+        # help_text format: "<用途说明> | 用法: /cmd ..."
         self._commands: dict[str, tuple] = {
-            "sess":   (self._cmd_sess,    "会话管理: /sess list|new <name>|switch <id>|del <id>"),
-            "forget": (self._cmd_forget,  "删除最近 N 条对话: /forget <n>"),
+            "sess":   (self._cmd_sess,    "会话管理 | 用法: /sess list|new <name>|switch <id>|del <id>"),
+            "forget": (self._cmd_forget,  "删除最近 N 条对话 | 用法: /forget <n>"),
             "hist":   (self._cmd_hist,    "打印当前会话内容 (调试)"),
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
         }
+        # Plugin-provided commands appear in /help (name -> description)
+        self._plugin_commands: dict[str, str] = {}
+
+    def register_plugin_commands(self, commands: dict[str, str]) -> None:
+        """Register commands provided by plugins, shown in /help output."""
+        self._plugin_commands.update(commands)
+
+    def collect_plugin_commands(self) -> dict[str, str]:
+        """Discover plugin commands from the plugin system (status hook)."""
+        discovered: dict[str, str] = {}
+        if self._plugin_system:
+            for meta in self._plugin_system.list_plugins():
+                name = meta.get("name", "")
+                info = meta.get("info") or {}
+                cmd_list = info.get("commands") or []
+                for cmd in cmd_list:
+                    if isinstance(cmd, dict):
+                        discovered[cmd.get("name", "")] = cmd.get("desc", "")
+                    elif isinstance(cmd, str):
+                        discovered[cmd] = ""
+        return discovered
 
     async def intercept(
         self,
@@ -62,8 +85,13 @@ class CommandHandler(Interceptor):
 
         handler = self._commands.get(cmd_name)
         if not handler:
-            # Unknown command — let LLM handle it or return help
-            return (False, None)
+            # Plugin-registered command? (e.g. 赞我 via /赞我) — let plugins handle it
+            plugin_cmds = dict(self._plugin_commands)
+            plugin_cmds.update(self.collect_plugin_commands())
+            if cmd_name in plugin_cmds:
+                return (False, None)
+            # Unknown command — report error, do NOT pass to LLM
+            return (True, f"未知指令: /{cmd_name}。输入 /help 查看可用指令。")
 
         # Execute command
         try:
@@ -168,7 +196,14 @@ class CommandHandler(Interceptor):
         self, bot_id: str, event: MessageEvent, args: list[str]
     ) -> str | None:
         """Show help."""
-        lines = ["可用命令:"] + [f"  {h}" for _, h in self._commands.values()]
+        lines = ["📖 可用指令:"]
+        for name, (_, help_text) in self._commands.items():
+            lines.append(f"  /{name} — {help_text}")
+        # Plugin commands
+        plugin_cmds = dict(self._plugin_commands)
+        plugin_cmds.update(self.collect_plugin_commands())
+        for name, desc in sorted(plugin_cmds.items()):
+            lines.append(f"  /{name} — {desc or '插件指令'}")
         return "\n".join(lines)
 
     async def _cmd_clear(

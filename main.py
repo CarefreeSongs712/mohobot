@@ -74,12 +74,19 @@ class MohobotApplication:
         # 4. Load plugins
         plugin_count = await self._plugin_system.load_plugins()
 
-        # Inject bot manager into plugins that need it (e.g. status plugin)
-        from plugins.status import inject_bot_manager as inject_bm
-        inject_bm(self._bot_manager)
+        # Inject bot manager into plugins that need it (e.g. status plugin).
+        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
+        # because re-importing the plugin module would create a second
+        # module object whose globals the loaded instance doesn't see.
+        for meta in self._plugin_system._plugins:
+            inst = meta.get("instance")
+            if inst is not None:
+                injector = getattr(inst.__class__, "inject_bot_manager", None)
+                if injector:
+                    injector(self._bot_manager)
+                    logger.debug(f"Injected bot_manager into plugin {meta['name']}")
 
         logger.info(f"Loaded {plugin_count} plugin(s)")
-
         # 5. Initialize message handler
         self._message_handler = MessageHandler(
             ws_server=None,  # Will be set after WS server creation
@@ -95,6 +102,7 @@ class MohobotApplication:
             context_manager=self._context_manager,
             llm_service=self._llm_service,
             ws_server=None,  # Will be set after WS server creation
+            plugin_system=self._plugin_system,
         )
         keyword_filter = KeywordFilter()
         interceptors = [command_handler, keyword_filter, self._plugin_system]
@@ -111,6 +119,18 @@ class MohobotApplication:
         # Wire up circular references
         self._message_handler._ws = self._ws_server
         command_handler._ws = self._ws_server
+
+        # Inject WS server into plugins that need it (e.g. praise plugin).
+        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
+        # because re-importing the plugin module would create a second
+        # module object whose globals the loaded instance doesn't see.
+        for meta in self._plugin_system._plugins:
+            inst = meta.get("instance")
+            if inst is not None:
+                injector = getattr(inst.__class__, "inject_ws_server", None)
+                if injector:
+                    injector(self._ws_server)
+                    logger.debug(f"Injected ws_server into plugin {meta['name']}")
 
         # Set event callback from WS server to message handler
         self._ws_server.set_event_callback(self._message_handler.handle_event)

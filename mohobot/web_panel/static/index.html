@@ -363,7 +363,8 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 <script>
 // ═══════════════ Auth ═══════════════
 let token = localStorage.getItem('mohobot_token') || '';
-let logFilter = '';
+// Multi-select log levels: empty array = show ALL
+let logFilters = [];
 let logPaused = false;
 
 async function api(path, options = {}) {
@@ -838,18 +839,35 @@ async function deleteCurrentSession() {
 
 // ═══════════════ 6. Logs ═══════════════
 let logSource = null;
+// Multi-select log levels: empty array = show ALL
+let logFilters = [];
 
 function setLogFilter(btn) {
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  logFilter = btn.dataset.filter;
-  // Restart stream to apply filter server-side
+  const lv = btn.dataset.filter;
+  if (lv === '') {
+    // "ALL" — clear all selections, disable other buttons
+    logFilters = [];
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.filter-btn[data-filter=""]').classList.add('active');
+  } else {
+    // Toggle this level; clicking "ALL" is only possible when nothing selected
+    const idx = logFilters.indexOf(lv);
+    if (idx >= 0) logFilters.splice(idx, 1);
+    else logFilters.push(lv);
+    btn.classList.toggle('active', idx < 0);
+    // If any level selected, deactivate "ALL"
+    document.querySelector('.filter-btn[data-filter=""]').classList.toggle('active', logFilters.length === 0);
+  }
+  // Restart stream to apply filters server-side
   if (logSource) { logSource.close(); startLogStream(); }
 }
 
 function startLogStream() {
   if (logSource) logSource.close();
-  const url = '/api/logs/stream?level=' + encodeURIComponent(logFilter);
+  // EventSource can't set Authorization header — pass token as query param
+  // Levels as comma-separated multi-select: ?level=DEBUG,INFO
+  const url = '/api/logs/stream?token=' + encodeURIComponent(token) +
+              '&level=' + encodeURIComponent(logFilters.join(','));
   logSource = new EventSource(url);
   logSource.addEventListener('log', e => appendLog(JSON.parse(e.data)));
   logSource.onerror = () => setTimeout(() => { if (logSource) { logSource.close(); startLogStream(); } }, 3000);

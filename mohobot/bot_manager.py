@@ -85,9 +85,14 @@ class BotManager:
         config_path = Path(self._data_dir) / "bots" / bot_id / "config.json"
         config = BotConfig.load(config_path)
 
-        # Auto-fill QQ from bot_id if not set
+        # Auto-fill QQ from bot_id if not set, and persist so the web panel
+        # can list this bot (qq/nickname) even after it disconnects.
         if config.qq == 0:
             config.qq = int(bot_id)
+        if not config.nickname:
+            config.nickname = f"Bot-{bot_id}"
+        if not config_path.exists():
+            config.save(config_path)
 
         instance = BotInstance(bot_id, websocket, config)
         self._bots[bot_id] = instance

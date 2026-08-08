@@ -274,16 +274,29 @@ class WebPanel:
         @app.get("/api/bots")
         async def list_bots(request: Request):
             await _require_auth(request)
+            from mohobot.models.config import BotConfig
+
+            # Scan data/bots/*/config.json — returns ALL configured bots
+            # (online or not), with qq + nickname from their config.
+            bots_dir = self._data_dir / "bots"
             bots = []
-            if not self._bot_manager:
-                return bots
-            for inst in self._bot_manager.all_bots:
-                bots.append({
-                    "bot_id": inst.bot_id,
-                    "qq": inst.qq,
-                    "nickname": inst.nickname,
-                    "online": True,
-                })
+            online_ids = set()
+            if self._bot_manager:
+                online_ids = {inst.bot_id for inst in self._bot_manager.all_bots}
+
+            if bots_dir.exists():
+                for entry in sorted(bots_dir.iterdir()):
+                    if not entry.is_dir():
+                        continue
+                    bot_id = entry.name
+                    cfg = BotConfig.load(entry / "config.json")
+                    bots.append({
+                        "bot_id": bot_id,
+                        "qq": cfg.qq,
+                        "nickname": cfg.nickname,
+                        "online": bot_id in online_ids,
+                        "enabled": cfg.enabled,
+                    })
             return bots
 
         @app.get("/api/bots/{bot_id}/config")
@@ -476,10 +489,24 @@ class WebPanel:
 
         @app.get("/api/logs/stream")
         async def log_stream(request: Request):
-            if not await _verify_token(request):
+            # EventSource in browsers CANNOT set custom headers, so accept
+            # the token via query param as well as the Authorization header.
+            query_token = request.query_params.get("token", "")
+            if query_token:
+                expiry = self._tokens.get(query_token, 0)
+                if expiry <= time.time():
+                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            elif not await _verify_token(request):
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
-            level_filter = request.query_params.get("level", "").upper()
+            # Multi-select levels: comma-separated, e.g. ?level=DEBUG,INFO
+            raw_levels = request.query_params.get("level", "").upper()
+            level_set: set[str] = set()
+            if raw_levels:
+                for lv in raw_levels.split(","):
+                    lv = lv.strip()
+                    if lv:
+                        level_set.add(lv)
 
             queue: asyncio.Queue = asyncio.Queue()
             self._active_sse_connections.add(queue)
@@ -491,7 +518,7 @@ class WebPanel:
                             break
                         try:
                             entry = await asyncio.wait_for(queue.get(), timeout=15.0)
-                            if level_filter and entry["level"] != level_filter:
+                            if level_set and entry["level"] not in level_set:
                                 continue
                             yield {"event": "log", "data": json.dumps(entry, ensure_ascii=False)}
                         except asyncio.TimeoutError:
