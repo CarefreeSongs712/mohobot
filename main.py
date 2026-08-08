@@ -66,7 +66,10 @@ class MohobotApplication:
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._llm_service = LLMService(global_config=self._config)
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
-        self._plugin_system = PluginSystem(plugins_dir=self._config.plugins_dir)
+        self._plugin_system = PluginSystem(
+            plugins_dir=self._config.plugins_dir,
+            data_dir=self._config.data_dir,
+        )
 
         # 4. Load plugins
         plugin_count = await self._plugin_system.load_plugins()
@@ -123,6 +126,12 @@ class MohobotApplication:
                 username=self._config.web_panel.username,
                 password_hash=self._config.web_panel.password_hash,
                 data_dir=self._config.data_dir,
+                config_path=self._config_path,
+                bot_manager=self._bot_manager,
+                context_manager=self._context_manager,
+                llm_service=self._llm_service,
+                plugin_system=self._plugin_system,
+                restart_callback=self.restart,
             )
             # Start web panel in background
             asyncio.create_task(self._run_web_panel())
@@ -133,6 +142,13 @@ class MohobotApplication:
             f"WS: ws://{self._config.server.host}:{self._config.server.port} | "
             f"Panel: http://{self._config.web_panel.host}:{self._config.web_panel.port}"
         )
+
+    async def restart(self) -> None:
+        """Restart the service in-process: shutdown then re-startup."""
+        logger.info("Restarting Mohobot...")
+        await self.shutdown()
+        await self.startup()
+        logger.info("Mohobot restarted successfully")
 
     async def _run_web_panel(self) -> None:
         """Run the web panel (wraps uvicorn)."""

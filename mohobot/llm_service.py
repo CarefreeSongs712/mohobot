@@ -8,8 +8,10 @@ from __future__ import annotations
 import os
 import time
 import json
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
+import aiofiles
 from loguru import logger
 from openai import AsyncOpenAI
 
@@ -151,6 +153,11 @@ class LLMService:
         reply_text = choice.message.content or ""
         tool_calls = choice.message.tool_calls
 
+        # Record token usage
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            await self._record_usage(model, usage, bot_id, event)
+
         # Handle tool calls
         tool_results = None
         if tool_calls:
@@ -219,7 +226,7 @@ class LLMService:
                 tools=self._tools_schemas,
                 tool_choice="auto",
                 stream=True,
-                stream_options={"include_usage": False},
+                stream_options={"include_usage": True},
             )
         except Exception as e:
             logger.error(f"LLM stream call failed: {e}")
@@ -229,8 +236,13 @@ class LLMService:
         full_content = ""
         tool_calls_buffer: dict[int, dict] = {}
         got_any_data = False
+        stream_usage = None  # Usage arrives in the final stream chunk
 
         async for chunk in stream:
+            # Capture usage from the final chunk (choices may be empty)
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                stream_usage = usage
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
@@ -283,7 +295,78 @@ class LLMService:
             yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
             return
 
+        # Record token usage from the final stream chunk
+        if stream_usage is not None:
+            await self._record_usage(model, stream_usage, bot_id, event)
+
         yield ("", True)  # Signal completion with no extra text
+
+    # ── Token usage tracking (web panel stats) ─────────────────
+
+    async def _record_usage(self, model: str, usage: Any, bot_id: str, event: MessageEvent) -> None:
+        """Append one usage record to data/stats/llm_usage.jsonl."""
+        try:
+            usage_dir = Path(self._cfg.data_dir) / "stats"
+            usage_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "time": time.time(),
+                "bot_id": bot_id,
+                "model": model,
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+            async with aiofiles.open(usage_dir / "llm_usage.jsonl", "a", encoding="utf-8") as f:
+                await f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"Failed to record LLM usage: {e}")
+
+    async def get_usage_stats(self) -> dict[str, Any]:
+        """Aggregate token usage from data/stats/llm_usage.jsonl.
+
+        Returns totals + per-model breakdown + today's usage.
+        """
+        import aiofiles
+        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
+        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+        per_model: dict[str, dict] = {}
+        today = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+
+        import datetime
+        today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+        if not usage_file.exists():
+            return {"totals": totals, "per_model": per_model, "today": today}
+
+        async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
+            async for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                pt = rec.get("prompt_tokens", 0)
+                ct = rec.get("completion_tokens", 0)
+                tt = rec.get("total_tokens", 0)
+                totals["prompt_tokens"] += pt
+                totals["completion_tokens"] += ct
+                totals["total_tokens"] += tt
+                totals["calls"] += 1
+                model = rec.get("model", "unknown")
+                pm = per_model.setdefault(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+                pm["calls"] += 1
+                pm["prompt_tokens"] += pt
+                pm["completion_tokens"] += ct
+                pm["total_tokens"] += tt
+                if rec.get("time", 0) >= today_start:
+                    today["prompt_tokens"] += pt
+                    today["completion_tokens"] += ct
+                    today["total_tokens"] += tt
+                    today["calls"] += 1
+
+        return {"totals": totals, "per_model": per_model, "today": today}
 
     async def _build_messages(
         self,

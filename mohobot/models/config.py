@@ -151,6 +151,40 @@ class GlobalConfig:
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to nested dict (for web panel editing)."""
+        return {
+            "server": {
+                "host": self.server.host,
+                "port": self.server.port,
+                "max_size": self.server.max_size,
+            },
+            "llm": {
+                "chat_model": self.llm.chat_model,
+                "chat_base_url": self.llm.chat_base_url,
+                "chat_api_key": self.llm.chat_api_key,
+                "chat_max_tokens": self.llm.chat_max_tokens,
+                "chat_temperature": self.llm.chat_temperature,
+                "vision_model": self.llm.vision_model,
+                "vision_base_url": self.llm.vision_base_url,
+                "vision_api_key": self.llm.vision_api_key,
+            },
+            "web_panel": {
+                "enabled": self.web_panel.enabled,
+                "host": self.web_panel.host,
+                "port": self.web_panel.port,
+                "username": self.web_panel.username,
+                "password_hash": self.web_panel.password_hash,
+            },
+            "interceptor": {
+                "keyword_file": self.interceptor.keyword_file,
+            },
+            "log_dir": self.log_dir,
+            "data_dir": self.data_dir,
+            "plugins_dir": self.plugins_dir,
+            "context_max_rounds": self.context_max_rounds,
+        }
+
 
 # ── Bot Config ────────────────────────────────────────────────
 
@@ -199,13 +233,17 @@ class BotConfig:
 
         import json
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({
-                "qq": self.qq,
-                "nickname": self.nickname,
-                "persona": self.persona,
-                "enabled": self.enabled,
-                "chat_model_override": self.chat_model_override,
-                "vision_model_override": self.vision_model_override,
-                "command_prefix": self.command_prefix,
-                "keyword_replies": self.keyword_replies,
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict (for web panel editing)."""
+        return {
+            "qq": self.qq,
+            "nickname": self.nickname,
+            "persona": self.persona,
+            "enabled": self.enabled,
+            "chat_model_override": self.chat_model_override,
+            "vision_model_override": self.vision_model_override,
+            "command_prefix": self.command_prefix,
+            "keyword_replies": self.keyword_replies,
+        }

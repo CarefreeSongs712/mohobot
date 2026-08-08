@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mohobot Web Panel</title>
+<style>
+:root {
+  --bg: #0f1115;
+  --bg-panel: #171a21;
+  --bg-card: #1e222b;
+  --bg-input: #14171d;
+  --border: #2a2f3a;
+  --text: #d7dce4;
+  --text-dim: #8b93a3;
+  --accent: #4f8cff;
+  --accent-hover: #6ba0ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --radius: 10px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px;
+  display: flex; overflow: hidden;
+}
+/* ── Sidebar ── */
+.sidebar {
+  width: 220px; min-width: 220px; background: var(--bg-panel);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  height: 100vh;
+}
+.sidebar .logo {
+  padding: 20px 18px; font-size: 17px; font-weight: 700; color: var(--accent);
+  border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+}
+.sidebar .logo .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); display: inline-block; }
+.sidebar nav { flex: 1; overflow-y: auto; padding: 10px 0; }
+.sidebar nav .nav-item {
+  display: flex; align-items: center; gap: 10px; padding: 11px 18px;
+  color: var(--text-dim); cursor: pointer; transition: all .15s;
+  border-left: 3px solid transparent; user-select: none;
+}
+.sidebar nav .nav-item:hover { background: var(--bg-card); color: var(--text); }
+.sidebar nav .nav-item.active {
+  background: var(--bg-card); color: var(--accent);
+  border-left-color: var(--accent); font-weight: 600;
+}
+.sidebar nav .nav-item .icon { font-size: 16px; width: 22px; text-align: center; }
+.sidebar .side-footer { padding: 14px 18px; border-top: 1px solid var(--border); }
+.sidebar .side-footer .user { color: var(--text-dim); font-size: 13px; margin-bottom: 8px; }
+.sidebar .side-footer .logout-btn {
+  width: 100%; padding: 8px; background: transparent; color: var(--red);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.sidebar .side-footer .logout-btn:hover { background: rgba(248,81,73,.1); }
+/* ── Main ── */
+.main { flex: 1; overflow-y: auto; padding: 24px 28px; }
+.main .page { display: none; }
+.main .page.active { display: block; }
+.page h2 { font-size: 20px; margin-bottom: 6px; }
+.page .subtitle { color: var(--text-dim); margin-bottom: 20px; font-size: 13px; }
+/* ── Cards / grids ── */
+.grid { display: grid; gap: 14px; margin-bottom: 20px; }
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 1100px) { .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, 1fr); } }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px;
+}
+.card .card-title { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.stat-value { font-size: 26px; font-weight: 700; }
+.stat-label { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+.stat-bar { height: 6px; background: var(--bg-input); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+.stat-bar .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
+.stat-bar .fill.warn { background: var(--yellow); }
+.stat-bar .fill.danger { background: var(--red); }
+/* ── Tables ── */
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--text-dim); font-weight: 500; font-size: 12px; }
+tbody tr:hover { background: rgba(255,255,255,.02); }
+.badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; }
+.badge.online { background: rgba(63,185,80,.15); color: var(--green); }
+.badge.offline { background: rgba(248,81,73,.15); color: var(--red); }
+.badge.enabled { background: rgba(63,185,80,.15); color: var(--green); }
+.badge.disabled { background: rgba(139,147,163,.15); color: var(--text-dim); }
+/* ── Forms ── */
+.form-row { margin-bottom: 14px; }
+.form-row label { display: block; color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
+.form-row input, .form-row select, .form-row textarea {
+  width: 100%; padding: 9px 12px; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  font-size: 13px; font-family: inherit; outline: none;
+}
+.form-row input:focus, .form-row select:focus, .form-row textarea:focus { border-color: var(--accent); }
+.form-row textarea { min-height: 90px; resize: vertical; line-height: 1.6; }
+.form-row .hint { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+.btn {
+  padding: 9px 18px; background: var(--accent); color: #fff; border: none;
+  border-radius: 6px; cursor: pointer; font-size: 13px; transition: background .15s;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn.secondary { background: var(--bg-input); color: var(--text); border: 1px solid var(--border); }
+.btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
+.btn.danger { background: transparent; color: var(--red); border: 1px solid var(--border); }
+.btn.danger:hover { background: rgba(248,81,73,.1); }
+.btn.small { padding: 5px 12px; font-size: 12px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+/* ── Toggle switch ── */
+.switch { position: relative; width: 40px; height: 22px; display: inline-block; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider {
+  position: absolute; inset: 0; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 22px; cursor: pointer; transition: .2s;
+}
+.switch .slider::before {
+  content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+  background: var(--text-dim); border-radius: 50%; transition: .2s;
+}
+.switch input:checked + .slider { background: rgba(79,140,255,.3); border-color: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(18px); background: var(--accent); }
+/* ── Login ── */
+.login-wrap { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.login-box {
+  width: 360px; background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 36px;
+}
+.login-box h1 { font-size: 20px; color: var(--accent); margin-bottom: 6px; text-align: center; }
+.login-box .sub { color: var(--text-dim); text-align: center; font-size: 13px; margin-bottom: 26px; }
+.login-box input {
+  width: 100%; padding: 11px 14px; margin-bottom: 14px; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; outline: none;
+}
+.login-box input:focus { border-color: var(--accent); }
+.login-box .btn { width: 100%; padding: 11px; font-size: 14px; }
+.login-error { color: var(--red); font-size: 13px; margin-top: 10px; text-align: center; min-height: 18px; }
+.hidden { display: none !important; }
+/* ── Logs ── */
+.log-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.log-toolbar .filter-btn {
+  padding: 6px 14px; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 20px; color: var(--text-dim); cursor: pointer; font-size: 12px;
+}
+.log-toolbar .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.log-container {
+  background: #0c0e12; border: 1px solid var(--border); border-radius: var(--radius);
+  height: calc(100vh - 260px); min-height: 320px; overflow-y: auto;
+  font-family: "Cascadia Code", Consolas, "Courier New", monospace; font-size: 12.5px; padding: 10px 0;
+}
+.log-entry { padding: 3px 16px; border-bottom: 1px solid rgba(255,255,255,.03); white-space: pre-wrap; word-break: break-all; }
+.log-entry .t { color: #565e6e; }
+.log-entry .lvl { font-weight: 700; margin: 0 6px; }
+.log-entry .lvl.DEBUG { color: var(--text-dim); }
+.log-entry .lvl.INFO { color: var(--accent); }
+.log-entry .lvl.WARNING { color: var(--yellow); }
+.log-entry .lvl.ERROR { color: var(--red); }
+.log-entry .lvl.CRITICAL { color: var(--red); }
+/* ── Conversation ── */
+.conv-layout { display: flex; gap: 14px; height: calc(100vh - 220px); min-height: 420px; }
+.conv-col { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow-y: auto; }
+.conv-col.col-left { width: 240px; min-width: 240px; }
+.conv-col.col-mid { width: 180px; min-width: 180px; }
+.conv-col.col-right { flex: 1; }
+.conv-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; }
+.conv-item:hover { background: rgba(255,255,255,.03); }
+.conv-item.active { background: rgba(79,140,255,.12); color: var(--accent); }
+.conv-item .small { color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+.conv-empty { padding: 30px 14px; color: var(--text-dim); text-align: center; font-size: 13px; }
+.conv-msgs { padding: 14px; }
+.conv-msg { padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; font-size: 13px; line-height: 1.6; position: relative; }
+.conv-msg.user { background: rgba(79,140,255,.08); border: 1px solid rgba(79,140,255,.2); }
+.conv-msg.assistant { background: rgba(63,185,80,.06); border: 1px solid rgba(63,185,80,.15); }
+.conv-msg .role-tag { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; display: flex; justify-content: space-between; }
+.conv-msg .edit-btn { cursor: pointer; color: var(--text-dim); font-size: 11px; }
+.conv-msg .edit-btn:hover { color: var(--accent); }
+.conv-msg textarea {
+  width: 100%; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); padding: 8px; font-family: inherit;
+  font-size: 13px; line-height: 1.6; min-height: 60px; resize: vertical;
+}
+.conv-msg .save-row { margin-top: 6px; display: flex; gap: 8px; }
+.conv-actions { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+/* ── Misc ── */
+.toast {
+  position: fixed; top: 20px; right: 20px; padding: 12px 18px; border-radius: 8px;
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+  z-index: 200; font-size: 13px; box-shadow: 0 4px 20px rgba(0,0,0,.4);
+  transition: opacity .3s; max-width: 360px;
+}
+.toast.ok { border-color: var(--green); }
+.toast.err { border-color: var(--red); }
+.loading { color: var(--text-dim); padding: 30px; text-align: center; }
+.bot-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 20px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div class="login-wrap hidden" id="login-wrap">
+  <div class="login-box">
+    <h1>🤖 Mohobot</h1>
+    <div class="sub">Web 管理面板</div>
+    <input type="text" id="login-username" placeholder="用户名" value="admin">
+    <input type="password" id="login-password" placeholder="密码" onkeydown="if(event.key==='Enter')login()">
+    <button class="btn" onclick="login()">登 录</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- Sidebar -->
+<aside class="sidebar hidden" id="sidebar">
+  <div class="logo"><span class="dot"></span> Mohobot</div>
+  <nav id="nav">
+    <div class="nav-item active" data-page="dashboard"><span class="icon">📊</span> 数据总览</div>
+    <div class="nav-item" data-page="config"><span class="icon">⚙️</span> 配置文件</div>
+    <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
+    <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
+    <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
+    <div class="nav-item" data-page="logs"><span class="icon">📋</span> 实时日志</div>
+    <div class="nav-item" data-page="settings"><span class="icon">🛠️</span> 系统设置</div>
+  </nav>
+  <div class="side-footer">
+    <div class="user" id="side-user">admin</div>
+    <button class="logout-btn" onclick="logout()">退出登录</button>
+  </div>
+</aside>
+
+<!-- Main -->
+<main class="main hidden" id="main">
+
+  <!-- 1. Dashboard -->
+  <div class="page active" id="page-dashboard">
+    <h2>📊 数据总览</h2>
+    <div class="subtitle">系统与框架运行状态</div>
+    <div class="grid cols-4" id="dash-system"></div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">🤖 Bot 列表</div>
+        <table id="dash-bots-table"><thead><tr><th>Bot ID</th><th>QQ</th><th>昵称</th><th>状态</th><th>在线时长</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <div class="card-title">🧠 LLM Token 消耗</div>
+        <div id="dash-llm"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Config -->
+  <div class="page" id="page-config">
+    <h2>⚙️ 配置文件</h2>
+    <div class="subtitle">可视化编辑全局配置与 Bot 配置</div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">🌐 全局配置</div>
+        <div id="config-global-form"></div>
+        <button class="btn" onclick="saveGlobalConfig()">保存全局配置</button>
+      </div>
+      <div class="card">
+        <div class="card-title">🤖 Bot 配置</div>
+        <div class="form-row">
+          <label>选择 Bot</label>
+          <select id="config-bot-select" onchange="loadBotConfig()"></select>
+        </div>
+        <div id="config-bot-form"></div>
+        <button class="btn" onclick="saveBotConfig()">保存 Bot 配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Models -->
+  <div class="page" id="page-models">
+    <h2>🧠 模型配置</h2>
+    <div class="subtitle">在线编辑 Chat / Vision 模型提供商与 API Key</div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">💬 Chat 模型</div>
+        <div id="model-chat-form"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🖼️ Vision 模型</div>
+        <div id="model-vision-form"></div>
+      </div>
+    </div>
+    <button class="btn" onclick="saveModels()">保存模型配置</button>
+  </div>
+
+  <!-- 4. Plugins -->
+  <div class="page" id="page-plugins">
+    <h2>🧩 插件管理</h2>
+    <div class="subtitle">启用 / 禁用插件（重启后生效）</div>
+    <div class="card">
+      <table>
+        <thead><tr><th>插件</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
+        <tbody id="plugins-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 5. Contexts -->
+  <div class="page" id="page-contexts">
+    <h2>💬 对话数据</h2>
+    <div class="subtitle">查看 / 编辑会话上下文</div>
+    <div class="conv-layout">
+      <div class="conv-col col-left" id="conv-chats"></div>
+      <div class="conv-col col-mid" id="conv-sessions"></div>
+      <div class="conv-col col-right" id="conv-detail"></div>
+    </div>
+  </div>
+
+  <!-- 6. Logs -->
+  <div class="page" id="page-logs">
+    <h2>📋 实时日志</h2>
+    <div class="subtitle">实时日志流（可筛选级别）</div>
+    <div class="log-toolbar">
+      <button class="filter-btn active" data-filter="" onclick="setLogFilter(this)">ALL</button>
+      <button class="filter-btn" data-filter="DEBUG" onclick="setLogFilter(this)">DEBUG</button>
+      <button class="filter-btn" data-filter="INFO" onclick="setLogFilter(this)">INFO</button>
+      <button class="filter-btn" data-filter="WARNING" onclick="setLogFilter(this)">WARN</button>
+      <button class="filter-btn" data-filter="ERROR" onclick="setLogFilter(this)">ERROR</button>
+      <span style="flex:1"></span>
+      <button class="btn secondary small" onclick="clearLogs()">清空</button>
+      <button class="btn secondary small" onclick="toggleLogPause()" id="log-pause-btn">暂停</button>
+    </div>
+    <div class="log-container" id="log-container"></div>
+  </div>
+
+  <!-- 7. Settings -->
+  <div class="page" id="page-settings">
+    <h2>🛠️ 系统设置</h2>
+    <div class="subtitle">修改密码与服务管理</div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">🔑 修改密码</div>
+        <div class="form-row"><label>原密码</label><input type="password" id="set-old-pwd"></div>
+        <div class="form-row"><label>新密码</label><input type="password" id="set-new-pwd"></div>
+        <div class="form-row"><label>确认新密码</label><input type="password" id="set-new-pwd2"></div>
+        <button class="btn" onclick="changePassword()">修改密码</button>
+      </div>
+      <div class="card">
+        <div class="card-title">🔁 服务管理</div>
+        <div class="form-row">
+          <label>运行状态</label>
+          <div id="set-status"></div>
+        </div>
+        <div class="form-row">
+          <label>重启服务会断开所有连接并重新加载配置</label>
+          <button class="btn danger" onclick="restartService()">重启服务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<div class="toast hidden" id="toast"></div>
+
+<script>
+// ═══════════════ Auth ═══════════════
+let token = localStorage.getItem('mohobot_token') || '';
+let logFilter = '';
+let logPaused = false;
+
+async function api(path, options = {}) {
+  const headers = options.headers || {};
+  headers['Authorization'] = 'Bearer ' + token;
+  if (options.body && typeof options.body === 'object') {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(options.body);
+  }
+  const res = await fetch(path, { ...options, headers });
+  if (res.status === 401) {
+    token = '';
+    localStorage.removeItem('mohobot_token');
+    showLogin();
+    throw new Error('Unauthorized');
+  }
+  return res;
+}
+
+async function apiJSON(path, options = {}) {
+  const res = await api(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+  return data;
+}
+
+function showToast(msg, ok = true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.classList.remove('hidden');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.add('hidden'), 3000);
+}
+
+function showLogin() {
+  document.getElementById('login-wrap').classList.remove('hidden');
+  document.getElementById('sidebar').classList.add('hidden');
+  document.getElementById('main').classList.add('hidden');
+}
+
+async function login() {
+  const username = document.getElementById('login-username').value;
+  const password = document.getElementById('login-password').value;
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '登录失败');
+    token = data.token;
+    localStorage.setItem('mohobot_token', token);
+    document.getElementById('side-user').textContent = data.username;
+    document.getElementById('login-wrap').classList.add('hidden');
+    document.getElementById('sidebar').classList.remove('hidden');
+    document.getElementById('main').classList.remove('hidden');
+    init();
+  } catch (e) {
+    document.getElementById('login-error').textContent = e.message;
+  }
+}
+
+function logout() {
+  token = '';
+  localStorage.removeItem('mohobot_token');
+  showLogin();
+}
+
+// ═══════════════ Navigation ═══════════════
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    item.classList.add('active');
+    document.getElementById('page-' + item.dataset.page).classList.add('active');
+    switch (item.dataset.page) {
+      case 'dashboard': loadDashboard(); break;
+      case 'config': loadConfigPage(); break;
+      case 'models': loadModels(); break;
+      case 'plugins': loadPlugins(); break;
+      case 'contexts': loadContextsPage(); break;
+      case 'logs': startLogStream(); break;
+      case 'settings': loadSettings(); break;
+    }
+  });
+});
+
+function init() {
+  loadDashboard();
+  startLogStream();
+}
+
+// ═══════════════ 1. Dashboard ═══════════════
+async function loadDashboard() {
+  try {
+    const d = await apiJSON('/api/dashboard');
+
+    // System stats
+    const sys = d.system;
+    const fmtSize = n => n == null ? '—' : (n >= 1073741824 ? (n/1073741824).toFixed(1)+' GB' : (n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : (n/1024).toFixed(1)+' KB'));
+    const uptimeStr = s => { const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60); return `${d}天 ${h}时 ${m}分`; };
+
+    let sysHtml = '';
+    const cpuCard = `<div class="card"><div class="card-title">CPU</div>
+      <div class="stat-value">${sys.cpu_percent != null ? sys.cpu_percent.toFixed(0)+'%' : '—'}</div>
+      <div class="stat-label">${sys.cpu_count ? sys.cpu_count + ' 核' : ''}</div>
+      ${sys.cpu_percent != null ? `<div class="stat-bar"><div class="fill ${sys.cpu_percent>80?'danger':sys.cpu_percent>60?'warn':''}" style="width:${sys.cpu_percent}%"></div></div>` : ''}
+    </div>`;
+    let memCard = '<div class="card"><div class="card-title">内存</div><div class="stat-value">—</div></div>';
+    if (sys.memory) {
+      const p = sys.memory.percent;
+      memCard = `<div class="card"><div class="card-title">内存</div>
+        <div class="stat-value">${p.toFixed(0)}%</div>
+        <div class="stat-label">${fmtSize(sys.memory.used)} / ${fmtSize(sys.memory.total)}</div>
+        <div class="stat-bar"><div class="fill ${p>80?'danger':p>60?'warn':''}" style="width:${p}%"></div></div>
+      </div>`;
+    }
+    let diskCard = '<div class="card"><div class="card-title">磁盘</div><div class="stat-value">—</div></div>';
+    if (sys.disk) {
+      const p = sys.disk.percent;
+      diskCard = `<div class="card"><div class="card-title">磁盘</div>
+        <div class="stat-value">${p.toFixed(0)}%</div>
+        <div class="stat-label">${fmtSize(sys.disk.used)} / ${fmtSize(sys.disk.total)}</div>
+        <div class="stat-bar"><div class="fill ${p>80?'danger':p>60?'warn':''}" style="width:${p}%"></div></div>
+      </div>`;
+    }
+    const uptimeCard = `<div class="card"><div class="card-title">系统</div>
+      <div class="stat-value" style="font-size:18px">${sys.platform.split(' ')[0]}</div>
+      <div class="stat-label">Python ${sys.python} · 运行 ${uptimeStr(sys.uptime)}</div>
+    </div>`;
+    document.getElementById('dash-system').innerHTML = cpuCard + memCard + diskCard + uptimeCard;
+
+    // Framework stats
+    const fw = d.framework;
+    document.getElementById('dash-system').insertAdjacentHTML('beforeend', `
+      <div class="card"><div class="card-title">📦 框架</div>
+        <div class="stat-value" style="font-size:18px">${fw.total_messages}</div>
+        <div class="stat-label">历史消息 · ${fw.history_files} 文件</div>
+        <div style="margin-top:8px"><span class="bot-chip">🤖 ${fw.bot_count} 个 Bot</span></div>
+      </div>
+      <div class="card"><div class="card-title">⏱️ 框架运行</div>
+        <div class="stat-value" style="font-size:18px">${uptimeStr(fw.uptime)}</div>
+        <div class="stat-label">${fw.context_files} 个会话文件</div>
+      </div>`);
+
+    // Bots table
+    const bots = d.bots || [];
+    const botRows = bots.map(b => `<tr>
+      <td>${b.bot_id}</td><td>${b.qq}</td><td>${b.nickname}</td>
+      <td><span class="badge ${b.online ? 'online' : 'offline'}">${b.online ? '在线' : '离线'}</span></td>
+      <td>${uptimeStr(b.connected_for)}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim)">暂无连接中的 Bot</td></tr>';
+    document.querySelector('#dash-bots-table tbody').innerHTML = botRows;
+
+    // LLM usage
+    const u = d.llm_usage || {};
+    const totals = u.totals || {};
+    const today = u.today || {};
+    const perModel = Object.entries(u.per_model || {}).map(([m, s]) =>
+      `<tr><td>${m}</td><td>${s.calls}</td><td>${s.prompt_tokens}</td><td>${s.completion_tokens}</td><td>${s.total_tokens}</td></tr>`
+    ).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim)">暂无调用记录</td></tr>';
+    document.getElementById('dash-llm').innerHTML = `
+      <div class="grid cols-3" style="margin-bottom:12px">
+        <div><div class="stat-value" style="font-size:20px">${totals.calls || 0}</div><div class="stat-label">总调用次数</div></div>
+        <div><div class="stat-value" style="font-size:20px">${totals.total_tokens || 0}</div><div class="stat-label">总 Token</div></div>
+        <div><div class="stat-value" style="font-size:20px">${today.total_tokens || 0}</div><div class="stat-label">今日 Token</div></div>
+      </div>
+      <table><thead><tr><th>模型</th><th>调用</th><th>输入</th><th>输出</th><th>总 Token</th></tr></thead>
+      <tbody>${perModel}</tbody></table>`;
+  } catch (e) { showToast('加载失败: ' + e.message, false); }
+}
+
+// ═══════════════ 2. Config ═══════════════
+let globalConfigCache = null;
+let botConfigCache = null;
+let botListCache = [];
+
+function formField(name, label, value, { type = 'text', hint = '' } = {}) {
+  const v = value == null ? '' : value;
+  return `<div class="form-row"><label>${label}</label>
+    <input type="${type}" id="cfg-${name}" value="${String(v).replace(/"/g, '&quot;')}">
+    ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
+}
+
+function textareaField(name, label, value, hint = '') {
+  const v = value == null ? '' : value;
+  return `<div class="form-row"><label>${label}</label>
+    <textarea id="cfg-${name}">${String(v).replace(/</g, '&lt;')}</textarea>
+    ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
+}
+
+async function loadConfigPage() {
+  try {
+    globalConfigCache = await apiJSON('/api/config');
+    botListCache = await apiJSON('/api/bots');
+
+    document.getElementById('config-global-form').innerHTML =
+      formField('server.port', 'WebSocket 端口', globalConfigCache.server?.port, { hint: 'OneBot 客户端连接的端口' }) +
+      formField('server.host', '监听地址', globalConfigCache.server?.host) +
+      formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
+      formField('log_dir', '日志目录', globalConfigCache.log_dir) +
+      formField('data_dir', '数据目录', globalConfigCache.data_dir) +
+      formField('plugins_dir', '插件目录', globalConfigCache.plugins_dir);
+
+    const sel = document.getElementById('config-bot-select');
+    sel.innerHTML = botListCache.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq})</option>`).join('');
+    if (botListCache.length) loadBotConfig();
+    else document.getElementById('config-bot-form').innerHTML = '<div class="conv-empty">暂无连接中的 Bot</div>';
+  } catch (e) { showToast('加载配置失败: ' + e.message, false); }
+}
+
+async function loadBotConfig() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId) return;
+  try {
+    botConfigCache = await apiJSON(`/api/bots/${botId}/config`);
+    const b = botConfigCache;
+    document.getElementById('config-bot-form').innerHTML =
+      formField('nickname', '昵称', b.nickname) +
+      formField('qq', 'QQ 号', b.qq) +
+      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为') +
+      formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
+      formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
+      formField('command_prefix', '指令前缀', b.command_prefix) +
+      `<div class="form-row"><label>启用</label>
+        <label class="switch"><input type="checkbox" id="cfg-enabled" ${b.enabled ? 'checked' : ''}><span class="slider"></span></label></div>` +
+      textareaField('keyword_replies_json', '关键词回复（JSON）', JSON.stringify(b.keyword_replies || {}, null, 2), '格式: {"关键词": "回复内容"}');
+  } catch (e) { showToast('加载 Bot 配置失败: ' + e.message, false); }
+}
+
+async function saveGlobalConfig() {
+  const g = document.getElementById('cfg-global-config') ? {} : {};
+  const port = parseInt(document.getElementById('cfg-server.port').value) || 8081;
+  const host = document.getElementById('cfg-server.host').value;
+  const data = {
+    server: { port, host },
+    context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
+    log_dir: document.getElementById('cfg-log_dir').value,
+    data_dir: document.getElementById('cfg-data_dir').value,
+    plugins_dir: document.getElementById('cfg-plugins_dir').value,
+  };
+  try {
+    await apiJSON('/api/config', { method: 'PUT', body: { data } });
+    showToast('全局配置已保存');
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function saveBotConfig() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId) return;
+  const data = {
+    nickname: document.getElementById('cfg-nickname').value,
+    qq: parseInt(document.getElementById('cfg-qq').value) || 0,
+    persona: document.getElementById('cfg-persona').value,
+    chat_model_override: document.getElementById('cfg-chat_model_override').value,
+    vision_model_override: document.getElementById('cfg-vision_model_override').value,
+    command_prefix: document.getElementById('cfg-command_prefix').value,
+    enabled: document.getElementById('cfg-enabled').checked,
+  };
+  try {
+    data.keyword_replies = JSON.parse(document.getElementById('cfg-keyword_replies_json').value || '{}');
+  } catch (e) { showToast('关键词回复 JSON 格式错误', false); return; }
+  try {
+    await apiJSON(`/api/bots/${botId}/config`, { method: 'PUT', body: { data } });
+    showToast('Bot 配置已保存');
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+// ═══════════════ 3. Models ═══════════════
+let modelCache = null;
+
+async function loadModels() {
+  try {
+    modelCache = await apiJSON('/api/models');
+    const c = modelCache.chat, v = modelCache.vision;
+    document.getElementById('model-chat-form').innerHTML =
+      formField('chat_model', '模型名称', c.model) +
+      formField('chat_base_url', 'API 地址 (Base URL)', c.base_url) +
+      formField('chat_api_key', 'API Key', c.api_key, { type: 'password' }) +
+      formField('chat_max_tokens', '最大 Token', c.max_tokens) +
+      formField('chat_temperature', '温度 (0-2)', c.temperature);
+    document.getElementById('model-vision-form').innerHTML =
+      formField('vision_model', '模型名称', v.model) +
+      formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
+      formField('vision_api_key', 'API Key', v.api_key, { type: 'password' });
+  } catch (e) { showToast('加载模型配置失败: ' + e.message, false); }
+}
+
+async function saveModels() {
+  const data = {
+    chat: {
+      model: document.getElementById('cfg-chat_model').value,
+      base_url: document.getElementById('cfg-chat_base_url').value,
+      api_key: document.getElementById('cfg-chat_api_key').value,
+      max_tokens: parseInt(document.getElementById('cfg-chat_max_tokens').value) || 4096,
+      temperature: parseFloat(document.getElementById('cfg-chat_temperature').value) || 0.7,
+    },
+    vision: {
+      model: document.getElementById('cfg-vision_model').value,
+      base_url: document.getElementById('cfg-vision_base_url').value,
+      api_key: document.getElementById('cfg-vision_api_key').value,
+    },
+  };
+  try {
+    await apiJSON('/api/models', { method: 'PUT', body: { data } });
+    showToast('模型配置已保存（重启后生效）');
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+// ═══════════════ 4. Plugins ═══════════════
+async function loadPlugins() {
+  try {
+    const plugins = await apiJSON('/api/plugins');
+    document.getElementById('plugins-table-body').innerHTML = plugins.map(p => `
+      <tr>
+        <td><b>${p.name}</b><div class="small" style="color:var(--text-dim);font-size:11px">${p.file}</div></td>
+        <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
+        <td style="color:var(--text-dim)">${p.info?.description || p.error || '—'}</td>
+        <td><label class="switch"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label></td>
+      </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">暂无插件</td></tr>';
+  } catch (e) { showToast('加载插件失败: ' + e.message, false); }
+}
+
+async function togglePlugin(name, enabled) {
+  try {
+    await apiJSON('/api/plugins/toggle', { method: 'POST', body: { name, enabled } });
+    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（重启后生效）`);
+  } catch (e) { showToast('操作失败: ' + e.message, false); loadPlugins(); }
+}
+
+// ═══════════════ 5. Contexts ═══════════════
+let ctxBots = [];
+let ctxSelected = null; // {bot_id, chat_type, chat_id}
+let ctxSessions = [];
+
+async function loadContextsPage() {
+  try {
+    ctxBots = await apiJSON('/api/contexts');
+    const el = document.getElementById('conv-chats');
+    if (!ctxBots.length) { el.innerHTML = '<div class="conv-empty">暂无数据</div>'; return; }
+    let html = '';
+    for (const b of ctxBots) {
+      html += `<div style="padding:8px 14px;color:var(--text-dim);font-size:12px;font-weight:600">Bot ${b.bot_id}</div>`;
+      for (const c of b.chats) {
+        const label = c.chat_type === 'private' ? `👤 ${c.chat_id}` : `👥 ${c.chat_id}`;
+        html += `<div class="conv-item" data-bot="${b.bot_id}" data-type="${c.chat_type}" data-chat="${c.chat_id}">
+          ${label}<div class="small">${c.session_count} 个会话</div></div>`;
+      }
+    }
+    el.innerHTML = html;
+    el.querySelectorAll('.conv-item').forEach(item => {
+      item.addEventListener('click', () => {
+        el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
+        item.classList.add('active');
+        ctxSelected = { bot_id: item.dataset.bot, chat_type: item.dataset.type, chat_id: item.dataset.chat };
+        loadSessions();
+      });
+    });
+  } catch (e) { showToast('加载对话数据失败: ' + e.message, false); }
+}
+
+async function loadSessions() {
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  const el = document.getElementById('conv-sessions');
+  try {
+    const data = await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}`);
+    ctxSessions = data.sessions;
+    const active = data.active;
+    el.innerHTML = `<div class="conv-actions">
+      <button class="btn small secondary" onclick="newSession()">＋ 新建</button>
+    </div>` +
+    ctxSessions.map(s => `<div class="conv-item ${s.id === active ? 'active' : ''}" data-sid="${s.id}" data-name="${s.name}">
+      ${s.name}<div class="small">${s.id}</div></div>`).join('') || '<div class="conv-empty">无会话</div>';
+    el.querySelectorAll('.conv-item').forEach(item => {
+      item.addEventListener('click', () => {
+        el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
+        item.classList.add('active');
+        loadSessionDetail(item.dataset.sid);
+      });
+    });
+    if (active) loadSessionDetail(active);
+  } catch (e) { showToast('加载会话失败: ' + e.message, false); }
+}
+
+async function loadSessionDetail(sessionId) {
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  const el = document.getElementById('conv-detail');
+  try {
+    const s = await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session/${sessionId}`);
+    if (!s) { el.innerHTML = '<div class="conv-empty">会话不存在</div>'; return; }
+    const msgs = s.messages || [];
+    el.innerHTML = `<div class="conv-actions">
+      <b style="padding:4px 6px">${s.name}</b>
+      <span style="flex:1"></span>
+      <button class="btn small secondary" onclick="resetCurrentSession()">重置</button>
+      <button class="btn small danger" onclick="deleteCurrentSession()">删除</button>
+    </div>
+    <div class="conv-msgs">` +
+    msgs.map((m, i) => {
+      const role = m.role || 'user';
+      const isAssistant = role === 'assistant';
+      return `<div class="conv-msg ${isAssistant ? 'assistant' : 'user'}">
+        <div class="role-tag"><span>${esc(role)}</span><span class="edit-btn" onclick="editMessage(${i}, this)">✏️ 编辑</span></div>
+        <div class="msg-content">${esc(String(m.content || ''))}</div>
+      </div>`;
+    }).join('') || '<div class="conv-empty">会话为空</div>' +
+    `</div>`;
+  } catch (e) { showToast('加载会话内容失败: ' + e.message, false); }
+}
+
+function editMessage(index, btn) {
+  const msgDiv = btn.closest('.conv-msg');
+  const contentDiv = msgDiv.querySelector('.msg-content');
+  const oldText = contentDiv.textContent;
+  contentDiv.innerHTML = `<textarea id="edit-msg-${index}">${esc(oldText)}</textarea>
+    <div class="save-row">
+      <button class="btn small secondary" onclick="saveMessage(${index})">保存</button>
+      <button class="btn small secondary" onclick="loadSessionDetail(currentSessionId())">取消</button>
+    </div>`;
+}
+
+function currentSessionId() {
+  const active = document.querySelector('#conv-sessions .conv-item.active');
+  return active ? active.dataset.sid : null;
+}
+
+async function saveMessage(index) {
+  const text = document.getElementById('edit-msg-' + index).value;
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  try {
+    await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session/${currentSessionId()}/message`, {
+      method: 'PUT', body: { index, content: text },
+    });
+    showToast('消息已更新');
+    loadSessionDetail(currentSessionId());
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function newSession() {
+  const name = prompt('会话名称:');
+  if (name === null) return;
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  try {
+    await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session`, {
+      method: 'POST', body: { name: name || '新会话' },
+    });
+    loadSessions();
+  } catch (e) { showToast('创建失败: ' + e.message, false); }
+}
+
+async function resetCurrentSession() {
+  if (!confirm('确定重置该会话吗？所有消息将被清空。')) return;
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  try {
+    await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session/${currentSessionId()}/reset`, { method: 'POST' });
+    showToast('会话已重置');
+    loadSessionDetail(currentSessionId());
+  } catch (e) { showToast('重置失败: ' + e.message, false); }
+}
+
+async function deleteCurrentSession() {
+  if (!confirm('确定删除该会话吗？此操作不可恢复。')) return;
+  const { bot_id, chat_type, chat_id } = ctxSelected;
+  try {
+    await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session/${currentSessionId()}`, { method: 'DELETE' });
+    showToast('会话已删除');
+    loadSessions();
+  } catch (e) { showToast('删除失败: ' + e.message, false); }
+}
+
+// ═══════════════ 6. Logs ═══════════════
+let logSource = null;
+
+function setLogFilter(btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  logFilter = btn.dataset.filter;
+  // Restart stream to apply filter server-side
+  if (logSource) { logSource.close(); startLogStream(); }
+}
+
+function startLogStream() {
+  if (logSource) logSource.close();
+  const url = '/api/logs/stream?level=' + encodeURIComponent(logFilter);
+  logSource = new EventSource(url);
+  logSource.addEventListener('log', e => appendLog(JSON.parse(e.data)));
+  logSource.onerror = () => setTimeout(() => { if (logSource) { logSource.close(); startLogStream(); } }, 3000);
+}
+
+function appendLog(entry) {
+  if (logPaused) return;
+  const container = document.getElementById('log-container');
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML = `<span class="t">${entry.time}</span><span class="lvl ${entry.level}">[${entry.level}]</span><span>${esc(entry.message)}</span>`;
+  container.appendChild(el);
+  container.scrollTop = container.scrollHeight;
+  while (container.children.length > 800) container.removeChild(container.firstChild);
+}
+
+function clearLogs() { document.getElementById('log-container').innerHTML = ''; }
+
+function toggleLogPause() {
+  logPaused = !logPaused;
+  document.getElementById('log-pause-btn').textContent = logPaused ? '继续' : '暂停';
+}
+
+// ═══════════════ 7. Settings ═══════════════
+function loadSettings() {
+  document.getElementById('set-status').innerHTML = '<span class="badge online">● 运行中</span>';
+}
+
+async function changePassword() {
+  const oldPwd = document.getElementById('set-old-pwd').value;
+  const newPwd = document.getElementById('set-new-pwd').value;
+  const newPwd2 = document.getElementById('set-new-pwd2').value;
+  if (newPwd !== newPwd2) { showToast('两次输入的新密码不一致', false); return; }
+  if (newPwd.length < 4) { showToast('新密码至少 4 位', false); return; }
+  try {
+    await apiJSON('/api/settings/password', { method: 'PUT', body: { old_password: oldPwd, new_password: newPwd } });
+    showToast('密码已修改，请重新登录');
+    setTimeout(() => logout(), 1500);
+  } catch (e) { showToast('修改失败: ' + e.message, false); }
+}
+
+async function restartService() {
+  if (!confirm('确定重启 Mohobot 服务吗？所有连接将断开，配置将重新加载。')) return;
+  try {
+    await apiJSON('/api/settings/restart', { method: 'POST' });
+    showToast('服务正在重启...');
+    setTimeout(() => { logSource && logSource.close(); showToast('等待服务重启完成，请稍后刷新页面'); }, 2000);
+  } catch (e) { showToast('重启失败: ' + e.message, false); }
+}
+
+// ═══════════════ Utils ═══════════════
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ═══════════════ Boot ═══════════════
+if (token) {
+  // Validate token
+  fetch('/api/health', { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(res => res.json())
+    .then(() => {
+      document.getElementById('login-wrap').classList.add('hidden');
+      document.getElementById('sidebar').classList.remove('hidden');
+      document.getElementById('main').classList.remove('hidden');
+      init();
+    })
+    .catch(() => showLogin());
+} else {
+  showLogin();
+}
+</script>
+</body>
+</html>

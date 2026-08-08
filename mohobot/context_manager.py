@@ -252,3 +252,86 @@ class ContextManager:
 
         logger.info(f"Deleted session {session_id} for {chat_type}:{chat_id}")
         return True
+
+    # ── Session Browsing / Editing (web panel) ────────────────
+
+    async def list_chats(self, bot_id: str) -> list[dict[str, Any]]:
+        """List all chats (private users + groups) for a bot, with session counts."""
+        base = self._context_base(bot_id, "")
+        if not base.exists():
+            return []
+        result: list[dict[str, Any]] = []
+        for chat_type in ("private", "group"):
+            type_dir = base / chat_type
+            if not type_dir.exists():
+                continue
+            for chat_dir in sorted(type_dir.iterdir()):
+                if not chat_dir.is_dir():
+                    continue
+                chat_id = chat_dir.name
+                sessions = await self.list_sessions(bot_id, chat_type, chat_id)
+                result.append({
+                    "chat_type": chat_type,
+                    "chat_id": chat_id,
+                    "session_count": len(sessions),
+                })
+        return result
+
+    async def get_session(
+        self, bot_id: str, chat_type: str, chat_id: str, session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Get a session's messages plus metadata. session_id=None → active session."""
+        if chat_type == "group":
+            session_id = "main"
+        else:
+            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            if session_id is None:
+                session_id = index.get("active", "sess_main")
+            if not any(s["id"] == session_id for s in index.get("sessions", [])):
+                return None
+
+        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
+        messages = await json_read(path)
+        if messages is None:
+            messages = []
+
+        name = session_id
+        if chat_type == "private":
+            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            for s in index.get("sessions", []):
+                if s["id"] == session_id:
+                    name = s.get("name", session_id)
+                    break
+
+        return {
+            "id": session_id,
+            "name": name,
+            "chat_type": chat_type,
+            "chat_id": chat_id,
+            "messages": messages if isinstance(messages, list) else [],
+        }
+
+    async def update_message(
+        self, bot_id: str, chat_type: str, chat_id: str,
+        session_id: str, index: int, content: str, role: str | None = None,
+    ) -> bool:
+        """Edit a single message in a session. Returns True on success."""
+        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
+        messages = await json_read(path)
+        if not isinstance(messages, list) or not (0 <= index < len(messages)):
+            return False
+        messages[index]["content"] = content
+        if role:
+            messages[index]["role"] = role
+        await json_write(path, messages)
+        return True
+
+    async def reset_session(
+        self, bot_id: str, chat_type: str, chat_id: str, session_id: str
+    ) -> bool:
+        """Reset (clear) a session's messages. Returns True on success."""
+        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
+        if not path.exists():
+            return False
+        await json_write(path, [])
+        return True

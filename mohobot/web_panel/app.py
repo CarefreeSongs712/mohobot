@@ -1,29 +1,46 @@
-"""FastAPI web admin panel with SSE log streaming, file browser, and config editor.
+"""FastAPI web admin panel — 7-section dashboard.
 
-Authentication: single admin password (bcrypt).
+Sections:
+  1. 数据总览 (dashboard): system + framework stats, bot list, LLM token usage
+  2. 配置文件 (config): visual editing of global + per-bot configs
+  3. 模型配置 (models): provider / api key / model editing
+  4. 插件管理 (plugins): enable/disable + plugin info
+  5. 对话数据 (contexts): browse/edit sessions & messages
+  6. 实时日志 (logs): SSE stream with level filtering
+  7. 系统设置 (settings): password change, service restart
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import platform
+import secrets
+import socket
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-import hashlib
-import secrets
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-# ── Login Models ──────────────────────────────────────────────
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
+
+# ── Request Models ────────────────────────────────────────────
 
 
 class LoginRequest(BaseModel):
@@ -31,16 +48,39 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordChangeRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
 class ConfigUpdateRequest(BaseModel):
-    path: str
+    data: dict[str, Any]
+
+
+class BotConfigUpdateRequest(BaseModel):
+    data: dict[str, Any]
+
+
+class PluginToggleRequest(BaseModel):
+    name: str
+    enabled: bool
+
+
+class SessionCreateRequest(BaseModel):
+    name: str = "新会话"
+
+
+class MessageUpdateRequest(BaseModel):
+    index: int
     content: str
+    role: str | None = None
 
 
 # ── Web Panel App ─────────────────────────────────────────────
 
 
 class WebPanel:
-    """FastAPI-based web admin panel."""
+    """FastAPI-based web admin panel with 7 dashboard sections."""
 
     def __init__(
         self,
@@ -49,25 +89,67 @@ class WebPanel:
         username: str = "admin",
         password_hash: str = "",
         data_dir: str = "./data",
+        config_path: str = "./config/global.yaml",
+        bot_manager=None,
+        context_manager=None,
+        llm_service=None,
+        plugin_system=None,
+        restart_callback=None,
     ):
         self._host = host
         self._port = port
         self._username = username
         self._password_hash = password_hash
         self._data_dir = Path(data_dir)
+        self._config_path = Path(config_path)
+        self._bot_manager = bot_manager
+        self._context_manager = context_manager
+        self._llm_service = llm_service
+        self._plugin_system = plugin_system
+        self._restart_callback = restart_callback
+
         self._app = FastAPI(title="Mohobot Web Panel")
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
         self._active_sse_connections: set[asyncio.Queue] = set()
-        self._setup_routes()
-
-        # Store session tokens (simple in-memory)
         self._tokens: dict[str, float] = {}
         self._token_expiry = 3600  # 1 hour
+        self._start_time = time.time()
+        self._setup_routes()
+
+        # Forward loguru messages to SSE subscribers (best-effort)
+        self._install_log_sink()
+
+    # ── Log forwarding to SSE ─────────────────────────────────
+
+    def _install_log_sink(self) -> None:
+        """Sink loguru records and broadcast them to all active SSE connections."""
+        from loguru import logger as lg
+
+        def _sink(message) -> None:
+            record = message.record
+            entry = {
+                "time": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+                "level": record["level"].name,
+                "message": record["message"],
+            }
+            # Broadcast to every connected SSE queue (best-effort, drop if full)
+            for q in list(self._active_sse_connections):
+                try:
+                    if q.full():
+                        q.get_nowait()
+                    q.put_nowait(entry)
+                except Exception:
+                    pass
+
+        # NOTE: no format= here — with format set, loguru passes the formatted
+        # STRING to the sink instead of the Message object, breaking .record
+        lg.add(_sink, level="DEBUG", enqueue=False)
+
+    # ── Routes ────────────────────────────────────────────────
 
     def _setup_routes(self) -> None:
         app = self._app
 
-        # CORS
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -76,43 +158,28 @@ class WebPanel:
             allow_headers=["*"],
         )
 
-        @app.on_event("startup")
-        async def startup():
-            logger.info("Web panel started")
+        # ── Auth helpers ──────────────────────────────────────
 
-        # ── Auth Routes ──────────────────────────────────────
+        def _hash_password(password: str) -> str:
+            salt = secrets.token_hex(16)
+            h = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000
+            ).hex()
+            return f"pbkdf2_sha256${salt}${h}"
 
-        @app.post("/api/login")
-        async def login(req: LoginRequest):
-            if req.username != self._username:
-                raise HTTPException(status_code=401, detail="Invalid credentials")
+        def _verify_password(password: str, stored: str) -> bool:
+            try:
+                method, salt, expected = stored.split("$", 2)
+                if method != "pbkdf2_sha256":
+                    return False
+                test = hashlib.pbkdf2_hmac(
+                    "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000
+                ).hex()
+                return test == expected
+            except ValueError:
+                return False
 
-            if self._password_hash:
-                # Format: method$salt$hash  (e.g. pbkdf2_sha256$salt$hexhash)
-                try:
-                    method, salt, stored_hash = self._password_hash.split("$", 2)
-                except ValueError:
-                    raise HTTPException(status_code=401, detail="Invalid credentials")
-                if method == "pbkdf2_sha256":
-                    test_hash = hashlib.pbkdf2_hmac(
-                        "sha256", req.password.encode("utf-8"), salt.encode("utf-8"), 100000
-                    ).hex()
-                    if test_hash != stored_hash:
-                        raise HTTPException(status_code=401, detail="Invalid credentials")
-                else:
-                    raise HTTPException(status_code=401, detail="Invalid credentials")
-            elif req.password == "admin":
-                pass  # Default password when hash is empty
-            else:
-                raise HTTPException(status_code=401, detail="Invalid credentials")
-
-            token = os.urandom(32).hex()
-            self._tokens[token] = time.time() + self._token_expiry
-            return {"token": token, "username": self._username}
-
-        # ── Auth Middleware ───────────────────────────────────
-
-        async def verify_token(request: Request) -> bool:
+        async def _verify_token(request: Request) -> bool:
             auth = request.headers.get("Authorization", "")
             if auth.startswith("Bearer "):
                 token = auth[7:]
@@ -121,18 +188,298 @@ class WebPanel:
                     return True
             return False
 
-        async def require_auth(request: Request):
-            if not await verify_token(request):
+        async def _require_auth(request: Request):
+            if not await _verify_token(request):
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
-        # ── SSE Log Stream ───────────────────────────────────
+        # ── Auth ──────────────────────────────────────────────
+
+        @app.post("/api/login")
+        async def login(req: LoginRequest):
+            if req.username != self._username:
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+            if self._password_hash:
+                if not _verify_password(req.password, self._password_hash):
+                    raise HTTPException(status_code=401, detail="用户名或密码错误")
+            elif req.password != "admin":
+                # Default fallback when no hash is configured
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+            token = os.urandom(32).hex()
+            self._tokens[token] = time.time() + self._token_expiry
+            return {"token": token, "username": self._username}
+
+        @app.post("/api/logout")
+        async def logout(request: Request):
+            auth = request.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                self._tokens.pop(auth[7:], None)
+            return {"status": "ok"}
+
+        # ── 1. Dashboard (数据总览) ──────────────────────────
+
+        @app.get("/api/dashboard")
+        async def dashboard(request: Request):
+            await _require_auth(request)
+
+            system = await self._get_system_stats()
+            framework = await self._get_framework_stats()
+            bots = await self._get_bot_list()
+            usage = await self._get_llm_usage()
+
+            return {
+                "system": system,
+                "framework": framework,
+                "bots": bots,
+                "llm_usage": usage,
+            }
+
+        # ── 2. Configuration (配置文件) ───────────────────────
+
+        @app.get("/api/config")
+        async def get_config(request: Request):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            return cfg.to_dict()
+
+        @app.put("/api/config")
+        async def update_config(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            data = body.data
+
+            # Apply nested updates safely
+            if "server" in data:
+                for k, v in data["server"].items():
+                    if hasattr(cfg.server, k):
+                        setattr(cfg.server, k, v)
+            if "web_panel" in data:
+                for k, v in data["web_panel"].items():
+                    if hasattr(cfg.web_panel, k) and k != "password_hash":
+                        setattr(cfg.web_panel, k, v)
+            if "interceptor" in data:
+                for k, v in data["interceptor"].items():
+                    if hasattr(cfg.interceptor, k):
+                        setattr(cfg.interceptor, k, v)
+            for key in ("log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
+                if key in data:
+                    setattr(cfg, key, data[key])
+
+            cfg.save(self._config_path)
+            logger.info(f"Web panel: global config updated ({list(data.keys())})")
+            return {"status": "ok"}
+
+        @app.get("/api/bots")
+        async def list_bots(request: Request):
+            await _require_auth(request)
+            bots = []
+            if not self._bot_manager:
+                return bots
+            for inst in self._bot_manager.all_bots:
+                bots.append({
+                    "bot_id": inst.bot_id,
+                    "qq": inst.qq,
+                    "nickname": inst.nickname,
+                    "online": True,
+                })
+            return bots
+
+        @app.get("/api/bots/{bot_id}/config")
+        async def get_bot_config(bot_id: str, request: Request):
+            await _require_auth(request)
+            from mohobot.models.config import BotConfig
+            config_path = self._data_dir / "bots" / bot_id / "config.json"
+            cfg = BotConfig.load(config_path)
+            return cfg.to_dict()
+
+        @app.put("/api/bots/{bot_id}/config")
+        async def update_bot_config(bot_id: str, request: Request, body: BotConfigUpdateRequest):
+            await _require_auth(request)
+            from mohobot.models.config import BotConfig
+            config_path = self._data_dir / "bots" / bot_id / "config.json"
+            cfg = BotConfig.load(config_path)
+            data = body.data
+            for k, v in data.items():
+                if hasattr(cfg, k):
+                    setattr(cfg, k, v)
+            cfg.save(config_path)
+
+            # Apply to live instance if connected
+            if self._bot_manager:
+                inst = self._bot_manager.get(bot_id)
+                if inst:
+                    inst.config = cfg
+
+            logger.info(f"Web panel: bot {bot_id} config updated")
+            return {"status": "ok"}
+
+        # ── 3. Models (模型配置) ─────────────────────────────
+
+        @app.get("/api/models")
+        async def get_models(request: Request):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            return {
+                "chat": {
+                    "model": cfg.llm.chat_model,
+                    "base_url": cfg.llm.chat_base_url,
+                    "api_key": cfg.llm.chat_api_key or "",
+                    "max_tokens": cfg.llm.chat_max_tokens,
+                    "temperature": cfg.llm.chat_temperature,
+                },
+                "vision": {
+                    "model": cfg.llm.vision_model,
+                    "base_url": cfg.llm.vision_base_url,
+                    "api_key": cfg.llm.vision_api_key or "",
+                },
+            }
+
+        @app.put("/api/models")
+        async def update_models(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            data = body.data
+
+            if "chat" in data:
+                for k, v in data["chat"].items():
+                    if hasattr(cfg.llm, f"chat_{k}") and k != "api_key":
+                        setattr(cfg.llm, f"chat_{k}", v)
+                if "api_key" in data["chat"]:
+                    cfg.llm.chat_api_key = data["chat"]["api_key"]
+            if "vision" in data:
+                for k, v in data["vision"].items():
+                    if hasattr(cfg.llm, f"vision_{k}") and k != "api_key":
+                        setattr(cfg.llm, f"vision_{k}", v)
+                if "api_key" in data["vision"]:
+                    cfg.llm.vision_api_key = data["vision"]["api_key"]
+
+            cfg.save(self._config_path)
+            logger.info("Web panel: LLM model config updated")
+            return {"status": "ok"}
+
+        # ── 4. Plugins (插件管理) ────────────────────────────
+
+        @app.get("/api/plugins")
+        async def list_plugins(request: Request):
+            await _require_auth(request)
+            if not self._plugin_system:
+                return []
+            return self._plugin_system.list_plugins()
+
+        @app.post("/api/plugins/toggle")
+        async def toggle_plugin(request: Request, body: PluginToggleRequest):
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件系统未启用")
+            ok = self._plugin_system.set_enabled(body.name, body.enabled)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"插件不存在: {body.name}")
+            return {"status": "ok", "name": body.name, "enabled": body.enabled}
+
+        # ── 5. Conversations (对话数据) ──────────────────────
+
+        @app.get("/api/contexts")
+        async def list_chats(request: Request):
+            await _require_auth(request)
+            if not self._context_manager:
+                return []
+            bots = []
+            if self._bot_manager:
+                for inst in self._bot_manager.all_bots:
+                    chats = await self._context_manager.list_chats(inst.bot_id)
+                    bots.append({"bot_id": inst.bot_id, "chats": chats})
+            return bots
+
+        @app.get("/api/contexts/{bot_id}/{chat_type}/{chat_id}")
+        async def get_chat_sessions(
+            bot_id: str, chat_type: str, chat_id: str, request: Request,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                return {"sessions": []}
+            sessions = await self._context_manager.list_sessions(bot_id, chat_type, chat_id)
+            active = await self._context_manager.get_active_session_id(bot_id, chat_type, chat_id)
+            return {"sessions": sessions, "active": active}
+
+        @app.get("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session/{session_id}")
+        async def get_session_detail(
+            bot_id: str, chat_type: str, chat_id: str, session_id: str, request: Request,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                return None
+            return await self._context_manager.get_session(
+                bot_id, chat_type, chat_id, session_id
+            )
+
+        @app.post("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session")
+        async def create_session(
+            bot_id: str, chat_type: str, chat_id: str, request: Request,
+            body: SessionCreateRequest,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                raise HTTPException(status_code=500, detail="会话管理器不可用")
+            sid = await self._context_manager.create_session(
+                bot_id, chat_type, chat_id, body.name
+            )
+            return {"status": "ok", "session_id": sid}
+
+        @app.delete("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session/{session_id}")
+        async def delete_session(
+            bot_id: str, chat_type: str, chat_id: str, session_id: str, request: Request,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                raise HTTPException(status_code=500, detail="会话管理器不可用")
+            ok = await self._context_manager.delete_session(
+                bot_id, chat_type, chat_id, session_id
+            )
+            if not ok:
+                raise HTTPException(status_code=400, detail="无法删除该会话")
+            return {"status": "ok"}
+
+        @app.post("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session/{session_id}/reset")
+        async def reset_session(
+            bot_id: str, chat_type: str, chat_id: str, session_id: str, request: Request,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                raise HTTPException(status_code=500, detail="会话管理器不可用")
+            ok = await self._context_manager.reset_session(
+                bot_id, chat_type, chat_id, session_id
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="会话不存在")
+            return {"status": "ok"}
+
+        @app.put("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session/{session_id}/message")
+        async def update_message(
+            bot_id: str, chat_type: str, chat_id: str, session_id: str,
+            request: Request, body: MessageUpdateRequest,
+        ):
+            await _require_auth(request)
+            if not self._context_manager:
+                raise HTTPException(status_code=500, detail="会话管理器不可用")
+            ok = await self._context_manager.update_message(
+                bot_id, chat_type, chat_id, session_id, body.index, body.content, body.role
+            )
+            if not ok:
+                raise HTTPException(status_code=400, detail="消息索引越界或会话不存在")
+            return {"status": "ok"}
+
+        # ── 6. Live Logs (实时日志) ──────────────────────────
 
         @app.get("/api/logs/stream")
         async def log_stream(request: Request):
-            if not await verify_token(request):
-                return JSONResponse(
-                    status_code=401, content={"detail": "Unauthorized"}
-                )
+            if not await _verify_token(request):
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+            level_filter = request.query_params.get("level", "").upper()
 
             queue: asyncio.Queue = asyncio.Queue()
             self._active_sse_connections.add(queue)
@@ -140,425 +487,190 @@ class WebPanel:
             async def event_generator() -> AsyncGenerator[dict, None]:
                 try:
                     while True:
-                        # Check if client disconnected
                         if await request.is_disconnected():
                             break
                         try:
-                            log_entry = await asyncio.wait_for(
-                                queue.get(), timeout=20.0
-                            )
-                            yield {
-                                "event": "log",
-                                "data": json.dumps(log_entry, ensure_ascii=False),
-                            }
+                            entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                            if level_filter and entry["level"] != level_filter:
+                                continue
+                            yield {"event": "log", "data": json.dumps(entry, ensure_ascii=False)}
                         except asyncio.TimeoutError:
-                            # Send keepalive
                             yield {"event": "ping", "data": "keepalive"}
                 finally:
                     self._active_sse_connections.discard(queue)
 
             return EventSourceResponse(event_generator())
 
-        # ── File Browser ─────────────────────────────────────
+        # ── 7. Settings (系统设置) ───────────────────────────
 
-        @app.get("/api/files")
-        async def list_files(request: Request, path: str = ""):
-            await require_auth(request)
-            # Resolve to absolute path — relative "data/.." breaks relative_to()
-            base = (self._data_dir / "..").resolve()
-            target = (base / path).resolve()
+        @app.put("/api/settings/password")
+        async def change_password(request: Request, body: PasswordChangeRequest):
+            await _require_auth(request)
 
-            # Ensure we don't escape the project directory
-            if not str(target).startswith(str(base)):
-                raise HTTPException(status_code=403, detail="Access denied")
+            # Verify old password
+            if self._password_hash:
+                if not _verify_password(body.old_password, self._password_hash):
+                    raise HTTPException(status_code=400, detail="原密码错误")
+            elif body.old_password != "admin":
+                raise HTTPException(status_code=400, detail="原密码错误")
 
-            if target.is_file():
-                content = target.read_text(encoding="utf-8")
-                return {
-                    "type": "file",
-                    "path": str(target.relative_to(base)),
-                    "name": target.name,
-                    "size": target.stat().st_size,
-                    "content": content,
-                    "extension": target.suffix,
-                }
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            cfg.web_panel.password_hash = _hash_password(body.new_password)
+            cfg.save(self._config_path)
+            self._password_hash = cfg.web_panel.password_hash
 
-            # List directory
-            if not target.exists():
-                raise HTTPException(status_code=404, detail="Not found")
+            # Invalidate all sessions
+            self._tokens.clear()
 
-            entries = []
-            for entry in sorted(target.iterdir()):
-                entries.append({
-                    "name": entry.name,
-                    "path": str(entry.relative_to(base)),
-                    "type": "dir" if entry.is_dir() else "file",
-                    "size": entry.stat().st_size if entry.is_file() else 0,
-                    "modified": datetime.fromtimestamp(
-                        entry.stat().st_mtime
-                    ).isoformat(),
-                })
+            logger.info("Web panel: admin password changed")
+            return {"status": "ok"}
 
-            return {"type": "dir", "path": str(target.relative_to(base)), "entries": entries}
+        @app.post("/api/settings/restart")
+        async def restart_service(request: Request):
+            await _require_auth(request)
+            if not self._restart_callback:
+                raise HTTPException(status_code=500, detail="重启回调未配置")
 
-        @app.post("/api/files")
-        async def save_file(request: Request, req: ConfigUpdateRequest):
-            await require_auth(request)
-            base = (self._data_dir / "..").resolve()
-            target = (base / req.path).resolve()
+            async def _delayed_restart():
+                await asyncio.sleep(1.0)
+                try:
+                    await self._restart_callback()
+                except Exception as e:
+                    logger.error(f"Restart failed: {e}")
 
-            if not str(target).startswith(str(base)):
-                raise HTTPException(status_code=403, detail="Access denied")
+            asyncio.create_task(_delayed_restart())
+            return {"status": "ok", "message": "服务即将重启..."}
 
-            target.write_text(req.content, encoding="utf-8")
-            logger.info(f"Web panel: saved file {req.path}")
-            return {"status": "ok", "path": req.path}
+        # ── Static frontend ───────────────────────────────────
 
-        # ── Statistics ──────────────────────────────────────
-
-        @app.get("/api/stats")
-        async def get_stats(request: Request):
-            await require_auth(request)
-
-            # Count history files and line counts
-            history_dir = self._data_dir / "history"
-            total_messages = 0
-            total_files = 0
-            bot_count = 0
-
-            if history_dir.exists():
-                for bot_dir in history_dir.iterdir() if history_dir.is_dir() else []:
-                    if bot_dir.is_dir():
-                        bot_count += 1
-                        for chat_type_dir in bot_dir.iterdir():
-                            if chat_type_dir.is_dir():
-                                for f in chat_type_dir.iterdir():
-                                    if f.suffix == ".jsonl":
-                                        total_files += 1
-                                        total_messages += sum(
-                                            1 for _ in f.read_text().splitlines()
-                                            if _.strip()
-                                        )
-
-            # Count context files
-            contexts_dir = self._data_dir / "contexts"
-            context_count = 0
-            if contexts_dir.exists():
-                for bot_dir in contexts_dir.iterdir() if contexts_dir.is_dir() else []:
-                    if bot_dir.is_dir():
-                        for chat_type_dir in bot_dir.iterdir():
-                            if chat_type_dir.is_dir():
-                                for user_dir in chat_type_dir.iterdir():
-                                    if user_dir.is_dir():
-                                        for f in user_dir.iterdir():
-                                            if f.suffix == ".json":
-                                                context_count += 1
-
-            return {
-                "bots": bot_count,
-                "total_messages": total_messages,
-                "history_files": total_files,
-                "context_files": context_count,
-                "uptime": time.time() - self._start_time if hasattr(self, '_start_time') else 0,
-            }
-
-        # ── Dashboard Page ───────────────────────────────────
+        static_dir = Path(__file__).parent / "static"
+        static_dir.mkdir(exist_ok=True)
 
         @app.get("/", response_class=HTMLResponse)
-        async def dashboard():
-            return """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mohobot Web Panel</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               background: #0d1117; color: #c9d1d9; min-height: 100vh; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center;
-                  padding: 16px 0; border-bottom: 1px solid #30363d; margin-bottom: 24px; }
-        .header h1 { font-size: 24px; color: #58a6ff; }
-        .login-form { max-width: 400px; margin: 100px auto; padding: 32px;
-                      background: #161b22; border-radius: 8px; border: 1px solid #30363d; }
-        .login-form h2 { margin-bottom: 24px; }
-        .login-form input { width: 100%; padding: 10px; margin-bottom: 16px;
-                            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-                            color: #c9d1d9; font-size: 14px; }
-        .login-form button { width: 100%; padding: 10px; background: #238636; color: #fff;
-                             border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
-        .login-form button:hover { background: #2ea043; }
-        .login-error { color: #f85149; margin-top: 8px; font-size: 14px; }
-        .hidden { display: none; }
-        .tabs { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
-        .tab { padding: 8px 16px; background: #21262d; border: 1px solid #30363d;
-               border-radius: 6px; cursor: pointer; color: #8b949e; }
-        .tab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
-        .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-                 padding: 20px; min-height: 400px; }
-        .log-container { max-height: 600px; overflow-y: auto; font-family: 'Courier New', monospace;
-                         font-size: 13px; line-height: 1.6; }
-        .log-entry { padding: 4px 8px; border-bottom: 1px solid #21262d; }
-        .log-entry:hover { background: #21262d; }
-        .log-time { color: #8b949e; }
-        .log-level { font-weight: bold; padding: 0 4px; }
-        .log-level.DEBUG { color: #8b949e; }
-        .log-level.INFO { color: #58a6ff; }
-        .log-level.WARNING { color: #d29922; }
-        .log-level.ERROR { color: #f85149; }
-        .file-list { list-style: none; }
-        .file-list li { padding: 8px 12px; border-bottom: 1px solid #21262d;
-                        cursor: pointer; display: flex; justify-content: space-between; }
-        .file-list li:hover { background: #21262d; }
-        .file-list .dir { color: #58a6ff; }
-        .file-list .file { color: #c9d1d9; }
-        .file-editor { width: 100%; min-height: 400px; background: #0d1117; color: #c9d1d9;
-                       border: 1px solid #30363d; border-radius: 6px; padding: 12px;
-                       font-family: 'Courier New', monospace; font-size: 13px; }
-        .save-btn { margin-top: 12px; padding: 8px 16px; background: #238636; color: #fff;
-                    border: none; border-radius: 6px; cursor: pointer; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                      gap: 16px; margin-bottom: 24px; }
-        .stat-card { background: #21262d; padding: 20px; border-radius: 8px;
-                     text-align: center; }
-        .stat-card .value { font-size: 36px; font-weight: bold; color: #58a6ff; }
-        .stat-card .label { font-size: 14px; color: #8b949e; margin-top: 4px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header"><h1>🤖 Mohobot Web Panel</h1><span id="status-indicator">未连接</span></div>
-
-        <!-- Login -->
-        <div id="login-form" class="login-form">
-            <h2>登录</h2>
-            <input type="text" id="username" placeholder="用户名" value="admin">
-            <input type="password" id="password" placeholder="密码">
-            <button onclick="login()">登录</button>
-            <div id="login-error" class="login-error hidden"></div>
-        </div>
-
-        <!-- Main content (hidden until login) -->
-        <div id="main-content" class="hidden">
-            <div class="stats-grid" id="stats-grid"></div>
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab('logs')">📋 实时日志</div>
-                <div class="tab" onclick="switchTab('files')">📁 文件浏览器</div>
-            </div>
-            <div class="panel" id="tab-logs"><div class="log-container" id="log-container"></div></div>
-            <div class="panel hidden" id="tab-files">
-                <div id="file-browser"><p>请先登录</p></div>
-                <div id="file-editor-area" class="hidden">
-                    <div id="file-path-display"></div>
-                    <textarea class="file-editor" id="file-editor-content"></textarea>
-                    <button class="save-btn" onclick="saveFile()">💾 保存</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        let token = localStorage.getItem('token') || '';
-        let currentFilePath = '';
-        let currentDir = '';
-
-        async function login() {
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            const errEl = document.getElementById('login-error');
-            errEl.classList.add('hidden');
-
-            try {
-                const res = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username, password})
-                });
-                if (!res.ok) { errEl.textContent = '登录失败，请检查用户名和密码'; errEl.classList.remove('hidden'); return; }
-                const data = await res.json();
-                token = data.token;
-                localStorage.setItem('token', token);
-                document.getElementById('login-form').classList.add('hidden');
-                document.getElementById('main-content').classList.remove('hidden');
-                loadStats();
-                startLogStream();
-                loadFileList('');
-            } catch(e) {
-                errEl.textContent = '网络错误: ' + e.message;
-                errEl.classList.remove('hidden');
-            }
-        }
-
-        // Auto-login if token exists
-        if (localStorage.getItem('token')) {
-            token = localStorage.getItem('token');
-            document.getElementById('login-form').classList.add('hidden');
-            document.getElementById('main-content').classList.remove('hidden');
-            loadStats();
-            startLogStream();
-            loadFileList('');
-        }
-
-        async function apiFetch(url, options = {}) {
-            const headers = options.headers || {};
-            headers['Authorization'] = 'Bearer ' + token;
-            if (options.body && typeof options.body === 'object') {
-                headers['Content-Type'] = 'application/json';
-                options.body = JSON.stringify(options.body);
-            }
-            const res = await fetch(url, {...options, headers});
-            if (res.status === 401) {
-                token = '';
-                localStorage.removeItem('token');
-                document.getElementById('login-form').classList.remove('hidden');
-                document.getElementById('main-content').classList.add('hidden');
-                throw new Error('Unauthorized');
-            }
-            return res;
-        }
-
-        function switchTab(name) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.panel').forEach(p => p.classList.add('hidden'));
-            document.querySelector(`.tab[onclick*="'${name}'"]`).classList.add('active');
-            document.getElementById(`tab-${name}`).classList.remove('hidden');
-            if (name === 'files') loadFileList(currentDir);
-        }
-
-        // ── Stats ──────────────────────────────────────────
-
-        async function loadStats() {
-            try {
-                const res = await apiFetch('/api/stats');
-                const data = await res.json();
-                const grid = document.getElementById('stats-grid');
-                grid.innerHTML = `
-                    <div class="stat-card"><div class="value">${data.bots}</div><div class="label">已连接 Bot</div></div>
-                    <div class="stat-card"><div class="value">${data.total_messages}</div><div class="label">历史消息</div></div>
-                    <div class="stat-card"><div class="value">${data.history_files}</div><div class="label">历史文件</div></div>
-                    <div class="stat-card"><div class="value">${data.context_files}</div><div class="label">会话文件</div></div>
-                `;
-            } catch(e) { /* ignore */ }
-        }
-
-        // ── SSE Log Stream ─────────────────────────────────
-
-        function startLogStream() {
-            const container = document.getElementById('log-container');
-            const evtSource = new EventSource('/api/logs/stream?token=' + token);
-
-            evtSource.addEventListener('log', function(e) {
-                const data = JSON.parse(e.data);
-                const el = document.createElement('div');
-                el.className = 'log-entry';
-                el.innerHTML = `<span class="log-time">${data.time || ''}</span> ` +
-                    `<span class="log-level ${data.level}">[${data.level}]</span> ` +
-                    `<span>${data.message || ''}</span>`;
-                container.appendChild(el);
-                container.scrollTop = container.scrollHeight;
-                // Keep max 500 entries
-                while (container.children.length > 500) container.removeChild(container.firstChild);
-            });
-
-            evtSource.addEventListener('ping', function(e) { /* keepalive */ });
-            evtSource.onerror = function() {
-                setTimeout(startLogStream, 3000);
-            };
-        }
-
-        // ── File Browser ───────────────────────────────────
-
-        async function loadFileList(dir) {
-            currentDir = dir;
-            const area = document.getElementById('file-browser');
-            try {
-                const res = await apiFetch('/api/files?path=' + encodeURIComponent(dir));
-                const data = await res.json();
-                if (data.type === 'file') {
-                    document.getElementById('file-browser').innerHTML =
-                        `<div class="file-list"><li onclick="loadFileList('${dir.substring(0, dir.lastIndexOf('/'))}')">⬆ 返回上级</li></div>`;
-                    showEditor(data);
-                    return;
-                }
-                let html = '<ul class="file-list">';
-                if (dir) html += `<li onclick="loadFileList('${dir.substring(0, dir.lastIndexOf('/'))}')"><span class="dir">⬆ 返回上级</span></li>`;
-                for (const entry of data.entries) {
-                    const icon = entry.type === 'dir' ? '📁' : '📄';
-                    html += `<li onclick="loadFileList('${entry.path}')">
-                        <span class="${entry.type}">${icon} ${entry.name}</span>
-                        <span style="color:#8b949e;font-size:12px">${entry.type === 'file' ? (entry.size/1024).toFixed(1)+'KB' : ''}</span>
-                    </li>`;
-                }
-                html += '</ul>';
-                area.innerHTML = html;
-                document.getElementById('file-editor-area').classList.add('hidden');
-            } catch(e) { area.innerHTML = '<p>加载失败: ' + e.message + '</p>'; }
-        }
-
-        function showEditor(data) {
-            document.getElementById('file-path-display').textContent = '📄 ' + data.path;
-            document.getElementById('file-editor-content').value = data.content || '';
-            currentFilePath = data.path;
-            document.getElementById('file-editor-area').classList.remove('hidden');
-
-            // Syntax-highlight by extension
-            const ext = data.extension;
-            if (['.json', '.jsonl', '.yaml', '.yml', '.py'].includes(ext)) {
-                // Could add basic syntax highlighting here
-            }
-        }
-
-        async function saveFile() {
-            const content = document.getElementById('file-editor-content').value;
-            try {
-                const res = await apiFetch('/api/files', {
-                    method: 'POST',
-                    body: {path: currentFilePath, content}
-                });
-                if (res.ok) alert('保存成功！');
-                else alert('保存失败');
-            } catch(e) { alert('保存失败: ' + e.message); }
-        }
-    </script>
-</body>
-</html>"""
-
-        # ── Health ───────────────────────────────────────────
+        async def index():
+            html_path = static_dir / "index.html"
+            if html_path.exists():
+                return HTMLResponse(html_path.read_text(encoding="utf-8"))
+            return HTMLResponse("<h1>Mohobot Web Panel</h1><p>static/index.html not found</p>")
 
         @app.get("/api/health")
         async def health():
             return {"status": "ok", "time": datetime.now().isoformat()}
 
-    async def push_log(self, level: str, message: str) -> None:
-        """Push a log entry to all connected SSE clients."""
-        entry = {
-            "time": datetime.now().isoformat(),
-            "level": level,
-            "message": message,
+    async def _get_system_stats(self) -> dict[str, Any]:
+        """System-level stats (CPU/mem/disk via psutil, or fallbacks)."""
+        result: dict[str, Any] = {
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "hostname": socket.gethostname(),
+            "uptime": time.time() - self._start_time,
         }
-        dead_connections = set()
-        for queue in self._active_sse_connections:
+        if HAS_PSUTIL:
+            result["cpu_percent"] = psutil.cpu_percent(interval=0.3)
+            result["cpu_count"] = psutil.cpu_count()
+            mem = psutil.virtual_memory()
+            result["memory"] = {
+                "total": mem.total,
+                "used": mem.used,
+                "percent": mem.percent,
+            }
+            disk = psutil.disk_usage(str(Path.cwd()))
+            result["disk"] = {
+                "total": disk.total,
+                "used": disk.used,
+                "percent": disk.percent,
+            }
+        else:
+            result["cpu_percent"] = None
+            result["memory"] = None
+            result["disk"] = None
+        return result
+
+    async def _get_framework_stats(self) -> dict[str, Any]:
+        """Framework-level stats: message counts from history files."""
+        result: dict[str, Any] = {
+            "start_time": self._start_time,
+            "uptime": time.time() - self._start_time,
+            "total_messages": 0,
+            "history_files": 0,
+            "context_files": 0,
+            "bot_count": 0,
+        }
+        if self._bot_manager:
+            result["bot_count"] = self._bot_manager.bot_count
+
+        history_dir = self._data_dir / "history"
+        if history_dir.exists():
+            for bot_dir in history_dir.iterdir():
+                if not bot_dir.is_dir():
+                    continue
+                for chat_dir in bot_dir.iterdir():
+                    if not chat_dir.is_dir():
+                        continue
+                    for f in chat_dir.iterdir():
+                        if f.suffix == ".jsonl":
+                            result["history_files"] += 1
+                            try:
+                                result["total_messages"] += sum(
+                                    1 for _ in f.read_text(encoding="utf-8").splitlines()
+                                    if _.strip()
+                                )
+                            except OSError:
+                                pass
+
+        contexts_dir = self._data_dir / "contexts"
+        if contexts_dir.exists():
+            for bot_dir in contexts_dir.iterdir():
+                if bot_dir.is_dir():
+                    for chat_type in bot_dir.iterdir():
+                        if chat_type.is_dir():
+                            for user_dir in chat_type.iterdir():
+                                if user_dir.is_dir():
+                                    for f in user_dir.iterdir():
+                                        if f.suffix == ".json":
+                                            result["context_files"] += 1
+        return result
+
+    async def _get_bot_list(self) -> list[dict[str, Any]]:
+        """List bots with online status and message counts."""
+        bots = []
+        if not self._bot_manager:
+            return bots
+        for inst in self._bot_manager.all_bots:
+            bots.append({
+                "bot_id": inst.bot_id,
+                "qq": inst.qq,
+                "nickname": inst.nickname,
+                "online": True,
+                "connected_at": inst.connected_at,
+                "connected_for": time.time() - inst.connected_at,
+                "message_count": inst.message_count,
+                "enabled": inst.config.enabled,
+            })
+        return bots
+
+    async def _get_llm_usage(self) -> dict[str, Any]:
+        """LLM token usage stats from the llm service."""
+        if self._llm_service:
             try:
-                await asyncio.wait_for(queue.put(entry), timeout=1.0)
-            except (asyncio.TimeoutError, Exception):
-                dead_connections.add(queue)
-        for q in dead_connections:
-            self._active_sse_connections.discard(q)
+                return await self._llm_service.get_usage_stats()
+            except Exception as e:
+                logger.error(f"Failed to get LLM usage: {e}")
+        return {"totals": {"calls": 0, "total_tokens": 0},
+                "per_model": {}, "today": {"calls": 0, "total_tokens": 0}}
+
+    # ── Server lifecycle ──────────────────────────────────────
 
     async def start(self) -> None:
         """Start the uvicorn server."""
         import uvicorn
-        self._start_time = time.time()
-
-        # Patch loguru to forward to SSE
         logger.info("Starting web panel...")
-
         config = uvicorn.Config(
             self._app,
             host=self._host,
             port=self._port,
-            log_level="info",
+            log_level="warning",
         )
         server = uvicorn.Server(config)
         self._server_instance = server
@@ -566,6 +678,6 @@ class WebPanel:
 
     async def stop(self) -> None:
         """Stop the uvicorn server."""
-        if hasattr(self, '_server_instance'):
+        if hasattr(self, "_server_instance"):
             self._server_instance.should_exit = True
             logger.info("Web panel stopped")
