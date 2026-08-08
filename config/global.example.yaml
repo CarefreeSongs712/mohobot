@@ -4,6 +4,11 @@
 #   cp config/global.example.yaml config/global.yaml
 # 注意：config/global.yaml 已被 .gitignore 排除，不会提交到仓库。
 
+# ── Beta 模式开关 ─────────────────────────────────────────────
+# true  = Agent 流水线(话题规划/记忆/反思, 按 bot 隔离)
+# false = 旧版直接流式回复(main 分支逻辑; 数据库保留, 需重启生效)
+beta_mode: true
+
 server:
   host: "0.0.0.0"
   port: 8081

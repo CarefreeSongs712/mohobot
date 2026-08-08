@@ -294,7 +294,7 @@ class WebPanel:
                           "topic_planner", "topic_replier", "reflection_worker", "reflex"):
                     if k in agent_data and isinstance(agent_data[k], dict):
                         setattr(cfg.agent, k, agent_data[k] or {})
-            for key in ("log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
+            for key in ("beta_mode", "log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])
 

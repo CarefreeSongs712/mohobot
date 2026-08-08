@@ -54,7 +54,7 @@ class PluginSystem(Interceptor):
             self._bot_manager = bot_manager
 
     def apply_injections(self) -> None:
-        """对已加载插件实例执行注入(ws_server / bot_manager)。
+        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir)。
 
         通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
         """
@@ -70,6 +70,9 @@ class PluginSystem(Interceptor):
                 injector = getattr(inst.__class__, "inject_bot_manager", None)
                 if injector:
                     injector(self._bot_manager)
+            injector = getattr(inst.__class__, "inject_data_dir", None)
+            if injector:
+                injector(str(self._data_dir))
 
     async def load_plugins(self) -> int:
         """Scan plugins directory and load all enabled plugins."""

@@ -105,6 +105,7 @@ class AgentConfig:
 @dataclass
 class GlobalConfig:
     """Top-level global configuration."""
+    beta_mode: bool = True     # true = Agent 流水线(beta 模式); false = 旧版直接流式回复(数据库保留)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
@@ -137,6 +138,7 @@ class GlobalConfig:
         agent_raw = raw.get("agent", {})
 
         return cls(
+            beta_mode=raw.get("beta_mode", True),
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8080),
@@ -199,6 +201,7 @@ class GlobalConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         raw = {
+            "beta_mode": self.beta_mode,
             "server": {
                 "host": self.server.host,
                 "port": self.server.port,
@@ -251,6 +254,7 @@ class GlobalConfig:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to nested dict (for web panel editing)."""
         return {
+            "beta_mode": self.beta_mode,
             "server": {
                 "host": self.server.host,
                 "port": self.server.port,

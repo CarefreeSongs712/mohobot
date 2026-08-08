@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 import websockets
@@ -40,6 +41,7 @@ class WSServer:
         self._on_event: EventCallback | None = None
         self._server: websockets.asyncio.server.Server | None = None
         self._heartbeat_interval: float = 30.0  # seconds
+        self._nickname_cache: dict[str, str] = {}  # get_nickname 缓存
 
     def set_event_callback(self, callback: EventCallback) -> None:
         """Set the callback invoked for every received event."""
@@ -213,3 +215,64 @@ class WSServer:
             {"user_id": int(user_id), "message": message},
             "private", user_id,
         )
+
+    async def send_image(
+        self, bot_id: str, chat_type: str, chat_id: int | str, image_path: str
+    ) -> None:
+        """发送本地图片文件(base64 内嵌, 不依赖 NapCat 访问本地路径)。
+
+        chat_type: "private" | "group"
+        """
+        import base64
+
+        ext = Path(image_path).suffix.lstrip(".").lower() or "png"
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        message: list[dict[str, Any]] = [
+            {"type": "image", "data": {"file": f"base64://{b64}"}},
+        ]
+        logger.debug(f"send_image to {chat_type}:{chat_id} via bot {bot_id} ({ext}, {len(b64) // 1024}KB)")
+        if chat_type == "private":
+            await self.send_private_msg(bot_id, chat_id, message)
+        else:
+            await self.send_group_msg(bot_id, chat_id, message)
+
+    # ── 用户昵称查询(供插件使用) ─────────────────────────────
+
+    async def get_nickname(
+        self,
+        bot_id: str,
+        user_id: int | str,
+        group_id: int | str | None = None,
+    ) -> str:
+        """获取用户昵称: 群名片 → QQ 昵称 → 数字兜底。带内存缓存。"""
+        cache_key = f"{bot_id}:{group_id or 'p'}:{user_id}"
+        cached = self._nickname_cache.get(cache_key)
+        if cached:
+            return cached
+
+        nickname = str(user_id)
+        # 群聊: 先取群成员资料(群名片优先)
+        if group_id is not None and str(group_id).isdigit():
+            resp = await self.send_to_bot(
+                bot_id, "get_group_member_info",
+                {"group_id": int(group_id), "user_id": int(user_id)},
+                wait_response=True, timeout=5.0,
+            )
+            if resp and resp.get("status") == "ok":
+                data = resp.get("data") or {}
+                nickname = data.get("card") or data.get("nickname") or nickname
+
+        if nickname == str(user_id):
+            # 群资料没拿到/私聊: 陌生人资料
+            resp = await self.send_to_bot(
+                bot_id, "get_stranger_info",
+                {"user_id": int(user_id)},
+                wait_response=True, timeout=5.0,
+            )
+            if resp and resp.get("status") == "ok":
+                data = resp.get("data") or {}
+                nickname = data.get("nickname") or nickname
+
+        self._nickname_cache[cache_key] = nickname
+        return nickname

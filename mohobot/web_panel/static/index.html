@@ -593,6 +593,7 @@ async function loadConfigPage() {
     botListCache = await apiJSON('/api/bots');
 
     document.getElementById('config-global-form').innerHTML =
+      checkField('beta_mode', 'Beta 模式(Agent 流水线)', globalConfigCache.beta_mode, '开启=话题规划/记忆/反思流水线; 关闭=旧版直接流式回复(需重启生效)') +
       formField('server.port', 'WebSocket 端口', globalConfigCache.server?.port, { hint: 'OneBot 客户端连接的端口' }) +
       formField('server.host', '监听地址', globalConfigCache.server?.host) +
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
@@ -715,6 +716,7 @@ async function saveGlobalConfig() {
     return isNaN(v) ? def : v;
   };
   const data = {
+    beta_mode: document.getElementById('cfg-beta_mode')?.checked ?? true,
     server: { port, host },
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     log_dir: document.getElementById('cfg-log_dir').value,

@@ -84,6 +84,7 @@ class MohobotApplication:
         logger.info(f"Loaded {plugin_count} plugin(s)")
 
         # 5. Database + Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
+        #    beta_mode=false: 保留数据库(面板备份/数据管理可用), 回复走旧版路径
         if self._config.database.enabled:
             db_folder = self._config.database.folder
             if db_folder.startswith("./"):
@@ -92,14 +93,16 @@ class MohobotApplication:
                 db_folder=db_folder,
                 db_file=self._config.database.file,
             )
-            if self._config.agent.enabled:
+            if self._config.beta_mode and self._config.agent.enabled:
                 self._agent_manager = BotAgentManager(
                     self._config.to_dict(),
                     self._database_manager,
                 )
-                logger.info("Agent subsystem enabled (per-bot runtimes)")
+                logger.info("Beta mode enabled — agent 流水线 per-bot runtimes")
             else:
-                logger.info("Agent subsystem disabled — using legacy LLM reply path")
+                logger.info(
+                    "Beta mode disabled (or agent disabled) — using legacy LLM reply path"
+                )
 
         # 6. Initialize message handler
         self._message_handler = MessageHandler(
