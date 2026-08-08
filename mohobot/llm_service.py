@@ -500,6 +500,28 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
+    async def describe_image_file(self, local_path: str, max_tokens: int = 256) -> str:
+        """用视觉模型描述本地图片文件。
+
+        图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网
+        (QQ 图源 gchat.qpic.cn 需鉴权, 直接传 URL 常导致模型返回空)。
+        """
+        if not self._vision_available or self._vision_client is None:
+            return ""
+        try:
+            import base64 as _b64
+            ext = Path(local_path).suffix.lower()
+            mime = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+            }.get(ext, "image/jpeg")
+            with open(local_path, "rb") as f:
+                data = _b64.b64encode(f.read()).decode()
+            return await self.describe_image(f"data:{mime};base64,{data}", max_tokens)
+        except Exception as e:
+            logger.warning(f"Vision describe file failed: {e}")
+            return ""
+
     async def _execute_tool(self, func_name: str, args_json: str) -> str:
         """Execute a tool/function call and return the result."""
         try:

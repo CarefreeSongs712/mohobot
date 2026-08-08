@@ -112,6 +112,7 @@ class MohobotApplication:
             reply_config=self._config.reply,
             agent_manager=self._agent_manager,
             database_manager=self._database_manager,
+            image_cache=self._image_cache,
         )
 
         # 7. Set up interceptors

@@ -366,6 +366,8 @@ class BotAgentRuntime:
                 use_json=use_json,
                 max_tokens=int(spec.get("max_tokens", 2048)),
                 temperature=float(spec.get("temperature", 0.7)),
+                data_dir=self.config.get("data_dir", "./data"),
+                bot_id=self.bot_id,
             )
             if not modules[name].is_available():
                 self.logger.warning(f"LLM module '{name}' NOT available (missing config)")

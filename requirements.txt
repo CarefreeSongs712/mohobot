@@ -26,7 +26,7 @@ loguru>=0.7.0
 
 # Image Processing
 Pillow>=10.0.0
-# imagehash>=4.3.0  # Not on all mirrors; phash is soft-fallback
+imagehash>=4.3.0  # 图片 phash 去重(ImageCache)
 
 # CQ Code parsing (regex)
 # (stdlib only)

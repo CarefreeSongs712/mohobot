@@ -58,6 +58,7 @@ class MessageHandler:
         reply_config=None,
         agent_manager=None,
         database_manager=None,
+        image_cache=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -71,6 +72,8 @@ class MessageHandler:
         # Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
         self._agent_manager = agent_manager
         self._db = database_manager
+        # 图片缓存(下载 + phash 去重 + 描述缓存)
+        self._image_cache = image_cache
 
         # Reply behavior from global config (stream/segment/delay/quote)
         if reply_config is None:
@@ -365,20 +368,34 @@ class MessageHandler:
         await runtime.handle_event(chat_type, chat_id, chat_event)
 
     async def _describe_first_image(self, bot_id: str, url: str) -> str:
-        """用视觉模型描述图片(带超时保护),失败降级为空串。"""
-        if self._llm is None:
+        """识别图片并返回描述。
+
+        走 ImageCache: 下载到本地 → phash 去重 → 描述缓存;
+        未命中时调视觉模型(本地文件 base64, 不依赖网关访问外网)。
+        下载失败/无缓存时降级为占位符。
+        """
+        if self._image_cache is None or self._llm is None:
             return ""
+
+        async def _vision_cb(image_url: str, local_path: str) -> str:
+            try:
+                return await asyncio.wait_for(
+                    self._llm.describe_image_file(local_path),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Vision describe timeout for bot {bot_id}")
+                return ""
+            except Exception as e:
+                logger.warning(f"Vision describe failed for bot {bot_id}: {e}")
+                return ""
+
         try:
-            return await asyncio.wait_for(
-                self._llm.describe_image(url),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Vision describe timeout for bot {bot_id}")
-            return ""
+            _, description = await self._image_cache.get_or_describe(url, vision_callback=_vision_cb)
         except Exception as e:
-            logger.warning(f"Vision describe failed for bot {bot_id}: {e}")
+            logger.warning(f"Image cache failed for bot {bot_id}: {e}")
             return ""
+        return description or ""
 
     async def _agent_context_provider(
         self, bot_id: str, chat_type: str, chat_id: str,

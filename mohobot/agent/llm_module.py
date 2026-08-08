@@ -18,7 +18,11 @@ from mohobot.agent.prompts import PROMPT_TEMPLATES
 
 
 class LLMModule:
-    """一次 LLM 调用的封装: 模型 + prompt 模板 + 参数。"""
+    """一次 LLM 调用的封装: 模型 + prompt 模板 + 参数。
+
+    成功调用后记录 token 用量到 stats/llm_usage.jsonl
+    (与 LLMService 旧路径同格式, 供 Web 面板统计)。
+    """
 
     def __init__(
         self,
@@ -33,6 +37,8 @@ class LLMModule:
         use_json: bool = False,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        data_dir: str = "",
+        bot_id: str = "",
     ):
         self.module_name = module_name
         self._cfg = config
@@ -44,6 +50,8 @@ class LLMModule:
         self.use_json = use_json
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self._data_dir = data_dir or "./data"
+        self._bot_id = bot_id
 
         if self.template is None and self.prompt_name:
             self.template = PROMPT_TEMPLATES.get(self.prompt_name, "")
@@ -93,10 +101,37 @@ class LLMModule:
                 f"LLM[{self.module_name}] {self.model} OK {duration_ms:.0f}ms "
                 f"({len(prompt)} prompt chars)"
             )
+            self._record_usage(resp)
             return content
         except Exception as e:
             logger.error(f"LLM[{self.module_name}] call failed: {e}")
             raise
+
+    def _record_usage(self, resp) -> None:
+        """把本次调用的 token 用量写入 stats/llm_usage.jsonl(面板统计)。"""
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        try:
+            import aiofiles as _aiofiles
+            from pathlib import Path as _Path
+            usage_dir = _Path(self._data_dir) / "stats"
+            usage_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "time": time.time(),
+                "bot_id": self._bot_id,
+                "module": self.module_name,
+                "model": self.model,
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+            # 同步写文件即可(每次调用一次, 量小); 失败不影响主流程
+            import json as _json
+            with open(usage_dir / "llm_usage.jsonl", "a", encoding="utf-8") as f:
+                f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"Record LLM usage failed: {e}")
 
     def _render_prompt(self, kwargs: dict[str, Any]) -> str:
         """Jinja2 渲染模板。"""
