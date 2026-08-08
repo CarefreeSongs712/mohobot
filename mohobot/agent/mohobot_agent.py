@@ -88,7 +88,7 @@ class MohobotAgent:
         plan: TopicAttentionPlan,
     ) -> List[OneResponseLine]:
         """把注意力计划实现为回复行。"""
-        user_context = self._load_user_expression_context(user_id)
+        user_context = await self._load_user_expression_context(user_id)
         return await self.main_chat.generate_response(
             reply_topic=plan.topic_content,
             user_nickname=user_context["nickname"],
@@ -109,7 +109,7 @@ class MohobotAgent:
         sing_plan: Optional[Tuple[str, str]] = None,
         conversation_history: Optional[str] = None,
     ) -> List[OneResponseLine]:
-        user_context = self._load_user_expression_context(user_id)
+        user_context = await self._load_user_expression_context(user_id)
         return await self.main_chat.generate_response(
             reply_topic=topic_content,
             user_nickname=user_context["nickname"],
@@ -148,9 +148,15 @@ class MohobotAgent:
 
     # ── 用户上下文 ───────────────────────────────────────────
 
-    def _load_user_expression_context(self, user_id: str) -> dict[str, str]:
-        description = self.database_manager.get_user_description(user_id) or ""
-        preferences = self.database_manager.get_user_preferences(user_id) or {}
+    async def _load_user_expression_context(self, user_id: str) -> dict[str, str]:
+        """读取用户画像/偏好(SQLite 共享库,丢线程池防阻塞)。"""
+        import asyncio
+        description = await asyncio.to_thread(
+            self.database_manager.get_user_description, user_id,
+        ) or ""
+        preferences = await asyncio.to_thread(
+            self.database_manager.get_user_preferences, user_id,
+        ) or {}
         return {
             "nickname": "你",
             "description": description,

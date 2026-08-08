@@ -157,7 +157,7 @@ class Plugin:
         lines.append("⚙️ 配置信息:")
         try:
             from mohobot.models.config import GlobalConfig
-            cfg = GlobalConfig.load()
+            cfg = GlobalConfig.load(os.environ.get("MOHOBOT_CONFIG", "./config/global.yaml"))
             lines.append(f"  WS 服务: ws://{cfg.server.host}:{cfg.server.port}")
             lines.append(f"  LLM 模型: {cfg.llm.chat_model}")
             lines.append(f"  Vision 模型: {cfg.llm.vision_model}")

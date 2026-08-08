@@ -98,7 +98,8 @@ class WSServer:
         except Exception as e:
             logger.error(f"Connection error for bot {bot_id}: {e}")
         finally:
-            self._bot_manager.unregister(bot_id)
+            # 传 instance: 若期间同 bot_id 已建立新连接,不要误删新实例
+            self._bot_manager.unregister(bot_id, instance)
 
     async def _dispatch(self, bot_id: str, data: dict[str, Any]) -> None:
         """Dispatch an incoming message — event or API response."""
@@ -147,11 +148,17 @@ class WSServer:
         echo = f"api_{uuid.uuid4().hex}"
         payload["echo"] = echo
         future = self._bot_manager.create_response_future(echo)
-        await instance.send(payload)
+        try:
+            await instance.send(payload)
+        except Exception:
+            # Send failed — don't leave the future dangling
+            self._bot_manager.remove_response_future(echo)
+            raise
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
+            self._bot_manager.remove_response_future(echo)
             return None
 
     async def _send_tracked(
@@ -171,7 +178,12 @@ class WSServer:
             return
         echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
-        await instance.send({"action": action, "params": params, "echo": echo})
+        try:
+            await instance.send({"action": action, "params": params, "echo": echo})
+        except Exception:
+            # Send failed — don't leave the tracked entry dangling
+            self._bot_manager.drop_pending_sent(echo)
+            raise
 
     async def send_group_msg(
         self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]

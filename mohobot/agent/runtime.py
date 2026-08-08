@@ -117,13 +117,20 @@ class SessionPipeline:
         if event.event_type != ChatInputEventType.USER_MESSAGE:
             return
 
-        # 写入数据库(用户消息, history → DB)
-        self.runtime.database_manager.add_conversation(
-            user_id, self.runtime.bot_id, "user",
-            event.content or "", msg_type=event.message_type,
-            meta_data={"chat_type": self.chat_type, "chat_id": self.chat_id,
-                       "speaker": event.payload.get("speaker", "")},
-        )
+        # 写入数据库(用户消息, history → DB)。
+        # 注意: SQLite 是共享库(busy_timeout 15s),同步调用会卡事件循环,
+        # 必须丢到线程池;失败只记日志,不能丢弃消息(消息仍进话题规划)。
+        try:
+            await asyncio.to_thread(
+                self.runtime.database_manager.add_conversation,
+                user_id, self.runtime.bot_id, "user",
+                event.content or "", event.message_type,
+                {"chat_type": self.chat_type, "chat_id": self.chat_id,
+                 "speaker": event.payload.get("speaker", "")},
+            )
+        except Exception as e:
+            self.logger.warning(f"Persist user message to DB failed: {e}")
+
         await self.planner.feed_unread_message(event)
 
     # ── 上下文(沿用原有 ContextManager 的会话上下文, context 不变) ──
@@ -171,13 +178,21 @@ class SessionPipeline:
         return reply_items
 
     async def _persist_replies(self, reply_items: List[OneResponseLine]) -> None:
-        """持久化 agent 回复到数据库(conversations 表)。"""
+        """持久化 agent 回复到数据库(conversations 表, 线程池防阻塞)。"""
+        dbm = self.runtime.database_manager
+        bot_id = self.runtime.bot_id
+        chat_id = self.chat_id
+        chat_type = self.chat_type
         for item in reply_items:
-            self.runtime.database_manager.add_conversation(
-                self.chat_id, self.runtime.bot_id, "agent",
-                item.get_content(), msg_type=item.type.value,
-                meta_data={"chat_type": self.chat_type, "chat_id": self.chat_id},
-            )
+            try:
+                await asyncio.to_thread(
+                    dbm.add_conversation,
+                    chat_id, bot_id, "agent",
+                    item.get_content(), item.type.value,
+                    {"chat_type": chat_type, "chat_id": chat_id},
+                )
+            except Exception as e:
+                self.logger.warning(f"Persist agent reply to DB failed: {e}")
 
     async def _send_reply_items(self, reply_items: List[OneResponseLine]) -> None:
         if self.runtime.reply_handler is None:
@@ -227,13 +242,17 @@ class SessionPipeline:
     async def _update_user_profile(self, turn: CompletedTurn) -> None:
         if not self._reflection_update_profile:
             return
-        snapshot = self.runtime.database_manager.get_context_snapshot(
-            turn.user_id, self.runtime.bot_id,
-        )
-        await self.runtime.agent.update_user_profile_by_context(
-            user_id=turn.user_id,
-            context=snapshot,
-        )
+        try:
+            snapshot = await asyncio.to_thread(
+                self.runtime.database_manager.get_context_snapshot,
+                turn.user_id, self.runtime.bot_id,
+            )
+            await self.runtime.agent.update_user_profile_by_context(
+                user_id=turn.user_id,
+                context=snapshot,
+            )
+        except Exception as e:
+            self.logger.warning(f"User profile update failed: {e}")
 
 
 class BotAgentRuntime:

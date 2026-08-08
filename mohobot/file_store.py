@@ -134,6 +134,44 @@ async def json_write(file_path: str | Path, data: Any, pretty: bool = True) -> N
             await f.write(content)
 
 
+async def json_update(
+    file_path: str | Path,
+    update_fn: Any,
+    default: Any = None,
+    pretty: bool = True,
+) -> Any:
+    """原子"读-改-写": 持锁期间完成整个 read → update_fn → write。
+
+    与分别调用 json_read + json_write 不同,锁覆盖整个流程,
+    避免并发 append/修改时丢失更新(读改写竞态)。
+    """
+    path = Path(file_path)
+    lock = _get_lock(str(path.absolute()))
+    async with lock:
+        if await aiofiles.os.path.exists(path):
+            async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                content = await f.read()
+            if content.strip():
+                try:
+                    data = json.loads(content)
+                except json.JSONDecodeError:
+                    data = default
+            else:
+                data = default
+        else:
+            data = default
+
+        new_data = update_fn(data)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        kwargs = {"ensure_ascii": False}
+        if pretty:
+            kwargs["indent"] = 2
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(new_data, **kwargs))
+        return new_data
+
+
 # ── JSONL Reader (read-only, lock-protected) ──────────────────
 
 

@@ -143,7 +143,7 @@ class WebPanel:
 
         # NOTE: no format= here — with format set, loguru passes the formatted
         # STRING to the sink instead of the Message object, breaking .record
-        lg.add(_sink, level="DEBUG", enqueue=False)
+        self._sink_id = lg.add(_sink, level="DEBUG", enqueue=False)
 
     # ── Routes ────────────────────────────────────────────────
 
@@ -720,7 +720,27 @@ class WebPanel:
         await server.serve()
 
     async def stop(self) -> None:
-        """Stop the uvicorn server."""
-        if hasattr(self, "_server_instance"):
-            self._server_instance.should_exit = True
+        """Stop the uvicorn server + remove the loguru sink (防重启堆积).
+
+        注意: uvicorn 在启动阶段被置 should_exit 时,serve() 会"绑定后直接
+        return"而跳过 shutdown() → 监听 socket 泄漏、端口无法重新绑定。
+        因此这里直接关闭已创建的 server sockets。
+        """
+        server = getattr(self, "_server_instance", None)
+        if server is not None:
+            server.should_exit = True
+            for s in list(getattr(server, "servers", None) or []):
+                try:
+                    s.close()
+                except Exception:
+                    pass
             logger.info("Web panel stopped")
+        # 移除本面板安装的 loguru sink,避免重启后重复收到日志
+        sink_id = getattr(self, "_sink_id", None)
+        if sink_id is not None:
+            from loguru import logger as lg
+            try:
+                lg.remove(sink_id)
+            except Exception:
+                pass
+            self._sink_id = None

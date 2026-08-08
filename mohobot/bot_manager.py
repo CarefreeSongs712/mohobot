@@ -99,11 +99,19 @@ class BotManager:
         logger.info(f"Bot registered: {bot_id} (QQ={config.qq}, nickname={config.nickname})")
         return instance
 
-    def unregister(self, bot_id: str) -> None:
-        """Remove a disconnected bot."""
-        if bot_id in self._bots:
-            del self._bots[bot_id]
-            logger.info(f"Bot unregistered: {bot_id}")
+    def unregister(self, bot_id: str, instance: BotInstance | None = None) -> None:
+        """Remove a disconnected bot.
+
+        instance 可选: 传入后只在其仍为当前实例时移除。
+        防止"旧连接断开 → unregister"误删同 bot_id 的新连接实例(重连竞态)。
+        """
+        if bot_id not in self._bots:
+            return
+        if instance is not None and self._bots[bot_id] is not instance:
+            logger.debug(f"Bot {bot_id}: stale connection closed, keep current instance")
+            return
+        del self._bots[bot_id]
+        logger.info(f"Bot unregistered: {bot_id}")
 
     def get(self, bot_id: str) -> BotInstance | None:
         """Get a bot instance by ID."""
@@ -165,3 +173,11 @@ class BotManager:
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_responses[echo] = future
         return future
+
+    def remove_response_future(self, echo: str) -> None:
+        """Remove a pending response future (e.g. after a timeout)."""
+        self._pending_responses.pop(echo, None)
+
+    def drop_pending_sent(self, echo: str) -> None:
+        """Remove a tracked sent-message entry (e.g. after a send failure)."""
+        self._pending_sent.pop(echo, None)

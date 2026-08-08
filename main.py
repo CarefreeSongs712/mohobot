@@ -179,7 +179,7 @@ class MohobotApplication:
                 restart_callback=self.restart,
             )
             # Start web panel in background
-            asyncio.create_task(self._run_web_panel())
+            self._web_panel_task = asyncio.create_task(self._run_web_panel())
 
         self._running = True
         logger.info(
@@ -207,9 +207,26 @@ class MohobotApplication:
         logger.info("Shutting down Mohobot...")
         self._running = False
 
-        # Stop web panel
+        # Stop web panel (await its server task so the port is freed
+        # before a restart rebinds it — otherwise "Address already in use")
         if self._web_panel:
             await self._web_panel.stop()
+        web_panel_task = getattr(self, "_web_panel_task", None)
+        if web_panel_task is not None:
+            try:
+                await asyncio.wait_for(web_panel_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                # uvicorn 卡住(如 lifespan 未响应) — 取消任务,防端口占用
+                logger.warning("Web panel task did not exit in time, cancelling")
+                web_panel_task.cancel()
+                try:
+                    await web_panel_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._web_panel_task = None
+            self._web_panel = None
 
         # Stop WS server
         if self._ws_server:

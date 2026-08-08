@@ -19,7 +19,7 @@ from typing import Any
 
 from loguru import logger
 
-from mohobot.file_store import json_read, json_write
+from mohobot.file_store import json_read, json_update, json_write
 
 
 class ContextManager:
@@ -93,7 +93,10 @@ class ContextManager:
         entries: list[dict[str, Any]],
         max_rounds: int = 30,
     ) -> None:
-        """Append entries to the active session context, trimming to max_rounds."""
+        """Append entries to the active session context, trimming to max_rounds.
+
+        使用 json_update 原子读改写,避免并发 append 丢失更新。
+        """
         if chat_type == "group":
             session_id = "main"
         else:
@@ -101,17 +104,16 @@ class ContextManager:
             session_id = index.get("active", "sess_main")
 
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-        context = await json_read(path)
-        if not isinstance(context, list):
-            context = []
 
-        context.extend(entries)
+        def _append(data):
+            context = data if isinstance(data, list) else []
+            context.extend(entries)
+            # Trim to max_rounds (keep last N user-assistant pairs)
+            if len(context) > max_rounds * 2:
+                context = context[-(max_rounds * 2):]
+            return context
 
-        # Trim to max_rounds (keep last N user-assistant pairs)
-        if len(context) > max_rounds * 2:
-            context = context[-(max_rounds * 2):]
-
-        await json_write(path, context)
+        await json_update(path, _append, default=[])
 
     async def clear_context(
         self, bot_id: str, chat_type: str, chat_id: str
@@ -132,13 +134,6 @@ class ContextManager:
         """Remove the last N entries from current session context.
         Returns the number of entries actually removed.
         """
-        context = await self.load_context(bot_id, chat_type, chat_id)
-        if not context:
-            return 0
-
-        actual = min(n, len(context))
-        remaining = context[:-actual]
-
         if chat_type == "group":
             session_id = "main"
         else:
@@ -146,8 +141,17 @@ class ContextManager:
             session_id = index.get("active", "sess_main")
 
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-        await json_write(path, remaining)
-        return actual
+        removed = [0]
+
+        def _forget(data):
+            context = data if isinstance(data, list) else []
+            if not context:
+                return context
+            removed[0] = min(n, len(context))
+            return context[:-removed[0]]
+
+        await json_update(path, _forget, default=[])
+        return removed[0]
 
     # ── Session Switching (Private Only) ──────────────────────
 
