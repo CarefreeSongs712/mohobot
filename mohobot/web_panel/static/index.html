@@ -558,6 +558,12 @@ function textareaField(name, label, value, hint = '') {
     ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
 }
 
+function checkField(name, label, value, hint = '') {
+  return `<div class="form-row"><label style="display:inline-block;margin-right:10px">${label}</label>
+    <label class="switch"><input type="checkbox" id="cfg-${name}" ${value ? 'checked' : ''}><span class="slider"></span></label>
+    ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
+}
+
 async function loadConfigPage() {
   try {
     globalConfigCache = await apiJSON('/api/config');
@@ -569,7 +575,16 @@ async function loadConfigPage() {
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
       formField('log_dir', '日志目录', globalConfigCache.log_dir) +
       formField('data_dir', '数据目录', globalConfigCache.data_dir) +
-      formField('plugins_dir', '插件目录', globalConfigCache.plugins_dir);
+      formField('plugins_dir', '插件目录', globalConfigCache.plugins_dir) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">💬 回复行为</div>' +
+      checkField('reply.stream', '流式请求', globalConfigCache.reply?.stream, '逐 token 接收,false 则等完整回复') +
+      checkField('reply.segment_reply', '分段回复', globalConfigCache.reply?.segment_reply, '按标点符号+长度切分为多条消息') +
+      checkField('reply.reply_quote', '引用触发消息', globalConfigCache.reply?.reply_quote, '首条回复引用用户的消息') +
+      formField('reply.segment_min_len', '分段最小长度', globalConfigCache.reply?.segment_min_len, { hint: '字符数,低于此长度不切分' }) +
+      formField('reply.segment_max_len', '分段硬上限', globalConfigCache.reply?.segment_max_len, { hint: '字符数,超过即使无标点也强制切' }) +
+      formField('reply.segment_delay_min', '分段延迟下限(秒)', globalConfigCache.reply?.segment_delay_min) +
+      formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max);
 
     const sel = document.getElementById('config-bot-select');
     sel.innerHTML = botListCache.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq})</option>`).join('');
@@ -601,12 +616,27 @@ async function saveGlobalConfig() {
   const g = document.getElementById('cfg-global-config') ? {} : {};
   const port = parseInt(document.getElementById('cfg-server.port').value) || 8081;
   const host = document.getElementById('cfg-server.host').value;
+  const num = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? def : v;
+  };
   const data = {
     server: { port, host },
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     log_dir: document.getElementById('cfg-log_dir').value,
     data_dir: document.getElementById('cfg-data_dir').value,
     plugins_dir: document.getElementById('cfg-plugins_dir').value,
+    reply: {
+      stream: document.getElementById('cfg-reply.stream')?.checked ?? true,
+      segment_reply: document.getElementById('cfg-reply.segment_reply')?.checked ?? true,
+      reply_quote: document.getElementById('cfg-reply.reply_quote')?.checked ?? true,
+      segment_min_len: num('cfg-reply.segment_min_len', 12),
+      segment_max_len: num('cfg-reply.segment_max_len', 60),
+      segment_delay_min: num('cfg-reply.segment_delay_min', 0.2),
+      segment_delay_max: num('cfg-reply.segment_delay_max', 0.5),
+    },
   };
   try {
     await apiJSON('/api/config', { method: 'PUT', body: { data } });

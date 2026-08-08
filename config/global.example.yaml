@@ -22,6 +22,16 @@ llm:
   vision_base_url: "http://127.0.0.1:36712/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 
+# ── 回复行为（系统级） ────────────────────────────────────────
+reply:
+  stream: true              # 是否使用流式请求（false = 等完整回复再发送）
+  segment_reply: true       # 是否分段回复（标点符号+长度分隔法）
+  segment_min_len: 12       # 分段最小长度（字符，低于此长度不切分）
+  segment_max_len: 60       # 分段硬上限（字符，超过即使无标点也强制切）
+  segment_delay_min: 0.2    # 分段发送随机延迟下限（秒）
+  segment_delay_max: 0.5    # 分段发送随机延迟上限（秒）
+  reply_quote: true         # 是否引用触发回复的那条消息
+
 web_panel:
   enabled: true
   host: "127.0.0.1"

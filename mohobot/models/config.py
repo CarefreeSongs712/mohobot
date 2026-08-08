@@ -52,12 +52,25 @@ class InterceptorConfig:
 
 
 @dataclass
+class ReplyConfig:
+    """LLM reply behavior (streaming / segmentation / delays)."""
+    stream: bool = True            # 是否使用流式请求
+    segment_reply: bool = True     # 是否分段回复(标点+长度分隔法)
+    segment_min_len: int = 12      # 分段最小长度(字符,低于此长度不切)
+    segment_max_len: int = 60      # 分段硬上限(字符,超过强制切)
+    segment_delay_min: float = 0.2  # 分段发送随机延迟下限(秒)
+    segment_delay_max: float = 0.5  # 分段发送随机延迟上限(秒)
+    reply_quote: bool = True       # 是否引用触发回复的那条消息
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
     interceptor: InterceptorConfig = field(default_factory=InterceptorConfig)
+    reply: ReplyConfig = field(default_factory=ReplyConfig)
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
@@ -78,6 +91,7 @@ class GlobalConfig:
         llm_raw = raw.get("llm", {})
         panel_raw = raw.get("web_panel", {})
         interceptor_raw = raw.get("interceptor", {})
+        reply_raw = raw.get("reply", {})
 
         return cls(
             server=ServerConfig(
@@ -104,6 +118,15 @@ class GlobalConfig:
             ),
             interceptor=InterceptorConfig(
                 keyword_file=interceptor_raw.get("keyword_file", "./data/keywords.json"),
+            ),
+            reply=ReplyConfig(
+                stream=reply_raw.get("stream", True),
+                segment_reply=reply_raw.get("segment_reply", True),
+                segment_min_len=reply_raw.get("segment_min_len", 12),
+                segment_max_len=reply_raw.get("segment_max_len", 60),
+                segment_delay_min=reply_raw.get("segment_delay_min", 0.2),
+                segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
+                reply_quote=reply_raw.get("reply_quote", True),
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -142,6 +165,15 @@ class GlobalConfig:
             "interceptor": {
                 "keyword_file": self.interceptor.keyword_file,
             },
+            "reply": {
+                "stream": self.reply.stream,
+                "segment_reply": self.reply.segment_reply,
+                "segment_min_len": self.reply.segment_min_len,
+                "segment_max_len": self.reply.segment_max_len,
+                "segment_delay_min": self.reply.segment_delay_min,
+                "segment_delay_max": self.reply.segment_delay_max,
+                "reply_quote": self.reply.reply_quote,
+            },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -178,6 +210,15 @@ class GlobalConfig:
             },
             "interceptor": {
                 "keyword_file": self.interceptor.keyword_file,
+            },
+            "reply": {
+                "stream": self.reply.stream,
+                "segment_reply": self.reply.segment_reply,
+                "segment_min_len": self.reply.segment_min_len,
+                "segment_max_len": self.reply.segment_max_len,
+                "segment_delay_min": self.reply.segment_delay_min,
+                "segment_delay_max": self.reply.segment_delay_max,
+                "reply_quote": self.reply.reply_quote,
             },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,

@@ -43,6 +43,7 @@ class MessageHandler:
         plugin_system,
         data_dir: str = "./data",
         context_max_rounds: int = 30,
+        reply_config=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -52,6 +53,18 @@ class MessageHandler:
         self._context_max_rounds = context_max_rounds
         self._interceptors: list = []  # Ordered list of interceptors
         self._writer_registry: dict[str, JSONLWriter] = {}
+
+        # Reply behavior from global config (stream/segment/delay/quote)
+        if reply_config is None:
+            from mohobot.models.config import ReplyConfig
+            reply_config = ReplyConfig()
+        self._segment_reply = reply_config.segment_reply
+        self._seg_min_len = reply_config.segment_min_len
+        self._seg_max_len = reply_config.segment_max_len
+        self._seg_delay_min = reply_config.segment_delay_min
+        self._seg_delay_max = reply_config.segment_delay_max
+        self._reply_quote = reply_config.reply_quote
+        self._stream = reply_config.stream
 
         # Image rate-limiting: track last image time per (bot_id, user_id)
         self._last_image_time: dict[str, float] = {}
@@ -240,30 +253,40 @@ class MessageHandler:
             nickname = event.sender.nickname or f"User-{event.user_id}"
         return f"{event.user_id}-{nickname}"
 
-    # ── Streaming reply with punctuation+length segmentation ──
+    # ── Reply behavior (config-driven) ────────────────────────
 
     # Strong break punctuation (sentence end). NOTE: single \n is NOT a break —
     # double newline (\n\n) is handled separately in _find_cut as a paragraph break.
     _PUNCT_STRONG = "。！？!?…"
     # Soft break punctuation (clause end)
     _PUNCT_SOFT = "；;，,、"
-    # Minimum chars before a segment may be flushed (below this, keep buffering)
-    _SEG_MIN_LEN = 12
-    # Hard cap: segment is force-flushed at this length even without punctuation
-    _SEG_MAX_LEN = 60
-    # Delay between consecutive segment messages (random seconds)
-    _SEND_DELAY_MIN = 0.2
-    _SEND_DELAY_MAX = 0.5
 
     async def _stream_llm_reply(self, bot_id, event, context, raw) -> str:
-        """Stream the LLM reply, sending punctuation+length segmented messages.
+        """Generate and send the LLM reply per the configured behavior.
 
-        - Segments are stripped of leading/trailing whitespace (empty ones skipped)
-        - Double newline (\n\n) forces a segment break
-        - First segment quotes the triggering message (reply segment)
-        - Consecutive segments are sent 0.2~0.5s apart (random)
+        - stream=True:    逐 token 流式接收
+        - stream=False:   一次性等待完整回复
+        - segment_reply:  按标点+长度切分为多条消息发送
+        - segment_delay:  分段之间的随机延迟区间
+        - reply_quote:    首条回复是否引用触发消息
         Returns the full assembled reply text (for context save).
         """
+        if not self._segment_reply:
+            # Non-segmented: collect everything, send as ONE message at the end
+            return await self._send_single_reply(bot_id, event, context, raw)
+
+        # Non-streaming path: single blocking call, then segment & send
+        if not self._stream:
+            reply_text, _ = await self._llm.chat(
+                bot_id=bot_id,
+                event=event,
+                context=context,
+                raw_event=raw,
+            )
+            full_reply = reply_text or ""
+            await self._send_full_text(bot_id, event, full_reply)
+            return full_reply
+
         buffer = ""
         full_reply = ""
         first_sent = False
@@ -298,6 +321,43 @@ class MessageHandler:
         )
         return full_reply
 
+    async def _send_single_reply(self, bot_id, event, context, raw) -> str:
+        """Non-segmented path: wait for full reply (streaming or not), send once.
+
+        With stream=True the chunks are still consumed incrementally (so the
+        LLM call isn't wasted) but only the final assembled text is sent.
+        """
+        full_reply = ""
+        async for chunk, _ in self._llm.chat_stream(
+            bot_id=bot_id,
+            event=event,
+            context=context,
+            raw_event=raw,
+        ):
+            if chunk:
+                full_reply += chunk
+
+        text = full_reply.strip()
+        if text:
+            if self._reply_quote:
+                message = [
+                    {"type": "reply", "data": {"id": str(event.message_id)}},
+                    {"type": "text", "data": {"text": text}},
+                ]
+            else:
+                message = text
+            await self._send_message(bot_id, event, message)
+        logger.debug(f"Single reply sent: {len(full_reply)} chars")
+        return full_reply
+
+    async def _send_full_text(self, bot_id, event, text: str) -> None:
+        """Segment a complete reply text and send with configured delays."""
+        first_sent = False
+        for seg in self._flush_ready_segments(text)["segments"]:
+            first_sent = await self._send_segment(bot_id, event, seg, first_sent)
+        if text.strip() and not first_sent:
+            await self._send_segment(bot_id, event, text, first_sent)
+
     async def _send_segment(self, bot_id, event, seg: str, first_sent: bool) -> bool:
         """Send one segmented message, stripped of whitespace.
 
@@ -308,15 +368,18 @@ class MessageHandler:
             return first_sent  # Empty after strip — skip
 
         if first_sent:
-            # 0.2~0.5s delay between consecutive messages
-            await asyncio.sleep(random.uniform(self._SEND_DELAY_MIN, self._SEND_DELAY_MAX))
+            # Random delay between consecutive messages (config-driven)
+            await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
             message: str | list[dict] = seg
         else:
-            # First segment quotes the user's message
-            message = [
-                {"type": "reply", "data": {"id": str(event.message_id)}},
-                {"type": "text", "data": {"text": seg}},
-            ]
+            if self._reply_quote:
+                # First segment quotes the user's message
+                message = [
+                    {"type": "reply", "data": {"id": str(event.message_id)}},
+                    {"type": "text", "data": {"text": seg}},
+                ]
+            else:
+                message = seg
             first_sent = True
 
         await self._send_message(bot_id, event, message)
@@ -342,18 +405,18 @@ class MessageHandler:
                 continue
 
             # 2. Hard cap reached — cut at last punctuation within cap, else force
-            if len(buffer) >= self._SEG_MAX_LEN:
-                cut = self._find_cut(buffer[: self._SEG_MAX_LEN])
+            if len(buffer) >= self._seg_max_len:
+                cut = self._find_cut(buffer[: self._seg_max_len])
                 if cut is None:
-                    cut = self._SEG_MAX_LEN
+                    cut = self._seg_max_len
                 segments.append(buffer[:cut])
                 buffer = buffer[cut:]
                 continue
 
             # 3. Min length + punctuation break
-            if len(buffer) >= self._SEG_MIN_LEN:
+            if len(buffer) >= self._seg_min_len:
                 cut = self._find_cut(buffer)
-                if cut is not None and cut >= self._SEG_MIN_LEN:
+                if cut is not None and cut >= self._seg_min_len:
                     segments.append(buffer[:cut])
                     buffer = buffer[cut:]
                     continue

@@ -263,6 +263,10 @@ class WebPanel:
                 for k, v in data["interceptor"].items():
                     if hasattr(cfg.interceptor, k):
                         setattr(cfg.interceptor, k, v)
+            if "reply" in data:
+                for k, v in data["reply"].items():
+                    if hasattr(cfg.reply, k):
+                        setattr(cfg.reply, k, v)
             for key in ("log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])

@@ -95,6 +95,7 @@ class MohobotApplication:
             plugin_system=self._plugin_system,
             data_dir=self._config.data_dir,
             context_max_rounds=self._config.context_max_rounds,
+            reply_config=self._config.reply,
         )
 
         # 6. Set up interceptors
