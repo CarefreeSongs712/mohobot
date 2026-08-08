@@ -45,12 +45,14 @@ class CharacterSubconscious:
         llm_modules: dict[str, Any],
         character_id: str = "bot",
         character_name: str = "",
+        anysearch_client=None,
     ):
         self.config = config
         self.database_manager = database_manager
         self.character_id = character_id
         self.character_name = character_name or character_id
         self.logger = logger.bind(agent=f"{character_id}Subconscious")
+        self.anysearch = anysearch_client  # 实时联网搜索(可选)
 
         self.memory = memory
         self.state = SubconsciousState(owner_character_id=character_id)
@@ -92,11 +94,32 @@ class CharacterSubconscious:
         )
 
     async def search_fact_constraints_for_topic(self, fact_constraints: List[str]) -> List[str]:
-        """事实约束检索。无歌曲知识库时返回空列表(特殊命令被忽略)。"""
-        if not fact_constraints:
+        """事实约束检索: 通过 Anysearch 实时联网搜索外部信息。
+
+        fact_constraints 由话题提取器产出(需实时信息的问题);
+        每话题最多搜 2 个查询, 结果注入回复提示词。
+        未配置 key / 搜索失败 → 返回空列表(降级, 不阻断回复)。
+        """
+        if not fact_constraints or self.anysearch is None:
             return []
-        # 简化: mohobot 无歌曲知识库,返回空
-        return []
+
+        queries = [q.strip() for q in fact_constraints if q and q.strip()][:2]
+        if not queries:
+            return []
+
+        import asyncio
+
+        results = await asyncio.gather(
+            *[self.anysearch.safe_search(q, max_results=5) for q in queries],
+            return_exceptions=True,
+        )
+        hits: List[str] = []
+        for q, r in zip(queries, results):
+            if isinstance(r, str) and r.strip():
+                hits.append(f"[搜索: {q}]\n{r[:2000]}")
+            else:
+                self.logger.debug(f"Fact search no result for: {q}")
+        return hits
 
     async def search_memory_context_for_topic(
         self,

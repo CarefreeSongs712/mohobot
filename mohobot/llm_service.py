@@ -94,7 +94,37 @@ class LLMService:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "anysearch_search",
+                    "description": "实时联网搜索获取最新外部信息(新闻、百科、价格、事件等)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "搜索查询, 简洁明确",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
         ]
+
+        # Anysearch 实时联网搜索(未配置 key 时工具自动移除)
+        from mohobot.anysearch import AnySearchClient
+        self._anysearch_client: AnySearchClient | None = None
+        if self._cfg.anysearch.enabled and self._cfg.anysearch.api_key:
+            self._anysearch_client = AnySearchClient(
+                api_key=self._cfg.anysearch.api_key,
+                base_url=self._cfg.anysearch.base_url,
+                timeout=self._cfg.anysearch.timeout,
+            )
+        else:
+            self._tools_schemas = [t for t in self._tools_schemas
+                                   if t["function"]["name"] != "anysearch_search"]
 
     async def chat(
         self,
@@ -534,6 +564,16 @@ class LLMService:
         elif func_name == "get_group_member_info":
             # This would need a bot connection to call the API
             return json.dumps({"error": "不在 WebSocket 连接中无法获取成员信息"}, ensure_ascii=False)
+        elif func_name == "anysearch_search":
+            if self._anysearch_client is None:
+                return json.dumps({"error": "Anysearch 未配置 API Key"}, ensure_ascii=False)
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return json.dumps({"error": "搜索查询不能为空"}, ensure_ascii=False)
+            try:
+                return await self._anysearch_client.safe_search(query, max_results=5)
+            except Exception as e:
+                return json.dumps({"error": f"搜索失败: {e}"}, ensure_ascii=False)
         else:
             return json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
 

@@ -103,6 +103,15 @@ class AgentConfig:
 
 
 @dataclass
+class AnySearchConfig:
+    """Anysearch 实时联网搜索配置。api_key 为空时搜索自动降级为空结果。"""
+    enabled: bool = True
+    api_key: str = ""
+    base_url: str = "https://api.anysearch.com/mcp"
+    timeout: int = 30
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     beta_mode: bool = True     # true = Agent 流水线(beta 模式); false = 旧版直接流式回复(数据库保留)
@@ -113,6 +122,7 @@ class GlobalConfig:
     reply: ReplyConfig = field(default_factory=ReplyConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
@@ -136,6 +146,7 @@ class GlobalConfig:
         reply_raw = raw.get("reply", {})
         db_raw = raw.get("database", {})
         agent_raw = raw.get("agent", {})
+        anysearch_raw = raw.get("anysearch", {})
 
         return cls(
             beta_mode=raw.get("beta_mode", True),
@@ -188,6 +199,12 @@ class GlobalConfig:
                 topic_replier=agent_raw.get("topic_replier", {}) or {},
                 reflection_worker=agent_raw.get("reflection_worker", {}) or {},
                 reflex=agent_raw.get("reflex", {}) or {},
+            ),
+            anysearch=AnySearchConfig(
+                enabled=anysearch_raw.get("enabled", True),
+                api_key=anysearch_raw.get("api_key", ""),
+                base_url=anysearch_raw.get("base_url", "https://api.anysearch.com/mcp"),
+                timeout=int(anysearch_raw.get("timeout", 30)),
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -242,6 +259,12 @@ class GlobalConfig:
                 "file": self.database.file,
             },
             "agent": self.agent.to_config_dict(),
+            "anysearch": {
+                "enabled": self.anysearch.enabled,
+                "api_key": self.anysearch.api_key,
+                "base_url": self.anysearch.base_url,
+                "timeout": self.anysearch.timeout,
+            },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -295,6 +318,12 @@ class GlobalConfig:
                 "file": self.database.file,
             },
             "agent": self.agent.to_config_dict(),
+            "anysearch": {
+                "enabled": self.anysearch.enabled,
+                "api_key": self.anysearch.api_key,
+                "base_url": self.anysearch.base_url,
+                "timeout": self.anysearch.timeout,
+            },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,

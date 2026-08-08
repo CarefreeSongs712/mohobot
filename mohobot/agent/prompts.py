@@ -17,7 +17,7 @@ TOPIC_EXTRACTION_PROMPT = """你需要从用户的消息中提取出可以用于
 - source_message_ids: list[int]，构成这个话题的消息的ID列表，即“可以用于回复的消息内容”前面的编号。没被选中的消息将在后续的话题提取中继续被考虑。
 - topic_content: str：对这个话题的概述，要求简洁明了，能够反映这个话题的核心内容
 - topic_type: str：话题类型，它可以是以下几种之一：chat（完整话题），incomplete（不完整话题）
-- fact_constraints: list[str]，对于完整话题，如果需要歌曲介绍或歌词，将歌名作为一个约束条件加入这个列表。除此之外为空，或者省略此字段。
+- fact_constraints: list[str]，对于完整话题，如果回复需要最新的实时信息（新闻、百科知识、价格、事件、人物资料等，或用户明确要求查询某事实），在这里放入需要联网搜索的具体查询问题，每个问题单独一条、简洁明确。如果不需要外部信息则为空，或者省略此字段。
 - memory_attempts: list[str]，对于完整话题，在这里放入你认为回复时需要回忆的记忆，记忆仅包括之前的对话内容和用户的个人信息。每个检索表述简单，一句话多个对象时，每个对象单独写一个。如果没有需要回忆的内容则为空。
 - sing_attempts: list[str]，对于完整话题，如果用户明确指出要听某首歌，则将歌名加入列表，否则为空。如果用户只是想听歌，则将'random_song'加入列表。
 示例如下：{"source_message_ids": [1, 2], "topic_content": "用户想了解机器人最近的情况", "topic_type": "chat", "fact_constraints": [], "memory_attempts": [], "sing_attempts": []}

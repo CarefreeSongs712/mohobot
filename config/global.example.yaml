@@ -9,6 +9,14 @@
 # false = 旧版直接流式回复(main 分支逻辑; 数据库保留, 需重启生效)
 beta_mode: true
 
+# ── Anysearch 实时联网搜索 ─────────────────────────────────────
+# 供 Bot 在回答中获取实时外部信息(自动搜索注入 + /搜索 命令 + 旧路径工具)
+anysearch:
+  enabled: true
+  api_key: ""                          # 必填: Anysearch API Key, 留空则搜索功能禁用
+  base_url: "https://api.anysearch.com/mcp"
+  timeout: 30                          # 单次请求超时(秒)
+
 server:
   host: "0.0.0.0"
   port: 8081

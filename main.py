@@ -80,6 +80,16 @@ class MohobotApplication:
         # 4. Load plugins
         # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
         self._plugin_system.set_runtime_refs(bot_manager=self._bot_manager)
+        # Anysearch 实时联网搜索客户端(供插件与流水线使用)
+        from mohobot.anysearch import AnySearchClient
+        self._anysearch_client: AnySearchClient | None = None
+        if self._config.anysearch.enabled and self._config.anysearch.api_key:
+            self._anysearch_client = AnySearchClient(
+                api_key=self._config.anysearch.api_key,
+                base_url=self._config.anysearch.base_url,
+                timeout=self._config.anysearch.timeout,
+            )
+            self._plugin_system.set_runtime_refs(anysearch_client=self._anysearch_client)
         plugin_count = await self._plugin_system.load_plugins()
         logger.info(f"Loaded {plugin_count} plugin(s)")
 

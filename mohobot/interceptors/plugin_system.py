@@ -43,18 +43,21 @@ class PluginSystem(Interceptor):
         # 运行时注入引用(热重载后重新注入)
         self._ws_server = None
         self._bot_manager = None
+        self._anysearch_client = None
 
     # ── 运行时注入(热重载后自动重新注入) ────────────────────
 
-    def set_runtime_refs(self, ws_server=None, bot_manager=None) -> None:
+    def set_runtime_refs(self, ws_server=None, bot_manager=None, anysearch_client=None) -> None:
         """保存运行时引用, 供 load/reload 后注入插件。"""
         if ws_server is not None:
             self._ws_server = ws_server
         if bot_manager is not None:
             self._bot_manager = bot_manager
+        if anysearch_client is not None:
+            self._anysearch_client = anysearch_client
 
     def apply_injections(self) -> None:
-        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir)。
+        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir / anysearch)。
 
         通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
         """
@@ -73,6 +76,10 @@ class PluginSystem(Interceptor):
             injector = getattr(inst.__class__, "inject_data_dir", None)
             if injector:
                 injector(str(self._data_dir))
+            if self._anysearch_client is not None:
+                injector = getattr(inst.__class__, "inject_anysearch_client", None)
+                if injector:
+                    injector(self._anysearch_client)
 
     async def load_plugins(self) -> int:
         """Scan plugins directory and load all enabled plugins."""

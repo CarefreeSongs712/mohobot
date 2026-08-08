@@ -311,6 +311,7 @@ class BotAgentRuntime:
             llm_modules=self.llm_modules,
             character_id=bot_id,
             character_name=self.character_name,
+            anysearch_client=self._build_anysearch_client(),
         )
 
         # 意识层
@@ -373,6 +374,19 @@ class BotAgentRuntime:
                 self.logger.warning(f"LLM module '{name}' NOT available (missing config)")
 
         return modules
+
+    def _build_anysearch_client(self):
+        """按全局配置构建 Anysearch 搜索客户端(未配置 key 时返回 None)。"""
+        from mohobot.anysearch import AnySearchClient
+
+        cfg = self.config.get("anysearch", {}) if isinstance(self.config, dict) else {}
+        if not cfg.get("enabled", True) or not cfg.get("api_key"):
+            return None
+        return AnySearchClient(
+            api_key=cfg.get("api_key", ""),
+            base_url=cfg.get("base_url", ""),
+            timeout=int(cfg.get("timeout", 30)),
+        )
 
     # ── 会话管理 ──────────────────────────────────────────────
 
