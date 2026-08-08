@@ -85,13 +85,13 @@ agent:
   memory:
     user_memory_dedup_threshold: 0.72
     vector_store:
-      enabled: false          # 未安装 chromadb 时自动降级为无向量库模式
+      enabled: true            # 未安装 chromadb 或未配 key 时自动降级为无向量库模式
       provider: chroma
       persist_dir: "./data/database/chroma"
       collection_name: "mohobot_memories"
-      embedding_model: "BAAI/bge-large-zh-v1.5"
-      embedding_base_url: ""  # SiliconFlow 等 OpenAI 兼容 embedding 端点
-      embedding_api_key: ""
+      embedding_model: "BAAI/bge-m3"   # 示例: 硅基流动 BAAI/bge-m3 (1024 维)
+      embedding_base_url: "https://api.siliconflow.cn/v1"
+      embedding_api_key: ""    # 必填: 填入硅基流动 API Key 后启用向量检索
   main_chat:
     max_output_lines: 12
   topic_planner:

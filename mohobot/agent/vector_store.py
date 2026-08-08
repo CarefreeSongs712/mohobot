@@ -197,7 +197,14 @@ class ChromaVectorStore(VectorStore):
 
 
 class _OpenAICompatEmbedding:
-    """OpenAI 兼容 embedding 函数(Chroma EmbeddingFunction 接口)。"""
+    """OpenAI 兼容 embedding 函数(Chroma EmbeddingFunction 接口)。
+
+    chromadb >= 1.5 要求实现 name() 方法(创建 collection 时会被调用),
+    否则 get_or_create_collection 会校验失败。
+    """
+
+    def name(self) -> str:
+        return "openai_compat"
 
     def __init__(self, model: str, base_url: str, api_key: str):
         import chromadb.utils.embedding_functions as ef
