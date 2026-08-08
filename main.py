@@ -15,8 +15,10 @@ from pathlib import Path
 from loguru import logger
 
 from mohobot import __version__
+from mohobot.agent.runtime import BotAgentManager
 from mohobot.bot_manager import BotManager
 from mohobot.context_manager import ContextManager
+from mohobot.db.database_manager import DatabaseManager
 from mohobot.file_store import ensure_dir
 from mohobot.image_cache import ImageCache
 from mohobot.interceptors.command_handler import CommandHandler
@@ -44,6 +46,8 @@ class MohobotApplication:
         self._message_handler: MessageHandler | None = None
         self._plugin_system: PluginSystem | None = None
         self._web_panel: WebPanel | None = None
+        self._database_manager: DatabaseManager | None = None
+        self._agent_manager: BotAgentManager | None = None
         self._running = False
 
     async def startup(self) -> None:
@@ -63,6 +67,8 @@ class MohobotApplication:
 
         # 3. Initialize core services
         self._bot_manager = BotManager(data_dir=self._config.data_dir)
+        # 旧格式迁移: data/bots/{qq} (无 bot_id) → 自动编号 bot_id 目录
+        self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._llm_service = LLMService(global_config=self._config)
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
@@ -72,22 +78,33 @@ class MohobotApplication:
         )
 
         # 4. Load plugins
+        # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
+        self._plugin_system.set_runtime_refs(bot_manager=self._bot_manager)
         plugin_count = await self._plugin_system.load_plugins()
-
-        # Inject bot manager into plugins that need it (e.g. status plugin).
-        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
-        # because re-importing the plugin module would create a second
-        # module object whose globals the loaded instance doesn't see.
-        for meta in self._plugin_system._plugins:
-            inst = meta.get("instance")
-            if inst is not None:
-                injector = getattr(inst.__class__, "inject_bot_manager", None)
-                if injector:
-                    injector(self._bot_manager)
-                    logger.debug(f"Injected bot_manager into plugin {meta['name']}")
-
         logger.info(f"Loaded {plugin_count} plugin(s)")
-        # 5. Initialize message handler
+
+        # 5. Database + Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
+        #    beta_mode=false: 保留数据库(面板备份/数据管理可用), 回复走旧版路径
+        if self._config.database.enabled:
+            db_folder = self._config.database.folder
+            if db_folder.startswith("./"):
+                db_folder = str(Path(db_folder).resolve())
+            self._database_manager = DatabaseManager(
+                db_folder=db_folder,
+                db_file=self._config.database.file,
+            )
+            if self._config.beta_mode and self._config.agent.enabled:
+                self._agent_manager = BotAgentManager(
+                    self._config.to_dict(),
+                    self._database_manager,
+                )
+                logger.info("Beta mode enabled — agent 流水线 per-bot runtimes")
+            else:
+                logger.info(
+                    "Beta mode disabled (or agent disabled) — using legacy LLM reply path"
+                )
+
+        # 6. Initialize message handler
         self._message_handler = MessageHandler(
             ws_server=None,  # Will be set after WS server creation
             context_manager=self._context_manager,
@@ -96,9 +113,12 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
             context_max_rounds=self._config.context_max_rounds,
             reply_config=self._config.reply,
+            agent_manager=self._agent_manager,
+            database_manager=self._database_manager,
+            image_cache=self._image_cache,
         )
 
-        # 6. Set up interceptors
+        # 7. Set up interceptors
         command_handler = CommandHandler(
             context_manager=self._context_manager,
             llm_service=self._llm_service,
@@ -109,7 +129,7 @@ class MohobotApplication:
         interceptors = [command_handler, keyword_filter, self._plugin_system]
         self._message_handler.set_interceptors(interceptors)
 
-        # 7. Initialize WebSocket server
+        # 8. Initialize WebSocket server
         self._ws_server = WSServer(
             bot_manager=self._bot_manager,
             host=self._config.server.host,
@@ -121,25 +141,17 @@ class MohobotApplication:
         self._message_handler._ws = self._ws_server
         command_handler._ws = self._ws_server
 
-        # Inject WS server into plugins that need it (e.g. praise plugin).
-        # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
-        # because re-importing the plugin module would create a second
-        # module object whose globals the loaded instance doesn't see.
-        for meta in self._plugin_system._plugins:
-            inst = meta.get("instance")
-            if inst is not None:
-                injector = getattr(inst.__class__, "inject_ws_server", None)
-                if injector:
-                    injector(self._ws_server)
-                    logger.debug(f"Injected ws_server into plugin {meta['name']}")
+        # 注入 WS server 到插件(热重载后由 PluginSystem 自动重新注入)
+        self._plugin_system.set_runtime_refs(ws_server=self._ws_server)
+        self._plugin_system.apply_injections()
 
         # Set event callback from WS server to message handler
         self._ws_server.set_event_callback(self._message_handler.handle_event)
 
-        # 8. Start servers
+        # 9. Start servers
         await self._ws_server.start()
 
-        # 9. Start web panel
+        # 10. Start web panel
         if self._config.web_panel.enabled:
             self._web_panel = WebPanel(
                 host=self._config.web_panel.host,
@@ -155,7 +167,7 @@ class MohobotApplication:
                 restart_callback=self.restart,
             )
             # Start web panel in background
-            asyncio.create_task(self._run_web_panel())
+            self._web_panel_task = asyncio.create_task(self._run_web_panel())
 
         self._running = True
         logger.info(
@@ -183,9 +195,26 @@ class MohobotApplication:
         logger.info("Shutting down Mohobot...")
         self._running = False
 
-        # Stop web panel
+        # Stop web panel (await its server task so the port is freed
+        # before a restart rebinds it — otherwise "Address already in use")
         if self._web_panel:
             await self._web_panel.stop()
+        web_panel_task = getattr(self, "_web_panel_task", None)
+        if web_panel_task is not None:
+            try:
+                await asyncio.wait_for(web_panel_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                # uvicorn 卡住(如 lifespan 未响应) — 取消任务,防端口占用
+                logger.warning("Web panel task did not exit in time, cancelling")
+                web_panel_task.cancel()
+                try:
+                    await web_panel_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._web_panel_task = None
+            self._web_panel = None
 
         # Stop WS server
         if self._ws_server:
@@ -202,6 +231,10 @@ class MohobotApplication:
         # Close file writers
         if self._message_handler:
             await self._message_handler.close()
+
+        # Stop agent runtimes
+        if self._agent_manager:
+            await self._agent_manager.stop_all()
 
         logger.info("Mohobot shutdown complete.")
 

@@ -64,13 +64,55 @@ class ReplyConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """数据库配置 — 与 Agent-LuoTianyi 共享同一个 SQLite 数据库文件。"""
+    enabled: bool = True
+    folder: str = "./data/database"
+    file: str = "luotianyi.db"
+
+
+@dataclass
+class AgentConfig:
+    """Agent 子系统配置(移植自 Agent-LuoTianyi,按 bot 隔离)。"""
+    enabled: bool = True
+    persona: dict = field(default_factory=dict)        # character_name / character_persona / speaking_style
+    llm_modules: dict = field(default_factory=dict)    # main_chat / topic_extractor / memory_writer / user_profile_updater
+    memory: dict = field(default_factory=dict)         # vector_store / dedup 阈值等
+    main_chat: dict = field(default_factory=dict)
+    topic_planner: dict = field(default_factory=dict)  # listen_timer / unread_store
+    topic_replier: dict = field(default_factory=dict)
+    reflection_worker: dict = field(default_factory=dict)
+    reflex: dict = field(default_factory=dict)
+
+    def to_config_dict(self) -> dict:
+        """转成 agent 模块读取的嵌套 dict(供 runtime 使用)。
+
+        注意: 必须包含 enabled,否则 save() 写入 yaml 后会丢开关。
+        """
+        return {
+            "enabled": self.enabled,
+            "persona": self.persona or {},
+            "llm_modules": self.llm_modules or {},
+            "memory": self.memory or {},
+            "main_chat": self.main_chat or {},
+            "topic_planner": self.topic_planner or {},
+            "topic_replier": self.topic_replier or {},
+            "reflection_worker": self.reflection_worker or {},
+            "reflex": self.reflex or {},
+        }
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
+    beta_mode: bool = True     # true = Agent 流水线(beta 模式); false = 旧版直接流式回复(数据库保留)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
     interceptor: InterceptorConfig = field(default_factory=InterceptorConfig)
     reply: ReplyConfig = field(default_factory=ReplyConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
@@ -92,8 +134,11 @@ class GlobalConfig:
         panel_raw = raw.get("web_panel", {})
         interceptor_raw = raw.get("interceptor", {})
         reply_raw = raw.get("reply", {})
+        db_raw = raw.get("database", {})
+        agent_raw = raw.get("agent", {})
 
         return cls(
+            beta_mode=raw.get("beta_mode", True),
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8080),
@@ -128,6 +173,22 @@ class GlobalConfig:
                 segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
                 reply_quote=reply_raw.get("reply_quote", True),
             ),
+            database=DatabaseConfig(
+                enabled=db_raw.get("enabled", True),
+                folder=db_raw.get("folder", "./data/database"),
+                file=db_raw.get("file", "luotianyi.db"),
+            ),
+            agent=AgentConfig(
+                enabled=agent_raw.get("enabled", True),
+                persona=agent_raw.get("persona", {}) or {},
+                llm_modules=agent_raw.get("llm_modules", {}) or {},
+                memory=agent_raw.get("memory", {}) or {},
+                main_chat=agent_raw.get("main_chat", {}) or {},
+                topic_planner=agent_raw.get("topic_planner", {}) or {},
+                topic_replier=agent_raw.get("topic_replier", {}) or {},
+                reflection_worker=agent_raw.get("reflection_worker", {}) or {},
+                reflex=agent_raw.get("reflex", {}) or {},
+            ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
@@ -140,6 +201,7 @@ class GlobalConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         raw = {
+            "beta_mode": self.beta_mode,
             "server": {
                 "host": self.server.host,
                 "port": self.server.port,
@@ -174,6 +236,12 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
             },
+            "database": {
+                "enabled": self.database.enabled,
+                "folder": self.database.folder,
+                "file": self.database.file,
+            },
+            "agent": self.agent.to_config_dict(),
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -186,6 +254,7 @@ class GlobalConfig:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to nested dict (for web panel editing)."""
         return {
+            "beta_mode": self.beta_mode,
             "server": {
                 "host": self.server.host,
                 "port": self.server.port,
@@ -220,6 +289,12 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
             },
+            "database": {
+                "enabled": self.database.enabled,
+                "folder": self.database.folder,
+                "file": self.database.file,
+            },
+            "agent": self.agent.to_config_dict(),
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -231,8 +306,14 @@ class GlobalConfig:
 
 @dataclass
 class BotConfig:
-    """Per-bot configuration, stored in data/bots/{bot_id}/config.json."""
-    qq: int = 0
+    """Per-bot configuration, stored in data/bots/{bot_id}/config.json.
+
+    bot_id 与 QQ 分离: bot_id 为内部标识(自动编号 bot_001...),
+    qq 为绑定的 QQ 号(0 = 未绑定, 一个 bot 只能绑定一个 QQ,
+    QQ 唯一绑定 —— 一个 QQ 只能被一个 bot 绑定)。
+    """
+    bot_id: str = ""  # 内部标识(自动编号), 决定数据目录名
+    qq: int = 0       # 绑定的 QQ 号 (0 = 未绑定)
     nickname: str = ""
     persona: str = "你是 Mohobot，一个有用的 AI 助手。"  # System prompt
     enabled: bool = True
@@ -257,6 +338,7 @@ class BotConfig:
             raw = json.load(f)
 
         return cls(
+            bot_id=raw.get("bot_id", ""),
             qq=raw.get("qq", 0),
             nickname=raw.get("nickname", ""),
             persona=raw.get("persona", "你是 Mohobot，一个有用的 AI 助手。"),
@@ -279,6 +361,7 @@ class BotConfig:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for web panel editing)."""
         return {
+            "bot_id": self.bot_id,
             "qq": self.qq,
             "nickname": self.nickname,
             "persona": self.persona,

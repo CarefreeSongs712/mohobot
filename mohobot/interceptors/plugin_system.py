@@ -40,6 +40,39 @@ class PluginSystem(Interceptor):
         self._plugins: list[dict[str, Any]] = []  # Plugin metadata + instance
         # {plugin_name: {"enabled": bool, "file": str, "loaded": bool, "info": {...}}}
         self._state_file = self._data_dir / "plugins_state.json"
+        # 运行时注入引用(热重载后重新注入)
+        self._ws_server = None
+        self._bot_manager = None
+
+    # ── 运行时注入(热重载后自动重新注入) ────────────────────
+
+    def set_runtime_refs(self, ws_server=None, bot_manager=None) -> None:
+        """保存运行时引用, 供 load/reload 后注入插件。"""
+        if ws_server is not None:
+            self._ws_server = ws_server
+        if bot_manager is not None:
+            self._bot_manager = bot_manager
+
+    def apply_injections(self) -> None:
+        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir)。
+
+        通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
+        """
+        for meta in self._plugins:
+            inst = meta.get("instance")
+            if inst is None:
+                continue
+            if self._ws_server is not None:
+                injector = getattr(inst.__class__, "inject_ws_server", None)
+                if injector:
+                    injector(self._ws_server)
+            if self._bot_manager is not None:
+                injector = getattr(inst.__class__, "inject_bot_manager", None)
+                if injector:
+                    injector(self._bot_manager)
+            injector = getattr(inst.__class__, "inject_data_dir", None)
+            if injector:
+                injector(str(self._data_dir))
 
     async def load_plugins(self) -> int:
         """Scan plugins directory and load all enabled plugins."""
@@ -126,6 +159,19 @@ class PluginSystem(Interceptor):
                 logger.error(f"Failed to load plugin {entry.name}: {e}")
 
         logger.info(f"Plugin system loaded {count} plugin(s)")
+        # 加载完成后注入运行时引用(热重载也走这里)
+        self.apply_injections()
+        return count
+
+    async def reload_plugins(self) -> int:
+        """热重载: 重新扫描 plugins/ 目录并加载全部插件。
+
+        新增/修改/删除插件文件、启停状态均立即生效, 无需重启。
+        """
+        logger.info("Hot-reloading plugins...")
+        self._plugins.clear()
+        count = await self.load_plugins()
+        logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
         return count
 
     # ── Plugin State (enable/disable) ─────────────────────────
@@ -150,19 +196,29 @@ class PluginSystem(Interceptor):
         except Exception as e:
             logger.error(f"Failed to save plugin state: {e}")
 
-    def set_enabled(self, name: str, enabled: bool) -> bool:
-        """Enable/disable a plugin (persisted; takes effect after reload)."""
+    async def set_enabled(self, name: str, enabled: bool) -> bool:
+        """启用/禁用插件, 立即生效(无需重启)。"""
         state = self._load_state()
         state[name] = {"enabled": enabled}
         self._save_state(state)
 
+        found = False
         for meta in self._plugins:
             if meta["name"] == name:
                 meta["enabled"] = enabled
-                logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (restart to apply)")
-                return True
-        # Plugin not loaded (or not yet scanned) — still persist for next load
-        logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (will apply on restart)")
+                found = True
+                break
+        if not found:
+            # 未扫描到(如新文件) — 全量重载以纳入
+            await self.reload_plugins()
+            return True
+        if enabled:
+            # 热启用: 若该插件此前加载失败或未加载, 重新加载它
+            meta = next((m for m in self._plugins if m["name"] == name), None)
+            if meta is not None and not meta.get("loaded"):
+                logger.info(f"Plugin {name} 热启用: 重新加载")
+                await self.reload_plugins()
+        logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (热生效)")
         return True
 
     def list_plugins(self) -> list[dict[str, Any]]:

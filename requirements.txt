@@ -26,10 +26,14 @@ loguru>=0.7.0
 
 # Image Processing
 Pillow>=10.0.0
-# imagehash>=4.3.0  # Not on all mirrors; phash is soft-fallback
+imagehash>=4.3.0  # 图片 phash 去重(ImageCache)
 
 # CQ Code parsing (regex)
 # (stdlib only)
+
+# Vector store (agent memory recall; degrades gracefully if missing)
+# 注意: 部分镜像(如清华)无此包, 可用阿里云: pip install chromadb -i https://mirrors.aliyun.com/pypi/simple/
+chromadb>=1.5.0
 
 # System stats (optional — provides detailed /status output)
 psutil>=5.9.0

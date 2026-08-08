@@ -10,6 +10,7 @@
   --bg-panel: #171a21;
   --bg-card: #1e222b;
   --bg-input: #14171d;
+  --bg2: #14171d;
   --border: #2a2f3a;
   --text: #d7dce4;
   --text-dim: #8b93a3;
@@ -111,6 +112,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 .btn.danger { background: transparent; color: var(--red); border: 1px solid var(--border); }
 .btn.danger:hover { background: rgba(248,81,73,.1); }
 .btn.small { padding: 5px 12px; font-size: 12px; }
+.btn.btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 /* ── Toggle switch ── */
 .switch { position: relative; width: 40px; height: 22px; display: inline-block; }
@@ -267,8 +269,13 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
           <label>选择 Bot</label>
           <select id="config-bot-select" onchange="loadBotConfig()"></select>
         </div>
+        <div class="form-row">
+          <button class="btn" onclick="createBotPrompt()" style="margin-right:8px">➕ 创建 Bot</button>
+          <button class="btn" onclick="bindBotPrompt()">🔗 绑定 QQ</button>
+        </div>
         <div id="config-bot-form"></div>
         <button class="btn" onclick="saveBotConfig()">保存 Bot 配置</button>
+        <div id="unbound-list" style="margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -293,8 +300,11 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   <!-- 4. Plugins -->
   <div class="page" id="page-plugins">
     <h2>🧩 插件管理</h2>
-    <div class="subtitle">启用 / 禁用插件（重启后生效）</div>
+    <div class="subtitle">启用 / 禁用 / 热重载插件（无需重启）</div>
     <div class="card">
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="reloadPlugins()">🔄 重新加载插件</button>
+      </div>
       <table>
         <thead><tr><th>插件</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
         <tbody id="plugins-table-body"></tbody>
@@ -326,6 +336,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       <span style="flex:1"></span>
       <button class="btn secondary small" onclick="clearLogs()">清空</button>
       <button class="btn secondary small" onclick="toggleLogPause()" id="log-pause-btn">暂停</button>
+      <button class="btn secondary small" onclick="toggleLogAutoScroll()" id="log-scroll-btn" style="background:var(--accent);color:#fff">⤓ 自动滚动</button>
     </div>
     <div class="log-container" id="log-container"></div>
   </div>
@@ -354,6 +365,17 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         </div>
       </div>
     </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">🗄️ 数据管理（备份 / 恢复 / 清理）</div>
+      <div id="data-scope-form"></div>
+      <div class="form-row" style="margin-top:8px">
+        <button class="btn" onclick="backupData()">💾 备份下载</button>
+        <button class="btn secondary" onclick="document.getElementById('restore-file').click()">📥 选择备份文件</button>
+        <input type="file" id="restore-file" accept=".zip" style="display:none" onchange="restoreData()">
+        <button class="btn danger" onclick="cleanupData()">🗑️ 清理数据</button>
+      </div>
+      <div class="hint">恢复/清理为危险操作，需要再次输入管理员密码。备份范围为 zip 打包下载。</div>
+    </div>
   </div>
 
 </main>
@@ -370,7 +392,8 @@ let logPaused = false;
 async function api(path, options = {}) {
   const headers = options.headers || {};
   headers['Authorization'] = 'Bearer ' + token;
-  if (options.body && typeof options.body === 'object') {
+  // raw=true 时 body 原样发送(如 FormData), 不设 Content-Type
+  if (options.body && typeof options.body === 'object' && !options.raw) {
     headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(options.body);
   }
@@ -570,6 +593,7 @@ async function loadConfigPage() {
     botListCache = await apiJSON('/api/bots');
 
     document.getElementById('config-global-form').innerHTML =
+      checkField('beta_mode', 'Beta 模式(Agent 流水线)', globalConfigCache.beta_mode, '开启=话题规划/记忆/反思流水线; 关闭=旧版直接流式回复(需重启生效)') +
       formField('server.port', 'WebSocket 端口', globalConfigCache.server?.port, { hint: 'OneBot 客户端连接的端口' }) +
       formField('server.host', '监听地址', globalConfigCache.server?.host) +
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
@@ -584,13 +608,78 @@ async function loadConfigPage() {
       formField('reply.segment_min_len', '分段最小长度', globalConfigCache.reply?.segment_min_len, { hint: '字符数,低于此长度不切分' }) +
       formField('reply.segment_max_len', '分段硬上限', globalConfigCache.reply?.segment_max_len, { hint: '字符数,超过即使无标点也强制切' }) +
       formField('reply.segment_delay_min', '分段延迟下限(秒)', globalConfigCache.reply?.segment_delay_min) +
-      formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max);
+      formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🤖 Agent 子系统</div>' +
+      checkField('agent.enabled', '启用 Agent 流水线', globalConfigCache.agent?.enabled, 'false = 使用旧版直接流式回复路径') +
+      formField('agent.persona.character_name', '角色名', globalConfigCache.agent?.persona?.character_name) +
+      textareaField('agent.persona.character_persona', '角色人设', globalConfigCache.agent?.persona?.character_persona) +
+      formField('agent.persona.speaking_style', '说话风格', globalConfigCache.agent?.persona?.speaking_style) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🗄️ 数据库</div>' +
+      checkField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite(与 Agent-LuoTianyi 共享)') +
+      formField('database.folder', '数据库目录', globalConfigCache.database?.folder) +
+      formField('database.file', '数据库文件名', globalConfigCache.database?.file);
 
     const sel = document.getElementById('config-bot-select');
-    sel.innerHTML = botListCache.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq})</option>`).join('');
-    if (botListCache.length) loadBotConfig();
-    else document.getElementById('config-bot-form').innerHTML = '<div class="conv-empty">暂无连接中的 Bot</div>';
+    const bots = (botListCache.bots || []).slice();
+    const unbound = botListCache.unbound || [];
+    sel.innerHTML = bots.map(b => `<option value="${b.bot_id}">${b.nickname} (${b.qq || '未绑定'})${b.online ? ' ●' : ''}</option>`).join('');
+    if (bots.length) loadBotConfig();
+    else document.getElementById('config-bot-form').innerHTML = '<div class="conv-empty">暂无 Bot,点击"➕ 创建 Bot"新建</div>';
+    // 未绑定连接列表(接受连接但不处理消息)
+    const ubEl = document.getElementById('unbound-list');
+    if (unbound.length) {
+      ubEl.innerHTML = '<div class="card-title" style="font-size:13px">📡 未绑定连接(消息被忽略)</div>' +
+        unbound.map(u => `<div class="form-row" style="justify-content:space-between">
+          <span>QQ ${u.qq}</span>
+          <button class="btn btn-sm" onclick="bindToNewBot(${u.qq})">创建并绑定</button></div>`).join('');
+    } else {
+      ubEl.innerHTML = '';
+    }
   } catch (e) { showToast('加载配置失败: ' + e.message, false); }
+}
+
+// ── Bot 创建 / 绑定 ───────────────────────────────────────────
+
+async function createBotPrompt() {
+  const nickname = prompt('新 Bot 昵称(可留空自动编号):');
+  if (nickname === null) return;
+  try {
+    const r = await apiJSON('/api/bots', { method: 'POST', body: { data: { nickname } } });
+    showToast(`已创建 Bot: ${r.bot_id}`);
+    loadConfigPage();
+  } catch (e) { showToast('创建失败: ' + e.message, false); }
+}
+
+async function bindBotPrompt() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId) { showToast('请先选择 Bot', false); return; }
+  const qq = prompt(`输入要绑定到 ${botId} 的 QQ 号(QQ 唯一绑定, 会解绑其他 bot):`);
+  if (!qq || !/^\d+$/.test(qq.trim())) return;
+  try {
+    await apiJSON(`/api/bots/${botId}/bind`, { method: 'PUT', body: { data: { qq: parseInt(qq.trim()) } } });
+    showToast(`已绑定 QQ ${qq}`);
+    loadConfigPage();
+  } catch (e) { showToast('绑定失败: ' + e.message, false); }
+}
+
+async function bindToNewBot(qq) {
+  try {
+    const r = await apiJSON('/api/bots', { method: 'POST', body: { data: { nickname: '', qq } } });
+    showToast(`已创建 ${r.bot_id} 并绑定 QQ ${qq}`);
+    loadConfigPage();
+  } catch (e) { showToast('创建绑定失败: ' + e.message, false); }
+}
+
+async function unbindBotPrompt() {
+  const botId = document.getElementById('config-bot-select').value;
+  if (!botId || !confirm(`解绑 ${botId} 的 QQ? 连接将降级为未绑定`)) return;
+  try {
+    await apiJSON(`/api/bots/${botId}/unbind`, { method: 'POST' });
+    showToast('已解绑');
+    loadConfigPage();
+  } catch (e) { showToast('解绑失败: ' + e.message, false); }
 }
 
 async function loadBotConfig() {
@@ -600,9 +689,13 @@ async function loadBotConfig() {
     botConfigCache = await apiJSON(`/api/bots/${botId}/config`);
     const b = botConfigCache;
     document.getElementById('config-bot-form').innerHTML =
+      `<div class="form-row"><label>Bot ID(内部标识)</label><input type="text" value="${b.bot_id}" readonly style="background:var(--bg2)"></div>` +
       formField('nickname', '昵称', b.nickname) +
-      formField('qq', 'QQ 号', b.qq) +
-      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为') +
+      (b.qq
+        ? `<div class="form-row"><label>绑定 QQ</label><input type="text" value="${b.qq}" readonly style="background:var(--bg2)">
+             <button class="btn btn-sm" onclick="unbindBotPrompt()" style="margin-left:8px">解绑</button></div>`
+        : '<div class="hint" style="margin:6px 0">⚠️ 未绑定 QQ — 点击上方"🔗 绑定 QQ"</div>') +
+      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为(子系统默认使用此人设)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
       formField('command_prefix', '指令前缀', b.command_prefix) +
@@ -623,6 +716,7 @@ async function saveGlobalConfig() {
     return isNaN(v) ? def : v;
   };
   const data = {
+    beta_mode: document.getElementById('cfg-beta_mode')?.checked ?? true,
     server: { port, host },
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     log_dir: document.getElementById('cfg-log_dir').value,
@@ -637,6 +731,19 @@ async function saveGlobalConfig() {
       segment_delay_min: num('cfg-reply.segment_delay_min', 0.2),
       segment_delay_max: num('cfg-reply.segment_delay_max', 0.5),
     },
+    agent: {
+      enabled: document.getElementById('cfg-agent.enabled')?.checked ?? true,
+      persona: {
+        character_name: document.getElementById('cfg-agent.persona.character_name')?.value ?? '',
+        character_persona: document.getElementById('cfg-agent.persona.character_persona')?.value ?? '',
+        speaking_style: document.getElementById('cfg-agent.persona.speaking_style')?.value ?? '',
+      },
+    },
+    database: {
+      enabled: document.getElementById('cfg-database.enabled')?.checked ?? true,
+      folder: document.getElementById('cfg-database.folder')?.value ?? '',
+      file: document.getElementById('cfg-database.file')?.value ?? '',
+    },
   };
   try {
     await apiJSON('/api/config', { method: 'PUT', body: { data } });
@@ -649,7 +756,6 @@ async function saveBotConfig() {
   if (!botId) return;
   const data = {
     nickname: document.getElementById('cfg-nickname').value,
-    qq: parseInt(document.getElementById('cfg-qq').value) || 0,
     persona: document.getElementById('cfg-persona').value,
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
     vision_model_override: document.getElementById('cfg-vision_model_override').value,
@@ -723,8 +829,17 @@ async function loadPlugins() {
 async function togglePlugin(name, enabled) {
   try {
     await apiJSON('/api/plugins/toggle', { method: 'POST', body: { name, enabled } });
-    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（重启后生效）`);
+    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（热生效）`);
+    loadPlugins();
   } catch (e) { showToast('操作失败: ' + e.message, false); loadPlugins(); }
+}
+
+async function reloadPlugins() {
+  try {
+    const r = await apiJSON('/api/plugins/reload', { method: 'POST' });
+    showToast(`插件已重新加载: ${r.count} 个生效`);
+    loadPlugins();
+  } catch (e) { showToast('重载失败: ' + e.message, false); }
 }
 
 // ═══════════════ 5. Contexts ═══════════════
@@ -869,6 +984,22 @@ async function deleteCurrentSession() {
 
 // ═══════════════ 6. Logs ═══════════════
 let logSource = null;
+let logAutoScroll = true;  // 自动滚动开关(默认开启)
+
+function toggleLogAutoScroll() {
+  logAutoScroll = !logAutoScroll;
+  const btn = document.getElementById('log-scroll-btn');
+  if (logAutoScroll) {
+    btn.style.background = 'var(--accent)';
+    btn.style.color = '#fff';
+    // 重新开启时立即滚到底部
+    const container = document.getElementById('log-container');
+    container.scrollTop = container.scrollHeight;
+  } else {
+    btn.style.background = '';
+    btn.style.color = '';
+  }
+}
 
 function setLogFilter(btn) {
   const lv = btn.dataset.filter;
@@ -908,7 +1039,7 @@ function appendLog(entry) {
   el.className = 'log-entry';
   el.innerHTML = `<span class="t">${entry.time}</span><span class="lvl ${entry.level}">[${entry.level}]</span><span>${esc(entry.message)}</span>`;
   container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
+  if (logAutoScroll) container.scrollTop = container.scrollHeight;
   while (container.children.length > 800) container.removeChild(container.firstChild);
 }
 
@@ -922,6 +1053,98 @@ function toggleLogPause() {
 // ═══════════════ 7. Settings ═══════════════
 function loadSettings() {
   document.getElementById('set-status').innerHTML = '<span class="badge online">● 运行中</span>';
+  renderDataScope();
+}
+
+// ── 数据管理 (备份/恢复/清理) ────────────────────────────────
+
+async function renderDataScope() {
+  const el = document.getElementById('data-scope-form');
+  let bots = [];
+  try {
+    const r = await apiJSON('/api/bots');
+    bots = r.bots || [];
+  } catch (e) { /* 加载失败时仅显示目录范围 */ }
+  el.innerHTML =
+    '<div class="form-row"><label>数据范围</label>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-cache" checked> 缓存(cache)</label>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-history" checked> 聊天历史(history)</label>' +
+    '<label><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label></div>' +
+    (bots.length
+      ? `<div class="form-row"><label>Bot 范围</label>
+         <label style="margin-right:10px"><input type="checkbox" id="ds-all" checked onchange="dsToggleAll(this)"> 全部</label>` +
+        bots.map(b => `<label style="margin-right:8px"><input type="checkbox" class="ds-bot" value="${b.bot_id}" checked> ${b.nickname}</label>`).join('') +
+        '</div>'
+      : '<div class="hint">暂无 Bot</div>');
+}
+
+function dsToggleAll(el) {
+  document.querySelectorAll('.ds-bot').forEach(cb => { cb.checked = el.checked; });
+}
+
+function dsScope() {
+  const dirs = [];
+  if (document.getElementById('ds-cache')?.checked) dirs.push('cache');
+  if (document.getElementById('ds-history')?.checked) dirs.push('history');
+  if (document.getElementById('ds-contexts')?.checked) dirs.push('contexts');
+  let bots = 'all';
+  const allBtn = document.getElementById('ds-all');
+  if (allBtn && !allBtn.checked) {
+    bots = [...document.querySelectorAll('.ds-bot:checked')].map(cb => cb.value);
+  }
+  return { bots, dirs };
+}
+
+async function backupData() {
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  try {
+    const res = await api('/api/data/backup', { method: 'POST', body: { data: scope } });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || ('HTTP ' + res.status));
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mohobot_backup_' + new Date().toISOString().slice(0, 19).replace(/[-T:]/g, '') + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+    showToast('备份已下载');
+  } catch (e) { showToast('备份失败: ' + e.message, false); }
+}
+
+async function restoreData() {
+  const fileEl = document.getElementById('restore-file');
+  const file = fileEl.files && fileEl.files[0];
+  if (!file) { showToast('请先选择备份文件', false); return; }
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  const pwd = prompt('输入管理员密码确认恢复（将覆盖所选范围的数据）:');
+  if (pwd === null) { fileEl.value = ''; return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('password', pwd);
+  fd.append('scope', JSON.stringify(scope));
+  try {
+    const r = await apiJSON('/api/data/restore', { method: 'POST', body: fd, raw: true });
+    showToast(`恢复完成: ${r.restored} 个文件`);
+  } catch (e) { showToast('恢复失败: ' + e.message, false); }
+  fileEl.value = '';
+}
+
+async function cleanupData() {
+  const scope = dsScope();
+  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
+  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！')) return;
+  const pwd = prompt('输入管理员密码确认清理:');
+  if (pwd === null) return;
+  try {
+    const r = await apiJSON('/api/data/cleanup', { method: 'POST', body: { data: { password: pwd, scope } } });
+    showToast(`清理完成: 移除 ${r.removed} 个文件`);
+  } catch (e) { showToast('清理失败: ' + e.message, false); }
 }
 
 async function changePassword() {

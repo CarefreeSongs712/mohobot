@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 import websockets
@@ -40,6 +41,7 @@ class WSServer:
         self._on_event: EventCallback | None = None
         self._server: websockets.asyncio.server.Server | None = None
         self._heartbeat_interval: float = 30.0  # seconds
+        self._nickname_cache: dict[str, str] = {}  # get_nickname 缓存
 
     def set_event_callback(self, callback: EventCallback) -> None:
         """Set the callback invoked for every received event."""
@@ -67,41 +69,51 @@ class WSServer:
     async def _handle_connection(
         self, websocket: websockets.asyncio.server.ServerConnection
     ) -> None:
-        """Handle an incoming WebSocket connection from a OneBot instance."""
+        """Handle an incoming WebSocket connection from a OneBot instance.
+
+        X-Self-ID = QQ 号 → 按绑定关系注册为 bot 实例或未绑定连接。
+        """
         # Extract headers
         headers = dict(websocket.request.headers)
-        bot_id = headers.get("x-self-id", headers.get("X-Self-ID", "unknown"))
+        qq = headers.get("x-self-id", headers.get("X-Self-ID", ""))
         client_role = headers.get(
             "x-client-role", headers.get("X-Client-Role", "Universal")
         )
 
         logger.info(
-            f"New connection: bot_id={bot_id}, role={client_role}, "
+            f"New connection: qq={qq}, role={client_role}, "
             f"remote={websocket.remote_address}"
         )
 
-        # Register bot
-        instance = self._bot_manager.register(bot_id, websocket)
-        logger.info(f"Bot {bot_id} ({instance.nickname}) connected")
+        # Register bot (按 QQ 查找绑定; 未绑定则接受但不处理)
+        instance = self._bot_manager.register(qq, websocket)
 
         try:
             async for raw_message in websocket:
                 try:
                     data = json.loads(raw_message)
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Invalid JSON from bot {bot_id}: {e}")
+                    logger.warning(f"Invalid JSON from {instance.bot_id or f'QQ{instance.qq}'}: {e}")
                     continue
 
-                await self._dispatch(bot_id, data)
+                await self._dispatch(instance, data)
         except websockets.exceptions.ConnectionClosed as e:
-            logger.info(f"Bot {bot_id} disconnected: {e.code} {e.reason}")
+            logger.info(f"{instance.bot_id or f'QQ{instance.qq}'} disconnected: {e.code} {e.reason}")
         except Exception as e:
-            logger.error(f"Connection error for bot {bot_id}: {e}")
+            logger.error(f"Connection error for {instance.bot_id or f'QQ{instance.qq}'}: {e}")
         finally:
-            self._bot_manager.unregister(bot_id)
+            # 传实例: 若期间同 QQ 已建立新连接,不要误删新实例
+            self._bot_manager.unregister(instance)
 
-    async def _dispatch(self, bot_id: str, data: dict[str, Any]) -> None:
+    async def _dispatch(self, instance, data: dict[str, Any]) -> None:
         """Dispatch an incoming message — event or API response."""
+        # 未绑定连接: 接受但不处理任何消息
+        if not instance.bound:
+            logger.debug(f"Ignoring message from unbound connection QQ {instance.qq}: {data.get('post_type') or data.get('action')}")
+            return
+
+        bot_id = instance.bot_id
+
         # API response: has 'status' field (echo may be absent if the request
         # didn't carry one, e.g. some clients omit echo on error responses).
         if "status" in data:
@@ -147,11 +159,17 @@ class WSServer:
         echo = f"api_{uuid.uuid4().hex}"
         payload["echo"] = echo
         future = self._bot_manager.create_response_future(echo)
-        await instance.send(payload)
+        try:
+            await instance.send(payload)
+        except Exception:
+            # Send failed — don't leave the future dangling
+            self._bot_manager.remove_response_future(echo)
+            raise
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
+            self._bot_manager.remove_response_future(echo)
             return None
 
     async def _send_tracked(
@@ -171,7 +189,12 @@ class WSServer:
             return
         echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
-        await instance.send({"action": action, "params": params, "echo": echo})
+        try:
+            await instance.send({"action": action, "params": params, "echo": echo})
+        except Exception:
+            # Send failed — don't leave the tracked entry dangling
+            self._bot_manager.drop_pending_sent(echo)
+            raise
 
     async def send_group_msg(
         self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]
@@ -192,3 +215,64 @@ class WSServer:
             {"user_id": int(user_id), "message": message},
             "private", user_id,
         )
+
+    async def send_image(
+        self, bot_id: str, chat_type: str, chat_id: int | str, image_path: str
+    ) -> None:
+        """发送本地图片文件(base64 内嵌, 不依赖 NapCat 访问本地路径)。
+
+        chat_type: "private" | "group"
+        """
+        import base64
+
+        ext = Path(image_path).suffix.lstrip(".").lower() or "png"
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        message: list[dict[str, Any]] = [
+            {"type": "image", "data": {"file": f"base64://{b64}"}},
+        ]
+        logger.debug(f"send_image to {chat_type}:{chat_id} via bot {bot_id} ({ext}, {len(b64) // 1024}KB)")
+        if chat_type == "private":
+            await self.send_private_msg(bot_id, chat_id, message)
+        else:
+            await self.send_group_msg(bot_id, chat_id, message)
+
+    # ── 用户昵称查询(供插件使用) ─────────────────────────────
+
+    async def get_nickname(
+        self,
+        bot_id: str,
+        user_id: int | str,
+        group_id: int | str | None = None,
+    ) -> str:
+        """获取用户昵称: 群名片 → QQ 昵称 → 数字兜底。带内存缓存。"""
+        cache_key = f"{bot_id}:{group_id or 'p'}:{user_id}"
+        cached = self._nickname_cache.get(cache_key)
+        if cached:
+            return cached
+
+        nickname = str(user_id)
+        # 群聊: 先取群成员资料(群名片优先)
+        if group_id is not None and str(group_id).isdigit():
+            resp = await self.send_to_bot(
+                bot_id, "get_group_member_info",
+                {"group_id": int(group_id), "user_id": int(user_id)},
+                wait_response=True, timeout=5.0,
+            )
+            if resp and resp.get("status") == "ok":
+                data = resp.get("data") or {}
+                nickname = data.get("card") or data.get("nickname") or nickname
+
+        if nickname == str(user_id):
+            # 群资料没拿到/私聊: 陌生人资料
+            resp = await self.send_to_bot(
+                bot_id, "get_stranger_info",
+                {"user_id": int(user_id)},
+                wait_response=True, timeout=5.0,
+            )
+            if resp and resp.get("status") == "ok":
+                data = resp.get("data") or {}
+                nickname = data.get("nickname") or nickname
+
+        self._nickname_cache[cache_key] = nickname
+        return nickname
