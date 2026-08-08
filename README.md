@@ -2,14 +2,23 @@
 
 > ⚠️ **开发阶段**: 本项目目前处于积极开发中，API、数据格式与功能均可能发生破坏性变更，请谨慎用于生产环境。
 
-基于 Python 异步框架 + [OneBot v11](https://github.com/botuniverse/onebot-11) 标准的**多 Bot AI 框架**。支持同时接入多个 QQ 机器人，通过 LLM 驱动对话，全部数据使用本地文件存储（无数据库）。
+基于 Python 异步框架 + [OneBot v11](https://github.com/botuniverse/onebot-11) 标准的**多 Bot AI 框架**。支持同时接入多个 QQ 机器人，通过 LLM 驱动对话。
+
+> **Agent 子系统（beta）**：回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的意识/潜意识双层架构（话题规划 → 注意力 → 风格化回复 → 反思记忆），按 bot 隔离；历史对话写入 SQLite（与 Agent-LuoTianyi 共享同一数据库文件），会话上下文仍由 JSON/JSONL 管理。
 
 ## ✨ 功能特性
 
 - **多 Bot 接入** — 反向 WebSocket (Reverse WebSocket) 服务端，一个进程同时服务多个机器人
+- **Agent 子系统（beta）** — 移植自 Agent-LuoTianyi 的回复流水线，按 bot 隔离：
+  - `TopicPlanner` 缓冲未读消息、判断用户是否说完，批量提取话题
+  - `TopicExtractor` LLM 提取话题与记忆检索线索（含群聊说话人标注）
+  - `AttentionPlanner` 并行召回记忆 / 事实 / 唱歌规划（无 TTS 时自动跳过）
+  - `MainChat` 结构化回复（`[tone]内容` 每行一句），`CharacterReflex` 戳一戳等低延迟反射
+  - `ReflectionWorker` 回合后串行反思：写入长期记忆 + 更新用户画像
+  - `SubconsciousMemory` 向量检索（ChromaDB，未配置时优雅降级）+ 数据库记忆正本
 - **LLM 驱动对话** — OpenAI 兼容 API，支持流式回复（标点+长度分段发送）、函数调用（Tools）、视觉识别（Vision）
 - **会话上下文管理** — 私聊支持多会话切换，群聊单一会话；上下文自动裁剪（最近 30 轮），记录每条消息的说话人（QQ号-昵称）
-- **原始数据不可变** — 聊天记录以 JSONL 只读归档，与可变的 AI 工作上下文分离
+- **历史对话入库** — 聊天记录写入 SQLite `conversations` 表（与 Agent-LuoTianyi 共用 `luotianyi.db`，用户名以 `qq_` 前缀隔离），原始事件另以 JSONL 只读归档
 - **智能群聊触发** — 群聊中仅在 @机器人 或 引用机器人自己的消息 时才触发 LLM 回复
 - **图片缓存与去重** — phash 感知哈希去重 + LRU 缓存（300MB 上限），图片消息只解析首张
 - **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件
@@ -24,8 +33,9 @@
 | 异步 | asyncio |
 | WebSocket | websockets |
 | Web 面板 | FastAPI + SSE |
-| 存储 | JSON / JSONL（无数据库） |
+| 存储 | SQLite（历史/记忆）+ JSON/JSONL（会话上下文与原始归档） |
 | LLM | OpenAI SDK（兼容适配层） |
+| 向量检索 | ChromaDB（可选，缺失时自动降级） |
 | 日志 | loguru（轮换） |
 | 图片 | Pillow + phash |
 

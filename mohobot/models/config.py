@@ -64,6 +64,41 @@ class ReplyConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """数据库配置 — 与 Agent-LuoTianyi 共享同一个 SQLite 数据库文件。"""
+    enabled: bool = True
+    folder: str = "./data/database"
+    file: str = "luotianyi.db"
+
+
+@dataclass
+class AgentConfig:
+    """Agent 子系统配置(移植自 Agent-LuoTianyi,按 bot 隔离)。"""
+    enabled: bool = True
+    persona: dict = field(default_factory=dict)        # character_name / character_persona / speaking_style
+    llm_modules: dict = field(default_factory=dict)    # main_chat / topic_extractor / memory_writer / user_profile_updater
+    memory: dict = field(default_factory=dict)         # vector_store / dedup 阈值等
+    main_chat: dict = field(default_factory=dict)
+    topic_planner: dict = field(default_factory=dict)  # listen_timer / unread_store
+    topic_replier: dict = field(default_factory=dict)
+    reflection_worker: dict = field(default_factory=dict)
+    reflex: dict = field(default_factory=dict)
+
+    def to_config_dict(self) -> dict:
+        """转成 agent 模块读取的嵌套 dict(供 runtime 使用)。"""
+        return {
+            "persona": self.persona or {},
+            "llm_modules": self.llm_modules or {},
+            "memory": self.memory or {},
+            "main_chat": self.main_chat or {},
+            "topic_planner": self.topic_planner or {},
+            "topic_replier": self.topic_replier or {},
+            "reflection_worker": self.reflection_worker or {},
+            "reflex": self.reflex or {},
+        }
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -71,6 +106,8 @@ class GlobalConfig:
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
     interceptor: InterceptorConfig = field(default_factory=InterceptorConfig)
     reply: ReplyConfig = field(default_factory=ReplyConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
@@ -92,6 +129,8 @@ class GlobalConfig:
         panel_raw = raw.get("web_panel", {})
         interceptor_raw = raw.get("interceptor", {})
         reply_raw = raw.get("reply", {})
+        db_raw = raw.get("database", {})
+        agent_raw = raw.get("agent", {})
 
         return cls(
             server=ServerConfig(
@@ -127,6 +166,22 @@ class GlobalConfig:
                 segment_delay_min=reply_raw.get("segment_delay_min", 0.2),
                 segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
                 reply_quote=reply_raw.get("reply_quote", True),
+            ),
+            database=DatabaseConfig(
+                enabled=db_raw.get("enabled", True),
+                folder=db_raw.get("folder", "./data/database"),
+                file=db_raw.get("file", "luotianyi.db"),
+            ),
+            agent=AgentConfig(
+                enabled=agent_raw.get("enabled", True),
+                persona=agent_raw.get("persona", {}) or {},
+                llm_modules=agent_raw.get("llm_modules", {}) or {},
+                memory=agent_raw.get("memory", {}) or {},
+                main_chat=agent_raw.get("main_chat", {}) or {},
+                topic_planner=agent_raw.get("topic_planner", {}) or {},
+                topic_replier=agent_raw.get("topic_replier", {}) or {},
+                reflection_worker=agent_raw.get("reflection_worker", {}) or {},
+                reflex=agent_raw.get("reflex", {}) or {},
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -174,6 +229,12 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
             },
+            "database": {
+                "enabled": self.database.enabled,
+                "folder": self.database.folder,
+                "file": self.database.file,
+            },
+            "agent": self.agent.to_config_dict(),
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -220,6 +281,12 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
             },
+            "database": {
+                "enabled": self.database.enabled,
+                "folder": self.database.folder,
+                "file": self.database.file,
+            },
+            "agent": self.agent.to_config_dict(),
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,

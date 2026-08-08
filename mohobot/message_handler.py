@@ -33,7 +33,19 @@ from mohobot.utils.cq_code import extract_plain_text
 
 
 class MessageHandler:
-    """Orchestrates the message processing pipeline."""
+    """Orchestrates the message processing pipeline.
+
+    Flow:
+      1. Receive raw OneBot event
+      2. Archive to history/ (JSONL raw event log)
+      3. Classify: notice/meta → plugin hooks; message → process
+      4. Group gate: only respond if @mentioned, replied-to, or command
+      5. Interceptors run (commands → keywords → plugins)
+      6a. Agent path (agent.enabled): 会话流水线(话题规划→回复→反思),
+          history 写入数据库(与 Agent-LuoTianyi 共享 SQLite)
+      6b. Legacy path: Context load → LLM streaming → reply-quote first chunk
+      7. Save context after reply completes
+    """
 
     def __init__(
         self,
@@ -44,6 +56,8 @@ class MessageHandler:
         data_dir: str = "./data",
         context_max_rounds: int = 30,
         reply_config=None,
+        agent_manager=None,
+        database_manager=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -53,6 +67,10 @@ class MessageHandler:
         self._context_max_rounds = context_max_rounds
         self._interceptors: list = []  # Ordered list of interceptors
         self._writer_registry: dict[str, JSONLWriter] = {}
+
+        # Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
+        self._agent_manager = agent_manager
+        self._db = database_manager
 
         # Reply behavior from global config (stream/segment/delay/quote)
         if reply_config is None:
@@ -216,10 +234,18 @@ class MessageHandler:
                     await self._send_reply(bot_id, event, response)
                 return
 
-        # ── LLM path: streaming with reply-quote ──
+        # ── LLM path ──
         chat_type = self._get_chat_type(event)
         chat_id = self._get_chat_id(event)
 
+        # Agent 子系统路径 (话题规划 → 回复 → 反思, history 写入数据库)
+        if self._agent_manager is not None:
+            runtime = self._ensure_agent_runtime(bot_id)
+            if runtime is not None:
+                await self._handle_agent_path(bot_id, event, raw, chat_type, chat_id)
+                return
+
+        # ── Legacy path: streaming with reply-quote ──
         # Load session context
         context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
 
@@ -243,6 +269,173 @@ class MessageHandler:
                 bot_id, chat_type, chat_id, [user_msg, ai_msg],
                 max_rounds=self._context_max_rounds,
             )
+            # history → 数据库 (与 Agent-LuoTianyi 共享 SQLite)
+            self._persist_legacy_turn(
+                bot_id, chat_type, chat_id, event,
+                user_msg["content"], full_reply,
+            )
+
+    # ── Agent 子系统路径 ───────────────────────────────────────
+
+    def _ensure_agent_runtime(self, bot_id: str):
+        """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。"""
+        runtime = self._agent_manager.get(bot_id)
+        if runtime is not None:
+            return runtime
+
+        instance = None
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+        nickname = instance.nickname if instance else f"Bot-{bot_id}"
+        persona = instance.config.persona if instance else ""
+        runtime = self._agent_manager.get_or_create(
+            bot_id,
+            bot_nickname=nickname,
+            persona=persona,
+            context_provider=self._agent_context_provider,
+        )
+        runtime.set_reply_handler(self._agent_reply_handler)
+        logger.info(f"Agent runtime wired for bot {bot_id}")
+        return runtime
+
+    async def _handle_agent_path(
+        self, bot_id: str, event: MessageEvent, raw: dict,
+        chat_type: str, chat_id: str,
+    ) -> None:
+        """把消息交给 agent 流水线 (话题规划 → 回复 → 反思)。
+
+        会话上下文(contexts)仍由 ContextManager 管理(不变):
+        用户消息立即入上下文, agent 回复在发送时入上下文。
+        """
+        from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
+
+        text = extract_plain_text(event.message) or ""
+        if not text:
+            from mohobot.utils.cq_code import extract_image_urls
+            if extract_image_urls(event.message):
+                text = "[图片]"
+
+        speaker = self._speaker_role(event)
+        chat_event = ChatInputEvent(
+            event_type=ChatInputEventType.USER_MESSAGE,
+            user_id=chat_id,          # 会话即"用户"(私聊=QQ号, 群聊=群号)
+            character_id=bot_id,
+            content=text,
+            message_id=str(event.message_id),
+            message_type="image" if (not text or text == "[图片]") else "text",
+            timestamp=float(event.time or 0),
+            payload={
+                "speaker": speaker,
+                "chat_type": chat_type,
+                "chat_id": chat_id,
+                "qq": str(event.user_id),
+            },
+        )
+
+        # 用户消息写入会话上下文(context 不变, 仍由 ContextManager 管理)
+        await self._ctx_mgr.append_context(
+            bot_id, chat_type, chat_id,
+            [{"role": speaker, "content": text or "[图片]", "timestamp": event.time}],
+            max_rounds=self._context_max_rounds,
+        )
+
+        runtime = self._agent_manager.get(bot_id)
+        await runtime.handle_event(chat_type, chat_id, chat_event)
+
+    async def _agent_context_provider(
+        self, bot_id: str, chat_type: str, chat_id: str,
+    ) -> str:
+        """把 ContextManager 的会话上下文格式化为纯文本(供话题提取/回复使用)。"""
+        try:
+            context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
+        except Exception as e:
+            logger.debug(f"Load agent context failed: {e}")
+            return ""
+        if not isinstance(context, list):
+            return ""
+        lines = []
+        for entry in context[-30:]:
+            role = entry.get("role", "?")
+            content = entry.get("content", "")
+            if not content:
+                continue
+            if role == "assistant":
+                lines.append(f"bot: {content}")
+            else:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    async def _agent_reply_handler(
+        self, bot_id: str, chat_type: str, chat_id: str,
+        reply_items, trigger_message_id: str = "",
+    ) -> None:
+        """agent 回复的发送回调: 每条回复行 = 一段, 首段引用触发消息。
+
+        复用原有回复行为配置 (reply_quote / segment_delay_*)。
+        """
+        from mohobot.agent.domain import ContextType
+
+        texts = [
+            item.get_content()
+            for item in reply_items
+            if item.type in (ContextType.TEXT,) and item.get_content().strip()
+        ]
+        if not texts:
+            logger.debug(f"No text reply for {bot_id}/{chat_type}/{chat_id}")
+            return
+
+        first_sent = False
+        for text in texts:
+            if first_sent:
+                await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
+                message: str | list[dict] = text
+            else:
+                if self._reply_quote and trigger_message_id:
+                    message = [
+                        {"type": "reply", "data": {"id": str(trigger_message_id)}},
+                        {"type": "text", "data": {"text": text}},
+                    ]
+                else:
+                    message = text
+                first_sent = True
+            await self._send_agent_message(bot_id, chat_type, chat_id, message)
+
+        # agent 回复写入会话上下文 (context 不变)
+        await self._ctx_mgr.append_context(
+            bot_id, chat_type, chat_id,
+            [{"role": "assistant", "content": "\n".join(texts),
+              "timestamp": int(time_module.time())}],
+            max_rounds=self._context_max_rounds,
+        )
+
+    async def _send_agent_message(
+        self, bot_id: str, chat_type: str, chat_id: str,
+        message: str | list[dict],
+    ) -> None:
+        if chat_type == "private":
+            await self._ws.send_private_msg(bot_id, chat_id, message)
+        else:
+            await self._ws.send_group_msg(bot_id, chat_id, message)
+
+    def _persist_legacy_turn(
+        self, bot_id: str, chat_type: str, chat_id: str,
+        event: MessageEvent, user_text: str, ai_text: str,
+    ) -> None:
+        """Legacy 路径下把这一轮对话写入数据库 (history → DB)。"""
+        if self._db is None:
+            return
+        try:
+            user_id = str(event.user_id) if chat_type == "private" else chat_id
+            self._db.add_conversation(
+                user_id, bot_id, "user", user_text,
+                msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
+            )
+            self._db.add_conversation(
+                user_id, bot_id, "agent", ai_text,
+                msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
+            )
+        except Exception as e:
+            logger.debug(f"Persist legacy turn to DB failed: {e}")
 
     @staticmethod
     def _speaker_role(event: MessageEvent) -> str:

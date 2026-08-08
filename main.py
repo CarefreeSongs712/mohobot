@@ -15,8 +15,10 @@ from pathlib import Path
 from loguru import logger
 
 from mohobot import __version__
+from mohobot.agent.runtime import BotAgentManager
 from mohobot.bot_manager import BotManager
 from mohobot.context_manager import ContextManager
+from mohobot.db.database_manager import DatabaseManager
 from mohobot.file_store import ensure_dir
 from mohobot.image_cache import ImageCache
 from mohobot.interceptors.command_handler import CommandHandler
@@ -44,6 +46,8 @@ class MohobotApplication:
         self._message_handler: MessageHandler | None = None
         self._plugin_system: PluginSystem | None = None
         self._web_panel: WebPanel | None = None
+        self._database_manager: DatabaseManager | None = None
+        self._agent_manager: BotAgentManager | None = None
         self._running = False
 
     async def startup(self) -> None:
@@ -74,6 +78,24 @@ class MohobotApplication:
         # 4. Load plugins
         plugin_count = await self._plugin_system.load_plugins()
 
+        # 5. Database + Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
+        if self._config.database.enabled:
+            db_folder = self._config.database.folder
+            if db_folder.startswith("./"):
+                db_folder = str(Path(db_folder).resolve())
+            self._database_manager = DatabaseManager(
+                db_folder=db_folder,
+                db_file=self._config.database.file,
+            )
+            if self._config.agent.enabled:
+                self._agent_manager = BotAgentManager(
+                    self._config.to_dict(),
+                    self._database_manager,
+                )
+                logger.info("Agent subsystem enabled (per-bot runtimes)")
+            else:
+                logger.info("Agent subsystem disabled — using legacy LLM reply path")
+
         # Inject bot manager into plugins that need it (e.g. status plugin).
         # NOTE: inject into the ACTUAL loaded instances via PluginSystem,
         # because re-importing the plugin module would create a second
@@ -87,7 +109,7 @@ class MohobotApplication:
                     logger.debug(f"Injected bot_manager into plugin {meta['name']}")
 
         logger.info(f"Loaded {plugin_count} plugin(s)")
-        # 5. Initialize message handler
+        # 6. Initialize message handler
         self._message_handler = MessageHandler(
             ws_server=None,  # Will be set after WS server creation
             context_manager=self._context_manager,
@@ -96,9 +118,11 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
             context_max_rounds=self._config.context_max_rounds,
             reply_config=self._config.reply,
+            agent_manager=self._agent_manager,
+            database_manager=self._database_manager,
         )
 
-        # 6. Set up interceptors
+        # 7. Set up interceptors
         command_handler = CommandHandler(
             context_manager=self._context_manager,
             llm_service=self._llm_service,
@@ -109,7 +133,7 @@ class MohobotApplication:
         interceptors = [command_handler, keyword_filter, self._plugin_system]
         self._message_handler.set_interceptors(interceptors)
 
-        # 7. Initialize WebSocket server
+        # 8. Initialize WebSocket server
         self._ws_server = WSServer(
             bot_manager=self._bot_manager,
             host=self._config.server.host,
@@ -136,10 +160,10 @@ class MohobotApplication:
         # Set event callback from WS server to message handler
         self._ws_server.set_event_callback(self._message_handler.handle_event)
 
-        # 8. Start servers
+        # 9. Start servers
         await self._ws_server.start()
 
-        # 9. Start web panel
+        # 10. Start web panel
         if self._config.web_panel.enabled:
             self._web_panel = WebPanel(
                 host=self._config.web_panel.host,
@@ -202,6 +226,10 @@ class MohobotApplication:
         # Close file writers
         if self._message_handler:
             await self._message_handler.close()
+
+        # Stop agent runtimes
+        if self._agent_manager:
+            await self._agent_manager.stop_all()
 
         logger.info("Mohobot shutdown complete.")
 

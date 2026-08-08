@@ -1,0 +1,56 @@
+context_max_rounds: 30
+data_dir: ./data
+database:
+  enabled: true
+  file: luotianyi_test.db
+  folder: ./data/database
+interceptor:
+  keyword_file: ./data/keywords.json
+llm:
+  chat_api_key: test-key
+  chat_base_url: http://127.0.0.1:36712/v1
+  chat_max_tokens: 4096
+  chat_model: test-model
+  chat_temperature: 0.7
+  vision_api_key: ""
+  vision_base_url: ""
+  vision_model: ""
+log_dir: ./logs
+plugins_dir: ./plugins
+reply:
+  reply_quote: true
+  segment_delay_max: 0.5
+  segment_delay_min: 0.2
+  segment_max_len: 60
+  segment_min_len: 12
+  segment_reply: true
+  stream: true
+agent:
+  enabled: true
+  persona:
+    character_name: Mohobot
+    character_persona: 测试人格
+    speaking_style: 简洁
+  llm_modules: {}
+  memory:
+    vector_store:
+      enabled: false
+  main_chat: {}
+  topic_planner:
+    listen_timer:
+      timeout: 0.5
+  topic_replier: {}
+  reflection_worker:
+    enabled: true
+  reflex:
+    enabled: true
+server:
+  host: 127.0.0.1
+  max_size: 10485760
+  port: 18081
+web_panel:
+  enabled: false
+  host: 127.0.0.1
+  password_hash: ""
+  port: 19090
+  username: admin

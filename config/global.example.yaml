@@ -43,6 +43,70 @@ web_panel:
 interceptor:
   keyword_file: "./data/keywords.json"
 
+# ── 数据库（与 Agent-LuoTianyi 共享同一个 SQLite） ───────────────
+database:
+  enabled: true
+  folder: "./data/database"   # SQLite 文件所在目录
+  file: "luotianyi.db"        # 与 Agent-LuoTianyi 相同文件名 → 共用同一数据库
+
+# ── Agent 子系统（移植自 Agent-LuoTianyi，按 bot 隔离） ─────────
+agent:
+  enabled: true               # false = 使用旧版直接流式回复路径
+  persona:
+    character_name: "Mohobot"
+    character_persona: "你是 Mohobot，一个多机器人 AI 框架中的助手，性格友好、乐于助人。"
+    speaking_style: "自然、简洁、亲切"
+  # 各 LLM 模块配置；留空继承顶部 llm.* 全局配置
+  llm_modules:
+    main_chat:
+      model: ""               # 覆盖全局 chat_model
+      base_url: ""
+      api_key: ""
+      temperature: 0.7
+      max_tokens: 2048
+    topic_extractor:
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+    memory_writer:
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+    user_profile_updater:
+      model: ""
+      base_url: ""
+      api_key: ""
+      temperature: 0.3
+      max_tokens: 1024
+  memory:
+    user_memory_dedup_threshold: 0.72
+    vector_store:
+      enabled: false          # 未安装 chromadb 时自动降级为无向量库模式
+      provider: chroma
+      persist_dir: "./data/database/chroma"
+      collection_name: "mohobot_memories"
+      embedding_model: "BAAI/bge-large-zh-v1.5"
+      embedding_base_url: ""  # SiliconFlow 等 OpenAI 兼容 embedding 端点
+      embedding_api_key: ""
+  main_chat:
+    max_output_lines: 12
+  topic_planner:
+    listen_timer:
+      timeout: 1.5            # 秒：等待用户说完的静默时长
+    unread_store:
+      max_size: 50
+  topic_replier: {}
+  reflection_worker:
+    enabled: true
+    write_memory: true        # 对话后是否反思并写入记忆
+    update_user_profile: true # 对话后是否更新用户画像
+  reflex:
+    enabled: true             # 戳一戳等低延迟反射回复
+
 log_dir: "./logs"
 data_dir: "./data"
 plugins_dir: "./plugins"
