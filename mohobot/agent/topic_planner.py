@@ -92,6 +92,12 @@ class TopicPlanner:
         self.topic_consumer: Optional[Callable[[ExtractedTopic], Awaitable[None]]] = None
         self._wake_event = asyncio.Event()
         self._extraction_in_progress = False
+        self._consecutive_failures = 0  # 连续提取失败计数(退避用)
+
+    def _retry_timeout(self) -> float:
+        """连续失败时逐渐拉长等待,避免 LLM 故障时每 1.5s 疯狂重试。"""
+        base = float((self.config.get("listen_timer", {}) or {}).get("timeout", 1.5))
+        return base + min(self._consecutive_failures, 10) * 2.0
 
     def set_topic_consumer(self, consumer) -> None:
         self.topic_consumer = consumer
@@ -155,6 +161,9 @@ class TopicPlanner:
 
                 if topics:
                     await self._consume_topics(topics)
+                    self._consecutive_failures = 0
+                else:
+                    self._consecutive_failures += 1
 
             except asyncio.CancelledError:
                 self.logger.info("TopicPlanner processor task cancelled")
@@ -229,7 +238,8 @@ class TopicPlanner:
                 await self.listen_timer.set_deadline()
         else:
             if remaining_unread:
-                await self.listen_timer.set_deadline()
+                # 失败退避: 连续失败时拉长等待时间
+                await self.listen_timer.set_deadline(timeout=self._retry_timeout())
             else:
                 await self.listen_timer.remove_deadline()
         return new_extracted_topics

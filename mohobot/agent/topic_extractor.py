@@ -16,9 +16,11 @@ from mohobot.agent.llm_module import LLMModule, parse_json_response
 
 
 class TopicExtractor:
-    def __init__(self, config: Dict[str, Any], character_id: str, llm_module: LLMModule | None):
+    def __init__(self, config: Dict[str, Any], character_id: str, llm_module: LLMModule | None,
+                 character_name: str = ""):
         self.config = config
         self.character_id = character_id
+        self.character_name = character_name or character_id
         self.llm = llm_module
 
     async def extract_topics(
@@ -48,6 +50,7 @@ class TopicExtractor:
         try:
             response = await self.llm.generate_response(
                 use_json=True,
+                character_name=self.character_name,
                 conversation_history=conversation_history or "无",
                 message_content=message_content,
                 terms=terms_str,

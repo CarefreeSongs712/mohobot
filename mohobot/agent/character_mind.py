@@ -66,6 +66,7 @@ class CharacterSubconscious:
             topic_extractor_cfg,
             character_id=character_id,
             llm_module=llm_modules.get("topic_extractor"),
+            character_name=self.character_name,
         )
         self.attention_planner = AttentionPlanner(
             attention_cfg,
@@ -145,6 +146,7 @@ class CharacterSubconscious:
             history=conversation_history or "",
             current_dialogue=current_dialogue,
             related_memories=related_memories or [],
+            character_name=self.character_name,
             commit=True,
         )
 

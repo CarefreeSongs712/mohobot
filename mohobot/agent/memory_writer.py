@@ -34,6 +34,7 @@ class MemoryWriter:
         current_dialogue: str = "",
         related_memories: List[str] | None = None,
         owner_character_id: str = "bot",
+        character_name: str = "",
         commit: bool = True,
     ) -> Dict[str, Any]:
         """分析最近的交互,提取有价值的信息存入记忆库。"""
@@ -44,6 +45,7 @@ class MemoryWriter:
             history,
             current_dialogue=current_dialogue,
             related_memories=related_memories or [],
+            character_name=character_name or owner_character_id,
         )
 
         user_items = memory_payload.get("user_memory", [])
@@ -52,7 +54,7 @@ class MemoryWriter:
 
         if user_items:
             seen_texts = await self._batch_check_user_memory_dups(
-                vector_store, user_id, user_items
+                vector_store, user_id, user_items, owner_character_id
             )
             for content in user_items:
                 text = (content or "").strip()
@@ -76,7 +78,7 @@ class MemoryWriter:
         if event_items:
             today = time.strftime("%Y-%m-%d")
             seen_texts = await self._batch_check_event_memory_dups(
-                vector_store, user_id, event_items, today
+                vector_store, user_id, event_items, today, owner_character_id
             )
             for content in event_items:
                 text = (content or "").strip()
@@ -104,11 +106,13 @@ class MemoryWriter:
         history: str,
         current_dialogue: str,
         related_memories: List[str],
+        character_name: str = "bot",
     ) -> Dict[str, Any]:
         empty = {"user_memory": [], "event_memory": []}
         try:
             response = await self.llm.generate_response(
                 use_json=True,
+                character_name=character_name,
                 history=history or "无",
                 current_dialogue=current_dialogue or "无",
                 related_memories="；".join(related_memories) if related_memories else "无",
@@ -149,7 +153,9 @@ class MemoryWriter:
             return False
 
         threshold = float(self.config.get("user_memory_dedup_threshold", 0.72))
-        if await self._has_similar_user_memory(vector_store, user_id, text, threshold):
+        if await self._has_similar_user_memory(
+            vector_store, user_id, text, threshold, owner_character_id
+        ):
             logger.debug(f"Skip duplicate user_memory: {text[:50]}")
             return False
 
@@ -162,6 +168,7 @@ class MemoryWriter:
                 "event_date": today,
                 "memory_type": "user_memory",
                 "user_id": user_id,
+                "owner_character_id": owner_character_id,
             },
         )
         ids = await asyncio.to_thread(vector_store.add_documents, [doc])
@@ -197,7 +204,9 @@ class MemoryWriter:
             return False
 
         today = time.strftime("%Y-%m-%d")
-        if await self._is_same_day_duplicate_event_memory(vector_store, user_id, text, today):
+        if await self._is_same_day_duplicate_event_memory(
+            vector_store, user_id, text, today, owner_character_id
+        ):
             logger.debug(f"Skip same-day duplicate event_memory: {text[:50]}")
             return False
 
@@ -209,6 +218,7 @@ class MemoryWriter:
                 "event_date": today,
                 "memory_type": "event_memory",
                 "user_id": user_id,
+                "owner_character_id": owner_character_id,
             },
         )
         ids = await asyncio.to_thread(vector_store.add_documents, [doc])
@@ -233,8 +243,12 @@ class MemoryWriter:
 
     async def _has_similar_user_memory(
         self, vector_store: VectorStore, user_id: str, content: str, threshold: float,
+        owner_character_id: str = "bot",
     ) -> bool:
-        results = await vector_store.search(user_id, content, k=5)
+        results = await vector_store.search(
+            user_id, content, k=5,
+            where={"user_id": user_id, "owner_character_id": owner_character_id},
+        )
         for doc, score in results:
             metadata = doc.get_metadata()
             if metadata.get("memory_type") != "user_memory":
@@ -245,8 +259,12 @@ class MemoryWriter:
 
     async def _is_same_day_duplicate_event_memory(
         self, vector_store: VectorStore, user_id: str, content: str, event_date: str,
+        owner_character_id: str = "bot",
     ) -> bool:
-        results = await vector_store.search(user_id, content, k=10)
+        results = await vector_store.search(
+            user_id, content, k=10,
+            where={"user_id": user_id, "owner_character_id": owner_character_id},
+        )
         target = self._normalize_text(content)
         for doc, _ in results:
             metadata = doc.get_metadata()
@@ -261,12 +279,16 @@ class MemoryWriter:
 
     async def _batch_check_user_memory_dups(
         self, vector_store: VectorStore, user_id: str, items: List[str],
+        owner_character_id: str = "bot",
     ) -> set:
         seen: set[str] = set()
         if not items:
             return seen
         threshold = float(self.config.get("user_memory_dedup_threshold", 0.72))
-        results = await vector_store.search(user_id, items[0], k=20)
+        results = await vector_store.search(
+            user_id, items[0], k=20,
+            where={"user_id": user_id, "owner_character_id": owner_character_id},
+        )
         for doc, score in results:
             metadata = doc.get_metadata()
             if metadata.get("memory_type") != "user_memory":
@@ -279,11 +301,15 @@ class MemoryWriter:
 
     async def _batch_check_event_memory_dups(
         self, vector_store: VectorStore, user_id: str, items: List[str], event_date: str,
+        owner_character_id: str = "bot",
     ) -> set:
         seen: set[str] = set()
         if not items:
             return seen
-        results = await vector_store.search(user_id, items[0], k=20)
+        results = await vector_store.search(
+            user_id, items[0], k=20,
+            where={"user_id": user_id, "owner_character_id": owner_character_id},
+        )
         for doc, _ in results:
             metadata = doc.get_metadata()
             if metadata.get("memory_type") != "event_memory":

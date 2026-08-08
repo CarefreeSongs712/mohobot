@@ -64,32 +64,43 @@ class SubconsciousMemory:
         similarity_threshold: float = 0.8,
         k: int = 3,
     ) -> MemoryContext:
-        """按话题线索召回记忆: 向量命中 → 批量回查数据库正本。"""
+        """按话题线索召回记忆: 向量命中 → 批量回查数据库正本。
+
+        检索失败(如共享库被锁)时降级为空上下文,不影响回复主流程。
+        """
         if not queries:
             return MemoryContext()
 
         candidate_hits: List[Tuple[float, str, str, Any, str]] = []
         vector_ids: List[str] = []
-        for query in queries:
-            q = (query or "").strip()
-            if not q:
-                continue
-            results = await self.vector_store.search(user_id, q, k=max(1, k))
-            for doc, score in results:
-                if score < similarity_threshold:
+        try:
+            for query in queries:
+                q = (query or "").strip()
+                if not q:
                     continue
-                content = doc.get_content().strip()
-                if not content:
-                    continue
-                vector_id = str(getattr(doc, "id", "") or "")
-                if vector_id:
-                    vector_ids.append(vector_id)
-                candidate_hits.append((score, q, vector_id, doc, content))
+                # 按 owner_character_id 过滤: 不同 bot 的记忆互相隔离
+                results = await self.vector_store.search(
+                    user_id, q, k=max(1, k),
+                    where={"user_id": user_id, "owner_character_id": self.owner_character_id},
+                )
+                for doc, score in results:
+                    if score < similarity_threshold:
+                        continue
+                    content = doc.get_content().strip()
+                    if not content:
+                        continue
+                    vector_id = str(getattr(doc, "id", "") or "")
+                    if vector_id:
+                        vector_ids.append(vector_id)
+                    candidate_hits.append((score, q, vector_id, doc, content))
 
-        records_by_vector_id = await asyncio.to_thread(
-            self.database_manager.get_agent_memory_records_by_embedding_ids,
-            vector_ids,
-        )
+            records_by_vector_id = await asyncio.to_thread(
+                self.database_manager.get_agent_memory_records_by_embedding_ids,
+                vector_ids,
+            )
+        except Exception as e:
+            logger.warning(f"Memory search degraded (empty context): {e}")
+            return MemoryContext()
 
         scored_hits: List[Tuple[float, str, MemoryHit]] = []
         for score, query, vector_id, doc, content in candidate_hits:
@@ -128,6 +139,7 @@ class SubconsciousMemory:
         history: str,
         current_dialogue: str = "",
         related_memories: List[str] | None = None,
+        character_name: str = "",
         commit: bool = True,
     ) -> Dict[str, Any]:
         return await self.memory_writer.process_interaction(
@@ -138,6 +150,7 @@ class SubconsciousMemory:
             current_dialogue=current_dialogue,
             related_memories=related_memories or [],
             owner_character_id=self.owner_character_id,
+            character_name=character_name,
             commit=commit,
         )
 
