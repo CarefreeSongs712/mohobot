@@ -246,7 +246,8 @@ class MessageHandler:
         chat_id = self._get_chat_id(event)
 
         # Agent 子系统路径 (话题规划 → 回复 → 反思, history 写入数据库)
-        if self._agent_manager is not None:
+        # 启用条件: 全局 beta_mode + 全局 agent.enabled + 该 bot 私有 agent_enabled
+        if self._agent_manager is not None and self._bot_agent_enabled(bot_id):
             runtime = self._ensure_agent_runtime(bot_id)
             if runtime is not None:
                 await self._handle_agent_path(bot_id, event, raw, chat_type, chat_id)
@@ -283,6 +284,14 @@ class MessageHandler:
             )
 
     # ── Agent 子系统路径 ───────────────────────────────────────
+
+    def _bot_agent_enabled(self, bot_id: str) -> bool:
+        """该 bot 是否启用 Agent 子系统(读取 BotConfig.agent_enabled)。"""
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+            if instance is not None:
+                return bool(getattr(instance.config, "agent_enabled", True))
+        return True
 
     def _ensure_agent_runtime(self, bot_id: str):
         """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。
@@ -729,8 +738,11 @@ class MessageHandler:
                 "qq": str(event.user_id),
             },
         )
-        runtime = self._ensure_agent_runtime(bot_id)
-        await runtime.handle_event(chat_type, chat_id, chat_event)
+        runtime = None
+        if self._agent_manager is not None and self._bot_agent_enabled(bot_id):
+            runtime = self._ensure_agent_runtime(bot_id)
+        if runtime is not None:
+            await runtime.handle_event(chat_type, chat_id, chat_event)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
         """Handle request events (friend add, group invite) — auto-approve for now."""

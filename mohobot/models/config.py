@@ -73,9 +73,13 @@ class DatabaseConfig:
 
 @dataclass
 class AgentConfig:
-    """Agent 子系统配置(移植自 Agent-LuoTianyi,按 bot 隔离)。"""
-    enabled: bool = True
-    persona: dict = field(default_factory=dict)        # character_name / character_persona / speaking_style
+    """Agent 子系统全局配置(移植自 Agent-LuoTianyi,按 bot 隔离)。
+
+    注意: 角色名/角色人设/说话风格不需要在此配置 —— 每个 bot 的
+    persona 直接取自其私有配置(BotConfig.persona / nickname),
+    "是否启用" 也在每个 bot 的私有配置里(agent_enabled)。
+    """
+    enabled: bool = True             # 全局总开关(各 bot 私有 agent_enabled 再单独控制)
     llm_modules: dict = field(default_factory=dict)    # main_chat / topic_extractor / memory_writer / user_profile_updater
     memory: dict = field(default_factory=dict)         # vector_store / dedup 阈值等
     main_chat: dict = field(default_factory=dict)
@@ -91,7 +95,6 @@ class AgentConfig:
         """
         return {
             "enabled": self.enabled,
-            "persona": self.persona or {},
             "llm_modules": self.llm_modules or {},
             "memory": self.memory or {},
             "main_chat": self.main_chat or {},
@@ -191,7 +194,6 @@ class GlobalConfig:
             ),
             agent=AgentConfig(
                 enabled=agent_raw.get("enabled", True),
-                persona=agent_raw.get("persona", {}) or {},
                 llm_modules=agent_raw.get("llm_modules", {}) or {},
                 memory=agent_raw.get("memory", {}) or {},
                 main_chat=agent_raw.get("main_chat", {}) or {},
@@ -346,6 +348,7 @@ class BotConfig:
     nickname: str = ""
     persona: str = "你是 Mohobot，一个有用的 AI 助手。"  # System prompt
     enabled: bool = True
+    agent_enabled: bool = True   # 本 bot 是否启用 Agent 子系统(beta 模式下的流水线)
 
     # Per-bot LLM overrides (optional)
     chat_model_override: str = ""
@@ -372,6 +375,7 @@ class BotConfig:
             nickname=raw.get("nickname", ""),
             persona=raw.get("persona", "你是 Mohobot，一个有用的 AI 助手。"),
             enabled=raw.get("enabled", True),
+            agent_enabled=raw.get("agent_enabled", True),
             chat_model_override=raw.get("chat_model_override", ""),
             vision_model_override=raw.get("vision_model_override", ""),
             command_prefix=raw.get("command_prefix", "/"),
@@ -395,6 +399,7 @@ class BotConfig:
             "nickname": self.nickname,
             "persona": self.persona,
             "enabled": self.enabled,
+            "agent_enabled": self.agent_enabled,
             "chat_model_override": self.chat_model_override,
             "vision_model_override": self.vision_model_override,
             "command_prefix": self.command_prefix,

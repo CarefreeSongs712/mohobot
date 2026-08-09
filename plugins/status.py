@@ -104,6 +104,9 @@ class Plugin:
         lines.append("📦 框架状态:")
         lines.append(f"  Bot ID: {bot_id}")
 
+        from mohobot.utils.time_utils import format_utc8
+        lines.append(f"  🕐 系统时间: {format_utc8()} (UTC+8)")
+
         # Bot manager injected via inject_bot_manager() classmethod (main.py)
         bm = self._bot_manager
         if bm:
@@ -200,7 +203,10 @@ _CJK_FONT_CANDIDATES = [
     r"C:\Windows\Fonts\msyhbd.ttc",
     r"C:\Windows\Fonts\simhei.ttf",      # 黑体
     r"C:\Windows\Fonts\simsun.ttc",      # 宋体
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu/Debian
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",        # Fedora
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
@@ -212,6 +218,19 @@ def _find_cjk_font() -> str | None:
     for candidate in _CJK_FONT_CANDIDATES:
         if os.path.exists(candidate):
             return candidate
+    # 兜底: 通过 fontconfig 查找任意支持中文的字体(不依赖固定路径)
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["fc-list", ":lang=zh", "file"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in (proc.stdout or "").splitlines():
+            path = line.split(":", 1)[0].strip()
+            if path and os.path.exists(path):
+                return path
+    except Exception:
+        pass
     return None
 
 

@@ -369,7 +369,12 @@ class LLMService:
         today = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
 
         import datetime
-        today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        from mohobot.utils.time_utils import TZ_UTC8
+        today_start = (
+            datetime.datetime.now(TZ_UTC8)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
 
         if not usage_file.exists():
             return {"totals": totals, "per_model": per_model, "today": today}
@@ -459,8 +464,9 @@ class LLMService:
                     "content": f"[{role}]: {content}",
                 })
 
-        # 3. Current time
-        now = time.strftime("%Y-%m-%d %H:%M:%S %A")
+        # 3. Current time (UTC+8 北京时间, 不依赖系统时区)
+        from mohobot.utils.time_utils import format_utc8
+        now = format_utc8("%Y-%m-%d %H:%M:%S %A")
         time_msg = f"当前时间: {now}"
 
         # 4. Build user input message
@@ -560,7 +566,8 @@ class LLMService:
             args = {}
 
         if func_name == "get_current_time":
-            return time.strftime("%Y-%m-%d %H:%M:%S")
+            from mohobot.utils.time_utils import format_utc8
+            return format_utc8("%Y-%m-%d %H:%M:%S")
         elif func_name == "get_group_member_info":
             # This would need a bot connection to call the API
             return json.dumps({"error": "不在 WebSocket 连接中无法获取成员信息"}, ensure_ascii=False)

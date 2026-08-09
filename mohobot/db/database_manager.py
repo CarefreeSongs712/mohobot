@@ -368,8 +368,7 @@ class DatabaseManager:
                     "cmd": json.dumps({"uuid": cmd_uuid, "content": content, "type": cmd_type},
                                       ensure_ascii=False),
                     "ts": datetime.now(),
-                },
-            )
+                },            )
             db.commit()
         except Exception as e:
             logger.debug(f"write_memory_update skipped: {e}")

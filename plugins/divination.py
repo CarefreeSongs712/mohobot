@@ -80,7 +80,8 @@ class Plugin:
 
         user_id = str(event.user_id)
         nickname = await self._get_nickname(bot_id, event, user_id)
-        today = time.strftime("%Y-%m-%d")
+        from mohobot.utils.time_utils import format_utc8
+        today = format_utc8("%Y-%m-%d")
 
         records = self._load_records()
         record = records.get(user_id)

@@ -277,12 +277,11 @@ class BotAgentRuntime:
         self.reply_handler: Optional[Callable[..., Awaitable[None]]] = None
 
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
-        persona_cfg = agent_cfg.get("persona", {})
-        self._persona_cfg = persona_cfg
+        # 角色名/人设/说话风格全部来自 bot 私有配置, 不再读取 agent.persona
         self._bot_persona = persona  # bot 自己的 persona (BotConfig.persona)
-        self.character_name = persona_cfg.get("character_name") or self.bot_nickname
-        self.character_persona = persona_cfg.get("character_persona") or persona
-        self.speaking_style = persona_cfg.get("speaking_style") or "自然、简洁"
+        self.character_name = self.bot_nickname
+        self.character_persona = persona or "你是 Mohobot，一个有用的 AI 助手。"
+        self.speaking_style = "自然、简洁"
 
         # 向量存储(可降级)
         memory_cfg = agent_cfg.get("memory", {})
@@ -393,16 +392,16 @@ class BotAgentRuntime:
     def sync_persona(self, bot_nickname: str = "", persona: str = "") -> bool:
         """按 bot 的最新昵称/人设同步本 runtime 的人设(若发生变化)。
 
-        优先级: agent.persona 显式配置 > bot 自己的 persona(BotConfig.persona)
-        > bot 昵称。返回是否发生了更新。
+        人设完全取自 bot 私有配置(BotConfig.persona / nickname)。
+        返回是否发生了更新。
         """
         bot_nickname = bot_nickname or self.bot_nickname
         persona = persona or self._bot_persona
         changed = False
 
-        new_name = self._persona_cfg.get("character_name") or bot_nickname
-        new_persona = self._persona_cfg.get("character_persona") or persona
-        new_style = self._persona_cfg.get("speaking_style") or "自然、简洁"
+        new_name = bot_nickname
+        new_persona = persona or "你是 Mohobot，一个有用的 AI 助手。"
+        new_style = "自然、简洁"
 
         if new_name != self.character_name or new_persona != self.character_persona \
                 or new_style != self.speaking_style:

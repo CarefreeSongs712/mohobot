@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -55,6 +54,7 @@ class RealizationPromptAssembler:
         memory_hits: Optional[list[str]] = None,
         sing_plan: Optional[tuple[str, str]] = None,
     ) -> RealizationPromptInput:
+        from mohobot.utils.time_utils import format_utc8
         return RealizationPromptInput(
             character_name=character_name,
             character_persona=character_persona,
@@ -62,7 +62,7 @@ class RealizationPromptAssembler:
             user_persona=self.build_user_persona(user_nickname, user_description),
             preference_context=preference_context,
             conversation_history=conversation_history or "无",
-            current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            current_time=format_utc8("%Y-%m-%d %H:%M:%S"),
             reply_topic=reply_topic or "",
             sing_requirement=self.build_sing_requirement(sing_plan),
             extra_knowledge=self.build_extra_knowledge(fact_hits or [], memory_hits or []),

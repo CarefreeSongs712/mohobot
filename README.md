@@ -85,15 +85,16 @@ ws://127.0.0.1:8081/ws
   "qq": 123456789,
   "nickname": "我的机器人",
   "persona": "你是 Mohobot，一个有用的 AI 助手。",
-  "enabled": true
+  "enabled": true,
+  "agent_enabled": true
 }
 ```
 
-> `qq` 为 0 表示未绑定；`persona` 同时作为该 bot 的 Agent 子系统默认人设。
+> `qq` 为 0 表示未绑定；`persona` 直接作为该 bot 的 Agent 子系统人设（角色名=昵称，人设=persona）；`agent_enabled` 单独控制该 bot 是否走 Agent 流水线。
 
 ### 3. 验证
 
-私聊机器人发送任意消息即可得到回复。默认启用 Agent 流水线（话题提取 → 回复，回复按行分段发送、首段引用触发消息）；若在 `config/global.yaml` 中设置 `agent.enabled: false`，则回退到旧版直接流式回复路径。
+私聊机器人发送任意消息即可得到回复。默认启用 Agent 流水线（话题提取 → 回复，回复按行分段发送、首段引用触发消息）；若在 `config/global.yaml` 中设置 `agent.enabled: false`，或在某个 bot 的私有配置里设置 `agent_enabled: false`，该 bot 回退到旧版直接流式回复路径。
 
 ## 🤖 Agent 子系统（beta）
 
@@ -101,14 +102,9 @@ ws://127.0.0.1:8081/ws
 
 ```yaml
 agent:
-  enabled: true                # false = 旧版直接流式回复
-  persona:
-    # 默认留空: 每个 bot 使用各自的 data/bots/{bot_id}/config.json 的
-    # persona / 昵称作为子系统人设(按 bot 隔离, 互不影响)。
-    # 如需全局统一人设, 在此填写即可覆盖所有 bot。
-    character_name: ""         # 留空 = 使用各 bot 昵称
-    character_persona: ""      # 留空 = 使用各 bot 自己的 persona
-    speaking_style: ""         # 留空 = 自然、简洁
+  enabled: true                # 全局总开关(需重启); 各 bot 是否启用流水线
+                               # 由 bot 私有配置的 agent_enabled 单独控制
+  # 角色名/人设/说话风格不在此配置 —— 每个 bot 自动使用自己的 nickname/persona
   llm_modules:                 # 各模块可独立覆盖模型；留空继承 llm.* 全局配置
     main_chat:                 # 回复生成
       model: ""

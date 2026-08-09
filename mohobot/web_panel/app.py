@@ -25,7 +25,6 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -142,8 +141,9 @@ class WebPanel:
 
         def _sink(message) -> None:
             record = message.record
+            from mohobot.utils.time_utils import to_utc8
             entry = {
-                "time": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+                "time": to_utc8(record["time"]).strftime("%Y-%m-%d %H:%M:%S"),
                 "level": record["level"].name,
                 "message": record["message"],
             }
@@ -266,6 +266,8 @@ class WebPanel:
             data = body.data
 
             # Apply nested updates safely
+            # 注意: database / log_dir / data_dir / plugins_dir 属于
+            # 服务端运行路径配置, 不允许在 WebUI 修改(改错会导致服务异常)。
             if "server" in data:
                 for k, v in data["server"].items():
                     if hasattr(cfg.server, k):
@@ -282,19 +284,16 @@ class WebPanel:
                 for k, v in data["reply"].items():
                     if hasattr(cfg.reply, k):
                         setattr(cfg.reply, k, v)
-            if "database" in data:
-                for k, v in data["database"].items():
-                    if hasattr(cfg.database, k):
-                        setattr(cfg.database, k, v)
             if "agent" in data:
                 agent_data = data["agent"] or {}
                 if "enabled" in agent_data:
                     cfg.agent.enabled = bool(agent_data["enabled"])
-                for k in ("persona", "llm_modules", "memory", "main_chat",
+                # persona 已移除(每个 bot 的人设取自其私有配置)
+                for k in ("llm_modules", "memory", "main_chat",
                           "topic_planner", "topic_replier", "reflection_worker", "reflex"):
                     if k in agent_data and isinstance(agent_data[k], dict):
                         setattr(cfg.agent, k, agent_data[k] or {})
-            for key in ("beta_mode", "log_dir", "data_dir", "plugins_dir", "context_max_rounds"):
+            for key in ("beta_mode", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
@@ -723,7 +722,8 @@ class WebPanel:
                 os.remove(tmp_path)
                 raise HTTPException(status_code=500, detail=f"备份失败: {e}")
 
-            fname = f"mohobot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            from mohobot.utils.time_utils import format_utc8
+            fname = f"mohobot_backup_{format_utc8('%Y%m%d_%H%M%S')}.zip"
             logger.info(f"Web panel: 备份完成 ({len(files)} 个文件, 范围={sorted(dir_set)})")
             return FileResponse(
                 tmp_path,
@@ -800,7 +800,8 @@ class WebPanel:
 
         @app.get("/api/health")
         async def health():
-            return {"status": "ok", "time": datetime.now().isoformat()}
+            from mohobot.utils.time_utils import now_utc8
+            return {"status": "ok", "time": now_utc8().isoformat()}
 
     # ── 数据管理辅助 ──────────────────────────────────────────
 

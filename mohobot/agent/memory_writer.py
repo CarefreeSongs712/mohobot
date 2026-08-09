@@ -18,6 +18,7 @@ from mohobot.agent.domain import (
 )
 from mohobot.agent.llm_module import LLMModule, parse_json_response
 from mohobot.agent.vector_store import Document, VectorStore
+from mohobot.utils.time_utils import format_utc8
 
 
 class MemoryWriter:
@@ -76,7 +77,7 @@ class MemoryWriter:
                 })
 
         if event_items:
-            today = time.strftime("%Y-%m-%d")
+            today = format_utc8("%Y-%m-%d")
             seen_texts = await self._batch_check_event_memory_dups(
                 vector_store, user_id, event_items, today, owner_character_id
             )
@@ -159,7 +160,7 @@ class MemoryWriter:
             logger.debug(f"Skip duplicate user_memory: {text[:50]}")
             return False
 
-        today = time.strftime("%Y-%m-%d")
+        today = format_utc8("%Y-%m-%d")
         doc = Document(
             content=text,
             metadata={
@@ -203,7 +204,7 @@ class MemoryWriter:
         if not text:
             return False
 
-        today = time.strftime("%Y-%m-%d")
+        today = format_utc8("%Y-%m-%d")
         if await self._is_same_day_duplicate_event_memory(
             vector_store, user_id, text, today, owner_character_id
         ):
