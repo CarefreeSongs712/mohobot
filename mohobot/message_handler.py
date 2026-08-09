@@ -889,22 +889,27 @@ class MessageHandler:
                 return
         await self._send_message(bot_id, event, reply)
 
-    # 合并转发阈值: 群聊文本回复超过 2000 字时改用合并转发
-    # (QQ 单条消息约 2000 字上限, 短内容直接发一条, 不拆合并转发)
-    _forward_min_len = 2000
+    # 合并转发阈值: 群聊文本回复超过 600 字时改用合并转发
+    # (短内容直接发一条; /help 等较长指令式输出自动合并)
+    _forward_min_len = 600
 
     # 框架内置全局指令(/ 前缀, 群内多 bot 只由 bot_id 最小者回复)
     _GLOBAL_COMMANDS = {"/help"}
+    # 前缀匹配的全局指令(带参数的命令): 封禁系统 /ban /pass /dec-* 系列
+    _GLOBAL_COMMAND_PREFIXES = ("/ban", "/pass", "/dec-")
 
     def _should_defer_global_command(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """全局指令去重: 命中全局指令且群内有多个 bot 时,
-        非 bot_id 最小者静默跳过(不回复, 也不交给 LLM)。"""
+        非 bot_id 最小者静默跳过(不回复, 也不交给 LLM)。
+
+        精确匹配(插件 global_triggers + 内置 /help) + 前缀匹配(封禁系统命令)。
+        """
         if not (self._ws and self._ws._bot_manager):
             return False
         text = extract_plain_text(event.message).strip()
         if not text:
             return False
-        # 命中集合: 内置 /help + 插件声明的 global_triggers
+        # 命中集合: 内置 + 插件声明的 global_triggers
         triggers = set(self._GLOBAL_COMMANDS)
         if self._plugins is not None:
             for meta in getattr(self._plugins, "_plugins", []):
@@ -914,7 +919,8 @@ class MessageHandler:
                 gt = getattr(inst.__class__, "global_triggers", None)
                 if isinstance(gt, (set, list, tuple)):
                     triggers.update(str(t) for t in gt)
-        if text not in triggers:
+        is_global = text in triggers or text.startswith(self._GLOBAL_COMMAND_PREFIXES)
+        if not is_global:
             return False
         # 群内最小 bot 才回复
         min_bot = self._ws._bot_manager.min_bot_for_group(str(event.group_id))

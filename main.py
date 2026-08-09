@@ -146,7 +146,10 @@ class MohobotApplication:
             plugin_system=self._plugin_system,
         )
         keyword_filter = KeywordFilter()
-        interceptors = [ban_filter, command_handler, keyword_filter, self._plugin_system]
+        # 拦截链: 封禁 → 插件 → 内置命令 → 关键词
+        # 插件优先消费 / 命令(含别名如 /jrlp), 内置命令(/help /sess 等)兜底,
+        # 未知指令节流不变; 关键词回复最后兜底普通消息。
+        interceptors = [ban_filter, self._plugin_system, command_handler, keyword_filter]
         self._message_handler.set_interceptors(interceptors)
 
         # 8. Initialize WebSocket server

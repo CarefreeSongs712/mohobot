@@ -462,6 +462,63 @@ async def test_concurrent_commands() -> None:
     print("[11] 6 bot 并发抽老婆/强娶 OK")
 
 
+async def test_jrlp_command_alias() -> None:
+    """/jrlp 英文缩写命令可解析(拦截链插件优先后生效)。"""
+    tmp = tempfile.mkdtemp(prefix="wife_")
+    inst = await make_plugin(tmp)
+
+    for uid in (1001, 1002, 1003, 2001):
+        await inst.on_message_observed(BOT, make_group_event(uid, "发言"), {})
+
+    # /jrlp → 抽老婆
+    ev = make_group_event(2001, "/jrlp")
+    handled, reply = await inst.on_message(BOT, ev, {})
+    assert handled is True, "/jrlp 应被插件消费"
+    assert isinstance(reply, list) and "你的今日老婆是" in "".join(
+        s.get("data", {}).get("text", "") for s in reply if s["type"] == "text"
+    )
+
+    # 拦截链顺序: 插件在 command_handler 之前(模拟 main.py 顺序)
+    from mohobot.interceptors.command_handler import CommandHandler
+    from mohobot.context_manager import ContextManager
+    from mohobot.models.config import ReplyConfig
+    from mohobot.message_handler import MessageHandler
+
+    class FakePlugins2:
+        async def dispatch_observed(self, *a, **kw):
+            return (False, None)
+
+    from mohobot.bot_manager import BotManager as _BM
+    inst._ws_server._bot_manager = _BM(data_dir=tempfile.mkdtemp(prefix="jr_"))
+
+    handler = MessageHandler(
+        ws_server=inst._ws_server,
+        context_manager=ContextManager(data_dir=tempfile.mkdtemp()),
+        llm_service=None,
+        plugin_system=FakePlugins2(),
+        data_dir=tempfile.mkdtemp(),
+        reply_config=ReplyConfig(stream=False),
+    )
+    cmd = CommandHandler(
+        context_manager=handler._ctx_mgr, llm_service=None,
+        ws_server=inst._ws_server, plugin_system=None,
+    )
+    # 新顺序: [ban, plugin, command, keyword] — 插件先于 command
+    from mohobot.interceptors.plugin_system import PluginSystem
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp(prefix="jps_"))
+    ps._plugins = [{"name": "wifepicker", "enabled": True, "loaded": True, "instance": inst}]
+    handler.set_interceptors([ps, cmd])
+    # 新用户 3001 触发 /jrlp → 插件(先于 command_handler)消费并发送回复
+    await handler._handle_message("bot_x", make_group_event(3001, "/jrlp"), {})
+    assert inst._ws_server.sent, "插件应消费 /jrlp 并发送回复"
+    sent_text = "".join(
+        s.get("data", {}).get("text", "") for s in inst._ws_server.sent[-1][2]
+        if s.get("type") == "text"
+    ) if isinstance(inst._ws_server.sent[-1][2], list) else ""
+    assert "你的今日老婆是" in sent_text, sent_text
+    print("[13] /jrlp 别名解析(插件优先) OK")
+
+
 async def test_all() -> None:
     await test_load_and_store()
     await test_observe_records_active_and_passthrough()
@@ -475,6 +532,7 @@ async def test_all() -> None:
     await test_propose_private_rejected()
     await test_graph_render_path()
     await test_concurrent_commands()
+    await test_jrlp_command_alias()
     print("\nALL WIFEPICKER TESTS PASSED")
 
 

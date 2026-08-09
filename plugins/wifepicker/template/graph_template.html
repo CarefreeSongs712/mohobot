@@ -20,20 +20,20 @@
 
         #network-container {
             width: 100%;
-            /* 预留 80px 给 header，保证不和图谱重叠 */
-            height: calc(100vh - 80px);
+            /* 预留 140px 给 header(标题加大后), 保证不和图谱重叠 */
+            height: calc(100vh - 140px);
             position: relative;
         }
 
         .header {
             width: 100%;
-            height: 80px;
+            height: 140px;
             display: flex;
             align-items: center;
             justify-content: center;
             text-align: center;
             color: #000000;
-            font-size: 32px;
+            font-size: 64px;
             font-weight: bold;
             background-color: #fff;
             z-index: 10;
@@ -69,15 +69,15 @@
                         shape: 'circularImage',
                        image: `https://q4.qlogo.cn/headimg_dl?dst_uin=${u.id}&spec=640&t=${hourlyTag}`,
                         borderWidth: 6,
-                        size: 110, // 放大头像 (50 -> 70)
+                        size: 110, // 头像尺寸
                         color: { border: '#4facfe', background: '#ffffff' },
                         font: {
                             color: '#000000',
-                            size: 50, // 放大文字 (18 -> 26)
-                            vadjust: 40, // 调整文字偏移，适应大头像
+                            size: 62, // 节点名字加大
+                            vadjust: 48, // 调整文字偏移, 适应大头像
                             strokeWidth: 6, // 增加描边
                             strokeColor: '#ffffff',
-                            bold: { color: '#000000', size: 44, vadjust: 40 }
+                            bold: { color: '#000000', size: 56, vadjust: 48 }
                         }
                     });
                 }
@@ -89,7 +89,7 @@
                 label: r.forced ? "强娶" : "抽中",
                 arrows: {to: {enabled: true,scaleFactor: 3,type: 'arrow'}},
                 color: { color: r.forced ? '#ff4d4f' : '#1890ff', width: 4 },
-                font: { align: 'middle', color: '#444', size: 48, background: '#ffffff' },
+                font: { align: 'middle', color: '#444', size: 56, background: '#ffffff' },
                 length: 700 // 拉开节点间距
             });
         });
@@ -109,20 +109,22 @@
             },
             physics: {
                 enabled: true,
-                barnesHut: {
-                    gravitationalConstant: -110000, // 进一步增大排斥力
-                    centralGravity: 0.001,
-                    springLength: 800, // 大幅增加弹簧长度
-                    springConstant: 0.04,           // 弹簧强度，值越小越“软”，节点越容易被推开
-                    damping: 0.09,
-                    avoidOverlap: 1 // 防重叠参数，允许适当交叉，看着更自然
+                // forceAtlas2(Gephi 同款): 节点均匀分散, 避免局部重叠/大片空白
+                solver: 'forceAtlas2Based',
+                forceAtlas2Based: {
+                    gravitationalConstant: -120,  // 节点间斥力
+                    centralGravity: 0.02,         // 向心引力: 防止节点四散失衡
+                    springLength: 260,            // 期望边长度
+                    springConstant: 0.14,         // 弹簧强度
+                    damping: 0.5,                 // 阻尼: 越大布局越稳定
+                    avoidOverlap: 0.9             // 0-1: 越接近 1 越避免头像重叠
                 },
                 stabilization: {
                     enabled: true,
-                    iterations: {{ iterations }},
+                    iterations: Math.max({{ iterations }}, 600),  // 足够迭代保证收敛均匀
                     updateInterval: 25,
                     onlyDynamicEdges: false,
-                fit: true
+                    fit: true
                 }
             }
         };

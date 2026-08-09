@@ -188,6 +188,12 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 }
 .conv-msg .save-row { margin-top: 6px; display: flex; gap: 8px; }
 .conv-actions { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+/* 对话数据: 搜索/分页工具栏 */
+.conv-toolbar { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); align-items: center; position: sticky; top: 0; background: var(--bg-card); z-index: 5; }
+.conv-toolbar input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; }
+.conv-toolbar select { padding: 5px 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; }
+.conv-pager { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-dim); position: sticky; bottom: 0; background: var(--bg-card); }
+.conv-pager button:disabled { opacity: .4; cursor: not-allowed; }
 /* ── Misc ── */
 .toast {
   position: fixed; top: 20px; right: 20px; padding: 12px 18px; border-radius: 8px;
@@ -1011,28 +1017,78 @@ let ctxSessions = [];
 async function loadContextsPage() {
   try {
     ctxBots = await apiJSON('/api/contexts');
-    const el = document.getElementById('conv-chats');
-    if (!ctxBots.length) { el.innerHTML = '<div class="conv-empty">暂无数据</div>'; return; }
-    let html = '';
-    for (const b of ctxBots) {
-      html += `<div style="padding:8px 14px;color:var(--text-dim);font-size:12px;font-weight:600">Bot ${b.bot_id}</div>`;
-      for (const c of b.chats) {
-        const label = c.chat_type === 'private' ? `👤 ${c.chat_id}` : `👥 ${c.chat_id}`;
-        html += `<div class="conv-item" data-bot="${b.bot_id}" data-type="${c.chat_type}" data-chat="${c.chat_id}">
-          ${label}<div class="small">${c.session_count} 个会话</div></div>`;
-      }
-    }
-    el.innerHTML = html;
-    el.querySelectorAll('.conv-item').forEach(item => {
-      item.addEventListener('click', () => {
-        el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
-        ctxSelected = { bot_id: item.dataset.bot, chat_type: item.dataset.type, chat_id: item.dataset.chat };
-        loadSessions();
-      });
-    });
+    ctxPage = 1;
+    renderChatList();
   } catch (e) { showToast('加载对话数据失败: ' + e.message, false); }
 }
+
+// ── 左侧会话列表: 全局搜索(QQ/群号) + 分页 ──
+let ctxSearch = '';
+let ctxPage = 1;
+let ctxPageSize = 10;
+
+function ctxSearchChanged(val) { ctxSearch = val.trim(); ctxPage = 1; renderChatList(); }
+function ctxPageSizeChanged(val) { ctxPageSize = parseInt(val) || 10; ctxPage = 1; renderChatList(); }
+function ctxPageChange(p) { if (p >= 1) { ctxPage = p; renderChatList(); } }
+
+function renderChatList() {
+  const el = document.getElementById('conv-chats');
+  if (!ctxBots.length) {
+    el.innerHTML = `<div class="conv-toolbar"><input id="ctx-search" placeholder="🔍 搜索 QQ 号/群号" oninput="ctxSearchChanged(this.value)"></div>
+      <div class="conv-empty">暂无数据</div>`;
+    return;
+  }
+  // 展平 + 全局过滤(所有 bot 的会话, 按 QQ/群号模糊)
+  const items = [];
+  for (const b of ctxBots) {
+    for (const c of b.chats) {
+      if (ctxSearch && !String(c.chat_id).includes(ctxSearch)) continue;
+      items.push({ bot: b.bot_id, chat: c });
+    }
+  }
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / ctxPageSize));
+  if (ctxPage > pages) ctxPage = pages;
+  const start = (ctxPage - 1) * ctxPageSize;
+  const pageItems = items.slice(start, start + ctxPageSize);
+
+  const sizeOptions = [10, 20, 50, 100]
+    .map(n => `<option value="${n}" ${n === ctxPageSize ? 'selected' : ''}>${n}/页</option>`).join('');
+  let html = `<div class="conv-toolbar">
+      <input id="ctx-search" placeholder="🔍 搜索 QQ 号/群号" value="${esc(ctxSearch)}" oninput="ctxSearchChanged(this.value)">
+      <select onchange="ctxPageSizeChanged(this.value)">${sizeOptions}</select>
+    </div>`;
+  let lastBot = null;
+  for (const item of pageItems) {
+    if (item.bot !== lastBot) {
+      html += `<div style="padding:8px 14px;color:var(--text-dim);font-size:12px;font-weight:600">Bot ${item.bot}</div>`;
+      lastBot = item.bot;
+    }
+    const c = item.chat;
+    const label = c.chat_type === 'private' ? `👤 ${c.chat_id}` : `👥 ${c.chat_id}`;
+    html += `<div class="conv-item" data-bot="${item.bot}" data-type="${c.chat_type}" data-chat="${c.chat_id}">
+      ${label}<div class="small">${c.session_count} 个会话</div></div>`;
+  }
+  if (!pageItems.length) html += '<div class="conv-empty">无匹配会话</div>';
+  html += `<div class="conv-pager">
+      <button class="btn small secondary" ${ctxPage <= 1 ? 'disabled' : ''} onclick="ctxPageChange(${ctxPage - 1})">‹ 上一页</button>
+      <span>${ctxPage}/${pages} · 共 ${total}</span>
+      <button class="btn small secondary" ${ctxPage >= pages ? 'disabled' : ''} onclick="ctxPageChange(${ctxPage + 1})">下一页 ›</button>
+    </div>`;
+  el.innerHTML = html;
+  el.querySelectorAll('.conv-item').forEach(item => {
+    item.addEventListener('click', () => {
+      el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      ctxSelected = { bot_id: item.dataset.bot, chat_type: item.dataset.type, chat_id: item.dataset.chat };
+      loadSessions();
+    });
+  });
+}
+
+// ── 右侧会话详情: 分页 ──
+let ctxSessionPage = 1;
+let ctxSessionPageSize = 10;
 
 async function loadSessions() {
   const { bot_id, chat_type, chat_id } = ctxSelected;
@@ -1040,21 +1096,44 @@ async function loadSessions() {
   try {
     const data = await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}`);
     ctxSessions = data.sessions;
-    const active = data.active;
-    el.innerHTML = `<div class="conv-actions">
-      <button class="btn small secondary" onclick="newSession()">＋ 新建</button>
-    </div>` +
-    ctxSessions.map(s => `<div class="conv-item ${s.id === active ? 'active' : ''}" data-sid="${s.id}" data-name="${s.name}">
-      ${s.name}<div class="small">${s.id}</div></div>`).join('') || '<div class="conv-empty">无会话</div>';
-    el.querySelectorAll('.conv-item').forEach(item => {
-      item.addEventListener('click', () => {
-        el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
-        loadSessionDetail(item.dataset.sid);
-      });
-    });
-    if (active) loadSessionDetail(active);
+    ctxSessionPage = 1;
+    renderSessions(data.active);
   } catch (e) { showToast('加载会话失败: ' + e.message, false); }
+}
+
+function ctxSessionPageSizeChanged(val) { ctxSessionPageSize = parseInt(val) || 10; ctxSessionPage = 1; renderSessions(); }
+function ctxSessionPageChange(p) { if (p >= 1) { ctxSessionPage = p; renderSessions(); } }
+
+function renderSessions(active) {
+  const el = document.getElementById('conv-sessions');
+  const total = ctxSessions.length;
+  const pages = Math.max(1, Math.ceil(total / ctxSessionPageSize));
+  if (ctxSessionPage > pages) ctxSessionPage = pages;
+  const start = (ctxSessionPage - 1) * ctxSessionPageSize;
+  const pageItems = ctxSessions.slice(start, start + ctxSessionPageSize);
+  const sizeOptions = [10, 20, 50, 100]
+    .map(n => `<option value="${n}" ${n === ctxSessionPageSize ? 'selected' : ''}>${n}/页</option>`).join('');
+  let html = `<div class="conv-actions">
+      <button class="btn small secondary" onclick="newSession()">＋ 新建</button>
+      <span style="flex:1"></span>
+      <select onchange="ctxSessionPageSizeChanged(this.value)">${sizeOptions}</select>
+    </div>`;
+  html += pageItems.map(s => `<div class="conv-item ${s.id === active ? 'active' : ''}" data-sid="${s.id}" data-name="${s.name}">
+    ${s.name}<div class="small">${s.id}</div></div>`).join('') || '<div class="conv-empty">无会话</div>';
+  html += `<div class="conv-pager">
+      <button class="btn small secondary" ${ctxSessionPage <= 1 ? 'disabled' : ''} onclick="ctxSessionPageChange(${ctxSessionPage - 1})">‹ 上一页</button>
+      <span>${ctxSessionPage}/${pages} · 共 ${total}</span>
+      <button class="btn small secondary" ${ctxSessionPage >= pages ? 'disabled' : ''} onclick="ctxSessionPageChange(${ctxSessionPage + 1})">下一页 ›</button>
+    </div>`;
+  el.innerHTML = html;
+  el.querySelectorAll('.conv-item').forEach(item => {
+    item.addEventListener('click', () => {
+      el.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      loadSessionDetail(item.dataset.sid);
+    });
+  });
+  if (active) loadSessionDetail(active);
 }
 
 async function loadSessionDetail(sessionId) {
