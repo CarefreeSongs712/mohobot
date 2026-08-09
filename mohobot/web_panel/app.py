@@ -302,8 +302,9 @@ class WebPanel:
                 ban_data = data["ban"] or {}
                 if "enabled" in ban_data:
                     cfg.ban.enabled = bool(ban_data["enabled"])
-                if "admins" in ban_data and isinstance(ban_data["admins"], list):
-                    cfg.ban.admins = [int(a) for a in ban_data["admins"] if str(a).isdigit()]
+            # 顶层 admins(封禁/插件命令共用管理员)
+            if "admins" in data and isinstance(data["admins"], list):
+                cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]
             for key in ("beta_mode", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])
@@ -312,8 +313,11 @@ class WebPanel:
             # 热同步封禁拦截器(启停/管理员即时生效, 无需重启)
             if self._ban_filter is not None:
                 self._ban_filter.sync_config(
-                    enabled=cfg.ban.enabled, admins=cfg.ban.admins,
+                    enabled=cfg.ban.enabled, admins=cfg.admins,
                 )
+            # 热同步插件管理员(关系插件等命令权限)
+            if self._plugin_system is not None:
+                self._plugin_system.set_admin_ids(list(cfg.admins))
             logger.info(f"Web panel: global config updated ({list(data.keys())})")
             return {"status": "ok"}
 
@@ -483,6 +487,30 @@ class WebPanel:
             count = await self._plugin_system.reload_plugins()
             logger.info(f"Web panel: plugins hot-reloaded ({count} active)")
             return {"status": "ok", "count": count, "plugins": self._plugin_system.list_plugins()}
+
+        @app.get("/api/plugins/{name}/config")
+        async def get_plugin_config(name: str, request: Request):
+            """读取插件配置(schema + 当前值)。"""
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件系统未启用")
+            config = self._plugin_system.get_plugin_config(name)
+            schema = self._plugin_system.get_config_schema(name)
+            if config is None or schema is None:
+                raise HTTPException(status_code=404, detail=f"插件 {name} 无配置")
+            return {"schema": schema, "config": config}
+
+        @app.post("/api/plugins/{name}/config")
+        async def save_plugin_config(name: str, request: Request, body: ConfigUpdateRequest):
+            """保存插件配置(schema 校验 + 热生效)。"""
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件系统未启用")
+            ok = self._plugin_system.save_plugin_config(name, body.data or {})
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"插件 {name} 无配置或不存在")
+            logger.info(f"Web panel: plugin {name} config updated (hot)")
+            return {"status": "ok", "config": self._plugin_system.get_plugin_config(name)}
 
         # ── 5. Conversations (对话数据) ──────────────────────
 
@@ -820,7 +848,7 @@ class WebPanel:
             data = await self._ban_store.get_all() if self._ban_store else {}
             return {
                 "enabled": cfg.ban.enabled,
-                "admins": list(cfg.ban.admins),
+                "admins": list(cfg.admins),
                 "ban": data.get("ban", {}),
                 "ban_all": data.get("ban_all", []),
                 "pass": data.get("pass", {}),

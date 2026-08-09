@@ -121,16 +121,16 @@ class BanConfig:
     """封禁系统配置(全局统一名单, 所有 bot 共享)。
 
     封禁语义: bot 静默忽略被禁用户的消息(不是 QQ 群管理封禁)。
-    admins 为可执行封禁命令的管理员 QQ 号列表。
+    管理员从顶层 GlobalConfig.admins 获取(ban 段不再单独配置 admins)。
     """
     enabled: bool = True
-    admins: list[int] = field(default_factory=list)   # 管理员 QQ 号
 
 
 @dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     beta_mode: bool = True     # true = Agent 流水线(beta 模式); false = 旧版直接流式回复(数据库保留)
+    admins: list[int] = field(default_factory=list)  # 全局管理员 QQ 号(封禁/插件命令共用)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
@@ -168,6 +168,10 @@ class GlobalConfig:
 
         return cls(
             beta_mode=raw.get("beta_mode", True),
+            # 顶层 admins 优先; 兼容旧配置 ban.admins(自动迁移)
+            admins=[int(a) for a in (
+                raw.get("admins") or ban_raw.get("admins") or []
+            ) if str(a).isdigit()],
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8080),
@@ -226,7 +230,6 @@ class GlobalConfig:
             ),
             ban=BanConfig(
                 enabled=ban_raw.get("enabled", True),
-                admins=[int(a) for a in ban_raw.get("admins", []) or []],
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -287,9 +290,9 @@ class GlobalConfig:
                 "base_url": self.anysearch.base_url,
                 "timeout": self.anysearch.timeout,
             },
+            "admins": list(self.admins),
             "ban": {
                 "enabled": self.ban.enabled,
-                "admins": list(self.ban.admins),
             },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
@@ -350,9 +353,9 @@ class GlobalConfig:
                 "base_url": self.anysearch.base_url,
                 "timeout": self.anysearch.timeout,
             },
+            "admins": list(self.admins),
             "ban": {
                 "enabled": self.ban.enabled,
-                "admins": list(self.ban.admins),
             },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,

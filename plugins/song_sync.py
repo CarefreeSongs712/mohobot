@@ -62,7 +62,7 @@ class Plugin:
         from mohobot.models.config import GlobalConfig
 
         cfg = GlobalConfig.load("./config/global.yaml")
-        admins = {str(a) for a in (cfg.ban.admins or [])}
+        admins = {str(a) for a in (cfg.admins or [])}
         if str(event.user_id) not in admins:
             return (True, "❌ 你没有权限执行此操作。")
 

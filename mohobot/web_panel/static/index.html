@@ -313,6 +313,18 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     </div>
   </div>
 
+  <!-- 插件配置弹窗 -->
+  <div class="modal hidden" id="plugin-config-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px">
+    <div class="card" style="width:560px;max-height:80vh;overflow-y:auto">
+      <div class="card-title" id="plugin-config-title">插件配置</div>
+      <div id="plugin-config-form"></div>
+      <div class="form-row" style="margin-top:12px;justify-content:flex-end">
+        <button class="btn btn-sm secondary" onclick="closePluginConfig()">关闭</button>
+        <button class="btn btn-sm" onclick="savePluginConfig()">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 5. Contexts -->
   <div class="page" id="page-contexts">
     <h2>💬 对话数据</h2>
@@ -671,9 +683,11 @@ async function loadConfigPage() {
       textareaField('agent.reflex.touch_replies', '戳一戳回复(每行一条)', (globalConfigCache.agent?.reflex?.touch_replies || []).join('\n'), 'bot 私有配置留空时使用这里; 都留空则用内置默认') +
       '<div class="hint" style="margin-top:-6px">角色名/人设/说话风格无需在此配置 —— 每个 bot 自动使用自己的昵称与人设(BotConfig.persona)</div>' +
       '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🛡 管理员</div>' +
+      formField('admins', '管理员 QQ(逗号分隔)', (globalConfigCache.admins || []).join(','), { hint: '可执行 /ban、插件管理命令(如 /群列表 /退群)的管理员 QQ 号' }) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🚫 封禁系统</div>' +
       checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
-      formField('ban.admins', '管理员 QQ(逗号分隔)', (globalConfigCache.ban?.admins || []).join(','), { hint: '可执行 /ban 等封禁命令的管理员 QQ 号' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🗄️ 数据库</div>' +
       readonlyCheckField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite(需在配置文件修改)') +
@@ -800,8 +814,8 @@ async function saveGlobalConfig() {
     },
     ban: {
       enabled: document.getElementById('cfg-ban.enabled')?.checked ?? true,
-      admins: (document.getElementById('cfg-ban.admins')?.value || '')
-        .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
+    admins: (document.getElementById('cfg-admins')?.value || '')
+      .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
     },
   };
   try {
@@ -883,7 +897,10 @@ async function loadPlugins() {
         <td><b>${p.name}</b><div class="small" style="color:var(--text-dim);font-size:11px">${p.file}</div></td>
         <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
         <td style="color:var(--text-dim)">${p.info?.description || p.error || '—'}</td>
-        <td><label class="switch"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label></td>
+        <td>
+          <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
+          ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
+        </td>
       </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">暂无插件</td></tr>';
   } catch (e) { showToast('加载插件失败: ' + e.message, false); }
 }
@@ -891,17 +908,99 @@ async function loadPlugins() {
 async function togglePlugin(name, enabled) {
   try {
     await apiJSON('/api/plugins/toggle', { method: 'POST', body: { name, enabled } });
-    showToast(`插件 ${name} 已${enabled ? '启用' : '禁用'}（热生效）`);
-    loadPlugins();
-  } catch (e) { showToast('操作失败: ' + e.message, false); loadPlugins(); }
+    showToast(`${name} 已${enabled ? '启用' : '禁用'}`);
+  } catch (e) { showToast('操作失败: ' + e.message, false); }
+  loadPlugins();
 }
 
 async function reloadPlugins() {
   try {
-    const r = await apiJSON('/api/plugins/reload', { method: 'POST' });
-    showToast(`插件已重新加载: ${r.count} 个生效`);
+    await apiJSON('/api/plugins/reload', { method: 'POST' });
+    showToast('插件已热重载');
     loadPlugins();
   } catch (e) { showToast('重载失败: ' + e.message, false); }
+}
+
+// ── 插件配置 (schema 驱动表单) ────────────────────────────────
+let pluginConfigCache = { name: '', schema: {}, config: {} };
+
+// 递归渲染 schema 字段
+function renderSchemaFields(schema, config, prefix = '') {
+  let html = '';
+  for (const [key, spec] of Object.entries(schema || {})) {
+    if (!spec || typeof spec !== 'object') continue;
+    if (spec.invisible) continue;
+    const id = prefix + key;
+    const label = spec.description || key;
+    const hint = spec.hint ? `<div class="hint">${spec.hint}</div>` : '';
+    const value = config[key];
+
+    if (spec.type === 'object') {
+      html += `<div class="card-title" style="font-size:13px;margin-top:8px">📂 ${label}</div>`;
+      html += renderSchemaFields(spec.items || {}, value || {}, id + '.');
+    } else if (spec.type === 'bool') {
+      html += `<div class="form-row"><label style="display:inline-block;margin-right:10px">${label}</label>
+        <label class="switch"><input type="checkbox" id="pcf-${id}" ${value ? 'checked' : ''}><span class="slider"></span></label>${hint}</div>`;
+    } else if (spec.type === 'list') {
+      html += `<div class="form-row"><label>${label}</label>
+        <input type="text" id="pcf-${id}" value="${(value || []).join(',')}" placeholder="逗号分隔多个值">${hint}</div>`;
+    } else if (spec.type === 'int') {
+      const slider = spec.slider ? ` min="${spec.slider.min}" max="${spec.slider.max}" step="${spec.slider.step || 1}"` : '';
+      html += `<div class="form-row"><label>${label}</label>
+        <input type="number" id="pcf-${id}" value="${value == null ? '' : value}"${slider}>${hint}</div>`;
+    } else {
+      html += `<div class="form-row"><label>${label}</label>
+        <input type="text" id="pcf-${id}" value="${String(value == null ? '' : value).replace(/"/g, '&quot;')}">${hint}</div>`;
+    }
+  }
+  return html;
+}
+
+// 递归收集表单值
+function collectSchemaFields(schema, prefix = '') {
+  const out = {};
+  for (const [key, spec] of Object.entries(schema || {})) {
+    if (!spec || typeof spec !== 'object' || spec.invisible) continue;
+    const id = prefix + key;
+    if (spec.type === 'object') {
+      out[key] = collectSchemaFields(spec.items || {}, id + '.');
+    } else if (spec.type === 'bool') {
+      out[key] = document.getElementById('pcf-' + id)?.checked ?? false;
+    } else if (spec.type === 'list') {
+      out[key] = (document.getElementById('pcf-' + id)?.value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+    } else if (spec.type === 'int') {
+      const v = parseInt(document.getElementById('pcf-' + id)?.value, 10);
+      out[key] = isNaN(v) ? (spec.default ?? 0) : v;
+    } else {
+      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
+    }
+  }
+  return out;
+}
+
+async function openPluginConfig(name) {
+  try {
+    const r = await apiJSON(`/api/plugins/${name}/config`);
+    pluginConfigCache = { name, schema: r.schema, config: r.config };
+    document.getElementById('plugin-config-title').textContent = `⚙️ ${name} 配置`;
+    document.getElementById('plugin-config-form').innerHTML = renderSchemaFields(r.schema, r.config);
+    document.getElementById('plugin-config-modal').classList.remove('hidden');
+  } catch (e) { showToast('加载配置失败: ' + e.message, false); }
+}
+
+function closePluginConfig() {
+  document.getElementById('plugin-config-modal').classList.add('hidden');
+}
+
+async function savePluginConfig() {
+  const data = collectSchemaFields(pluginConfigCache.schema);
+  try {
+    await apiJSON(`/api/plugins/${pluginConfigCache.name}/config`, { method: 'POST', body: { data } });
+    showToast('配置已保存(热生效)');
+    closePluginConfig();
+    loadPlugins();
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
 }
 
 // ═══════════════ 5. Contexts ═══════════════

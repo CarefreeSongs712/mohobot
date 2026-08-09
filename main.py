@@ -80,6 +80,7 @@ class MohobotApplication:
         # 4. Load plugins
         # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
         self._plugin_system.set_runtime_refs(bot_manager=self._bot_manager)
+        self._plugin_system.set_admin_ids(list(self._config.admins))
         # Anysearch 实时联网搜索客户端(供插件与流水线使用)
         from mohobot.anysearch import AnySearchClient
         self._anysearch_client: AnySearchClient | None = None
@@ -135,7 +136,7 @@ class MohobotApplication:
         ban_filter = BanInterceptor(
             data_dir=self._config.data_dir,
             enabled=self._config.ban.enabled,
-            admins=self._config.ban.admins,
+            admins=self._config.admins,
             store=self._ban_store,
         )
         command_handler = CommandHandler(

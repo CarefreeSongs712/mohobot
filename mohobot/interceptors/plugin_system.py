@@ -40,10 +40,34 @@ class PluginSystem(Interceptor):
         self._plugins: list[dict[str, Any]] = []  # Plugin metadata + instance
         # {plugin_name: {"enabled": bool, "file": str, "loaded": bool, "info": {...}}}
         self._state_file = self._data_dir / "plugins_state.json"
+        # 插件配置目录(全局一份): data/plugins_config/{name}.json
+        self._config_dir = Path(data_dir) / "plugins_config"
         # 运行时注入引用(热重载后重新注入)
         self._ws_server = None
         self._bot_manager = None
         self._anysearch_client = None
+        self._admin_ids: set[str] = set()  # 全局管理员(封禁/插件命令共用)
+
+    # ── 管理员注入 ─────────────────────────────────────────────
+
+    def set_admin_ids(self, admins: list[int] | None) -> None:
+        """热同步全局管理员(web 面板保存后调用)。"""
+        if admins is not None:
+            self._admin_ids = {str(a) for a in admins}
+        self.apply_admin_injection()
+
+    def apply_admin_injection(self) -> None:
+        """把管理员列表注入插件实例(类级 inject_admin_ids classmethod)。"""
+        for meta in self._plugins:
+            inst = meta.get("instance")
+            if inst is None:
+                continue
+            injector = getattr(inst.__class__, "inject_admin_ids", None)
+            if injector:
+                try:
+                    injector(list(self._admin_ids))
+                except Exception as e:
+                    logger.error(f"Admin injection failed for {meta['name']}: {e}")
 
     # ── 运行时注入(热重载后自动重新注入) ────────────────────
 
@@ -57,7 +81,7 @@ class PluginSystem(Interceptor):
             self._anysearch_client = anysearch_client
 
     def apply_injections(self) -> None:
-        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir / anysearch)。
+        """对已加载插件实例执行注入(ws_server / bot_manager / data_dir / anysearch / admins)。
 
         通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
         """
@@ -80,9 +104,16 @@ class PluginSystem(Interceptor):
                 injector = getattr(inst.__class__, "inject_anysearch_client", None)
                 if injector:
                     injector(self._anysearch_client)
+        # 管理员注入(类级)
+        self.apply_admin_injection()
 
     async def load_plugins(self) -> int:
-        """Scan plugins directory and load all enabled plugins."""
+        """Scan plugins directory and load all enabled plugins.
+
+        支持两种形态:
+        - 单文件插件: plugins/xxx.py (定义 class Plugin)
+        - 目录插件:   plugins/xxx/main.py (定义 class Plugin, 可含 core/ 子模块与 _conf_schema.json)
+        """
         self._plugins.clear()
 
         if not self._plugins_dir.exists():
@@ -99,22 +130,35 @@ class PluginSystem(Interceptor):
 
         count = 0
         for entry in sorted(self._plugins_dir.iterdir()):
-            if entry.suffix != ".py" or entry.name.startswith("_"):
-                continue
-            if entry.name == "__init__.py":
+            # 定位插件入口文件: 单文件 xxx.py 或 目录 xxx/main.py
+            entry_path = None
+            plugin_name = ""
+            if entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_") and entry.name != "__init__.py":
+                entry_path = entry
+                plugin_name = entry.stem
+            elif entry.is_dir() and not entry.name.startswith("_") and entry.name != "__pycache__":
+                main_file = entry / "main.py"
+                if main_file.exists():
+                    entry_path = main_file
+                    plugin_name = entry.name
+                else:
+                    continue
+            else:
                 continue
 
-            plugin_name = entry.stem
             plugin_state = state.get(plugin_name, {"enabled": True})
             enabled = plugin_state.get("enabled", True)
 
             meta = {
                 "name": plugin_name,
-                "file": entry.name,
+                "file": str(entry_path.relative_to(self._plugins_dir)),
+                "entry_dir": str(entry_path.parent) if entry_path.parent != self._plugins_dir else "",
                 "enabled": enabled,
                 "loaded": False,
                 "error": None,
                 "info": {},
+                "config_schema": None,
+                "config": None,
                 "loaded_at": None,
             }
 
@@ -124,8 +168,14 @@ class PluginSystem(Interceptor):
                 continue
 
             try:
+                # 目录插件: 把插件目录加入 sys.path(其 main.py 内可 import 同目录模块)
+                if meta["entry_dir"]:
+                    plugin_dir_abs = str(entry_path.parent.absolute())
+                    if plugin_dir_abs not in sys.path:
+                        sys.path.insert(0, plugin_dir_abs)
+
                 module_name = f"mohobot_plugin_{plugin_name}"
-                spec = importlib.util.spec_from_file_location(module_name, entry)
+                spec = importlib.util.spec_from_file_location(module_name, entry_path)
                 if spec is None or spec.loader is None:
                     meta["error"] = "spec load failed"
                     self._plugins.append(meta)
@@ -157,6 +207,14 @@ class PluginSystem(Interceptor):
                 cls_info = getattr(plugin_instance.__class__, "info", None)
                 if isinstance(cls_info, dict):
                     meta["info"].update(cls_info)
+
+                # 插件配置: 读取 _conf_schema.json(若有) + 合并已存配置
+                schema = self._load_config_schema(entry_path.parent)
+                if schema:
+                    meta["config_schema"] = schema
+                    meta["config"] = self._load_plugin_config(plugin_name, schema)
+                    self._inject_config(plugin_instance, meta["config"])
+
                 self._plugins.append(meta)
                 count += 1
                 logger.info(f"Loaded plugin: {plugin_name}")
@@ -169,6 +227,129 @@ class PluginSystem(Interceptor):
         # 加载完成后注入运行时引用(热重载也走这里)
         self.apply_injections()
         return count
+
+    # ── 插件配置 (schema 驱动) ────────────────────────────────
+
+    @staticmethod
+    def _load_config_schema(plugin_dir: Path) -> dict | None:
+        """读取插件目录下的 _conf_schema.json(不存在返回 None)。"""
+        schema_path = plugin_dir / "_conf_schema.json"
+        if not schema_path.exists():
+            return None
+        try:
+            return json.loads(schema_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to load config schema {schema_path}: {e}")
+            return None
+
+    def _load_plugin_config(self, plugin_name: str, schema: dict) -> dict:
+        """合并 schema 默认值 + 已存配置(存于 data/plugins_config/{name}.json)。"""
+        defaults = self._schema_defaults(schema)
+        saved: dict = {}
+        config_file = self._config_dir / f"{plugin_name}.json"
+        if config_file.exists():
+            try:
+                saved = json.loads(config_file.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    saved = {}
+            except Exception as e:
+                logger.error(f"Failed to load plugin config {config_file}: {e}")
+        merged = self._deep_merge(defaults, saved)
+        # 首次无存档时写默认值, 便于面板编辑
+        if not saved:
+            try:
+                config_file.parent.mkdir(parents=True, exist_ok=True)
+                config_file.write_text(
+                    json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception as e:
+                logger.error(f"Failed to save default plugin config: {e}")
+        return merged
+
+    @classmethod
+    def _schema_defaults(cls, schema: dict) -> dict:
+        """从 schema 递归构造默认配置。"""
+        result: dict = {}
+        for key, spec in (schema or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            stype = spec.get("type", "string")
+            if stype == "object":
+                result[key] = cls._schema_defaults(spec.get("items") or {})
+            elif "default" in spec:
+                result[key] = spec["default"]
+            elif stype == "list":
+                result[key] = []
+            elif stype == "bool":
+                result[key] = False
+            elif stype == "int":
+                result[key] = 0
+            else:
+                result[key] = ""
+        return result
+
+    @staticmethod
+    def _deep_merge(base: dict, override: dict) -> dict:
+        merged = dict(base)
+        for k, v in (override or {}).items():
+            if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+                merged[k] = PluginSystem._deep_merge(merged[k], v)
+            else:
+                merged[k] = v
+        return merged
+
+    @staticmethod
+    def _inject_config(plugin_instance, config: dict) -> None:
+        """把配置注入插件实例(实例属性 plugin_config)。"""
+        try:
+            object.__setattr__(plugin_instance, "plugin_config", config)
+        except Exception:
+            try:
+                plugin_instance.plugin_config = config
+            except Exception:
+                pass
+
+    def get_plugin_config(self, name: str) -> dict | None:
+        """Web 面板读取插件配置。"""
+        for meta in self._plugins:
+            if meta["name"] == name:
+                return meta.get("config")
+        return None
+
+    def get_config_schema(self, name: str) -> dict | None:
+        for meta in self._plugins:
+            if meta["name"] == name:
+                return meta.get("config_schema")
+        return None
+
+    def save_plugin_config(self, name: str, config: dict) -> bool:
+        """保存插件配置并热同步到插件实例(立即生效, 无需重启)。"""
+        meta = next((m for m in self._plugins if m["name"] == name), None)
+        if meta is None or meta.get("config_schema") is None:
+            return False
+        merged = self._deep_merge(
+            self._schema_defaults(meta["config_schema"]), config or {}
+        )
+        meta["config"] = merged
+        try:
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+            (self._config_dir / f"{name}.json").write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save plugin config {name}: {e}")
+            return False
+        inst = meta.get("instance")
+        if inst is not None:
+            self._inject_config(inst, merged)
+            updater = getattr(inst, "on_config_update", None)
+            if callable(updater):
+                try:
+                    updater(merged)
+                except Exception as e:
+                    logger.error(f"Plugin {name} on_config_update failed: {e}")
+        logger.info(f"Plugin {name} config updated (热生效)")
+        return True
 
     async def reload_plugins(self) -> int:
         """热重载: 重新扫描 plugins/ 目录并加载全部插件。
@@ -263,6 +444,27 @@ class PluginSystem(Interceptor):
                     await handler(bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} meta handler error: {e}")
+
+    async def dispatch_request(
+        self, bot_id: str, event, raw: dict,
+    ) -> bool:
+        """Dispatch a request event (好友申请/群邀请) to plugins.
+
+        Returns True if a plugin handled the request (框架不再自动同意)。
+        """
+        for meta in self._plugins:
+            if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            plugin = meta.get("instance")
+            try:
+                handler = getattr(plugin, "on_request", None)
+                if handler:
+                    handled = await handler(bot_id, event, raw)
+                    if handled:
+                        return True
+            except Exception as e:
+                logger.error(f"Plugin {meta['name']} request handler error: {e}")
+        return False
 
     async def intercept(
         self,

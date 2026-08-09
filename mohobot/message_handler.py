@@ -805,7 +805,19 @@ class MessageHandler:
         return list(DEFAULT_TOUCH_REPLIES)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
-        """Handle request events (friend add, group invite) — auto-approve for now."""
+        """Handle request events (friend add, group invite).
+
+        先交给插件(关系管理器等)处理: 插件 on_request 返回 True 表示已接管
+        (自动规则/审批转发); 否则框架默认自动同意。
+        """
+        if self._plugins is not None:
+            try:
+                handled = await self._plugins.dispatch_request(bot_id, event, raw)
+                if handled:
+                    return
+            except Exception as e:
+                logger.error(f"Request dispatch failed: {e}")
+
         logger.info(f"Request from bot {bot_id}: {event.request_type} from {event.user_id}")
         if event.request_type == "friend":
             await self._ws.send_to_bot(bot_id, "set_friend_add_request", {

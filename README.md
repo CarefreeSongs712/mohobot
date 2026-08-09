@@ -173,6 +173,28 @@ database:
 
 > 记忆写入采用"向量索引 + 数据库正本"双写：向量检索仅用于召回线索，数据库正本为最终依据；未配置 embedding 时检索自动降级为空实现，记忆仍会写入数据库正本。
 
+## 🧩 插件系统与插件配置
+
+**插件形态**：单文件插件（`plugins/xxx.py`）或目录插件（`plugins/xxx/main.py` + 可选 `core/` 子模块），热加载/热重载/启停无需重启。
+
+**插件配置系统**：插件目录放 `_conf_schema.json` 声明配置项（类型：`string/int/bool/list/object`+items，含 `description/hint/default/slider/invisible`），配置存于 `data/plugins_config/{name}.json`（全局一份），Web 面板"插件管理"页自动渲染表单编辑、保存即热生效（调用插件 `on_config_update` 回调）。
+
+**事件钩子**：`on_message` / `on_notice` / `on_meta` / `on_request`（好友申请、群邀请，插件接管后框架不再自动同意）。
+
+**注入**：`inject_ws_server` / `inject_bot_manager` / `inject_data_dir` / `inject_anysearch_client` / `inject_admin_ids`（全局管理员，与封禁系统共用配置顶层 `admins`）。
+
+## 👥 关系管理器插件（移植自 astrbot_plugin_relationship）
+
+`plugins/relationship/` — 帮助管理 QQ 好友和群聊（命令带 `/` 前缀，管理员=全局 `admins`，审批员=管理员+配置的额外审批员）：
+
+- **查询/管理**：`/群列表` `/好友列表` `/退群 <序号|群号|区间>` `/删好友 <@|QQ|序号|区间>`（管理员）
+- **审批流**：好友申请/群邀请 → 自动规则（黑名单自动拒绝、`auto_agree/reject` 开关）→ 未自动处理时转发审批消息到**审批群**（`manage_group`）或私发审批员 → 审批员**引用该消息**回复 `/同意` `/拒绝` `/拉黑`
+- **抽查**：`/抽查 <群号|@群友|@QQ> <数量>` — 转发最近聊天记录（分批发）
+- **通知自动处理**：被设为/撤管理员、被禁言（超时自动退群）、被踢（自动拉黑群/用户）、被拉群（小群/大群/群容量/互斥成员检查自动退群 + 自动抽查新群）
+- **其他**：`/推荐 <群号|@qq>` 发送名片、`/加审批员 @某人` `/减审批员 @某人`
+
+> 移植自 [astrbot_plugin_relationship](https://github.com/Zhalslar/astrbot_plugin_relationship) v3.0.5（Zhalslar），去掉 afdian 校验与"加好友/加群"扩展（无对应依赖），OneBot API 走 mohobot 通用 `send_to_bot`。
+
 ## 🎵 歌曲知识（移植自 Agent-LuoTianyi，beta 板块）
 
 歌曲知识部分**直接移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的 server 端实现**（`src/subconscious/music_knowledge/`、`src/subconscious/memory/song_knowledge.py`、`src/world/get_new_songs/`），包含：
