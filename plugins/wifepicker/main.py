@@ -162,6 +162,10 @@ class Plugin:
             if is_allowed_group(group_id, self.plugin_config):
                 self.store.active_users.setdefault(group_id, {})
                 record_active_light(self.store, group_id, get_sender_id(event), get_self_id(event))
+                # 周期性落盘(活跃记录高频, 不每条都写盘)
+                now = time.time()
+                if now - self.store._last_save_at > 120:
+                    await self.store.flush(force=True)
             # 2. 求婚回复(同意/拒绝/是/否)
             reply = await self._handle_propose_response(bot_id, event)
             if reply:
