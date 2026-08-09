@@ -137,6 +137,7 @@
             }
         };
         const network = new vis.Network(container, data, options);
+        window.__network = network;  // 暴露给渲染验证/调试(读取节点坐标)
         network.once("stabilizationIterationsDone", function () {
             // 稳定后冻结布局: 否则物理引擎继续运行, 节点会重新聚拢/漂移
             network.setOptions({ physics: false });
