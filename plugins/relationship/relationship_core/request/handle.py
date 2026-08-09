@@ -47,10 +47,8 @@ class RequestHandle:
 
         if result.approve is not None:
             await self._do_approve(bot_id, req, result.approve)
-        if result.event_reply:
-            return result.event_reply
 
-        # 黑名单状态同步
+        # 黑名单状态同步(必须在 event_reply 返回前执行, 否则 /拉黑 不会生效)
         if isinstance(req, GroupRequest):
             if result.block_group is False:
                 self.cfg.remove_black_group(req.group_id)

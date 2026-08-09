@@ -821,6 +821,13 @@ class WebPanel:
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+            # 恢复封禁数据后刷新拦截器缓存(否则 60s TTL 内用旧名单)
+            if "ban" in dir_set and self._ban_store is not None:
+                try:
+                    await self._ban_store.clear_banned()
+                except Exception as e:
+                    logger.warning(f"恢复后刷新封禁缓存失败: {e}")
+
             logger.info(f"Web panel: 恢复完成 ({restored} 个文件, 范围={sorted(dir_set)})")
             return {"status": "ok", "restored": restored}
 
@@ -834,6 +841,12 @@ class WebPanel:
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
             removed = self._cleanup_data(bot_list, dir_set)
+            # 清理封禁数据后同步刷新拦截器缓存
+            if "ban" in dir_set and self._ban_store is not None:
+                try:
+                    await self._ban_store.clear_banned()
+                except Exception as e:
+                    logger.warning(f"清理后刷新封禁缓存失败: {e}")
             logger.info(f"Web panel: 清理完成 (移除 {removed} 个文件, 范围={sorted(dir_set)})")
             return {"status": "ok", "removed": removed}
 

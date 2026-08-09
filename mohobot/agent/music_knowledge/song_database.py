@@ -30,11 +30,16 @@ class Song(Base):
 
 SessionLocal = None
 engine = None
+_engine_url: str | None = None  # 已初始化的 URL(防重复重建)
 
 
 def init_song_db(config: Dict):
-    """Initialize database tables"""
-    global engine, SessionLocal
+    """Initialize database tables.
+
+    幂等: 相同 db 路径重复调用不重建(多 bot 共享同一知识库时避免
+    全局 engine 被反复替换导致旧连接泄漏)。
+    """
+    global engine, SessionLocal, _engine_url
 
     db_folder: str = config.get("db_folder", None)
     db_file: str = config.get("db_file", None)
@@ -49,8 +54,15 @@ def init_song_db(config: Dict):
 
     DATABASE_URL = f"sqlite:///{os.path.join(db_folder, db_file)}"
 
+    if _engine_url == DATABASE_URL and engine is not None and SessionLocal is not None:
+        return  # 已初始化同一库, 直接复用
+
+    if engine is not None:
+        engine.dispose()  # 换库前释放旧连接
+
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    _engine_url = DATABASE_URL
     Base.metadata.create_all(bind=engine)
 
 

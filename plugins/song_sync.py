@@ -59,9 +59,10 @@ class Plugin:
             return (False, None)
 
         # 管理员检查(与封禁系统共用全局 admins 配置)
+        import os
         from mohobot.models.config import GlobalConfig
 
-        cfg = GlobalConfig.load("./config/global.yaml")
+        cfg = GlobalConfig.load(os.environ.get("MOHOBOT_CONFIG", "./config/global.yaml"))
         admins = {str(a) for a in (cfg.admins or [])}
         if str(event.user_id) not in admins:
             return (True, "❌ 你没有权限执行此操作。")

@@ -356,10 +356,12 @@ class MessageHandler:
 
         speaker = self._speaker_role(event)
 
+        # 确保 runtime 已创建(首条消息时惰性创建), 再取歌曲链接器
+        runtime = self._ensure_agent_runtime(bot_id)
+
         # 歌曲实体检出: FlashText 链接器(触发动词门控) → 消息 terms
         # 术语会进入话题提取 prompt, 约束 LLM 输出(防编造歌/歌词)
         terms: list[str] = []
-        runtime = self._agent_manager.get(bot_id) if self._agent_manager else None
         linker = getattr(runtime, "song_entity_linker", None) if runtime else None
         if linker is not None:
             try:
@@ -391,8 +393,6 @@ class MessageHandler:
             max_rounds=self._context_max_rounds,
         )
 
-        if runtime is None:
-            runtime = self._ensure_agent_runtime(bot_id)
         await runtime.handle_event(chat_type, chat_id, chat_event)
 
     async def _describe_first_image(self, bot_id: str, url: str) -> str:

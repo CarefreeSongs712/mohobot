@@ -60,8 +60,10 @@ class PluginConfig:
         return [str(i) for i in (ids or []) if str(i).isdigit()]
 
     def _append_admin_to_manage_users(self) -> None:
-        if self.admin_id and self.admin_id not in self.manage_users:
-            self.manage_users.append(self.admin_id)
+        """确保所有全局管理员都在审批员列表中(不止第一个)。"""
+        for admin_id in self.admins_id:
+            if admin_id and admin_id not in self.manage_users:
+                self.manage_users.append(admin_id)
 
     def is_black_group(self, group_id: str) -> bool:
         return str(group_id) in self.group_blacklist
@@ -118,8 +120,10 @@ class PluginConfig:
         """把运行时修改(黑名单/审批员)写回插件配置存档。"""
         self._data.setdefault("request", {})["group_blacklist"] = list(self.group_blacklist)
         self._data["request"]["user_blacklist"] = list(self.user_blacklist)
+        # 存档只保留"额外审批员"(全局管理员自动加入, 不落盘)
+        admin_set = set(self.admins_id)
         self._data["manage_users"] = [
-            u for u in self.manage_users if u != self.admin_id
+            u for u in self.manage_users if u not in admin_set
         ]
         try:
             import json
