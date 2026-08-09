@@ -115,6 +115,17 @@ class AnySearchConfig:
 
 
 @dataclass
+class BanConfig:
+    """封禁系统配置(全局统一名单, 所有 bot 共享)。
+
+    封禁语义: bot 静默忽略被禁用户的消息(不是 QQ 群管理封禁)。
+    admins 为可执行封禁命令的管理员 QQ 号列表。
+    """
+    enabled: bool = True
+    admins: list[int] = field(default_factory=list)   # 管理员 QQ 号
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     beta_mode: bool = True     # true = Agent 流水线(beta 模式); false = 旧版直接流式回复(数据库保留)
@@ -126,6 +137,7 @@ class GlobalConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
+    ban: BanConfig = field(default_factory=BanConfig)
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
@@ -150,6 +162,7 @@ class GlobalConfig:
         db_raw = raw.get("database", {})
         agent_raw = raw.get("agent", {})
         anysearch_raw = raw.get("anysearch", {})
+        ban_raw = raw.get("ban", {})
 
         return cls(
             beta_mode=raw.get("beta_mode", True),
@@ -207,6 +220,10 @@ class GlobalConfig:
                 api_key=anysearch_raw.get("api_key", ""),
                 base_url=anysearch_raw.get("base_url", "https://api.anysearch.com/mcp"),
                 timeout=int(anysearch_raw.get("timeout", 30)),
+            ),
+            ban=BanConfig(
+                enabled=ban_raw.get("enabled", True),
+                admins=[int(a) for a in ban_raw.get("admins", []) or []],
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -267,6 +284,10 @@ class GlobalConfig:
                 "base_url": self.anysearch.base_url,
                 "timeout": self.anysearch.timeout,
             },
+            "ban": {
+                "enabled": self.ban.enabled,
+                "admins": list(self.ban.admins),
+            },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -326,6 +347,10 @@ class GlobalConfig:
                 "base_url": self.anysearch.base_url,
                 "timeout": self.anysearch.timeout,
             },
+            "ban": {
+                "enabled": self.ban.enabled,
+                "admins": list(self.ban.admins),
+            },
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
@@ -349,6 +374,7 @@ class BotConfig:
     persona: str = "你是 Mohobot，一个有用的 AI 助手。"  # System prompt
     enabled: bool = True
     agent_enabled: bool = True   # 本 bot 是否启用 Agent 子系统(beta 模式下的流水线)
+    touch_replies: list[str] = field(default_factory=list)  # 戳一戳固定回复(空=用全局/默认)
 
     # Per-bot LLM overrides (optional)
     chat_model_override: str = ""
@@ -376,6 +402,7 @@ class BotConfig:
             persona=raw.get("persona", "你是 Mohobot，一个有用的 AI 助手。"),
             enabled=raw.get("enabled", True),
             agent_enabled=raw.get("agent_enabled", True),
+            touch_replies=list(raw.get("touch_replies", []) or []),
             chat_model_override=raw.get("chat_model_override", ""),
             vision_model_override=raw.get("vision_model_override", ""),
             command_prefix=raw.get("command_prefix", "/"),
@@ -400,6 +427,7 @@ class BotConfig:
             "persona": self.persona,
             "enabled": self.enabled,
             "agent_enabled": self.agent_enabled,
+            "touch_replies": list(self.touch_replies),
             "chat_model_override": self.chat_model_override,
             "vision_model_override": self.vision_model_override,
             "command_prefix": self.command_prefix,

@@ -224,6 +224,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
+    <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
     <div class="nav-item" data-page="logs"><span class="icon">📋</span> 实时日志</div>
     <div class="nav-item" data-page="settings"><span class="icon">🛠️</span> 系统设置</div>
   </nav>
@@ -339,6 +340,47 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       <button class="btn secondary small" onclick="toggleLogAutoScroll()" id="log-scroll-btn" style="background:var(--accent);color:#fff">⤓ 自动滚动</button>
     </div>
     <div class="log-container" id="log-container"></div>
+  </div>
+
+  <!-- 7. Settings -->
+  <!-- 8. 封禁管理 -->
+  <div class="page" id="page-ban">
+    <h2>🚫 封禁管理</h2>
+    <div class="subtitle">全局统一封禁名单(所有 bot 共享) — 被禁用户消息将被静默忽略</div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">➕ 添加记录</div>
+      <div class="form-row">
+        <label>操作</label>
+        <select id="ban-op">
+          <option value="ban">封禁(当前会话)</option>
+          <option value="ban-all">全局封禁</option>
+          <option value="pass">临时解禁(当前会话)</option>
+          <option value="pass-all">全局临时解禁</option>
+          <option value="dec-ban">删除会话封禁</option>
+          <option value="dec-ban-all">删除全局封禁</option>
+          <option value="dec-pass">删除会话解禁</option>
+          <option value="dec-pass-all">删除全局解禁</option>
+          <option value="reset">重置用户全部记录</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>QQ 号</label><input type="text" id="ban-uid" placeholder="被操作用户 QQ">
+      </div>
+      <div class="form-row">
+        <label>会话</label><input type="text" id="ban-session" placeholder="group:123 或 private:456 (会话级操作必填)">
+      </div>
+      <div class="form-row">
+        <label>时间</label><input type="text" id="ban-time" placeholder="留空=永久; 如 1d / 2h / 30m / 1d2h">
+      </div>
+      <div class="form-row">
+        <label>理由</label><input type="text" id="ban-reason" placeholder="可选">
+      </div>
+      <button class="btn" onclick="banOperate()">执行操作</button>
+    </div>
+    <div class="card">
+      <div class="card-title">📋 当前名单</div>
+      <div id="ban-list-view"></div>
+    </div>
   </div>
 
   <!-- 7. Settings -->
@@ -471,6 +513,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
       case 'models': loadModels(); break;
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
+      case 'ban': loadBanPage(); break;
       case 'logs': startLogStream(); break;
       case 'settings': loadSettings(); break;
     }
@@ -625,7 +668,12 @@ async function loadConfigPage() {
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🤖 Agent 子系统</div>' +
       checkField('agent.enabled', '全局启用 Agent 流水线', globalConfigCache.agent?.enabled, '各 bot 是否使用流水线由 bot 私有配置的"启用 Agent 子系统"单独控制') +
+      textareaField('agent.reflex.touch_replies', '戳一戳回复(每行一条)', (globalConfigCache.agent?.reflex?.touch_replies || []).join('\n'), 'bot 私有配置留空时使用这里; 都留空则用内置默认') +
       '<div class="hint" style="margin-top:-6px">角色名/人设/说话风格无需在此配置 —— 每个 bot 自动使用自己的昵称与人设(BotConfig.persona)</div>' +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🚫 封禁系统</div>' +
+      checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
+      formField('ban.admins', '管理员 QQ(逗号分隔)', (globalConfigCache.ban?.admins || []).join(','), { hint: '可执行 /ban 等封禁命令的管理员 QQ 号' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🗄️ 数据库</div>' +
       readonlyCheckField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite(需在配置文件修改)') +
@@ -710,6 +758,7 @@ async function loadBotConfig() {
       `<div class="form-row"><label>启用 Agent 子系统</label>
         <label class="switch"><input type="checkbox" id="cfg-agent_enabled" ${b.agent_enabled !== false ? 'checked' : ''}><span class="slider"></span></label>
         <div class="hint">开启=本 bot 走话题规划/记忆/反思流水线; 关闭=本 bot 用旧版直接流式回复(其他 bot 不受影响)</div></div>` +
+      textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(agent.reflex.touch_replies)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
       formField('command_prefix', '指令前缀', b.command_prefix) +
@@ -744,6 +793,15 @@ async function saveGlobalConfig() {
     },
     agent: {
       enabled: document.getElementById('cfg-agent.enabled')?.checked ?? true,
+      reflex: {
+        touch_replies: (document.getElementById('cfg-agent.reflex.touch_replies')?.value || '')
+          .split('\n').map(s => s.trim()).filter(Boolean),
+      },
+    },
+    ban: {
+      enabled: document.getElementById('cfg-ban.enabled')?.checked ?? true,
+      admins: (document.getElementById('cfg-ban.admins')?.value || '')
+        .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
     },
   };
   try {
@@ -759,6 +817,8 @@ async function saveBotConfig() {
     nickname: document.getElementById('cfg-nickname').value,
     persona: document.getElementById('cfg-persona').value,
     agent_enabled: document.getElementById('cfg-agent_enabled')?.checked ?? true,
+    touch_replies: (document.getElementById('cfg-touch_replies')?.value || '')
+      .split('\n').map(s => s.trim()).filter(Boolean),
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
     vision_model_override: document.getElementById('cfg-vision_model_override').value,
     command_prefix: document.getElementById('cfg-command_prefix').value,
@@ -1052,6 +1112,95 @@ function toggleLogPause() {
   document.getElementById('log-pause-btn').textContent = logPaused ? '继续' : '暂停';
 }
 
+// ═══════════════ 8. Ban (封禁管理) ═══════════════
+let banCache = null;
+
+async function loadBanPage() {
+  try {
+    banCache = await apiJSON('/api/ban');
+    renderBanLists();
+  } catch (e) { showToast('加载封禁名单失败: ' + e.message, false); }
+}
+
+function fmtBanTime(t) {
+  // t = 到期时间戳(秒), 0=永久
+  if (!t) return '永久';
+  const remain = t - Math.floor(Date.now() / 1000);
+  if (remain <= 0) return '已过期';
+  const d = Math.floor(remain / 86400), h = Math.floor(remain % 86400 / 3600),
+        m = Math.floor(remain % 3600 / 60), s = remain % 60;
+  let out = '';
+  if (d) out += d + '天';
+  if (h) out += h + '小时';
+  if (m) out += m + '分钟';
+  if (s || !out) out += s + '秒';
+  return '剩余 ' + out;
+}
+
+function banRecordHtml(r) {
+  const reason = r.reason && r.reason !== '无理由' ? ` - <span class="dim">${r.reason}</span>` : '';
+  return `<div class="form-row" style="justify-content:space-between">
+    <span>👤 ${r.uid} — ${fmtBanTime(r.time)}${reason}</span>
+    <button class="btn btn-sm" onclick="banRemove('${r.uid}')">删除</button></div>`;
+}
+
+function banGroupHtml(title, records, empty) {
+  const body = (records && records.length)
+    ? records.map(banRecordHtml).join('')
+    : `<div class="conv-empty">${empty}</div>`;
+  return `<div class="card-title" style="font-size:13px;margin-top:10px">${title}</div>${body}`;
+}
+
+function renderBanLists() {
+  const b = banCache || {};
+  const admins = (b.admins || []).join(', ') || '(未配置)';
+  let html = `<div class="hint" style="margin-bottom:6px">🛡 封禁功能: ${b.enabled ? '<span style="color:#5cb85c">已启用</span>' : '<span style="color:#d9534f">已停用</span>'} | 管理员: ${admins}</div>`;
+  // 会话级
+  const sessions = new Set([...Object.keys(b.ban || {}), ...Object.keys(b.pass || {})]);
+  if (sessions.size) {
+    for (const sk of sessions) {
+      html += `<div class="card" style="margin-bottom:12px"><div class="card-title">💬 会话 ${sk}</div>`;
+      html += banGroupHtml('🚫 封禁', (b.ban || {})[sk], '无封禁');
+      html += banGroupHtml('🎀 解禁', (b.pass || {})[sk], '无解禁');
+      html += '</div>';
+    }
+  } else {
+    html += '<div class="conv-empty">暂无会话级记录</div>';
+  }
+  // 全局
+  html += `<div class="card" style="margin-bottom:12px"><div class="card-title">🌐 全局</div>`;
+  html += banGroupHtml('🚫 全局封禁', b.ban_all || [], '无全局封禁');
+  html += banGroupHtml('🎀 全局解禁', b.pass_all || [], '无全局解禁');
+  html += '</div>';
+  document.getElementById('ban-list-view').innerHTML = html;
+}
+
+async function banOperate() {
+  const action = document.getElementById('ban-op').value;
+  const uid = document.getElementById('ban-uid').value.trim();
+  const sessionKey = document.getElementById('ban-session').value.trim();
+  const time = document.getElementById('ban-time').value.trim();
+  const reason = document.getElementById('ban-reason').value.trim();
+  if (!uid) { showToast('请输入 QQ 号', false); return; }
+  if ((action === 'ban' || action === 'pass' || action === 'dec-ban' || action === 'dec-pass') && !sessionKey) {
+    showToast('会话级操作需要填写会话(group:xxx 或 private:xxx)', false); return;
+  }
+  try {
+    await apiJSON('/api/ban/operate', { method: 'POST', body: { data: { action, uid, session_key: sessionKey, time, reason } } });
+    showToast('操作成功');
+    loadBanPage();
+  } catch (e) { showToast('操作失败: ' + e.message, false); }
+}
+
+async function banRemove(uid) {
+  if (!confirm(`确认删除用户 ${uid} 的全部记录?`)) return;
+  try {
+    await apiJSON('/api/ban/operate', { method: 'POST', body: { data: { action: 'reset', uid } } });
+    showToast('已删除');
+    loadBanPage();
+  } catch (e) { showToast('删除失败: ' + e.message, false); }
+}
+
 // ═══════════════ 7. Settings ═══════════════
 function loadSettings() {
   document.getElementById('set-status').innerHTML = '<span class="badge online">● 运行中</span>';
@@ -1071,7 +1220,8 @@ async function renderDataScope() {
     '<div class="form-row"><label>数据范围</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-cache" checked> 缓存(cache)</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-history" checked> 聊天历史(history)</label>' +
-    '<label><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label></div>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label>' +
+    '<label><input type="checkbox" id="ds-ban" checked> 封禁名单(ban)</label></div>' +
     (bots.length
       ? `<div class="form-row"><label>Bot 范围</label>
          <label style="margin-right:10px"><input type="checkbox" id="ds-all" checked onchange="dsToggleAll(this)"> 全部</label>` +
@@ -1089,6 +1239,7 @@ function dsScope() {
   if (document.getElementById('ds-cache')?.checked) dirs.push('cache');
   if (document.getElementById('ds-history')?.checked) dirs.push('history');
   if (document.getElementById('ds-contexts')?.checked) dirs.push('contexts');
+  if (document.getElementById('ds-ban')?.checked) dirs.push('ban');
   let bots = 'all';
   const allBtn = document.getElementById('ds-all');
   if (allBtn && !allBtn.checked) {

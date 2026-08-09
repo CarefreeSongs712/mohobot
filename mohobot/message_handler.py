@@ -59,6 +59,7 @@ class MessageHandler:
         agent_manager=None,
         database_manager=None,
         image_cache=None,
+        global_config=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -67,6 +68,7 @@ class MessageHandler:
         self._data_dir = data_dir
         self._context_max_rounds = context_max_rounds
         self._interceptors: list = []  # Ordered list of interceptors
+        self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
         self._writer_registry: dict[str, JSONLWriter] = {}
 
         # Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
@@ -296,7 +298,7 @@ class MessageHandler:
     def _ensure_agent_runtime(self, bot_id: str):
         """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。
 
-        每次调用都同步 bot 的最新昵称/人设(web 面板修改 config.json 后
+        每次调用都同步 bot 的最新昵称/人设/戳回复(web 面板修改 config.json 后
         立即生效), 各 bot 的子系统人设彼此独立。
         """
         instance = None
@@ -304,6 +306,7 @@ class MessageHandler:
             instance = self._ws._bot_manager.get(bot_id)
         nickname = instance.nickname if instance else f"Bot-{bot_id}"
         persona = instance.config.persona if instance else ""
+        touch_replies = instance.config.touch_replies if instance else []
 
         runtime = self._agent_manager.get(bot_id)
         if runtime is None:
@@ -311,12 +314,14 @@ class MessageHandler:
                 bot_id,
                 bot_nickname=nickname,
                 persona=persona,
+                touch_replies=touch_replies,
                 context_provider=self._agent_context_provider,
             )
             runtime.set_reply_handler(self._agent_reply_handler)
             logger.info(f"Agent runtime wired for bot {bot_id}")
         else:
             runtime.sync_persona(nickname, persona)
+            runtime.sync_touch_replies(touch_replies)
         return runtime
 
     async def _handle_agent_path(
@@ -716,9 +721,13 @@ class MessageHandler:
         await self._plugins.dispatch_notice(bot_id, event, raw)
 
     async def _handle_poke(self, bot_id: str, event: NoticeEvent) -> None:
-        """戳一戳: 确认戳的是本 bot 后,路由到 agent 反射通道 (USER_TOUCH)。"""
-        if self._agent_manager is None:
-            return
+        """戳一戳: 确认戳的是本 bot 后,回复固定文案。
+
+        所有 bot 都生效(不依赖 agent 开关):
+        agent 路径 → 反射通道 (USER_TOUCH);
+        非 agent 路径 → 直接随机一条固定回复。
+        文案优先级: bot 私有 touch_replies > 全局 agent.reflex.touch_replies > 内置默认。
+        """
 
         # 判断被戳对象是不是本 bot(target_id 可能缺省)
         bot_qq = bot_id
@@ -730,30 +739,55 @@ class MessageHandler:
         if target and target not in ("0", "0.0") and target != bot_qq:
             return  # 戳的是别人,忽略
 
-        from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
-
         chat_type = "group" if event.group_id else "private"
         chat_id = str(event.group_id) if event.group_id else str(event.user_id)
-        chat_event = ChatInputEvent(
-            event_type=ChatInputEventType.USER_TOUCH,
-            user_id=chat_id,
-            character_id=bot_id,
-            content="[用户戳了戳机器人]",
-            message_id=f"poke-{event.user_id}-{event.time}",
-            message_type="touch",
-            timestamp=float(event.time or 0),
-            payload={
-                "speaker": f"{event.user_id}-用户",
-                "chat_type": chat_type,
-                "chat_id": chat_id,
-                "qq": str(event.user_id),
-            },
-        )
-        runtime = None
+
+        # Agent 路径: 反射通道(带记忆/上下文语义)
         if self._agent_manager is not None and self._bot_agent_enabled(bot_id):
+            from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
             runtime = self._ensure_agent_runtime(bot_id)
-        if runtime is not None:
-            await runtime.handle_event(chat_type, chat_id, chat_event)
+            if runtime is not None:
+                chat_event = ChatInputEvent(
+                    event_type=ChatInputEventType.USER_TOUCH,
+                    user_id=chat_id,
+                    character_id=bot_id,
+                    content="[用户戳了戳机器人]",
+                    message_id=f"poke-{event.user_id}-{event.time}",
+                    message_type="touch",
+                    timestamp=float(event.time or 0),
+                    payload={
+                        "speaker": f"{event.user_id}-用户",
+                        "chat_type": chat_type,
+                        "chat_id": chat_id,
+                        "qq": str(event.user_id),
+                    },
+                )
+                await runtime.handle_event(chat_type, chat_id, chat_event)
+                return
+
+        # 非 agent 路径: 直接固定回复
+        replies = self._resolve_touch_replies(bot_id)
+        if replies and self._ws:
+            import random
+            text = random.choice(replies)
+            if event.group_id:
+                await self._ws.send_group_msg(bot_id, event.group_id, text)
+            else:
+                await self._ws.send_private_msg(bot_id, event.user_id, text)
+
+    def _resolve_touch_replies(self, bot_id: str) -> list[str]:
+        """解析戳一戳固定回复列表: bot 私有 > 全局配置 > 内置默认。"""
+        from mohobot.agent.character_reflex import DEFAULT_TOUCH_REPLIES
+        instance = None
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+        if instance is not None and getattr(instance.config, "touch_replies", []):
+            return list(instance.config.touch_replies)
+        if self._global_config is not None:
+            global_replies = (self._global_config.agent.reflex or {}).get("touch_replies") or []
+            if global_replies:
+                return list(global_replies)
+        return list(DEFAULT_TOUCH_REPLIES)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
         """Handle request events (friend add, group invite) — auto-approve for now."""

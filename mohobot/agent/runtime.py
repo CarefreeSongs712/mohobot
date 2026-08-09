@@ -266,6 +266,7 @@ class BotAgentRuntime:
         bot_id: str,
         bot_nickname: str = "",
         persona: str = "",
+        touch_replies: Optional[list[str]] = None,
         context_provider: Optional[Callable[..., Awaitable[str]]] = None,
     ):
         self.config = config
@@ -279,6 +280,7 @@ class BotAgentRuntime:
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
         # 角色名/人设/说话风格全部来自 bot 私有配置, 不再读取 agent.persona
         self._bot_persona = persona  # bot 自己的 persona (BotConfig.persona)
+        self._bot_touch_replies = list(touch_replies or [])  # bot 私有戳回复
         self.character_name = self.bot_nickname
         self.character_persona = persona or "你是 Mohobot，一个有用的 AI 助手。"
         self.speaking_style = "自然、简洁"
@@ -335,6 +337,7 @@ class BotAgentRuntime:
         self.reflex = CharacterReflex(
             agent_cfg.get("reflex", {}),
             character_id=bot_id,
+            touch_replies=self._bot_touch_replies or None,
         )
 
         # 会话流水线: session_key -> SessionPipeline
@@ -428,6 +431,12 @@ class BotAgentRuntime:
             )
         return changed
 
+    def sync_touch_replies(self, touch_replies: Optional[list[str]] = None) -> None:
+        """同步戳一戳固定回复列表(web 面板修改 bot 配置后立即生效)。"""
+        self._bot_touch_replies = list(touch_replies or [])
+        if self.reflex is not None:
+            self.reflex.set_touch_replies(self._bot_touch_replies or None)
+
     def session_key_for(self, chat_type: str, chat_id: str) -> str:
         return f"{chat_type}:{chat_id}"
 
@@ -480,6 +489,7 @@ class BotAgentManager:
         bot_id: str,
         bot_nickname: str = "",
         persona: str = "",
+        touch_replies: Optional[list[str]] = None,
         context_provider=None,
     ) -> BotAgentRuntime:
         runtime = self._runtimes.get(bot_id)
@@ -490,6 +500,7 @@ class BotAgentManager:
                 bot_id=bot_id,
                 bot_nickname=bot_nickname,
                 persona=persona,
+                touch_replies=touch_replies,
                 context_provider=context_provider,
             )
             self._runtimes[bot_id] = runtime

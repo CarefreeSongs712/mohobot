@@ -126,9 +126,18 @@ class MohobotApplication:
             agent_manager=self._agent_manager,
             database_manager=self._database_manager,
             image_cache=self._image_cache,
+            global_config=self._config,
         )
 
-        # 7. Set up interceptors
+        # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
+        from mohobot.ban import BanInterceptor, BanStore
+        self._ban_store = BanStore(data_dir=self._config.data_dir)
+        ban_filter = BanInterceptor(
+            data_dir=self._config.data_dir,
+            enabled=self._config.ban.enabled,
+            admins=self._config.ban.admins,
+            store=self._ban_store,
+        )
         command_handler = CommandHandler(
             context_manager=self._context_manager,
             llm_service=self._llm_service,
@@ -136,7 +145,7 @@ class MohobotApplication:
             plugin_system=self._plugin_system,
         )
         keyword_filter = KeywordFilter()
-        interceptors = [command_handler, keyword_filter, self._plugin_system]
+        interceptors = [ban_filter, command_handler, keyword_filter, self._plugin_system]
         self._message_handler.set_interceptors(interceptors)
 
         # 8. Initialize WebSocket server
@@ -174,6 +183,8 @@ class MohobotApplication:
                 context_manager=self._context_manager,
                 llm_service=self._llm_service,
                 plugin_system=self._plugin_system,
+                ban_store=self._ban_store,
+                ban_filter=ban_filter,
                 restart_callback=self.restart,
             )
             # Start web panel in background

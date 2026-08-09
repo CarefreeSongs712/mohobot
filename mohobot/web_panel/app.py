@@ -108,6 +108,8 @@ class WebPanel:
         context_manager=None,
         llm_service=None,
         plugin_system=None,
+        ban_store=None,
+        ban_filter=None,
         restart_callback=None,
     ):
         self._host = host
@@ -120,6 +122,8 @@ class WebPanel:
         self._context_manager = context_manager
         self._llm_service = llm_service
         self._plugin_system = plugin_system
+        self._ban_store = ban_store
+        self._ban_filter = ban_filter
         self._restart_callback = restart_callback
 
         self._app = FastAPI(title="Mohobot Web Panel")
@@ -293,11 +297,22 @@ class WebPanel:
                           "topic_planner", "topic_replier", "reflection_worker", "reflex"):
                     if k in agent_data and isinstance(agent_data[k], dict):
                         setattr(cfg.agent, k, agent_data[k] or {})
+            if "ban" in data:
+                ban_data = data["ban"] or {}
+                if "enabled" in ban_data:
+                    cfg.ban.enabled = bool(ban_data["enabled"])
+                if "admins" in ban_data and isinstance(ban_data["admins"], list):
+                    cfg.ban.admins = [int(a) for a in ban_data["admins"] if str(a).isdigit()]
             for key in ("beta_mode", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
             cfg.save(self._config_path)
+            # 热同步封禁拦截器(启停/管理员即时生效, 无需重启)
+            if self._ban_filter is not None:
+                self._ban_filter.sync_config(
+                    enabled=cfg.ban.enabled, admins=cfg.ban.admins,
+                )
             logger.info(f"Web panel: global config updated ({list(data.keys())})")
             return {"status": "ok"}
 
@@ -646,7 +661,7 @@ class WebPanel:
 
         # ── 8. Data management (数据管理: 备份/恢复/清理) ──────
 
-        DATA_SCOPES = {"cache", "history", "contexts"}
+        DATA_SCOPES = {"cache", "history", "contexts", "ban"}
 
         def _parse_data_scope(scope: Any) -> tuple[list[str] | None, set[str]]:
             """解析范围: 返回 (bots 列表或 None=全部, dirs 集合)。"""
@@ -666,7 +681,7 @@ class WebPanel:
                 raise HTTPException(status_code=400, detail="dirs 参数无效")
             dir_set = {str(d) for d in dirs_raw} & DATA_SCOPES
             if not dir_set:
-                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts)")
+                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts/ban)")
             return bot_list, dir_set
 
         def _collect_data_files(
@@ -682,6 +697,13 @@ class WebPanel:
                     for f in cache_dir.rglob("*"):
                         if f.is_file():
                             files.append((f"cache/{f.relative_to(cache_dir).as_posix()}", f))
+
+            if "ban" in dir_set:
+                ban_dir = root / "ban"
+                if ban_dir.exists():
+                    for f in ban_dir.rglob("*"):
+                        if f.is_file():
+                            files.append((f"ban/{f.relative_to(ban_dir).as_posix()}", f))
 
             for d in ("history", "contexts"):
                 if d not in dir_set:
@@ -786,6 +808,70 @@ class WebPanel:
             logger.info(f"Web panel: 清理完成 (移除 {removed} 个文件, 范围={sorted(dir_set)})")
             return {"status": "ok", "removed": removed}
 
+        # ── 9. 封禁管理 (ban) ──────────────────────────────────
+
+        @app.get("/api/ban")
+        async def get_ban_list(request: Request):
+            """封禁名单全量(面板可视化)。"""
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            data = await self._ban_store.get_all() if self._ban_store else {}
+            return {
+                "enabled": cfg.ban.enabled,
+                "admins": list(cfg.ban.admins),
+                "ban": data.get("ban", {}),
+                "ban_all": data.get("ban_all", []),
+                "pass": data.get("pass", {}),
+                "pass_all": data.get("pass_all", []),
+            }
+
+        @app.post("/api/ban/operate")
+        async def ban_operate(request: Request, body: ConfigUpdateRequest):
+            """面板封禁操作: action=ban|ban-all|pass|pass-all|dec-ban|dec-ban-all|dec-pass|dec-pass-all|reset"""
+            await _require_auth(request)
+            if self._ban_store is None:
+                raise HTTPException(status_code=500, detail="封禁存储不可用")
+            data = body.data or {}
+            action = str(data.get("action", ""))
+            uid = str(data.get("uid", "")).strip()
+            session_key = str(data.get("session_key", "")).strip() or None
+            time_str = str(data.get("time", "") or "0").strip()
+            reason = str(data.get("reason", "") or "").strip() or None
+
+            if not uid:
+                raise HTTPException(status_code=400, detail="uid 不能为空")
+            if action in ("ban", "pass") and not session_key:
+                raise HTTPException(status_code=400, detail="会话级操作需要 session_key")
+
+            from mohobot.ban.time_utils import timestr_to_int
+            try:
+                seconds = timestr_to_int(time_str)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"时间格式错误: {time_str!r}")
+
+            if action == "reset":
+                await self._ban_store.reset_user(uid)
+            elif action.startswith("dec-"):
+                target = action[len("dec-"):]
+                ok, err = await self._ban_store.delete(
+                    target, uid, session_key=session_key, seconds=seconds, reason=reason,
+                )
+                if not ok:
+                    raise HTTPException(status_code=400, detail=err or "未找到记录")
+            elif action in ("ban", "ban-all", "pass", "pass-all"):
+                ok = await self._ban_store.upsert(
+                    action, uid, session_key=session_key,
+                    time_val=seconds, reason=reason,
+                )
+                if not ok:
+                    raise HTTPException(status_code=400, detail="操作失败")
+            else:
+                raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+
+            logger.info(f"Web panel: ban operate {action} uid={uid} session={session_key or '-'}")
+            return {"status": "ok"}
+
         # ── Static frontend ───────────────────────────────────
 
         static_dir = Path(__file__).parent / "static"
@@ -815,6 +901,16 @@ class WebPanel:
         if "cache" in dir_set:
             src = tmp_dir / "cache"
             dst = root / "cache"
+            if src.exists():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst)
+                restored += sum(1 for _ in src.rglob("*") if _.is_file())
+
+        if "ban" in dir_set:
+            src = tmp_dir / "ban"
+            dst = root / "ban"
             if src.exists():
                 if dst.exists():
                     shutil.rmtree(dst)
@@ -858,6 +954,13 @@ class WebPanel:
                         removed += 1
                 shutil.rmtree(cache_dir)
                 logger.info("Web panel: cache 已清理")
+
+        if "ban" in dir_set:
+            ban_dir = root / "ban"
+            if ban_dir.exists():
+                removed += sum(1 for _ in ban_dir.rglob("*") if _.is_file())
+                shutil.rmtree(ban_dir)
+                logger.info("Web panel: ban 已清理")
 
         for d in ("history", "contexts"):
             if d not in dir_set:

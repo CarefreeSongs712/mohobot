@@ -33,7 +33,19 @@ class CharacterReflex:
     ):
         self.config = config or {}
         self.character_id = character_id
-        self.touch_replies = touch_replies or DEFAULT_TOUCH_REPLIES
+        # 优先级: 显式传入(bot 私有) > 全局 agent.reflex.touch_replies > 内置默认
+        cfg_replies = self.config.get("touch_replies") or []
+        self.touch_replies = (
+            touch_replies or cfg_replies or DEFAULT_TOUCH_REPLIES
+        )
+
+    def set_touch_replies(self, touch_replies: Optional[list[str]]) -> None:
+        """运行时更新戳一戳回复列表(web 面板修改 bot 配置后立即生效)。"""
+        if touch_replies:
+            self.touch_replies = list(touch_replies)
+        else:
+            cfg_replies = self.config.get("touch_replies") or []
+            self.touch_replies = cfg_replies or DEFAULT_TOUCH_REPLIES
 
     async def try_handle(
         self,

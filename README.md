@@ -154,7 +154,13 @@ agent:
     update_user_profile: true  # 更新用户画像
   reflex:
     enabled: true              # 戳一戳反射回复
+    touch_replies:             # 戳一戳固定回复列表(每行一条)
+      - "呜哇！吓我一跳～"
+      - "嘿嘿，别戳啦～"
+      # 留空则各 bot 使用自己的 BotConfig.touch_replies(再留空用内置默认)
 ```
+
+> 戳一戳固定回复对所有 bot 生效（不依赖 Agent 开关），优先级：bot 私有 `touch_replies` > 全局 `agent.reflex.touch_replies` > 内置默认。
 
 ### 数据库配置
 
@@ -166,6 +172,27 @@ database:
 ```
 
 > 记忆写入采用"向量索引 + 数据库正本"双写：向量检索仅用于召回线索，数据库正本为最终依据；未配置 embedding 时检索自动降级为空实现，记忆仍会写入数据库正本。
+
+## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
+
+多 bot 聚合场景的全局统一封禁名单（所有 bot 共享），**语义：bot 静默忽略被禁用户的消息**（不是 QQ 群管理封禁）。存储于 `data/ban/`（4 个 JSON），不依赖外部服务。
+
+```yaml
+ban:
+  enabled: true
+  admins: []                  # 管理员 QQ 号(可执行封禁命令)
+```
+
+- **命令**（管理员可执行；`/banlist` `/ban-help` 所有人可用）：
+  - `/ban <@|QQ> [时间] [理由]` — 封禁于当前会话（群=本群，私聊=对方私聊）
+  - `/ban-all <@|QQ> [时间] [理由]` — 全局封禁
+  - `/pass <@|QQ> [时间] [理由]` / `/pass-all` — 临时解禁（会话级/全局）
+  - `/dec-ban <@|QQ> [时间]` / `/dec-ban-all` / `/dec-pass` / `/dec-pass-all` — 删除/削减记录
+  - `/ban-reset <@|QQ>` — 清除用户全部记录；`/banlist` 查看名单
+  - `/ban-enable` / `/ban-disable` — 临时启停；`/ban-help` 帮助
+- **优先级**：会话解禁 > 会话封禁 > 全局解禁 > 全局封禁；过期自动清理
+- **时间格式**：`1d` `2h` `30m` `10s` 可组合（如 `1d2h`），不带时间 = 永久
+- Web 面板「封禁管理」板块可视化查看/增删记录；封禁数据纳入备份/恢复/清理范围
 
 ## 📁 目录结构
 
@@ -202,10 +229,15 @@ mohobot/
 │   ├── llm_service.py             # LLM 服务（旧路径：流式、工具调用、视觉）
 │   ├── file_store.py              # 异步文件存储（锁保护）
 │   ├── image_cache.py             # 图片缓存与 phash 去重
-│   ├── interceptors/              # 拦截器（指令、关键词、插件系统）
+│   ├── ban/                       # 封禁系统（移植自 reneban，去 server/云同步）
+│   │   ├── models.py              # 封禁记录数据模型
+│   │   ├── time_utils.py          # 时间解析（1d/2h/30m/10s）
+│   │   ├── store.py               # 名单存储（全局统一 + 缓存 + 过期清理）
+│   │   └── ban_filter.py          # 拦截器（静默过滤 + 管理命令）
+│   ├── interceptors/              # 拦截器（封禁、指令、关键词、插件系统）
 │   ├── models/                    # OneBot 协议与配置模型
 │   ├── utils/                     # 日志、CQ 码解析等工具
-│   └── web_panel/                 # FastAPI 管理面板（7 板块）
+│   └── web_panel/                 # FastAPI 管理面板（8 板块，含封禁管理）
 ├── plugins/                       # 插件目录（动态加载：status / praise）
 ├── tests/                         # 冒烟测试（smoke_*）与单测
 ├── data/                          # 运行时数据（自动生成，勿提交）
