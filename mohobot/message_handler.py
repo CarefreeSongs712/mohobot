@@ -510,6 +510,14 @@ class MessageHandler:
             nickname = event.sender.nickname or f"User-{event.user_id}"
         return f"{event.user_id}-{nickname}"
 
+    def _bot_config(self, bot_id: str):
+        """当前 bot 的私有配置(BotConfig), 用于旧版路径的人设/模型覆盖。"""
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+            if instance is not None:
+                return instance.config
+        return None
+
     # ── Reply behavior (config-driven) ────────────────────────
 
     # Strong break punctuation (sentence end). NOTE: single \n is NOT a break —
@@ -539,6 +547,7 @@ class MessageHandler:
                 event=event,
                 context=context,
                 raw_event=raw,
+                bot_config=self._bot_config(bot_id),
             )
             full_reply = reply_text or ""
             await self._send_full_text(bot_id, event, full_reply)
@@ -554,6 +563,7 @@ class MessageHandler:
             event=event,
             context=context,
             raw_event=raw,
+            bot_config=self._bot_config(bot_id),
         ):
             if chunk:
                 buffer += chunk
@@ -590,6 +600,7 @@ class MessageHandler:
             event=event,
             context=context,
             raw_event=raw,
+            bot_config=self._bot_config(bot_id),
         ):
             if chunk:
                 full_reply += chunk
