@@ -22,6 +22,10 @@ from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent, Sender
 
 BOT = "bot_001"
 GROUP = "888888"
+
+
+async def _async_false():
+    return False
 MEMBERS = [
     {"user_id": 1001, "card": "阿绫", "nickname": "luo"},
     {"user_id": 1002, "card": "天依", "nickname": "tian"},
@@ -368,6 +372,50 @@ async def test_propose_private_rejected() -> None:
     print("[10] 私聊求婚拒绝 OK")
 
 
+async def test_graph_render_path() -> None:
+    """关系图渲染路径: mock renderer 成功 → send_image; 失败 → 文本降级。"""
+    from wifepicker_core.command import relationdiagram as rd_mod
+
+    tmp = tempfile.mkdtemp(prefix="wife_")
+    inst = await make_plugin(tmp)
+
+    # 先初始化今日记录结构(date 为空时 ensure_today_records 会重置)
+    from datetime import datetime as _dt
+    inst.store.records["date"] = _dt.now().strftime("%Y-%m-%d")
+    recs = inst.store.records.setdefault("groups", {}).setdefault(GROUP, {}).setdefault("records", [])
+    recs.append({"user_id": "2001", "wife_id": "1002", "wife_name": "天依",
+                 "timestamp": "2026-08-09T12:00:00", "forced": True})
+    await inst.store.flush(force=True)
+
+    # 渲染成功 → send_image 被调用, 返回 None
+    async def fake_render_png(html, out, **kw):
+        Path(out).write_bytes(b"PNGDATA")
+        return True
+
+    orig_available, orig_render = rd_mod.available, rd_mod.render_png
+    rd_mod.available = lambda: True
+    rd_mod.render_png = fake_render_png
+    try:
+        ev = make_group_event(2001, "/关系图")
+        handled, reply = await inst.on_message(BOT, ev, {})
+        assert handled is True
+        assert reply is None, f"渲染成功应无文本回复: {reply}"
+        assert inst._ws_server.sent_images, "应发送图片"
+        chat_type, chat_id, img_path = inst._ws_server.sent_images[-1]
+        assert chat_type == "group" and str(chat_id) == GROUP
+        assert Path(img_path).exists() and Path(img_path).read_bytes() == b"PNGDATA"
+
+        # 渲染失败 → 文本降级
+        inst._ws_server.sent_images.clear()
+        rd_mod.render_png = lambda html, out, **kw: _async_false()
+        ev2 = make_group_event(2001, "/关系图")
+        _, reply2 = await inst.on_message(BOT, ev2, {})
+        assert isinstance(reply2, str) and "文本版" in reply2
+    finally:
+        rd_mod.available, rd_mod.render_png = orig_available, orig_render
+    print("[12] 关系图渲染路径(成功发图/失败降级) OK")
+
+
 async def test_concurrent_commands() -> None:
     """6 用户并发抽老婆/强娶 — 不丢记录不崩溃。"""
     tmp = tempfile.mkdtemp(prefix="wife_")
@@ -425,6 +473,7 @@ async def test_all() -> None:
     await test_keyword_trigger()
     await test_graph_text_fallback()
     await test_propose_private_rejected()
+    await test_graph_render_path()
     await test_concurrent_commands()
     print("\nALL WIFEPICKER TESTS PASSED")
 

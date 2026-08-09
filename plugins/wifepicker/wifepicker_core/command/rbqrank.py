@@ -65,7 +65,7 @@ async def cmd_rbq_ranking(plugin, bot_id: str, event, rest: str):
             rank_width = 400
             dynamic_height = header_h + (len(top_10) * item_h) + footer_h
 
-            tmp_dir = plugin._data_dir / "plugins_data" / "wifepicker" / "tmp"
+            tmp_dir = Path(plugin._data_dir) / "plugins_data" / "wifepicker" / "tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             out_png = tmp_dir / f"rbq_{uuid.uuid4().hex}.png"
             ok = await render_png(

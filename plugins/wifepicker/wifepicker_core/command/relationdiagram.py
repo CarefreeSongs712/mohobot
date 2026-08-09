@@ -88,7 +88,7 @@ async def cmd_show_graph(plugin, bot_id: str, event, rest: str):
 
     # 渲染 PNG
     if available():
-        tmp_dir = plugin._data_dir / "plugins_data" / "wifepicker" / _TMP_DIR
+        tmp_dir = Path(plugin._data_dir) / "plugins_data" / "wifepicker" / _TMP_DIR
         tmp_dir.mkdir(parents=True, exist_ok=True)
         out_png = tmp_dir / f"graph_{uuid.uuid4().hex}.png"
         ok = await render_png(
