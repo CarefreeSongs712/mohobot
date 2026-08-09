@@ -20,7 +20,7 @@
 
         #network-container {
             width: 100%;
-            /* 预留 140px 给 header(标题加大后), 保证不和图谱重叠 */
+            /* 预留 80px 给 header，保证不和图谱重叠 */
             height: calc(100vh - 140px);
             position: relative;
         }
@@ -56,14 +56,6 @@
         const edges = [];
         const userSet = new Set();
 
-        // 自适应尺寸: 节点越多头像越小, 避免拥挤/重叠
-        const allIds = new Set();
-        raw_data.forEach(r => { allIds.add(String(r.user_id)); allIds.add(String(r.wife_id)); });
-        const nodeCount = allIds.size;
-        const avatarSize = nodeCount <= 10 ? 110 : nodeCount <= 20 ? 90 : nodeCount <= 30 ? 75 : 62;
-        const labelSize = avatarSize >= 90 ? 62 : avatarSize >= 75 ? 54 : 46;
-        const labelVadjust = avatarSize >= 90 ? 48 : 40;
-
         raw_data.forEach(r => {
             const userName = user_map[r.user_id] || "用户" + r.user_id;
             const wifeName = user_map[r.wife_id] || r.wife_name;
@@ -77,15 +69,15 @@
                         shape: 'circularImage',
                        image: `https://q4.qlogo.cn/headimg_dl?dst_uin=${u.id}&spec=640&t=${hourlyTag}`,
                         borderWidth: 6,
-                        size: avatarSize,
+                        size: 110, // 放大头像 (50 -> 70)
                         color: { border: '#4facfe', background: '#ffffff' },
                         font: {
                             color: '#000000',
-                            size: labelSize,
-                            vadjust: labelVadjust,
+                            size: 50, // 放大文字 (18 -> 26)
+                            vadjust: 40, // 调整文字偏移，适应大头像
                             strokeWidth: 6, // 增加描边
                             strokeColor: '#ffffff',
-                            bold: { color: '#000000', size: labelSize - 6, vadjust: labelVadjust }
+                            bold: { color: '#000000', size: 44, vadjust: 40 }
                         }
                     });
                 }
@@ -97,7 +89,7 @@
                 label: r.forced ? "强娶" : "抽中",
                 arrows: {to: {enabled: true,scaleFactor: 3,type: 'arrow'}},
                 color: { color: r.forced ? '#ff4d4f' : '#1890ff', width: 4 },
-                font: { align: 'middle', color: '#444', size: 56, background: '#ffffff' },
+                font: { align: 'middle', color: '#444', size: 48, background: '#ffffff' },
                 length: 700 // 拉开节点间距
             });
         });
@@ -111,111 +103,37 @@
             },
             edges: {
                 smooth: {
-                    // dynamic: 根据边的相对位置自动选择弯曲方向, 显著减少交叉
-                    type: 'dynamic',
-                    roundness: 0.3
+                    type: 'curvedCW',
+                    roundness: 0.2
                 }
             },
             physics: {
                 enabled: true,
-                // forceAtlas2(Gephi 同款): 节点均匀分散, 避免局部重叠/大片空白
-                solver: 'forceAtlas2Based',
-                forceAtlas2Based: {
-                    gravitationalConstant: -500,  // 节点间斥力
-                    centralGravity: 0.02,         // 分量内单图布局: 向心引力保持紧凑
-                    springLength: 420,            // 期望边长度
-                    springConstant: 0.08,         // 弹簧强度
-                    damping: 0.6,                 // 阻尼: 越大布局越稳定
-                    avoidOverlap: 1.0             // 0-1: 1=完全避免头像重叠
+                barnesHut: {
+                    gravitationalConstant: -110000, // 进一步增大排斥力
+                    centralGravity: 0.001,
+                    springLength: 800, // 大幅增加弹簧长度
+                    springConstant: 0.04,           // 弹簧强度，值越小越“软”，节点越容易被推开
+                    damping: 0.09,
+                    avoidOverlap: 1 // 防重叠参数，允许适当交叉，看着更自然
                 },
                 stabilization: {
                     enabled: true,
-                    iterations: Math.max({{ iterations }}, 1000),  // 足够迭代保证收敛均匀
+                    iterations: {{ iterations }},
                     updateInterval: 25,
                     onlyDynamicEdges: false,
-                    fit: true
+                fit: true
                 }
             }
         };
-
-        // ── 连通分量检测: 不相干的分量各自独立布局, 网格排列 ──
-        const adj = {};
-        raw_data.forEach(r => {
-            (adj[r.user_id] = adj[r.user_id] || new Set()).add(String(r.wife_id));
-            (adj[r.wife_id] = adj[r.wife_id] || new Set()).add(String(r.user_id));
-        });
-        const visitedComp = new Set();
-        const components = [];
-        for (const id of Object.keys(adj)) {
-            if (visitedComp.has(id)) continue;
-            const comp = [];
-            const stack = [id];
-            visitedComp.add(id);
-            while (stack.length) {
-                const cur = stack.pop();
-                comp.push(cur);
-                (adj[cur] || []).forEach(n => {
-                    if (!visitedComp.has(n)) { visitedComp.add(n); stack.push(n); }
-                });
-            }
-            components.push(comp);
-        }
-
-        // ── 分量布局: 每分量独立 network, 区域面积 ∝ 节点数 ──
-        // (面积按节点数加权 → 各分量 fit 后节点视觉大小一致, 不出现大小不一)
-        const root = document.getElementById('network-container');
-        root.innerHTML = '';
-        // 贪心分行: 每行最多 3 个分量
-        const rowAssign = [];
-        let curRow = { comps: [], nodes: 0 };
-        components.forEach((c, i) => {
-            if (curRow.comps.length >= 3) {
-                rowAssign.push(curRow);
-                curRow = { comps: [], nodes: 0 };
-            }
-            curRow.comps.push(i);
-            curRow.nodes += c.length;
-        });
-        if (curRow.comps.length) rowAssign.push(curRow);
-        const totalRowNodes = rowAssign.reduce((s, r) => s + r.nodes, 0);
-        let readyCount = 0;
-        window.__networks = [];
-
-        rowAssign.forEach((row, ri) => {
-            // 行高 ∝ 行内节点数; 行内区域宽 ∝ 分量节点数
-            const rowH = root.clientHeight * (row.nodes / totalRowNodes);
-            let x = 0;
-            row.comps.forEach(ci => {
-                const w = (components[ci].length / row.nodes) * root.clientWidth;
-                const div = document.createElement('div');
-                div.style.cssText = `position:absolute;left:${x}px;`
-                    + `top:${ri * rowH}px;width:${w}px;height:${rowH}px;`;
-                root.appendChild(div);
-                x += w;
-                const comp = components[ci];
-                const compNodes = comp
-                    .map(id => nodes.find(n => n.id === id))
-                    .filter(Boolean);
-                const compEdges = edges.filter(e => comp.includes(e.from) && comp.includes(e.to));
-                const net = new vis.Network(
-                    div,
-                    { nodes: new vis.DataSet(compNodes), edges: new vis.DataSet(compEdges) },
-                    options,
-                );
-                window.__networks.push(net);
-                net.once("stabilizationIterationsDone", function () {
-                    // 稳定后冻结布局(不立即 fit, 等全部分量稳定统一处理)
-                    net.setOptions({ physics: false });
-                    readyCount++;
-                    if (readyCount === components.length) {
-                        // 统一 fit: 各分量在各自区域内适配, padding 留边距防 label 溢出
-                        window.__networks.forEach(n =>
-                            n.fit({ animation: false, padding: 35 })
-                        );
-                        window.__graphReady = true;
-                    }
-                });
-            });
+        const network = new vis.Network(container, data, options);
+        window.__network = network;  // 暴露给渲染验证/调试
+        network.once("stabilizationIterationsDone", function () {
+            // 稳定后冻结布局: 否则物理引擎继续运行, 节点会重新聚拢/漂移
+            network.setOptions({ physics: false });
+            network.fit({ animation: false, padding: 35 });
+            // 标记渲染完成(渲染器等待此标记后截图)
+            window.__graphReady = true;
         });
     </script>
 </body>
