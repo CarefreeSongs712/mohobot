@@ -525,6 +525,31 @@ class PluginSystem(Interceptor):
                 logger.error(f"Plugin {meta['name']} request handler error: {e}")
         return False
 
+    async def dispatch_observed(
+        self,
+        bot_id: str,
+        event,
+        raw: dict,
+    ) -> tuple[bool, str | list[dict[str, Any]] | None]:
+        """分发"消息观察"钩子: 所有消息(含群内未 @bot 的)在 gate 前先过一遍插件。
+
+        用于插件捕获普通消息(活跃记录、求婚"同意/拒绝"回复、无前缀关键词触发)。
+        返回 (是否消费, 回复); 不消费时消息继续走正常流程(gate → 拦截链 → LLM)。
+        """
+        for meta in self._plugins:
+            if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            plugin = meta.get("instance")
+            try:
+                handler = getattr(plugin, "on_message_observed", None)
+                if handler:
+                    handled, response = await handler(bot_id, event, raw)
+                    if handled:
+                        return (True, response)
+            except Exception as e:
+                logger.error(f"Plugin {meta['name']} observe handler error: {e}")
+        return (False, None)
+
     async def intercept(
         self,
         bot_id: str,

@@ -1,0 +1,135 @@
+{
+    "daily_limit": {
+        "type": "int",
+        "description": "每日抽取上限",
+        "hint": "每位用户每天可以抽取老婆的次数上限，最好设置为一次，后面很多功能都是基于上限为一开发的，多次可能会出现一些兼容性问题。",
+        "default": 1
+    },
+    "force_marry_cd": {
+        "type": "int",
+        "description": "强娶冷却天数",
+        "hint": "一个人每隔多少天可以强娶一次别人。",
+        "default": 3
+    },
+    "propose_cooldown_minutes": {
+        "type": "int",
+        "description": "求婚冷却分钟数",
+        "hint": "求婚成功后双方进入冷却的时长，单位为分钟。设置为 0 可关闭求婚冷却。",
+        "default": 60,
+        "slider": {
+            "min": 0,
+            "max": 1440,
+            "step": 10
+        }
+    },
+    "max_records": {
+        "type": "int",
+        "description": "活跃群友记录上限",
+        "hint": "跨群累计活跃用户总记录条数，作为抽老婆的候选池。达到此数值后将自动清理最沉默的群友。如果你加的群很多，而且都比较活跃，请调高此数值。",
+        "default": 500
+    },
+    "active_user_days": {
+        "type": "int",
+        "description": "活跃筛选天数",
+        "hint": "仅保留最近多少天内发过言的群友作为抽老婆候选，超过该天数未发言的人会在抽取前从活跃池删除。可设置 1 到 30 天。",
+        "default": 30,
+        "slider": {
+            "min": 1,
+            "max": 30,
+            "step": 1
+        }
+    },
+    "debug_enabled": {
+        "type": "bool",
+        "description": "全局调试日志",
+        "hint": "开启后会输出抽取流程、候选池、群成员过滤、活跃池清理等调试日志。排查完成后建议关闭。",
+        "default": false
+    },
+    "excluded_users": {
+        "type": "list",
+        "description": "排除用户列表",
+        "hint": "在此列表中的QQ号将不会被抽中。",
+        "default": []
+    },
+    "force_marry_excluded_users": {
+        "type": "list",
+        "description": "强娶排除用户列表",
+        "hint": "在此列表中的QQ号不会被“强娶”指令选中。",
+        "default": []
+    },
+    "whitelist_groups": {
+        "type": "list",
+        "description": "群聊白名单",
+        "hint": "若填写，则插件仅在这些群生效。",
+        "default": []
+    },
+    "blacklist_groups": {
+        "type": "list",
+        "description": "群聊黑名单",
+        "hint": "在此列表中的群聊将禁用此插件功能。",
+        "default": []
+    },
+    "iterations": {
+        "type": "int",
+        "description": "关系图生成迭代次数",
+        "hint": "控制关系图生成的精细度。如果你感觉生成的头像跑到图片外，请调小此数值。人数少的话可以调小一点，100也可以（推荐140最佳）",
+        "default": 140,
+        "slider": {
+            "min": 50,
+            "max": 180,
+            "step": 10
+        }
+    },
+    "keyword_trigger_enabled": {
+        "type": "bool",
+        "description": "关键词触发",
+        "hint": "开启后, 直接发送“抽老婆/强娶/关系图”等关键词即可触发, 无需 / 前缀。默认关闭以避免误触。",
+        "default": false
+    },
+    "keyword_trigger_mode": {
+        "type": "string",
+        "description": "关键词匹配模式",
+        "hint": "exact：消息去两端空白后必须完全相等；starts_with：以关键词开头即可；contains：包含关键词即可。建议保持 exact 以避免误触。",
+        "options": [
+            "exact",
+            "starts_with",
+            "contains"
+        ],
+        "default": "exact"
+    },
+    "auto_set_other_half": {
+        "type": "bool",
+        "description": "自动设置对方老婆",
+        "hint": "开启后，抽到老婆时若对方今天还没有老婆记录，将自动给对方设置“你”为老婆（对方仍可自行抽取/强娶，视每日上限而定）。默认关闭。",
+        "default": false
+    },
+    "auto_withdraw_enabled": {
+        "type": "bool",
+        "description": "定时自动撤回(已停用)",
+        "hint": "mohobot 版暂不支持自动撤回(无 delete_msg 追踪), 该配置保留但无效。",
+        "default": false
+    },
+    "auto_withdraw_delay_seconds": {
+        "type": "int",
+        "description": "自动撤回延迟(秒)",
+        "hint": "自动撤回延迟时间，单位秒。仅在开启“定时自动撤回”时生效。",
+        "default": 5,
+        "slider": {
+            "min": 1,
+            "max": 60,
+            "step": 1
+        }
+    },
+    "allow_marry_bot": {
+        "type": "bool",
+        "description": "允许强娶/抽取机器人",
+        "hint": "开启后，机器人（Bot）也会进入老婆池，并可以被强娶。默认关闭。",
+        "default": false
+    },
+    "at_waifu": {
+        "type": "bool",
+        "description": "是否 @ 抽到的老婆",
+        "hint": "开启后，抽到老婆或强娶时会额外 @ 对方。默认关闭。",
+        "default": false
+    }
+}

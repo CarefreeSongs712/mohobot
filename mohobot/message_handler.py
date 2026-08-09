@@ -219,6 +219,21 @@ class MessageHandler:
             f"type={event.message_type}, text='{text_preview}'"
         )
 
+        # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
+        # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
+        # 插件明确消费时发送回复并结束; 否则继续正常流程。
+        if self._plugins is not None:
+            try:
+                observed_handled, observed_reply = await self._plugins.dispatch_observed(
+                    bot_id, event, raw
+                )
+                if observed_handled:
+                    if observed_reply:
+                        await self._send_reply(bot_id, event, observed_reply)
+                    return
+            except Exception as e:
+                logger.exception(f"Plugin observe dispatch error: {e}")
+
         # ── Group gate: only respond if @mentioned, replied-to, or command ──
         if isinstance(event, GroupMessageEvent):
             if not await self._should_respond_to_group(bot_id, event):

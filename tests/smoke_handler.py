@@ -57,6 +57,7 @@ class FakeWS:
 class FakePlugins:
     async def dispatch_notice(self, *a, **kw): pass
     async def dispatch_meta(self, *a, **kw): pass
+    async def dispatch_observed(self, *a, **kw): return (False, None)
 
 
 class FakeLLMService:

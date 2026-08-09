@@ -131,6 +131,9 @@ async def test_handler_concurrent_messages() -> None:
         async def dispatch_request(self, *a, **kw):
             return False
 
+        async def dispatch_observed(self, *a, **kw):
+            return (False, None)
+
     ws = FakeWS(bm)
     ctx = ContextManager(data_dir=tmp)
     handler = MessageHandler(

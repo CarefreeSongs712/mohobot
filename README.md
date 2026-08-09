@@ -195,6 +195,19 @@ database:
 
 > 移植自 [astrbot_plugin_relationship](https://github.com/Zhalslar/astrbot_plugin_relationship) v3.0.5（Zhalslar），去掉 afdian 校验与"加好友/加群"扩展（无对应依赖），OneBot API 走 mohobot 通用 `send_to_bot`。
 
+## 🌸 抽老婆插件（移植自 astrbot-plugin-wifepicker）
+
+`plugins/wifepicker/` — 群聊互动：活跃成员抽"今日老婆"（活跃池筛选 + 640px 头像 + @）、我的老婆、强娶（冷却 + 排除列表）、关系图（vis-network 渲染）、rbq排行、求婚（30 秒"同意/拒绝"交互 + 拒绝后强娶确认）：
+
+- **命令**（带 `/` 前缀 + 英文缩写别名）：`/今日老婆`(jrlp/抽老婆) `/我的老婆`(wdlp) `/强娶 @某人`(qiangqu) `/关系图`(gxt) `/rbq排行`(rbqph) `/求婚 @某人`(qh) `/抽老婆帮助`(clpbz)；管理员：`/重置记录` `/重置强娶时间` `/重置求婚时间`
+- **关键词触发**（配置开关，默认关）：直接发 `jrlp`/`抽老婆` 等无需 `/` 前缀（仅群聊，支持 exact/starts_with/contains 匹配模式）
+- **求婚交互**：框架新增**消息观察钩子**（`PluginSystem.dispatch_observed`）——所有群消息（含未 @bot 的）在 gate 前先过插件，用于活跃记录、求婚"同意/拒绝"回复、无前缀关键词触发
+- **数据**：合并为 `data/plugins_data/wifepicker/data.json`（原 5 文件合一），file_store 原子读写，并发安全
+- **关系图/rbq排行**：Playwright 渲染 HTML→PNG（生产需 `pip install playwright && playwright install chromium`），未安装/失败时自动降级为文本列表
+- **适配**：管理员=全局 `admins`；数据隔离于各群白/黑名单（`whitelist_groups`/`blacklist_groups`）；`auto_withdraw`（自动撤回）因 mohobot 无删除消息追踪而停用
+
+> 移植自 [astrbot-plugin-wifepicker](https://github.com/astrbot/astrbot-plugin-wifepicker) v3.2.6（作者：Nayukiiii），核心逻辑/模板/关键词路由原样移植，事件模型与数据存储适配 mohobot。
+
 ## 🎵 歌曲知识（移植自 Agent-LuoTianyi，beta 板块）
 
 歌曲知识部分**直接移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的 server 端实现**（`src/subconscious/music_knowledge/`、`src/subconscious/memory/song_knowledge.py`、`src/world/get_new_songs/`），包含：
