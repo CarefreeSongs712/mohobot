@@ -62,8 +62,14 @@ async def render_png(
     width: int,
     height: int,
     wait_ms: int = IMAGE_WAIT_MS,
+    wait_js: str | None = None,
+    wait_js_timeout_ms: int = 20000,
 ) -> bool:
-    """渲染 HTML 到 PNG 文件。失败返回 False。"""
+    """渲染 HTML 到 PNG 文件。失败返回 False。
+
+    wait_js: 可选 JS 表达式, 等到其返回 true 再截图
+    (如关系图布局稳定并冻结后的标记, 避免截到布局漂移中的画面)。
+    """
     browser = await _get_browser()
     if browser is None:
         return False
@@ -71,8 +77,14 @@ async def render_png(
     try:
         page = await browser.new_page(viewport={"width": width, "height": height})
         await page.set_content(html_content, wait_until="load")
-        # 等待头像等外网图片加载 + 布局稳定
-        await page.wait_for_timeout(wait_ms)
+        if wait_js:
+            try:
+                await page.wait_for_function(wait_js, timeout=wait_js_timeout_ms)
+            except Exception:
+                logger.warning(f"等待渲染标记超时({wait_js_timeout_ms}ms), 直接截图")
+        else:
+            # 等待头像等外网图片加载 + 布局稳定
+            await page.wait_for_timeout(wait_ms)
         await page.screenshot(
             path=str(Path(output_path)),
             full_page=False,

@@ -94,6 +94,8 @@ async def cmd_show_graph(plugin, bot_id: str, event, rest: str):
         ok = await render_png(
             html_content, out_png,
             width=clip_width, height=clip_height,
+            # 等布局稳定并冻结(physics off)后再截图, 避免截到漂移画面
+            wait_js="window.__graphReady === true",
         )
         if ok and plugin._ws_server is not None:
             await plugin._ws_server.send_image(

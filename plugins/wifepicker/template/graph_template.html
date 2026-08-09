@@ -56,6 +56,14 @@
         const edges = [];
         const userSet = new Set();
 
+        // 自适应尺寸: 节点越多头像越小, 避免拥挤/重叠
+        const allIds = new Set();
+        raw_data.forEach(r => { allIds.add(String(r.user_id)); allIds.add(String(r.wife_id)); });
+        const nodeCount = allIds.size;
+        const avatarSize = nodeCount <= 10 ? 110 : nodeCount <= 20 ? 90 : nodeCount <= 30 ? 75 : 62;
+        const labelSize = avatarSize >= 90 ? 62 : avatarSize >= 75 ? 54 : 46;
+        const labelVadjust = avatarSize >= 90 ? 48 : 40;
+
         raw_data.forEach(r => {
             const userName = user_map[r.user_id] || "用户" + r.user_id;
             const wifeName = user_map[r.wife_id] || r.wife_name;
@@ -69,15 +77,15 @@
                         shape: 'circularImage',
                        image: `https://q4.qlogo.cn/headimg_dl?dst_uin=${u.id}&spec=640&t=${hourlyTag}`,
                         borderWidth: 6,
-                        size: 110, // 头像尺寸
+                        size: avatarSize,
                         color: { border: '#4facfe', background: '#ffffff' },
                         font: {
                             color: '#000000',
-                            size: 62, // 节点名字加大
-                            vadjust: 48, // 调整文字偏移, 适应大头像
+                            size: labelSize,
+                            vadjust: labelVadjust,
                             strokeWidth: 6, // 增加描边
                             strokeColor: '#ffffff',
-                            bold: { color: '#000000', size: 56, vadjust: 48 }
+                            bold: { color: '#000000', size: labelSize - 6, vadjust: labelVadjust }
                         }
                     });
                 }
@@ -112,16 +120,16 @@
                 // forceAtlas2(Gephi 同款): 节点均匀分散, 避免局部重叠/大片空白
                 solver: 'forceAtlas2Based',
                 forceAtlas2Based: {
-                    gravitationalConstant: -120,  // 节点间斥力
-                    centralGravity: 0.02,         // 向心引力: 防止节点四散失衡
-                    springLength: 260,            // 期望边长度
-                    springConstant: 0.14,         // 弹簧强度
-                    damping: 0.5,                 // 阻尼: 越大布局越稳定
-                    avoidOverlap: 0.9             // 0-1: 越接近 1 越避免头像重叠
+                    gravitationalConstant: -400,  // 节点间斥力(头像大, 需更强斥力)
+                    centralGravity: 0.01,         // 向心引力: 防止节点四散失衡
+                    springLength: 500,            // 期望边长度
+                    springConstant: 0.08,         // 弹簧强度: 软弹簧让斥力主导
+                    damping: 0.6,                 // 阻尼: 越大布局越稳定
+                    avoidOverlap: 1.0             // 0-1: 1=完全避免头像重叠
                 },
                 stabilization: {
                     enabled: true,
-                    iterations: Math.max({{ iterations }}, 600),  // 足够迭代保证收敛均匀
+                    iterations: Math.max({{ iterations }}, 1000),  // 足够迭代保证收敛均匀
                     updateInterval: 25,
                     onlyDynamicEdges: false,
                     fit: true
@@ -130,7 +138,11 @@
         };
         const network = new vis.Network(container, data, options);
         network.once("stabilizationIterationsDone", function () {
-            network.fit();
+            // 稳定后冻结布局: 否则物理引擎继续运行, 节点会重新聚拢/漂移
+            network.setOptions({ physics: false });
+            network.fit({ animation: false });
+            // 标记渲染完成(渲染器等待此标记后截图)
+            window.__graphReady = true;
         });
     </script>
 </body>
