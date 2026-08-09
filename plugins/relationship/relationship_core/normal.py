@@ -9,8 +9,8 @@ from typing import Any
 
 from loguru import logger
 
-from core.config import PluginConfig
-from core.utils import api_call, get_ats, get_nickname, parse_multi_input
+from relationship_core.config import PluginConfig
+from relationship_core.utils import api_call, get_ats, get_nickname, parse_multi_input
 
 
 class NormalHandle:
@@ -140,7 +140,7 @@ class NormalHandle:
 
     async def check_messages(self, bot_id: str, event: Any, raw: str) -> str:
         """抽查 <群号|@群友|@QQ> <数量>, 转发最近聊天记录到当前会话。"""
-        from core.forward import ForwardTool
+        from relationship_core.forward import ForwardTool
 
         parts = (raw or "").split()
         count = self.cfg.check.count

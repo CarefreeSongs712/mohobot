@@ -33,7 +33,10 @@ def convert_duration_advanced(duration: int) -> str:
 
 async def api_call(ws_server, bot_id: str, action: str, params: dict | None = None,
                    timeout: float = 10.0) -> Any:
-    """调用 OneBot API 并返回响应 data(任意类型; 失败/超时返回 None)。"""
+    """调用 OneBot API 并返回响应 data(任意类型; 失败/超时返回 None)。
+
+    兼容不同实现的 retcode 类型(str/int)与缺失 status 的情况。
+    """
     if ws_server is None:
         return None
     try:
@@ -45,10 +48,17 @@ async def api_call(ws_server, bot_id: str, action: str, params: dict | None = No
         return None
     if not isinstance(resp, dict):
         return None
-    if resp.get("status") != "ok" or resp.get("retcode") != 0:
-        logger.warning(
-            f"API {action} 返回错误: {resp.get('wording') or resp.get('message')}"
-        )
+    # 失败判定: status 显式为 failed/error, 或 retcode 非 0(兼容字符串)
+    status = str(resp.get("status", "")).lower()
+    if status in ("failed", "error", "fail"):
+        logger.warning(f"API {action} 返回错误: {resp.get('wording') or resp.get('message')}")
+        return None
+    try:
+        retcode = int(resp.get("retcode", 0))
+    except (TypeError, ValueError):
+        retcode = 0
+    if retcode != 0:
+        logger.warning(f"API {action} 返回错误: {resp.get('wording') or resp.get('message')}")
         return None
     return resp.get("data")
 
@@ -104,7 +114,12 @@ async def get_reply_text(ws_server, bot_id: str, event: Any) -> str:
     reply_id = get_reply_id(event)
     if not reply_id:
         return ""
-    data = await api_call(ws_server, bot_id, "get_msg", {"message_id": int(reply_id)})
+    try:
+        mid = int(reply_id)
+    except (TypeError, ValueError):
+        logger.warning(f"非法引用消息 id: {reply_id!r}")
+        return ""
+    data = await api_call(ws_server, bot_id, "get_msg", {"message_id": mid})
     if not data:
         return ""
     message = data.get("message") or []

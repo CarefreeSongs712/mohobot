@@ -23,11 +23,11 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from core import config as _cfg
-from core.contact import ContactHandle
-from core.normal import NormalHandle
-from core.notice.handle import NoticeHandle
-from core.request.handle import RequestHandle
+from relationship_core import config as _cfg
+from relationship_core.contact import ContactHandle
+from relationship_core.normal import NormalHandle
+from relationship_core.notice.handle import NoticeHandle
+from relationship_core.request.handle import RequestHandle
 
 # 命令表: 名称 → 处理器方法名(带 / 前缀, 与 mohobot 风格一致)
 COMMANDS = {
@@ -96,7 +96,11 @@ class Plugin:
         self._contact = None
 
     def _ensure_handlers(self) -> None:
-        """用当前配置构造处理器(配置热更新后重建)。"""
+        """用当前配置 + 当前管理员重建处理器。
+
+        每次入口调用(admin 列表由 inject_admin_ids 类级热更新,
+        配置由面板热更新), 保证权限判断始终使用最新值。
+        """
         self._cfg = _cfg.PluginConfig(
             self.plugin_config,
             admins=self._admin_ids,
@@ -127,14 +131,15 @@ class Plugin:
             return (False, None)
 
         parts = text[1:].strip().split(maxsplit=1)
+        if not parts:
+            return (False, None)
         cmd = parts[0]
         rest = parts[1] if len(parts) > 1 else ""
         handler_name = COMMANDS.get(cmd)
         if handler_name is None:
             return (False, None)
 
-        if self._cfg is None:
-            self._ensure_handlers()
+        self._ensure_handlers()
 
         handler = getattr(self, handler_name, None)
         if handler is None:
@@ -150,8 +155,7 @@ class Plugin:
 
     async def on_request(self, bot_id: str, event: Any, raw: dict) -> bool:
         """接管好友申请/群邀请: 自动规则 + 转发审批。返回 True=已处理。"""
-        if self._cfg is None:
-            self._ensure_handlers()
+        self._ensure_handlers()
         return await self._request.handle_raw(bot_id, event, raw)
 
     # ── 通知事件(管理员变动/禁言/被踢/被拉群) ────────────────
@@ -159,8 +163,7 @@ class Plugin:
     async def on_notice(self, bot_id: str, event: Any, raw: dict) -> None:
         if event.notice_type == "notify" and event.sub_type == "poke":
             return  # 戳一戳交给反射/框架
-        if self._cfg is None:
-            self._ensure_handlers()
+        self._ensure_handlers()
         try:
             await self._notice.handle(bot_id, event, raw)
         except Exception as e:

@@ -243,7 +243,10 @@ class PluginSystem(Interceptor):
             return None
 
     def _load_plugin_config(self, plugin_name: str, schema: dict) -> dict:
-        """合并 schema 默认值 + 已存配置(存于 data/plugins_config/{name}.json)。"""
+        """合并 schema 默认值 + 已存配置(存于 data/plugins_config/{name}.json)。
+
+        存档按 schema 强转类型, 防止手工编辑/旧版本写入脏值导致插件崩溃。
+        """
         defaults = self._schema_defaults(schema)
         saved: dict = {}
         config_file = self._config_dir / f"{plugin_name}.json"
@@ -254,7 +257,8 @@ class PluginSystem(Interceptor):
                     saved = {}
             except Exception as e:
                 logger.error(f"Failed to load plugin config {config_file}: {e}")
-        merged = self._deep_merge(defaults, saved)
+        coerced = self._coerce_config(schema, saved)
+        merged = self._deep_merge(defaults, coerced)
         # 首次无存档时写默认值, 便于面板编辑
         if not saved:
             try:
@@ -298,6 +302,40 @@ class PluginSystem(Interceptor):
                 merged[k] = v
         return merged
 
+    @classmethod
+    def _coerce_config(cls, schema: dict, data: dict) -> dict:
+        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。"""
+        result: dict = {}
+        for key, spec in (schema or {}).items():
+            if not isinstance(spec, dict) or key not in data:
+                continue
+            value = data[key]
+            stype = spec.get("type", "string")
+            if stype == "object":
+                result[key] = cls._coerce_config(
+                    spec.get("items") or {}, value if isinstance(value, dict) else {}
+                )
+            elif stype == "bool":
+                if isinstance(value, str):
+                    result[key] = value.strip().lower() in ("true", "1", "yes", "on")
+                else:
+                    result[key] = bool(value)
+            elif stype == "int":
+                try:
+                    result[key] = int(value)
+                except (TypeError, ValueError):
+                    result[key] = spec.get("default", 0)
+            elif stype == "list":
+                if isinstance(value, list):
+                    result[key] = [str(i) for i in value]
+                elif isinstance(value, str):
+                    result[key] = [s.strip() for s in value.split(",") if s.strip()]
+                else:
+                    result[key] = []
+            else:  # string
+                result[key] = str(value) if value is not None else ""
+        return result
+
     @staticmethod
     def _inject_config(plugin_instance, config: dict) -> None:
         """把配置注入插件实例(实例属性 plugin_config)。"""
@@ -310,11 +348,20 @@ class PluginSystem(Interceptor):
                 pass
 
     def get_plugin_config(self, name: str) -> dict | None:
-        """Web 面板读取插件配置。"""
-        for meta in self._plugins:
-            if meta["name"] == name:
-                return meta.get("config")
-        return None
+        """Web 面板读取插件配置(优先读存档, 插件运行时 _persist 的修改立即可见)。"""
+        meta = next((m for m in self._plugins if m["name"] == name), None)
+        if meta is None:
+            return None
+        # 插件运行时可写回配置文件(如关系插件黑名单); 面板应显示最新存档
+        config_file = self._config_dir / f"{name}.json"
+        if config_file.exists():
+            try:
+                saved = json.loads(config_file.read_text(encoding="utf-8"))
+                if isinstance(saved, dict):
+                    return saved
+            except Exception as e:
+                logger.error(f"Failed to read plugin config {config_file}: {e}")
+        return meta.get("config")
 
     def get_config_schema(self, name: str) -> dict | None:
         for meta in self._plugins:
@@ -327,8 +374,10 @@ class PluginSystem(Interceptor):
         meta = next((m for m in self._plugins if m["name"] == name), None)
         if meta is None or meta.get("config_schema") is None:
             return False
+        # 按 schema 类型强转(面板可能提交字符串/错误类型)
+        coerced = self._coerce_config(meta["config_schema"], config or {})
         merged = self._deep_merge(
-            self._schema_defaults(meta["config_schema"]), config or {}
+            self._schema_defaults(meta["config_schema"]), coerced
         )
         meta["config"] = merged
         try:

@@ -10,10 +10,10 @@ from typing import Any
 
 from loguru import logger
 
-from core.config import PluginConfig
-from core.forward import ForwardTool
-from core.notice.decision import NoticeDecision
-from core.notice.model import NoticeMessage
+from relationship_core.config import PluginConfig
+from relationship_core.forward import ForwardTool
+from relationship_core.notice.decision import NoticeDecision
+from relationship_core.notice.model import NoticeMessage
 
 
 class NoticeHandle:
@@ -65,9 +65,14 @@ class NoticeHandle:
         # 退群
         if result.leave_group:
             await asyncio.sleep(5)
-            await self.cfg.ws_server.send_to_bot(
-                bot_id, "set_group_leave", {"group_id": int(notice.group_id)},
-            )
+            try:
+                gid = int(notice.group_id)
+            except (TypeError, ValueError):
+                gid = 0
+            if gid:
+                await self.cfg.ws_server.send_to_bot(
+                    bot_id, "set_group_leave", {"group_id": gid},
+                )
 
     async def _send_to_chat(self, bot_id: str, event: Any, text: str) -> None:
         """把提示发到事件所在会话(群聊/私聊)。"""

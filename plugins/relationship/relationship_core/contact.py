@@ -8,8 +8,8 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from core.config import PluginConfig
-from core.utils import api_call, get_ats
+from relationship_core.config import PluginConfig
+from relationship_core.utils import api_call, get_ats
 
 
 class ContactHandle:

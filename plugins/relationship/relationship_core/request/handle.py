@@ -10,10 +10,10 @@ from typing import Any
 
 from loguru import logger
 
-from core.config import PluginConfig
-from core.request.decision import RequestDecision
-from core.request.model import BaseRequest, FriendRequest, GroupRequest
-from core.utils import api_call, get_reply_text
+from relationship_core.config import PluginConfig
+from relationship_core.request.decision import RequestDecision
+from relationship_core.request.model import BaseRequest, FriendRequest, GroupRequest
+from relationship_core.utils import api_call, get_reply_text
 
 
 class RequestHandle:

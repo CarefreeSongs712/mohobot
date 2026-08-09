@@ -227,11 +227,142 @@ async def test_request_dispatch() -> None:
     print("[4] request 事件先 dispatch 插件, 未处理则自动同意 OK")
 
 
+async def test_schema_coercion() -> None:
+    """save 时 schema 类型强转: 面板提交字符串/错误类型不崩。"""
+    from mohobot.interceptors.plugin_system import PluginSystem
+
+    tmp = tempfile.mkdtemp(prefix="pcoerce_")
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tmp)
+    await ps.load_plugins()
+
+    # 面板提交错误类型: int 字段给字符串, bool 给字符串, list 给逗号串
+    ok = ps.save_plugin_config("relationship", {
+        "check": {"count": "50", "batch_size": "abc", "delay": "10"},
+        "request": {"auto_agree_friend": "true", "auto_reject_group": 1},
+        "manage_users": "2001,2002",
+    })
+    assert ok
+    cfg = ps.get_plugin_config("relationship")
+    assert cfg["check"]["count"] == 50, cfg["check"]["count"]
+    assert cfg["check"]["batch_size"] == 40, "非法 int 回退默认值"
+    assert cfg["check"]["delay"] == 10
+    assert cfg["request"]["auto_agree_friend"] is True
+    assert cfg["request"]["auto_reject_group"] is True
+    assert cfg["manage_users"] == ["2001", "2002"]
+
+    # 插件实例热同步 + on_config_update 后 cfg 重建
+    meta = next(m for m in ps._plugins if m["name"] == "relationship")
+    inst = meta["instance"]
+    assert getattr(inst, "plugin_config", {}).get("manage_users") == ["2001", "2002"]
+    assert inst._cfg is None, "on_config_update 后应失效重建"
+
+    # 存档脏值(手工编辑)启动也不崩
+    import json as _json
+    archive = Path(tmp) / "plugins_config" / "relationship.json"
+    archive.write_text(_json.dumps({
+        "check": {"count": "abc", "batch_size": "55"},
+        "notice": {"max_group_capacity": "abc"},
+    }), encoding="utf-8")
+    ps2 = PluginSystem(plugins_dir="plugins", data_dir=tmp)
+    await ps2.load_plugins()
+    meta2 = next(m for m in ps2._plugins if m["name"] == "relationship")
+    cfg2 = meta2["config"]
+    assert cfg2["check"]["count"] == 20, "脏 int 回退默认"
+    assert cfg2["check"]["batch_size"] == 55, "合法数字字符串应转换"
+    assert cfg2["notice"]["max_group_capacity"] == 100
+    print("[5] schema 类型强转 + 存档脏值防护 OK")
+
+
+async def test_admin_hot_update() -> None:
+    """admin 热更新即时生效(无需重启/重载插件)。"""
+    import sys as _sys
+    sys.path.insert(0, "plugins/relationship")
+    from mohobot.interceptors.plugin_system import PluginSystem
+
+    tmp = tempfile.mkdtemp(prefix="padm2_")
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tmp)
+    ps.set_admin_ids([1001])
+    await ps.load_plugins()
+    meta = next(m for m in ps._plugins if m["name"] == "relationship")
+    inst = meta["instance"]
+
+    # 触发一次 handler 构造
+    inst._ensure_handlers()
+    assert "1001" in inst._cfg.manage_users, "管理员应为审批员"
+
+    # 面板热更新 admins
+    ps.set_admin_ids([1001, 2002])
+    assert set(inst._admin_ids) == {"1001", "2002"}
+
+    # 再次入口 → 重新构造 cfg, 新管理员生效
+    inst._ensure_handlers()
+    assert "2002" in inst._cfg.manage_users, "热更新后的管理员应进入审批员"
+    print("[6] admin 热更新即时生效 OK")
+
+
+async def test_api_call_retcode_string() -> None:
+    """api_call 兼容字符串 retcode("0") 与缺失 status。"""
+    import sys as _sys
+    sys.path.insert(0, "plugins/relationship")
+    from relationship_core.utils import api_call
+
+    class WS:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def send_to_bot(self, *a, **kw):
+            return self.resp
+
+    # retcode 为字符串 "0"
+    r = await api_call(WS({"status": "ok", "retcode": "0", "data": {"x": 1}}), "b", "get_group_info")
+    assert r == {"x": 1}
+
+    # 无 status 字段
+    r = await api_call(WS({"retcode": 0, "data": [1, 2]}), "b", "get_group_list")
+    assert r == [1, 2]
+
+    # 失败
+    r = await api_call(WS({"status": "ok", "retcode": 1, "wording": "failed"}), "b", "x")
+    assert r is None
+
+    # 非 dict 响应
+    r = await api_call(WS(None), "b", "x")
+    assert r is None
+    print("[7] api_call retcode 兼容 OK")
+
+
+async def test_empty_command_no_crash() -> None:
+    """单独 "/" 不崩溃。"""
+    import sys as _sys
+    sys.path.insert(0, "plugins/relationship")
+    from mohobot.interceptors.plugin_system import PluginSystem
+    from mohobot.models.onebot import GroupMessageEvent, Sender
+
+    tmp = tempfile.mkdtemp(prefix="pempty_")
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tmp)
+    await ps.load_plugins()
+    meta = next(m for m in ps._plugins if m["name"] == "relationship")
+    inst = meta["instance"]
+
+    ev = GroupMessageEvent(
+        time=0, self_id=1, post_type="message", message_type="group", message_id=1,
+        user_id=1001, group_id=2001, sender=Sender(user_id=1001),
+        message=[{"type": "text", "data": {"text": "/"}}],
+    )
+    handled, reply = await inst.on_message("bot_001", ev, {})
+    assert handled is False, "单独 / 不应命中任何命令"
+    print("[8] 空命令防护 OK")
+
+
 async def main() -> None:
     await test_plugin_config_system()
     await test_admin_injection()
     await test_relationship_commands()
     await test_request_dispatch()
+    await test_schema_coercion()
+    await test_admin_hot_update()
+    await test_api_call_retcode_string()
+    await test_empty_command_no_crash()
     print("\nALL PLUGIN CONFIG / RELATIONSHIP TESTS PASSED")
 
 

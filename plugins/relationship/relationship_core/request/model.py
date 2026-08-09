@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
-from core.utils import api_call
+from relationship_core.utils import api_call
 
 
 class BaseRequest(ABC):

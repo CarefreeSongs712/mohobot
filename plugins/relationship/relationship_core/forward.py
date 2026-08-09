@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from core.utils import api_call, get_ats, parse_multi_input
+from relationship_core.utils import api_call, get_ats, parse_multi_input
 
 
 class ForwardTool:

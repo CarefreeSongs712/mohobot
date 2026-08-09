@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.config import PluginConfig
-from core.notice.model import NoticeMessage
-from core.utils import api_call, convert_duration_advanced, get_nickname
+from relationship_core.config import PluginConfig
+from relationship_core.notice.model import NoticeMessage
+from relationship_core.utils import api_call, convert_duration_advanced, get_nickname
 
 
 @dataclass
@@ -111,7 +111,10 @@ class NoticeDecision:
     async def _handle_invited(self, result: NoticeResult):
         group_name = await self._get_group_name()
         operator_name = await self._get_operator_name()
-        gid = int(self.msg.group_id)
+        try:
+            gid = int(self.msg.group_id)
+        except (TypeError, ValueError):
+            gid = 0
 
         result.admin_reply = f"主人..我被 {operator_name} 拉进了 {group_name}({gid})。"
 
@@ -183,8 +186,7 @@ class NoticeDecision:
     async def _check_group_size(self, result: NoticeResult, gid: int) -> bool:
         """返回 True 表示已触发退群, 不再继续后续检查。"""
         group_info = await api_call(
-            self.ws_server, self.bot_id, "get_group_info",
-            {"group_id": int(gid), "no_cache": True},
+            self.ws_server, self.bot_id, "get_group_info", {"group_id": int(gid)}
         ) or {}
         member_count = group_info.get("member_count", 0)
 

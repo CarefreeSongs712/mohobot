@@ -9,9 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from core.config import PluginConfig
-from core.request.model import BaseRequest, FriendRequest, GroupRequest
-from core.utils import api_call
+from relationship_core.config import PluginConfig
+from relationship_core.request.model import BaseRequest, FriendRequest, GroupRequest
+from relationship_core.utils import api_call
 
 
 @dataclass
