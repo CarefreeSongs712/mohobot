@@ -96,6 +96,79 @@ ws://127.0.0.1:8081/ws
 
 私聊机器人发送任意消息即可得到回复。默认启用 Agent 流水线（话题提取 → 回复，回复按行分段发送、首段引用触发消息）；若在 `config/global.yaml` 中设置 `agent.enabled: false`，或在某个 bot 的私有配置里设置 `agent_enabled: false`，该 bot 回退到旧版直接流式回复路径。
 
+## 🚀 生产部署（Ubuntu 服务器）
+
+### 1. 环境准备
+
+```bash
+# Python 3.12（示例用 pyenv）
+sudo apt update
+curl -fsSL https://pyenv.run | bash   # 或直接使用系统 Python 3.10+
+pyenv install 3.12.13
+pyenv global 3.12.13
+
+# 拉取代码 + 依赖
+git clone https://github.com/CarefreeSongs712/mohobot.git /opt/mohobot
+cd /opt/mohobot
+pip install -r requirements.txt
+cp config/global.example.yaml config/global.yaml   # 填写 LLM API Key
+```
+
+### 2. 可选：关系图渲染（Playwright + Chromium）
+
+`/关系图`、`/rbq排行` 用 Playwright 渲染 HTML→PNG，未安装时自动降级为文本列表：
+
+```bash
+pip install playwright
+# 官方 CDN 不可用时用国内镜像（生产实测方案）:
+# 1) 安装与镜像匹配的 playwright 版本（chromium revision 需与镜像同步版本一致）
+pip install playwright==1.52.0
+# 2) 手动下载 chromium 到缓存目录（revision 1169 的 npmmirror 有 x64 包）
+curl -L -o /tmp/chromium-linux.zip \
+  "https://registry.npmmirror.com/-/binary/playwright/builds/chromium/1169/chromium-linux.zip"
+curl -L -o /tmp/headless.zip \
+  "https://registry.npmmirror.com/-/binary/playwright/builds/chromium/1169/chromium-headless-shell-linux.zip"
+mkdir -p ~/.cache/ms-playwright/chromium-1169
+cd ~/.cache/ms-playwright/chromium-1169 && python -m zipfile -e /tmp/chromium-linux.zip . && python -m zipfile -e /tmp/headless.zip .
+touch INSTALLATION_COMPLETE
+chmod +x chrome-linux/chrome chrome-linux/headless_shell
+# headless shell 需放到 Playwright 期望的目录（chromium_headless_shell-1169/chrome-linux/）
+# 安装系统依赖库
+sudo apt-get install -y libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+  libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+  libpango-1.0-0 libcairo2 libasound2t64 libatspi2.0-0t64 fonts-noto-cjk
+# 验证渲染
+python -c "from playwright.async_api import async_playwright; import asyncio
+async def t():
+    p = await async_playwright().start(); b = await p.chromium.launch(args=['--no-sandbox'])
+    pg = await b.new_page(); await pg.set_content('<h1>测试</h1>'); await pg.screenshot(path='/tmp/t.png'); await b.close()
+asyncio.run(t())"
+```
+
+> 中文渲染需安装 CJK 字体（`fonts-noto-cjk`）；无外网访问时头像（qlogo）加载会留白，其余正常。
+
+### 3. 运行（screen 守护）
+
+```bash
+screen -S mohobot
+cd /opt/mohobot && python main.py
+# Ctrl+A D 脱离；常用管理：
+#   screen -ls                         查看会话
+#   screen -S mohobot -X stuff "..."   向会话发送命令
+#   优雅停止: kill -TERM <pid>          (main.py 捕获 SIGTERM 落盘退出)
+```
+
+### 4. 连接 OneBot 客户端
+
+NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务器IP>:8081`（端口见 `config/global.yaml` 的 `server.port`）。多个机器人各开一个连接，`X-Self-ID` 头为各自 QQ；Web 面板（`http://<IP>:9090`）创建 bot 并绑定 QQ 后即可使用。
+
+### 5. 部署后验证
+
+- 日志确认插件加载：`grep "Loaded plugin" logs/mohobot_*.log`
+- Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
+- 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
+- 更新部署：`git pull origin main` 后 `kill -TERM <pid>` 重启
+
 ## 🤖 Agent 子系统（beta）
 
 回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi)，`config/global.yaml` 的 `agent:` 段配置：
@@ -400,7 +473,7 @@ class Plugin:
 
 ## 📄 License
 
-[GPL-3.0](LICENSE)
+[MIT](LICENSE)
 
 ## 🙏 致谢
 
