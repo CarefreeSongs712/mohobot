@@ -121,32 +121,80 @@
                 // forceAtlas2(Gephi 同款): 节点均匀分散, 避免局部重叠/大片空白
                 solver: 'forceAtlas2Based',
                 forceAtlas2Based: {
-                    gravitationalConstant: -600,  // 节点间斥力(再加强, 布局更松)
-                    centralGravity: 0.001,        // 中心引力≈0: 互不相连的连通分量
-                                                  // 自然分离, 不挤在一起(分量内部
-                                                  // 由边弹簧约束, 不会散架)
-                    springLength: 700,            // 期望边长度(更长=更直=交叉少)
-                    springConstant: 0.06,         // 弹簧强度: 软弹簧让斥力主导
+                    gravitationalConstant: -500,  // 节点间斥力
+                    centralGravity: 0.02,         // 分量内单图布局: 向心引力保持紧凑
+                    springLength: 420,            // 期望边长度
+                    springConstant: 0.08,         // 弹簧强度
                     damping: 0.6,                 // 阻尼: 越大布局越稳定
                     avoidOverlap: 1.0             // 0-1: 1=完全避免头像重叠
                 },
                 stabilization: {
                     enabled: true,
-                    iterations: Math.max({{ iterations }}, 1200),  // 足够迭代保证收敛均匀
+                    iterations: Math.max({{ iterations }}, 1000),  // 足够迭代保证收敛均匀
                     updateInterval: 25,
                     onlyDynamicEdges: false,
                     fit: true
                 }
             }
         };
-        const network = new vis.Network(container, data, options);
-        window.__network = network;  // 暴露给渲染验证/调试(读取节点坐标)
-        network.once("stabilizationIterationsDone", function () {
-            // 稳定后冻结布局: 否则物理引擎继续运行, 节点会重新聚拢/漂移
-            network.setOptions({ physics: false });
-            network.fit({ animation: false });
-            // 标记渲染完成(渲染器等待此标记后截图)
-            window.__graphReady = true;
+
+        // ── 连通分量检测: 不相干的分量各自独立布局, 网格排列 ──
+        const adj = {};
+        raw_data.forEach(r => {
+            (adj[r.user_id] = adj[r.user_id] || new Set()).add(String(r.wife_id));
+            (adj[r.wife_id] = adj[r.wife_id] || new Set()).add(String(r.user_id));
+        });
+        const visitedComp = new Set();
+        const components = [];
+        for (const id of Object.keys(adj)) {
+            if (visitedComp.has(id)) continue;
+            const comp = [];
+            const stack = [id];
+            visitedComp.add(id);
+            while (stack.length) {
+                const cur = stack.pop();
+                comp.push(cur);
+                (adj[cur] || []).forEach(n => {
+                    if (!visitedComp.has(n)) { visitedComp.add(n); stack.push(n); }
+                });
+            }
+            components.push(comp);
+        }
+
+        // 网格排列: 每分量一个独立 network 容器, 分量间天然分离
+        const root = document.getElementById('network-container');
+        root.innerHTML = '';
+        const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(components.length))));
+        const rows = Math.ceil(components.length / cols);
+        const areaW = root.clientWidth / cols;
+        const areaH = root.clientHeight / rows;
+        let readyCount = 0;
+        window.__networks = [];
+
+        components.forEach((comp, idx) => {
+            const div = document.createElement('div');
+            div.style.cssText = `position:absolute;left:${(idx % cols) * areaW}px;`
+                + `top:${Math.floor(idx / cols) * areaH}px;width:${areaW}px;height:${areaH}px;`;
+            root.appendChild(div);
+            const compNodes = comp
+                .map(id => nodes.find(n => n.id === id))
+                .filter(Boolean);
+            const compEdges = edges.filter(e => comp.includes(e.from) && comp.includes(e.to));
+            const net = new vis.Network(
+                div,
+                { nodes: new vis.DataSet(compNodes), edges: new vis.DataSet(compEdges) },
+                options,
+            );
+            window.__networks.push(net);
+            net.once("stabilizationIterationsDone", function () {
+                // 稳定后冻结布局, 分量内 fit 到自己的区域
+                net.setOptions({ physics: false });
+                net.fit({ animation: false });
+                readyCount++;
+                if (readyCount === components.length) {
+                    window.__graphReady = true;
+                }
+            });
         });
     </script>
 </body>
