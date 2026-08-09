@@ -7,6 +7,7 @@ to context_manager and llm_service / ws_server as appropriate.
 from __future__ import annotations
 
 import re
+import time as _time
 from typing import Any
 
 from loguru import logger
@@ -17,6 +18,9 @@ from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent, Messag
 
 class CommandHandler(Interceptor):
     """Handles slash commands for session management and utilities."""
+
+    # 未知指令提醒冷却(秒): 同一会话内 60 分钟最多提醒一次
+    UNKNOWN_CMD_COOLDOWN = 3600
 
     def __init__(self, context_manager, llm_service, ws_server, plugin_system=None):
         self._ctx_mgr = context_manager
@@ -34,6 +38,8 @@ class CommandHandler(Interceptor):
         }
         # Plugin-provided commands appear in /help (name -> description)
         self._plugin_commands: dict[str, str] = {}
+        # 未知指令提醒时间戳: {(bot_id, chat_type, chat_id): last_remind_ts}
+        self._unknown_remind_at: dict[tuple[str, str, str], float] = {}
 
     def register_plugin_commands(self, commands: dict[str, str]) -> None:
         """Register commands provided by plugins, shown in /help output."""
@@ -90,10 +96,11 @@ class CommandHandler(Interceptor):
             plugin_cmds.update(self.collect_plugin_commands())
             if cmd_name in plugin_cmds:
                 return (False, None)
-            # Unknown command — report error, do NOT pass to LLM
-            return (True, f"未知指令: /{cmd_name}。输入 /help 查看可用指令。")
+            # Unknown command — 60 分钟内同一会话最多提醒一次,
+            # 冷却期内静默拦截(不回复, 也不传给 LLM)
+            return await self._handle_unknown_command(bot_id, event, cmd_name)
 
-        # Execute command
+        # Execute command — 指令存在但出错时每次都回复(不节流)
         try:
             reply = await handler[0](bot_id, event, args)
             if reply:
@@ -102,6 +109,32 @@ class CommandHandler(Interceptor):
         except Exception as e:
             logger.error(f"Command '{cmd_name}' error: {e}")
             return (True, f"命令执行出错: {e}")
+
+    async def _handle_unknown_command(
+        self, bot_id: str, event: MessageEvent, cmd_name: str
+    ) -> tuple[bool, str | None]:
+        """未知指令: 60 分钟冷却, 同一会话内只提醒一次。"""
+        chat_type, chat_id, _ = await self._get_target_info(event)
+        key = (bot_id, chat_type, str(chat_id))
+        now = _time.time()
+
+        last = self._unknown_remind_at.get(key, 0.0)
+        if now - last < self.UNKNOWN_CMD_COOLDOWN:
+            logger.debug(
+                f"Unknown command '/{cmd_name}' throttled "
+                f"(last reminder {int(now - last)}s ago)"
+            )
+            return (True, None)
+
+        self._unknown_remind_at[key] = now
+        self._prune_unknown_reminders(now)
+        return (True, f"未知指令: /{cmd_name}。输入 /help 查看可用指令。")
+
+    def _prune_unknown_reminders(self, now: float) -> None:
+        """清理超过两倍冷却期的记录, 防止字典无限增长。"""
+        stale_before = now - self.UNKNOWN_CMD_COOLDOWN * 2
+        for key in [k for k, ts in self._unknown_remind_at.items() if ts < stale_before]:
+            del self._unknown_remind_at[key]
 
     async def _get_target_info(
         self, event: MessageEvent
