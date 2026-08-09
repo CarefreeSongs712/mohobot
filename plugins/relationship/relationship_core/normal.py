@@ -116,7 +116,7 @@ class NormalHandle:
             if self.cfg.is_manage_user(at_id):
                 msgs.append(f"{nickname}已在审批员列表中")
                 continue
-            self.cfg.add_manage_user(at_id)
+            await self.cfg.add_manage_user(at_id)
             msgs.append(f"已添加审批员: {nickname}")
         return "\n".join(msgs)
 
@@ -134,7 +134,7 @@ class NormalHandle:
             if not self.cfg.is_manage_user(at_id):
                 msgs.append(f"{nickname}不在审批员列表中")
                 continue
-            self.cfg.remove_manage_user(at_id)
+            await self.cfg.remove_manage_user(at_id)
             msgs.append(f"已移除审批员: {nickname}")
         return "\n".join(msgs)
 

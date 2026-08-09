@@ -369,8 +369,14 @@ class PluginSystem(Interceptor):
                 return meta.get("config_schema")
         return None
 
-    def save_plugin_config(self, name: str, config: dict) -> bool:
-        """保存插件配置并热同步到插件实例(立即生效, 无需重启)。"""
+    async def save_plugin_config(self, name: str, config: dict) -> bool:
+        """保存插件配置并热同步到插件实例(立即生效, 无需重启)。
+
+        用 json_update 原子读改写: 以磁盘当前存档为基础合并面板提交值,
+        与插件运行时 _persist(黑名单/审批员)并发写同一存档时不互相覆盖。
+        """
+        from mohobot.file_store import json_update
+
         meta = next((m for m in self._plugins if m["name"] == name), None)
         if meta is None or meta.get("config_schema") is None:
             return False
@@ -382,9 +388,13 @@ class PluginSystem(Interceptor):
         meta["config"] = merged
         try:
             self._config_dir.mkdir(parents=True, exist_ok=True)
-            (self._config_dir / f"{name}.json").write_text(
-                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            path = self._config_dir / f"{name}.json"
+
+            def _merge(current):
+                base = current if isinstance(current, dict) else {}
+                return self._deep_merge(base, merged)
+
+            await json_update(path, _merge, default=merged)
         except Exception as e:
             logger.error(f"Failed to save plugin config {name}: {e}")
             return False

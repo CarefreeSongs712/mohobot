@@ -90,7 +90,10 @@ class BotManager:
         self._unbound: dict[str, BotInstance] = {}  # qq(str) -> instance (未绑定连接)
         self._data_dir = data_dir
         self._bots_dir = Path(data_dir) / "bots"
-        self._pending_responses: dict[str, asyncio.Future] = {}
+        # 按 bot_id 隔离的 pending 响应: bot_id -> {echo: future}
+        # (多 bot 并发时, 无 echo 的错误响应只与该 bot 自己的 pending 匹配,
+        #  不会误配到其它 bot 的等待者)
+        self._pending_responses: dict[str, dict[str, asyncio.Future]] = {}
         # Track sent messages awaiting message_id: echo -> (bot_id, chat_type, chat_id)
         self._pending_sent: dict[str, tuple[str, str, str]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
@@ -357,16 +360,19 @@ class BotManager:
         """Route an API response to the waiting caller, and record sent message IDs."""
         echo = response.get("echo")
 
-        # Resolve any future waiting on this echo
-        if echo and echo in self._pending_responses:
-            future = self._pending_responses.pop(echo)
+        # Resolve any future waiting on this echo (per-bot pending)
+        pending = self._pending_responses.get(bot_id)
+        if echo and pending and echo in pending:
+            future = pending.pop(echo)
             if not future.done():
                 future.set_result(response)
-        elif not echo and len(self._pending_responses) == 1:
+        elif not echo and pending and len(pending) == 1:
             # Some clients omit echo on error responses — if exactly one API
-            # call is pending, match it (safe under sequential usage).
-            key, future = next(iter(self._pending_responses.items()))
-            self._pending_responses.pop(key)
+            # call is pending for THIS bot, match it (safe per-bot: one bot
+            # may still await multiple parallel calls, but echo-less responses
+            # only resolve when there's no ambiguity for that bot).
+            key, future = next(iter(pending.items()))
+            pending.pop(key)
             if not future.done():
                 future.set_result(response)
 
@@ -380,15 +386,19 @@ class BotManager:
                 if instance:
                     instance.record_sent_message(chat_type, chat_id, mid)
 
-    def create_response_future(self, echo: str) -> asyncio.Future:
-        """Create a future for awaiting an API response."""
+    def create_response_future(self, bot_id: str, echo: str) -> asyncio.Future:
+        """Create a future for awaiting an API response (per-bot pending)."""
         future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending_responses[echo] = future
+        self._pending_responses.setdefault(bot_id, {})[echo] = future
         return future
 
-    def remove_response_future(self, echo: str) -> None:
+    def remove_response_future(self, bot_id: str, echo: str) -> None:
         """Remove a pending response future (e.g. after a timeout)."""
-        self._pending_responses.pop(echo, None)
+        pending = self._pending_responses.get(bot_id)
+        if pending:
+            pending.pop(echo, None)
+            if not pending:
+                self._pending_responses.pop(bot_id, None)
 
     def drop_pending_sent(self, echo: str) -> None:
         """Remove a tracked sent-message entry (e.g. after a send failure)."""

@@ -12,6 +12,7 @@ session_key: "group:群号" / "private:QQ号"
 
 from __future__ import annotations
 
+import asyncio
 import time as _time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,11 @@ class BanStore:
         self._dir = Path(data_dir) / "ban"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._cache_ttl = cache_ttl
+
+        # 所有公共操作(读/写/清理)串行化:
+        # 并发 upsert 改内存后 await 写盘时, 若另一协程触发缓存重载
+        # (从旧磁盘读)并整体替换缓存引用, 前者的内存修改会被覆盖丢失。
+        self._lock = asyncio.Lock()
 
         self.banlist_path = self._dir / "ban_list.json"
         self.banall_list_path = self._dir / "banall_list.json"
@@ -70,6 +76,12 @@ class BanStore:
     async def _write_list(path: Path, data: UserDataList) -> None:
         await json_write(path, [dict(i) for i in data])
 
+    @staticmethod
+    def _prune_empty_sessions(cache: dict[str, UserDataList]) -> None:
+        """删除空 session 键(delete/reset 后避免残留空列表)。"""
+        for key in [k for k, v in cache.items() if not v]:
+            del cache[key]
+
     async def _load_all(self) -> None:
         """加载全部 4 个名单到缓存。"""
         self._ban_cache = await self._read_dict(self.banlist_path)
@@ -79,7 +91,11 @@ class BanStore:
         self._cache_ts = _time.time()
 
     async def _ensure_cache(self) -> None:
-        """缓存过期时重载(并惰性清理过期记录)。"""
+        """缓存过期时重载(须持锁调用)。
+
+        过期记录不在此清理(由 is_banned 惰性跳过, 语义不变);
+        完整清理走 clear_banned(web 面板触发), 避免与并发修改竞态。
+        """
         if (
             self._ban_cache is None
             or self._banall_cache is None
@@ -87,7 +103,7 @@ class BanStore:
             or self._passall_cache is None
             or _time.time() - self._cache_ts > self._cache_ttl
         ):
-            await self.clear_banned()
+            await self._load_all()
 
     # ── 判断 ───────────────────────────────────────────────────
 
@@ -97,32 +113,33 @@ class BanStore:
         Returns: (是否被禁, 理由)
         优先级: pass(会话) > ban(会话) > pass-all(全局) > ban-all(全局)
         """
-        await self._ensure_cache()
-        now = _time.time()
-        uid = str(uid)
+        async with self._lock:
+            await self._ensure_cache()
+            now = _time.time()
+            uid = str(uid)
 
-        def _active(item: UserDataModel) -> bool:
-            return item.time == 0 or item.time > now
+            def _active(item: UserDataModel) -> bool:
+                return item.time == 0 or item.time > now
 
-        # pass(会话) — 解禁优先
-        pass_list = (self._pass_cache or {}).get(session_key) or UserDataList()
-        for item in pass_list:
-            if item.uid == uid and _active(item):
-                return (False, item.reason)
-        # ban(会话)
-        ban_list = (self._ban_cache or {}).get(session_key) or UserDataList()
-        for item in ban_list:
-            if item.uid == uid and _active(item):
-                return (True, item.reason)
-        # pass-all(全局)
-        for item in self._passall_cache or UserDataList():
-            if item.uid == uid and _active(item):
-                return (False, item.reason)
-        # ban-all(全局)
-        for item in self._banall_cache or UserDataList():
-            if item.uid == uid and _active(item):
-                return (True, item.reason)
-        return (False, None)
+            # pass(会话) — 解禁优先
+            pass_list = (self._pass_cache or {}).get(session_key) or UserDataList()
+            for item in pass_list:
+                if item.uid == uid and _active(item):
+                    return (False, item.reason)
+            # ban(会话)
+            ban_list = (self._ban_cache or {}).get(session_key) or UserDataList()
+            for item in ban_list:
+                if item.uid == uid and _active(item):
+                    return (True, item.reason)
+            # pass-all(全局)
+            for item in self._passall_cache or UserDataList():
+                if item.uid == uid and _active(item):
+                    return (False, item.reason)
+            # ban-all(全局)
+            for item in self._banall_cache or UserDataList():
+                if item.uid == uid and _active(item):
+                    return (True, item.reason)
+            return (False, None)
 
     # ── 操作 ───────────────────────────────────────────────────
 
@@ -139,52 +156,53 @@ class BanStore:
 
         time_val: 0=永久, 否则为到期时间戳(now + 秒数)。
         """
-        await self._ensure_cache()
-        now = int(_time.time())
-        expiry = 0 if time_val <= 0 else now + time_val
-        record = UserDataModel(uid=uid, time=expiry, reason=reason or "无理由")
+        async with self._lock:
+            await self._ensure_cache()
+            now = int(_time.time())
+            expiry = 0 if time_val <= 0 else now + time_val
+            record = UserDataModel(uid=uid, time=expiry, reason=reason or "无理由")
 
-        if list_name == "ban":
-            assert session_key
-            self._ban_cache.setdefault(session_key, UserDataList())
-            lst = self._ban_cache[session_key]
-            old = lst.find_by_uid(uid)
-            if old:
-                lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
+            if list_name == "ban":
+                assert session_key
+                self._ban_cache.setdefault(session_key, UserDataList())
+                lst = self._ban_cache[session_key]
+                old = lst.find_by_uid(uid)
+                if old:
+                    lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
+                else:
+                    lst.append(record)
+                await self._write_dict(self.banlist_path, self._ban_cache)
+            elif list_name == "ban-all":
+                lst = self._banall_cache or UserDataList()
+                old = lst.find_by_uid(uid)
+                if old:
+                    lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
+                else:
+                    lst.append(record)
+                self._banall_cache = lst
+                await self._write_list(self.banall_list_path, lst)
+            elif list_name == "pass":
+                assert session_key
+                self._pass_cache.setdefault(session_key, UserDataList())
+                lst = self._pass_cache[session_key]
+                old = lst.find_by_uid(uid)
+                if old:
+                    lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
+                else:
+                    lst.append(record)
+                await self._write_dict(self.passlist_path, self._pass_cache)
+            elif list_name == "pass-all":
+                lst = self._passall_cache or UserDataList()
+                old = lst.find_by_uid(uid)
+                if old:
+                    lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
+                else:
+                    lst.append(record)
+                self._passall_cache = lst
+                await self._write_list(self.passall_list_path, lst)
             else:
-                lst.append(record)
-            await self._write_dict(self.banlist_path, self._ban_cache)
-        elif list_name == "ban-all":
-            lst = self._banall_cache or UserDataList()
-            old = lst.find_by_uid(uid)
-            if old:
-                lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
-            else:
-                lst.append(record)
-            self._banall_cache = lst
-            await self._write_list(self.banall_list_path, lst)
-        elif list_name == "pass":
-            assert session_key
-            self._pass_cache.setdefault(session_key, UserDataList())
-            lst = self._pass_cache[session_key]
-            old = lst.find_by_uid(uid)
-            if old:
-                lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
-            else:
-                lst.append(record)
-            await self._write_dict(self.passlist_path, self._pass_cache)
-        elif list_name == "pass-all":
-            lst = self._passall_cache or UserDataList()
-            old = lst.find_by_uid(uid)
-            if old:
-                lst.update_user_full(uid, new_time=expiry, new_reason=record.reason)
-            else:
-                lst.append(record)
-            self._passall_cache = lst
-            await self._write_list(self.passall_list_path, lst)
-        else:
-            return False
-        return True
+                return False
+            return True
 
     async def delete(
         self,
@@ -201,76 +219,82 @@ class BanStore:
         seconds>0: 削减剩余时长(永久记录不可削减)。
         Returns: (是否成功, 错误消息)
         """
-        await self._ensure_cache()
-        uid = str(uid)
+        async with self._lock:
+            await self._ensure_cache()
+            uid = str(uid)
 
-        if list_name == "ban":
-            assert session_key
-            lst = (self._ban_cache or {}).get(session_key)
-            if not lst or lst.find_by_uid(uid) is None:
-                return (False, "未找到记录")
-            if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
-                return (False, "永久限制不支持削减, 请用 /dec-ban 不带时间直接删除")
-            if seconds == 0:
-                lst.remove_by_uid(uid)
-            await self._write_dict(self.banlist_path, self._ban_cache)
-        elif list_name == "ban-all":
-            lst = self._banall_cache or UserDataList()
-            if lst.find_by_uid(uid) is None:
-                return (False, "未找到记录")
-            if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
-                return (False, "永久限制不支持削减, 请用 /dec-ban-all 不带时间直接删除")
-            if seconds == 0:
-                lst.remove_by_uid(uid)
-            self._banall_cache = lst
-            await self._write_list(self.banall_list_path, lst)
-        elif list_name == "pass":
-            assert session_key
-            lst = (self._pass_cache or {}).get(session_key)
-            if not lst or lst.find_by_uid(uid) is None:
-                return (False, "未找到记录")
-            if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
-                return (False, "永久解禁不支持削减, 请用 /dec-pass 不带时间直接删除")
-            if seconds == 0:
-                lst.remove_by_uid(uid)
-            await self._write_dict(self.passlist_path, self._pass_cache)
-        elif list_name == "pass-all":
-            lst = self._passall_cache or UserDataList()
-            if lst.find_by_uid(uid) is None:
-                return (False, "未找到记录")
-            if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
-                return (False, "永久解禁不支持削减, 请用 /dec-pass-all 不带时间直接删除")
-            if seconds == 0:
-                lst.remove_by_uid(uid)
-            self._passall_cache = lst
-            await self._write_list(self.passall_list_path, lst)
-        else:
-            return (False, "unknown list")
-        return (True, None)
+            if list_name == "ban":
+                assert session_key
+                lst = (self._ban_cache or {}).get(session_key)
+                if not lst or lst.find_by_uid(uid) is None:
+                    return (False, "未找到记录")
+                if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
+                    return (False, "永久限制不支持削减, 请用 /dec-ban 不带时间直接删除")
+                if seconds == 0:
+                    lst.remove_by_uid(uid)
+                self._prune_empty_sessions(self._ban_cache)
+                await self._write_dict(self.banlist_path, self._ban_cache)
+            elif list_name == "ban-all":
+                lst = self._banall_cache or UserDataList()
+                if lst.find_by_uid(uid) is None:
+                    return (False, "未找到记录")
+                if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
+                    return (False, "永久限制不支持削减, 请用 /dec-ban-all 不带时间直接删除")
+                if seconds == 0:
+                    lst.remove_by_uid(uid)
+                self._banall_cache = lst
+                await self._write_list(self.banall_list_path, lst)
+            elif list_name == "pass":
+                assert session_key
+                lst = (self._pass_cache or {}).get(session_key)
+                if not lst or lst.find_by_uid(uid) is None:
+                    return (False, "未找到记录")
+                if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
+                    return (False, "永久解禁不支持削减, 请用 /dec-pass 不带时间直接删除")
+                if seconds == 0:
+                    lst.remove_by_uid(uid)
+                self._prune_empty_sessions(self._pass_cache)
+                await self._write_dict(self.passlist_path, self._pass_cache)
+            elif list_name == "pass-all":
+                lst = self._passall_cache or UserDataList()
+                if lst.find_by_uid(uid) is None:
+                    return (False, "未找到记录")
+                if seconds > 0 and not lst.subtract_time_from_user(uid, seconds, reason):
+                    return (False, "永久解禁不支持削减, 请用 /dec-pass-all 不带时间直接删除")
+                if seconds == 0:
+                    lst.remove_by_uid(uid)
+                self._passall_cache = lst
+                await self._write_list(self.passall_list_path, lst)
+            else:
+                return (False, "unknown list")
+            return (True, None)
 
     async def reset_user(self, uid: str) -> None:
         """清除用户在所有名单中的记录。"""
-        await self._ensure_cache()
-        uid = str(uid)
-        for cache in (self._banall_cache, self._passall_cache):
-            if cache:
-                cache.remove_by_uid(uid)
-        for cache in (self._ban_cache, self._pass_cache):
-            if cache:
-                for lst in cache.values():
-                    lst.remove_by_uid(uid)
-        await self._write_dict(self.banlist_path, self._ban_cache)
-        await self._write_list(self.banall_list_path, self._banall_cache)
-        await self._write_dict(self.passlist_path, self._pass_cache)
-        await self._write_list(self.passall_list_path, self._passall_cache)
+        async with self._lock:
+            await self._ensure_cache()
+            uid = str(uid)
+            for cache in (self._banall_cache, self._passall_cache):
+                if cache:
+                    cache.remove_by_uid(uid)
+            for cache in (self._ban_cache, self._pass_cache):
+                if cache:
+                    for lst in cache.values():
+                        lst.remove_by_uid(uid)
+                    self._prune_empty_sessions(cache)
+            await self._write_dict(self.banlist_path, self._ban_cache)
+            await self._write_list(self.banall_list_path, self._banall_cache)
+            await self._write_dict(self.passlist_path, self._pass_cache)
+            await self._write_list(self.passall_list_path, self._passall_cache)
 
     # ── 清理 ───────────────────────────────────────────────────
 
     async def clear_banned(self) -> None:
         """清除过期记录 + pass/ban 冗余, 重建缓存。"""
-        await self._clear_expired()
-        await self._clear_redundant()
-        await self._load_all()
+        async with self._lock:
+            await self._clear_expired()
+            await self._clear_redundant()
+            await self._load_all()
 
     async def _clear_expired(self) -> None:
         """清除已过期(非永久)的记录。"""
@@ -363,13 +387,14 @@ class BanStore:
 
     async def get_all(self) -> dict[str, Any]:
         """导出全部名单(web 面板展示用)。"""
-        await self._ensure_cache()
-        return {
-            "ban": {k: [dict(i) for i in v] for k, v in (self._ban_cache or {}).items()},
-            "ban_all": [dict(i) for i in (self._banall_cache or UserDataList())],
-            "pass": {k: [dict(i) for i in v] for k, v in (self._pass_cache or {}).items()},
-            "pass_all": [dict(i) for i in (self._passall_cache or UserDataList())],
-        }
+        async with self._lock:
+            await self._ensure_cache()
+            return {
+                "ban": {k: [dict(i) for i in v] for k, v in (self._ban_cache or {}).items()},
+                "ban_all": [dict(i) for i in (self._banall_cache or UserDataList())],
+                "pass": {k: [dict(i) for i in v] for k, v in (self._pass_cache or {}).items()},
+                "pass_all": [dict(i) for i in (self._passall_cache or UserDataList())],
+            }
 
     def session_key_for(self, chat_type: str, chat_id: str | int) -> str:
         """构造会话 key: group:群号 / private:QQ号。"""

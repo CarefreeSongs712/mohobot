@@ -342,6 +342,8 @@ class LLMService:
     async def _record_usage(self, model: str, usage: Any, bot_id: str, event: MessageEvent) -> None:
         """Append one usage record to data/stats/llm_usage.jsonl."""
         try:
+            from mohobot.file_store import JSONLWriter
+
             usage_dir = Path(self._cfg.data_dir) / "stats"
             usage_dir.mkdir(parents=True, exist_ok=True)
             record = {
@@ -352,8 +354,9 @@ class LLMService:
                 "completion_tokens": getattr(usage, "completion_tokens", 0),
                 "total_tokens": getattr(usage, "total_tokens", 0),
             }
-            async with aiofiles.open(usage_dir / "llm_usage.jsonl", "a", encoding="utf-8") as f:
-                await f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            # JSONLWriter 带 per-file 锁: 6 bot 并发回复结束时同时写 usage 不交错
+            writer = JSONLWriter(usage_dir / "llm_usage.jsonl")
+            await writer.append(record)
         except Exception as e:
             logger.debug(f"Failed to record LLM usage: {e}")
 

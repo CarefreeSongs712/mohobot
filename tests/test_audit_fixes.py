@@ -62,10 +62,10 @@ async def test_future_cleanup() -> None:
     from mohobot.bot_manager import BotManager
 
     bm = BotManager(data_dir=tempfile.mkdtemp(prefix="fc_"))
-    fut = bm.create_response_future("echo1")
-    assert "echo1" in bm._pending_responses
-    bm.remove_response_future("echo1")
-    assert "echo1" not in bm._pending_responses
+    fut = bm.create_response_future("bot_001", "echo1")
+    assert "echo1" in bm._pending_responses["bot_001"]
+    bm.remove_response_future("bot_001", "echo1")
+    assert "echo1" not in bm._pending_responses.get("bot_001", {})
     bm._pending_sent["e2"] = ("1", "private", "2")
     bm.drop_pending_sent("e2")
     assert "e2" not in bm._pending_sent

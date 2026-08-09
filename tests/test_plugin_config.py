@@ -43,7 +43,7 @@ async def test_plugin_config_system() -> None:
     assert archive.exists()
 
     # 保存配置 → 热同步到实例
-    ok = ps.save_plugin_config("relationship", {
+    ok = await ps.save_plugin_config("relationship", {
         "manage_group": "123456",
         "manage_users": ["2001"],
         "check": {"count": 50},
@@ -63,7 +63,7 @@ async def test_plugin_config_system() -> None:
     assert saved["check"]["count"] == 50
 
     # 未知插件保存 → False
-    assert ps.save_plugin_config("nope", {}) is False
+    assert await ps.save_plugin_config("nope", {}) is False
     print("[1] 插件配置系统(目录插件/schema/默认/热同步) OK")
 
 
@@ -236,7 +236,7 @@ async def test_schema_coercion() -> None:
     await ps.load_plugins()
 
     # 面板提交错误类型: int 字段给字符串, bool 给字符串, list 给逗号串
-    ok = ps.save_plugin_config("relationship", {
+    ok = await ps.save_plugin_config("relationship", {
         "check": {"count": "50", "batch_size": "abc", "delay": "10"},
         "request": {"auto_agree_friend": "true", "auto_reject_group": 1},
         "manage_users": "2001,2002",

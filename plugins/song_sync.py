@@ -13,6 +13,9 @@ from loguru import logger
 
 TRIGGERS = {"/sync-songs", "/同步歌曲"}
 
+# 同步任务串行化: 并发触发 /sync-songs 时避免两个线程同时写知识库 SQLite
+_sync_lock = asyncio.Lock()
+
 
 class Plugin:
     """Responds to /sync-songs with a manual VCPedia sync."""
@@ -71,20 +74,35 @@ class Plugin:
         return (True, "🔄 正在同步 VCPedia 新歌(约需几分钟), 完成后会通知你~")
 
     async def _run_sync(self, bot_id: str, event: Any, cfg) -> None:
-        """后台同步(阻塞网络操作放线程池), 完成后发结果。"""
-        try:
-            from mohobot.agent.music_knowledge.vcpedia import sync_vcpedia_new_songs
+        """后台同步(阻塞网络操作放线程池), 完成后发结果。
 
-            music_cfg = cfg.agent.music_knowledge or {}
-            result = await asyncio.to_thread(sync_vcpedia_new_songs, music_cfg)
-            added = result.get("added", [])
-            failed = result.get("failed", [])
-            lines = [f"✅ 同步完成: 新增 {len(added)} 首, 失败 {len(failed)} 首"]
-            if added:
-                lines.append("新增: " + "、".join(added[:10]) + ("…" if len(added) > 10 else ""))
-            if failed:
-                lines.append("失败: " + "、".join(failed[:5]) + ("…" if len(failed) > 5 else ""))
-            reply = "\n".join(lines)
+        串行化: 已有同步在跑时, 本次直接告知, 不并发写 SQLite。
+        """
+        if _sync_lock.locked():
+            try:
+                from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent
+
+                if isinstance(event, GroupMessageEvent):
+                    await self._send(bot_id, "group", event.group_id, "⏳ 已有同步任务在运行, 请稍后再试")
+                elif isinstance(event, PrivateMessageEvent):
+                    await self._send(bot_id, "private", event.user_id, "⏳ 已有同步任务在运行, 请稍后再试")
+            except Exception as e:
+                logger.warning(f"sync-songs 忙碌提示发送失败: {e}")
+            return
+        try:
+            async with _sync_lock:
+                from mohobot.agent.music_knowledge.vcpedia import sync_vcpedia_new_songs
+
+                music_cfg = cfg.agent.music_knowledge or {}
+                result = await asyncio.to_thread(sync_vcpedia_new_songs, music_cfg)
+                added = result.get("added", [])
+                failed = result.get("failed", [])
+                lines = [f"✅ 同步完成: 新增 {len(added)} 首, 失败 {len(failed)} 首"]
+                if added:
+                    lines.append("新增: " + "、".join(added[:10]) + ("…" if len(added) > 10 else ""))
+                if failed:
+                    lines.append("失败: " + "、".join(failed[:5]) + ("…" if len(failed) > 5 else ""))
+                reply = "\n".join(lines)
         except Exception as e:
             logger.error(f"sync-songs failed: {e}")
             reply = f"❌ 同步失败: {e}"

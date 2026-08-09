@@ -94,6 +94,11 @@ class Plugin:
         self._request = None
         self._notice = None
         self._contact = None
+        # 配置修改串行化锁(跨 _ensure_handlers 重建的 cfg 实例共享,
+        # 6 bot 并发 /加审批员 /拉黑 时防止丢更新)
+        import asyncio
+
+        self._config_lock = asyncio.Lock()
 
     def _ensure_handlers(self) -> None:
         """用当前配置 + 当前管理员重建处理器。
@@ -106,6 +111,7 @@ class Plugin:
             admins=self._admin_ids,
             ws_server=self._ws_server,
             data_dir=self._data_dir,
+            lock=self._config_lock,
         )
         self._normal = NormalHandle(self._cfg)
         self._request = RequestHandle(self._cfg)

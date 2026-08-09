@@ -506,7 +506,7 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            ok = self._plugin_system.save_plugin_config(name, body.data or {})
+            ok = await self._plugin_system.save_plugin_config(name, body.data or {})
             if not ok:
                 raise HTTPException(status_code=404, detail=f"插件 {name} 无配置或不存在")
             logger.info(f"Web panel: plugin {name} config updated (hot)")

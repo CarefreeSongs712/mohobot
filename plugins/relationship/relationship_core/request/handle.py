@@ -51,14 +51,14 @@ class RequestHandle:
         # 黑名单状态同步(必须在 event_reply 返回前执行, 否则 /拉黑 不会生效)
         if isinstance(req, GroupRequest):
             if result.block_group is False:
-                self.cfg.remove_black_group(req.group_id)
+                await self.cfg.remove_black_group(req.group_id)
             elif result.block_group:
-                self.cfg.add_black_group(req.group_id)
+                await self.cfg.add_black_group(req.group_id)
         if isinstance(req, FriendRequest):
             if result.block_user is False:
-                self.cfg.remove_block_user(req.user_id)
+                await self.cfg.remove_block_user(req.user_id)
             elif result.block_user:
-                self.cfg.add_block_user(req.user_id)
+                await self.cfg.add_block_user(req.user_id)
 
         return result.event_reply or "已处理"
 
@@ -82,14 +82,14 @@ class RequestHandle:
         # 黑名单状态同步
         if isinstance(req, GroupRequest):
             if result.block_group is False:
-                self.cfg.remove_black_group(req.group_id)
+                await self.cfg.remove_black_group(req.group_id)
             elif result.block_group:
-                self.cfg.add_black_group(req.group_id)
+                await self.cfg.add_black_group(req.group_id)
         if isinstance(req, FriendRequest):
             if result.block_user is False:
-                self.cfg.remove_block_user(req.user_id)
+                await self.cfg.remove_block_user(req.user_id)
             elif result.block_user:
-                self.cfg.add_block_user(req.user_id)
+                await self.cfg.add_block_user(req.user_id)
 
     async def _do_approve(self, bot_id: str, req: BaseRequest, approve: bool) -> None:
         try:

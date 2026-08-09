@@ -158,18 +158,18 @@ class WSServer:
         import uuid
         echo = f"api_{uuid.uuid4().hex}"
         payload["echo"] = echo
-        future = self._bot_manager.create_response_future(echo)
+        future = self._bot_manager.create_response_future(bot_id, echo)
         try:
             await instance.send(payload)
         except Exception:
             # Send failed — don't leave the future dangling
-            self._bot_manager.remove_response_future(echo)
+            self._bot_manager.remove_response_future(bot_id, echo)
             raise
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
-            self._bot_manager.remove_response_future(echo)
+            self._bot_manager.remove_response_future(bot_id, echo)
             return None
 
     async def _send_tracked(

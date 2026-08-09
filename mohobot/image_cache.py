@@ -21,7 +21,7 @@ import aiofiles.os
 import httpx
 from loguru import logger
 
-from mohobot.file_store import json_read, json_write
+from mohobot.file_store import json_read, json_update, json_write
 
 try:
     from PIL import Image
@@ -107,15 +107,19 @@ class ImageCache:
         elif description is None:
             description = "[图片]"
 
-        # Update cache map
-        cache_map[image_url] = {
+        # Update cache map (原子合并: 6 bot 并发描述不同图时不丢彼此的条目)
+        entry = {
             "path": str(local_path),
             "phash": phash_val,
             "description": description or "[图片]",
             "cached_at": time.time(),
             "size": await self._file_size(local_path),
         }
-        await self._save_cache_map(cache_map)
+        cache_map = await json_update(
+            self._map_path,
+            lambda cur: {**(cur if isinstance(cur, dict) else {}), image_url: entry},
+            default={},
+        )
 
         # Enforce LRU eviction
         await self._evict_if_needed(cache_map)
@@ -188,16 +192,20 @@ class ImageCache:
                 except OSError as e:
                     logger.warning(f"Failed to remove cached image: {e}")
 
-        # Remove from map
-        for url in removed:
-            del cache_map[url]
-
+        # Remove from map (用磁盘最新合并: 并发更新的条目不丢)
         if removed:
             logger.info(
                 f"LRU eviction: removed {len(removed)} images, "
                 f"freed {freed // 1024} KB"
             )
-            await self._save_cache_map(cache_map)
+            cache_map = await json_update(
+                self._map_path,
+                lambda cur: {
+                    k: v for k, v in (cur if isinstance(cur, dict) else {}).items()
+                    if k not in removed
+                },
+                default={},
+            )
 
     @staticmethod
     def _hamming_distance(h1: str, h2: str) -> int:
