@@ -41,6 +41,15 @@ imagehash>=4.3.0  # 图片 phash 去重(ImageCache)
 # 注意: 部分镜像(如清华)无此包, 可用阿里云: pip install chromadb -i https://mirrors.aliyun.com/pypi/simple/
 chromadb>=1.5.0
 
+# Song knowledge (agent subsystem; FlashText keyword linker)
+# 注意: flashtext 已从 PyPI 下架, 需从 GitHub 安装:
+#   pip install --no-build-isolation git+https://github.com/vi3k6i5/flashtext.git
+flashtext>=2.7
+
+# VCPedia sync (manual; requests + BeautifulSoup)
+requests>=2.28.0
+beautifulsoup4>=4.12.0
+
 # System stats (optional — provides detailed /status output)
 psutil>=5.9.0
 

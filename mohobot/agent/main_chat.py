@@ -136,8 +136,19 @@ class StructuredResponseParser:
 
             sing_match = self.sing_pattern.match(line)
             if sing_match:
-                # mohobot 不支持唱歌,忽略 [sing] 行
+                # 唱段: 歌词由 sing_plan(歌曲知识库检索结果)补上
                 structured_found = True
+                song_name = sing_match.group(1).strip()
+                lyrics = ""
+                if sing_plan and sing_plan[0] and sing_plan[1]:
+                    # sing_plan[0]=歌名(可能带《》), 归一化后匹配
+                    plan_song = self._strip_brackets(sing_plan[0])
+                    if song_name in (plan_song, f"《{plan_song}》") or plan_song in song_name:
+                        lyrics = sing_plan[1]
+                results.append(SongSegmentChat(
+                    song=song_name,
+                    lyrics=lyrics,
+                ))
                 continue
 
             tone_match = self.tone_pattern.match(line)
@@ -156,6 +167,11 @@ class StructuredResponseParser:
 
         logger.warning("No structured format detected in LLM response, returning empty text")
         return [self.default_response]
+
+    @staticmethod
+    def _strip_brackets(name: str) -> str:
+        """去掉歌名两端的《》等装饰。"""
+        return (name or "").strip().strip("《》\"'“”‘’")
 
     def _strip_code_fence(self, response: str) -> str:
         text = response.strip()

@@ -305,6 +305,8 @@ class BotAgentRuntime:
         )
 
         # 潜意识
+        self.song_entity_linker = None  # FlashText 歌名/歌词链接器(消息预处理用)
+        self.song_knowledge = self._build_song_knowledge(agent_cfg)
         self.mind = CharacterSubconscious(
             agent_cfg,
             database_manager=database_manager,
@@ -313,6 +315,7 @@ class BotAgentRuntime:
             character_id=bot_id,
             character_name=self.character_name,
             anysearch_client=self._build_anysearch_client(),
+            song_knowledge=self.song_knowledge,
         )
 
         # 意识层
@@ -389,6 +392,29 @@ class BotAgentRuntime:
             base_url=cfg.get("base_url", ""),
             timeout=int(cfg.get("timeout", 30)),
         )
+
+    def _build_song_knowledge(self, agent_cfg: Dict[str, Any]):
+        """构建歌曲知识(SQLite 事实库 + 关键词链接器)。
+
+        未启用/缺依赖时返回 None(歌名识别与点歌功能自动降级)。
+        """
+        try:
+            from mohobot.agent.music_knowledge import SongEntityLinker, SongKnowledgeMemory
+
+            music_cfg = agent_cfg.get("music_knowledge") or {}
+            if not music_cfg.get("enabled", True):
+                self.logger.info("music_knowledge 未启用, 歌曲知识降级")
+                return None
+            knowledge = SongKnowledgeMemory(music_cfg)
+            linker = SongEntityLinker(music_cfg)
+            self.song_entity_linker = linker
+            self.logger.info("歌曲知识已加载(SQLite 事实库 + FlashText 链接器)")
+            return knowledge
+        except ImportError as e:
+            self.logger.warning(f"歌曲知识依赖缺失(flashtext?), 已降级: {e}")
+        except Exception as e:
+            self.logger.warning(f"歌曲知识初始化失败, 已降级: {e}")
+        return None
 
     # ── 会话管理 ──────────────────────────────────────────────
 

@@ -173,6 +173,33 @@ database:
 
 > 记忆写入采用"向量索引 + 数据库正本"双写：向量检索仅用于召回线索，数据库正本为最终依据；未配置 embedding 时检索自动降级为空实现，记忆仍会写入数据库正本。
 
+## 🎵 歌曲知识（移植自 Agent-LuoTianyi，beta 板块）
+
+歌曲知识部分**直接移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的 server 端实现**（`src/subconscious/music_knowledge/`、`src/subconscious/memory/song_knowledge.py`、`src/world/get_new_songs/`），包含：
+
+1. **SQLite 事实库**（`mohobot/agent/music_knowledge/song_database.py`）— `songs` 表：`name / safe_name(过滤非字母数字的规范化名) / uploader(UP主) / singers(演唱) / introduction / lyrics`
+2. **查询服务**（`knowledge_service.py`）— 精确匹配优先（name/safe_name 相等），兜底 `ilike` 模糊；按 UP主/歌手（逗号分隔）/歌词片段查询
+3. **FlashText 关键词链接器**（`jargon.py`）— `SongEntityLinker` 加载两份 txt（歌名/歌词关键词）为 Aho-Corasick 风格匹配器；**触发动词门控**：消息必须命中 `{听,唱,点,循环,安利,写,作曲,调教,歌}` 才激活歌名识别（防日常误触发），产出 `《歌名》是一首歌` / `歌词是《歌名》的歌词` 术语写入消息 `terms`
+4. **对话使用链路** — 术语进话题提取 prompt → LLM 产出 `fact_constraints`（歌名约束）→ 并行检索 SQLite 返回《歌名》的介绍/歌词去重文本 → 注入回复 prompt 约束输出防编造；`sing_attempts`（点歌）→ 从事实库取歌词文本呈现（**无 TTS/音频，只发歌词文本**）
+5. **VCPedia 新歌同步**（`vcpedia.py`）— 手动触发（`/sync-songs` 管理员命令 或 `scripts/sync_vcpedia.py`），无定时器
+
+**默认知识库**随仓库提供（`res/song_knowledge/`：`knowledge_db.db` 3412 首 + 两个关键词 txt，数据来自用户提供的《音乐知识库0726》，非仓库代码）；**首次启动自动复制到 `data/song_knowledge/`**，已有数据不会被覆盖。配置在 `agent.music_knowledge`：
+
+```yaml
+agent:
+  music_knowledge:
+    enabled: true
+    song_database:
+      db_folder: "./data/song_knowledge"
+      db_file: "knowledge_db.db"
+    songname_file: "./data/song_knowledge/song_name_keywords.txt"
+    lyric_file: "./data/song_knowledge/song_lyric_keywords.txt"
+    crawler:
+      base_url: "https://vcpedia.cn"
+```
+
+> 依赖：`flashtext`（已从 PyPI 下架，需 `pip install --no-build-isolation git+https://github.com/vi3k6i5/flashtext.git`）、`requests`、`beautifulsoup4`（VCPedia 同步用）。
+
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 
 多 bot 聚合场景的全局统一封禁名单（所有 bot 共享），**语义：bot 静默忽略被禁用户的消息**（不是 QQ 群管理封禁）。存储于 `data/ban/`（4 个 JSON），不依赖外部服务。

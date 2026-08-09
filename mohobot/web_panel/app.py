@@ -294,7 +294,8 @@ class WebPanel:
                     cfg.agent.enabled = bool(agent_data["enabled"])
                 # persona 已移除(每个 bot 的人设取自其私有配置)
                 for k in ("llm_modules", "memory", "main_chat",
-                          "topic_planner", "topic_replier", "reflection_worker", "reflex"):
+                          "topic_planner", "topic_replier", "reflection_worker", "reflex",
+                          "music_knowledge"):
                     if k in agent_data and isinstance(agent_data[k], dict):
                         setattr(cfg.agent, k, agent_data[k] or {})
             if "ban" in data:

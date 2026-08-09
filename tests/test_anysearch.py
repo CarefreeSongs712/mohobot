@@ -93,6 +93,7 @@ async def test_beta_fact_search() -> None:
 
     mind = CharacterSubconscious.__new__(CharacterSubconscious)
     mind.anysearch = FakeAnySearch()
+    mind.song_knowledge = None  # 测试环境不加载歌曲知识库
     mind.logger = __import__("loguru").logger
 
     hits = await mind.search_fact_constraints_for_topic(["最新科技新闻", "洛天依出道日期"])
@@ -103,6 +104,10 @@ async def test_beta_fact_search() -> None:
     # 超过 2 个查询只搜前 2 个
     hits2 = await mind.search_fact_constraints_for_topic(["a", "b", "c", "d"])
     assert len(hits2) == 2
+
+    # 歌曲类约束 → 走知识库(未配置 → 降级为空, 不报错)
+    hits3 = await mind.search_fact_constraints_for_topic(["《千年食谱颂》"])
+    assert hits3 == []
 
     # 无 client / 空查询 → 空列表(降级)
     mind.anysearch = None

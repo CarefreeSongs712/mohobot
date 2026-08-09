@@ -87,6 +87,7 @@ class AgentConfig:
     topic_replier: dict = field(default_factory=dict)
     reflection_worker: dict = field(default_factory=dict)
     reflex: dict = field(default_factory=dict)
+    music_knowledge: dict = field(default_factory=dict)  # 歌曲知识库(song_database/crawler/关键词文件)
 
     def to_config_dict(self) -> dict:
         """转成 agent 模块读取的嵌套 dict(供 runtime 使用)。
@@ -102,6 +103,7 @@ class AgentConfig:
             "topic_replier": self.topic_replier or {},
             "reflection_worker": self.reflection_worker or {},
             "reflex": self.reflex or {},
+            "music_knowledge": self.music_knowledge or {},
         }
 
 
@@ -214,6 +216,7 @@ class GlobalConfig:
                 topic_replier=agent_raw.get("topic_replier", {}) or {},
                 reflection_worker=agent_raw.get("reflection_worker", {}) or {},
                 reflex=agent_raw.get("reflex", {}) or {},
+                music_knowledge=agent_raw.get("music_knowledge", {}) or {},
             ),
             anysearch=AnySearchConfig(
                 enabled=anysearch_raw.get("enabled", True),

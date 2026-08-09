@@ -355,6 +355,18 @@ class MessageHandler:
             content = text
 
         speaker = self._speaker_role(event)
+
+        # 歌曲实体检出: FlashText 链接器(触发动词门控) → 消息 terms
+        # 术语会进入话题提取 prompt, 约束 LLM 输出(防编造歌/歌词)
+        terms: list[str] = []
+        runtime = self._agent_manager.get(bot_id) if self._agent_manager else None
+        linker = getattr(runtime, "song_entity_linker", None) if runtime else None
+        if linker is not None:
+            try:
+                terms = linker.extract_and_verify(content)
+            except Exception as e:
+                logger.debug(f"Song entity extraction failed: {e}")
+
         chat_event = ChatInputEvent(
             event_type=ChatInputEventType.USER_MESSAGE,
             user_id=chat_id,          # 会话即"用户"(私聊=QQ号, 群聊=群号)
@@ -363,6 +375,7 @@ class MessageHandler:
             message_id=str(event.message_id),
             message_type="image" if image_urls else "text",
             timestamp=float(event.time or 0),
+            terms=terms,
             payload={
                 "speaker": speaker,
                 "chat_type": chat_type,
@@ -378,7 +391,8 @@ class MessageHandler:
             max_rounds=self._context_max_rounds,
         )
 
-        runtime = self._agent_manager.get(bot_id)
+        if runtime is None:
+            runtime = self._ensure_agent_runtime(bot_id)
         await runtime.handle_event(chat_type, chat_id, chat_event)
 
     async def _describe_first_image(self, bot_id: str, url: str) -> str:
@@ -447,7 +461,8 @@ class MessageHandler:
         texts = [
             item.get_content()
             for item in reply_items
-            if item.type in (ContextType.TEXT,) and item.get_content().strip()
+            if item.type in (ContextType.TEXT, ContextType.SING)
+            and item.get_content().strip()
         ]
         if not texts:
             logger.debug(f"No text reply for {bot_id}/{chat_type}/{chat_id}")

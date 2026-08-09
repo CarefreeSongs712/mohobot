@@ -279,7 +279,10 @@ class SongSegmentChat(OneResponseLine):
     uuid: str = ""
 
     def get_content(self) -> str:
-        return f"唱了《{self.song}》"
+        # mohobot 无 TTS: 唱段以歌词文本呈现
+        if self.lyrics:
+            return f"《{self.song}》\n{self.lyrics}"
+        return f"《{self.song}》"
 
 
 @dataclass
