@@ -68,8 +68,11 @@ def is_allowed_group(group_id: str | None, config: dict) -> bool:
 
 
 async def api_call(ws_server, bot_id: str, action: str, params: dict) -> Any:
-    """通用 OneBot API 调用(宽松解析 retcode/status)。"""
-    resp = await ws_server.send_to_bot(bot_id, action, params, wait_response=True)
+    """通用 OneBot API 调用(宽松解析 retcode/status)。
+
+    超时 5s(默认 10s 太长, 串行兜底链会拖慢回复)。
+    """
+    resp = await ws_server.send_to_bot(bot_id, action, params, wait_response=True, timeout=5.0)
     if not resp:
         return None
     data = resp.get("data")

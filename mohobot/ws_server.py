@@ -107,7 +107,11 @@ class WSServer:
             self._bot_manager.unregister(instance)
 
     async def _dispatch(self, instance, data: dict[str, Any]) -> None:
-        """Dispatch an incoming message — event or API response."""
+        """Dispatch an incoming message — event or API response.
+
+        事件处理用 create_task 异步派发: 一条消息处理慢(如 API 超时)不会
+        阻塞同一连接上后续消息/API 响应(否则一个指令卡住全 bot 都卡)。
+        """
         # 未绑定连接: 接受但不处理任何消息
         if not instance.bound:
             logger.debug(f"Ignoring message from unbound connection QQ {instance.qq}: {data.get('post_type') or data.get('action')}")
@@ -121,15 +125,16 @@ class WSServer:
             await self._bot_manager.handle_api_response(bot_id, data)
             return
 
-        # It's an event (has 'post_type')
+        # It's an event (has 'post_type') — 异步派发, 不阻塞连接
         if "post_type" in data:
             event = Event.from_dict(data)
             if self._on_event:
-                await self._on_event(bot_id, event, data)
+                asyncio.create_task(self._on_event(bot_id, event, data))
             return
 
-        # Unknown message type
-        logger.debug(f"Unknown message from bot {bot_id}: {data}")
+        # Unknown message type (诊断: 客户端回的非标准消息)
+        preview = str(data)[:300]
+        logger.warning(f"Unknown message from bot {bot_id}: {preview}")
 
     async def send_to_bot(
         self,

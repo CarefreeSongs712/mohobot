@@ -884,14 +884,14 @@ class MessageHandler:
             isinstance(reply, str)
             and isinstance(event, GroupMessageEvent)
             and len(reply) >= self._forward_min_len
-            and reply.count("\n") >= 4
         ):
             if await self._try_send_forward(bot_id, event, reply):
                 return
         await self._send_message(bot_id, event, reply)
 
-    # 合并转发阈值: 超过此长度的群聊文本回复改用合并转发
-    _forward_min_len = 300
+    # 合并转发阈值: 群聊文本回复超过 2000 字时改用合并转发
+    # (QQ 单条消息约 2000 字上限, 短内容直接发一条, 不拆合并转发)
+    _forward_min_len = 2000
 
     # 框架内置全局指令(/ 前缀, 群内多 bot 只由 bot_id 最小者回复)
     _GLOBAL_COMMANDS = {"/help"}
@@ -928,7 +928,8 @@ class MessageHandler:
         try:
             lines = [ln for ln in text.split("\n") if ln.strip()]
             if len(lines) < 2:
-                return False
+                # 单行长文本: 按 500 字切块
+                lines = [text[i:i + 500] for i in range(0, len(text), 500)]
             bot_qq, bot_nick = self._bot_identity(bot_id)
             nodes = [
                 {

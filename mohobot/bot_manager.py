@@ -400,6 +400,14 @@ class BotManager:
             pending.pop(key)
             if not future.done():
                 future.set_result(response)
+        elif echo:
+            # 诊断: 响应带 echo 但 pending 中无匹配(超时后到达/echo 被改)
+            if logger.level("DEBUG").no >= 10:
+                logger.debug(
+                    f"API response echo {echo!r} 无匹配 pending "
+                    f"(bot {bot_id}, pending={len(pending or {})}, "
+                    f"action 可能已超时)"
+                )
 
         # Record message_id for a tracked sent message (reply-quote detection)
         if echo and echo in self._pending_sent:

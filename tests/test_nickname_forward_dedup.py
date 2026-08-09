@@ -135,25 +135,27 @@ async def test_forward_long_reply() -> None:
     )
     ev = make_group_event(2001, "/help")
 
-    # 长文本(>300 字符且多行) → 合并转发
-    long_text = "\n".join(f"第 {i} 行: " + "帮助说明内容" * 5 for i in range(15))
-    assert len(long_text) > 300
+    # 长文本(>2000 字符) → 合并转发
+    long_text = "\n".join(f"第 {i} 行: " + "帮助说明内容" * 12 for i in range(60))
+    assert len(long_text) > 2000
     await handler._send_reply("bot_001", ev, long_text)
     assert ws.forward_calls, "长文本应走合并转发"
     assert not ws.plain_calls
     bot_id, gid, nodes = ws.forward_calls[-1]
     assert str(gid) == "888888"
-    assert len(nodes) == 15
+    assert len(nodes) == 60
     node = nodes[0]
     assert node["type"] == "node"
     assert node["data"]["user_id"] == "1000", "节点署名应为 bot QQ"
     assert node["data"]["nickname"] == "天依beta"
     assert node["data"]["content"][0]["type"] == "text"
 
-    # 短文本 → 普通发送
+    # 600 字符短文本(<2000) → 普通发送, 不拆合并转发
     ws.forward_calls.clear()
-    await handler._send_reply("bot_001", ev, "短回复")
-    assert not ws.forward_calls and ws.plain_calls
+    short_text = "\n".join(f"第 {i} 行: 帮助说明" for i in range(30))
+    assert 300 < len(short_text) < 2000
+    await handler._send_reply("bot_001", ev, short_text)
+    assert not ws.forward_calls and ws.plain_calls, "2000 字以内应普通发送"
 
     # 合并转发失败 → 回退普通发送
     ws.fail_forward = True
