@@ -305,6 +305,14 @@ class WebPanel:
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]
+            elif (
+                isinstance(data.get("ban"), dict)
+                and isinstance(data["ban"].get("admins"), list)
+            ):
+                # 兼容旧页面把 admins 提交到 ban 下的情况
+                cfg.admins = [
+                    int(a) for a in data["ban"]["admins"] if str(a).isdigit()
+                ]
             for key in ("beta_mode", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])

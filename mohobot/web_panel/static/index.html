@@ -820,9 +820,10 @@ async function saveGlobalConfig() {
     },
     ban: {
       enabled: document.getElementById('cfg-ban.enabled')?.checked ?? true,
+    },
+    // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
     admins: (document.getElementById('cfg-admins')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
-    },
   };
   try {
     await apiJSON('/api/config', { method: 'PUT', body: { data } });
