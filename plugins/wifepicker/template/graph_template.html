@@ -161,39 +161,60 @@
             components.push(comp);
         }
 
-        // 网格排列: 每分量一个独立 network 容器, 分量间天然分离
+        // ── 分量布局: 每分量独立 network, 区域面积 ∝ 节点数 ──
+        // (面积按节点数加权 → 各分量 fit 后节点视觉大小一致, 不出现大小不一)
         const root = document.getElementById('network-container');
         root.innerHTML = '';
-        const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(components.length))));
-        const rows = Math.ceil(components.length / cols);
-        const areaW = root.clientWidth / cols;
-        const areaH = root.clientHeight / rows;
+        // 贪心分行: 每行最多 3 个分量
+        const rowAssign = [];
+        let curRow = { comps: [], nodes: 0 };
+        components.forEach((c, i) => {
+            if (curRow.comps.length >= 3) {
+                rowAssign.push(curRow);
+                curRow = { comps: [], nodes: 0 };
+            }
+            curRow.comps.push(i);
+            curRow.nodes += c.length;
+        });
+        if (curRow.comps.length) rowAssign.push(curRow);
+        const totalRowNodes = rowAssign.reduce((s, r) => s + r.nodes, 0);
         let readyCount = 0;
         window.__networks = [];
 
-        components.forEach((comp, idx) => {
-            const div = document.createElement('div');
-            div.style.cssText = `position:absolute;left:${(idx % cols) * areaW}px;`
-                + `top:${Math.floor(idx / cols) * areaH}px;width:${areaW}px;height:${areaH}px;`;
-            root.appendChild(div);
-            const compNodes = comp
-                .map(id => nodes.find(n => n.id === id))
-                .filter(Boolean);
-            const compEdges = edges.filter(e => comp.includes(e.from) && comp.includes(e.to));
-            const net = new vis.Network(
-                div,
-                { nodes: new vis.DataSet(compNodes), edges: new vis.DataSet(compEdges) },
-                options,
-            );
-            window.__networks.push(net);
-            net.once("stabilizationIterationsDone", function () {
-                // 稳定后冻结布局, 分量内 fit 到自己的区域
-                net.setOptions({ physics: false });
-                net.fit({ animation: false });
-                readyCount++;
-                if (readyCount === components.length) {
-                    window.__graphReady = true;
-                }
+        rowAssign.forEach((row, ri) => {
+            // 行高 ∝ 行内节点数; 行内区域宽 ∝ 分量节点数
+            const rowH = root.clientHeight * (row.nodes / totalRowNodes);
+            let x = 0;
+            row.comps.forEach(ci => {
+                const w = (components[ci].length / row.nodes) * root.clientWidth;
+                const div = document.createElement('div');
+                div.style.cssText = `position:absolute;left:${x}px;`
+                    + `top:${ri * rowH}px;width:${w}px;height:${rowH}px;`;
+                root.appendChild(div);
+                x += w;
+                const comp = components[ci];
+                const compNodes = comp
+                    .map(id => nodes.find(n => n.id === id))
+                    .filter(Boolean);
+                const compEdges = edges.filter(e => comp.includes(e.from) && comp.includes(e.to));
+                const net = new vis.Network(
+                    div,
+                    { nodes: new vis.DataSet(compNodes), edges: new vis.DataSet(compEdges) },
+                    options,
+                );
+                window.__networks.push(net);
+                net.once("stabilizationIterationsDone", function () {
+                    // 稳定后冻结布局(不立即 fit, 等全部分量稳定统一处理)
+                    net.setOptions({ physics: false });
+                    readyCount++;
+                    if (readyCount === components.length) {
+                        // 统一 fit: 各分量在各自区域内适配, padding 留边距防 label 溢出
+                        window.__networks.forEach(n =>
+                            n.fit({ animation: false, padding: 35 })
+                        );
+                        window.__graphReady = true;
+                    }
+                });
             });
         });
     </script>
