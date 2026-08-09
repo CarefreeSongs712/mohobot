@@ -27,9 +27,7 @@ from ..utils import (
     get_self_id,
     get_text,
     is_allowed_group,
-    resolve_member_name,
     text_segment,
-    api_call,
 )
 
 PROPOSE_RESPONSE_SECONDS = 30
@@ -54,18 +52,12 @@ def _format_remaining(seconds: float) -> str:
 
 
 async def _member_name(plugin, bot_id: str, group_id: str, user_id: str) -> str:
-    """群成员名字(群名片优先), 失败回退数字。"""
+    """群成员名字(群名片 → QQ 昵称 → 数字, 走框架 get_nickname 带缓存)。"""
     fallback = f"用户({user_id})"
     try:
-        members = await api_call(
-            plugin._ws_server, bot_id, "get_group_member_list",
-            {"group_id": int(group_id)},
-        )
-        if isinstance(members, list):
-            return resolve_member_name(members, user_id, fallback)
+        return await plugin._ws_server.get_nickname(bot_id, user_id, group_id)
     except Exception:
-        pass
-    return fallback
+        return fallback
 
 
 async def cmd_propose(plugin, bot_id: str, event, rest: str):

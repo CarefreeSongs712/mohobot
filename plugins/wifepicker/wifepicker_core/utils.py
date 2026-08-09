@@ -95,19 +95,35 @@ async def get_group_info(ws_server, bot_id: str, group_id: str) -> dict:
 
 
 def resolve_member_name(members: list[dict], user_id: str, fallback: str) -> str:
-    """群成员列表 → 名字(群名片优先, 再昵称)。"""
+    """群成员列表 → 名字(群名片优先, 再昵称; 空白名片视为无)。"""
     for m in members:
         if str(m.get("user_id")) == str(user_id):
-            return str(m.get("card") or m.get("nickname") or fallback)
+            card = str(m.get("card") or "").strip()
+            nickname = str(m.get("nickname") or "").strip()
+            return card or nickname or fallback
     return fallback
 
 
+async def resolve_name(ws_server, bot_id: str, group_id: str, user_id: str, fallback: str) -> str:
+    """名字解析: 群名片 → QQ 昵称 → 数字兜底(走框架 get_nickname, 带缓存)。
+
+    群成员列表获取失败时用于兜底, 保证不显示纯数字。
+    """
+    try:
+        return await ws_server.get_nickname(bot_id, user_id, group_id)
+    except Exception:
+        return fallback
+
+
 def build_user_map(members: list[dict]) -> dict[str, str]:
-    """群成员列表 → {qq: 名字}。"""
-    return {
-        str(m.get("user_id")): str(m.get("card") or m.get("nickname") or m.get("user_id"))
-        for m in members
-    }
+    """群成员列表 → {qq: 名字}(群名片优先, 空白名片回退昵称)。"""
+    result: dict[str, str] = {}
+    for m in members:
+        card = str(m.get("card") or "").strip()
+        nickname = str(m.get("nickname") or "").strip()
+        uid = str(m.get("user_id"))
+        result[uid] = card or nickname or uid
+    return result
 
 
 def at_segment(qq: str) -> dict:

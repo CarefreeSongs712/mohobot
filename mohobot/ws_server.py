@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as time_module
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -41,7 +42,7 @@ class WSServer:
         self._on_event: EventCallback | None = None
         self._server: websockets.asyncio.server.Server | None = None
         self._heartbeat_interval: float = 30.0  # seconds
-        self._nickname_cache: dict[str, str] = {}  # get_nickname 缓存
+        self._nickname_cache: dict[str, tuple[str, float]] = {}  # get_nickname 缓存(key -> (名字, 过期时间))
 
     def set_event_callback(self, callback: EventCallback) -> None:
         """Set the callback invoked for every received event."""
@@ -237,6 +238,21 @@ class WSServer:
         else:
             await self.send_group_msg(bot_id, chat_id, message)
 
+    async def send_group_forward_msg(
+        self, bot_id: str, group_id: int | str, nodes: list[dict[str, Any]]
+    ) -> None:
+        """发送合并转发消息(OneBot 扩展 API, NapCat 等客户端支持)。
+
+        nodes: 自定义节点数组, 每节点:
+          {"type": "node", "data": {"user_id": "QQ", "nickname": "名字",
+                                    "content": [{"type": "text", "data": {"text": "..."}}]}}
+        """
+        await self._send_tracked(
+            bot_id, "send_group_forward_msg",
+            {"group_id": int(group_id), "messages": nodes},
+            "group", group_id,
+        )
+
     # ── 用户昵称查询(供插件使用) ─────────────────────────────
 
     async def get_nickname(
@@ -245,14 +261,19 @@ class WSServer:
         user_id: int | str,
         group_id: int | str | None = None,
     ) -> str:
-        """获取用户昵称: 群名片 → QQ 昵称 → 数字兜底。带内存缓存。"""
+        """获取用户昵称: 群名片 → QQ 昵称 → 数字兜底。
+
+        缓存带 TTL(成功 10 分钟, 失败 30 秒重试), 避免首次获取失败时
+        永久缓存数字导致昵称永远显示为 QQ 号。
+        """
+        now = time_module.time()
         cache_key = f"{bot_id}:{group_id or 'p'}:{user_id}"
         cached = self._nickname_cache.get(cache_key)
-        if cached:
-            return cached
+        if cached and cached[1] > now:
+            return cached[0]
 
         nickname = str(user_id)
-        # 群聊: 先取群成员资料(群名片优先)
+        # 群聊: 先取群成员资料(群名片优先; 空/空白名片回退昵称)
         if group_id is not None and str(group_id).isdigit():
             resp = await self.send_to_bot(
                 bot_id, "get_group_member_info",
@@ -261,7 +282,9 @@ class WSServer:
             )
             if resp and resp.get("status") == "ok":
                 data = resp.get("data") or {}
-                nickname = data.get("card") or data.get("nickname") or nickname
+                card = str(data.get("card") or "").strip()
+                member_nick = str(data.get("nickname") or "").strip()
+                nickname = card or member_nick or nickname
 
         if nickname == str(user_id):
             # 群资料没拿到/私聊: 陌生人资料
@@ -272,7 +295,17 @@ class WSServer:
             )
             if resp and resp.get("status") == "ok":
                 data = resp.get("data") or {}
-                nickname = data.get("nickname") or nickname
+                nickname = str(data.get("nickname") or "").strip() or nickname
 
-        self._nickname_cache[cache_key] = nickname
+        # 失败(仍是数字)只缓存 30 秒, 允许下次重试; 成功缓存 10 分钟
+        ttl = 30 if nickname == str(user_id) else 600
+        self._nickname_cache[cache_key] = (nickname, now + ttl)
+        self._prune_nickname_cache(now)
         return nickname
+
+    def _prune_nickname_cache(self, now: float | None = None) -> None:
+        """惰性清理过期昵称缓存, 防止无限增长。"""
+        now = time_module.time() if now is None else now
+        stale = [k for k, (_, exp) in self._nickname_cache.items() if exp <= now]
+        for k in stale:
+            del self._nickname_cache[k]

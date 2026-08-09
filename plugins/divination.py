@@ -22,6 +22,9 @@ _FIELDS = ["财运", "事业", "姻缘", "健康", "出行", "学业", "运气"]
 class Plugin:
     """Responds to divination requests — once per day per user."""
 
+    # 全局指令: 群内多 bot 时只由 bot_id 最小者回复(框架去重)
+    global_triggers = TRIGGERS
+
     info = {
         "commands": [
             {"name": "占卜", "desc": "每日一次人品占卜(财运/事业/姻缘等)"},

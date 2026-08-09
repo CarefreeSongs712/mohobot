@@ -219,6 +219,11 @@ class MessageHandler:
             f"type={event.message_type}, text='{text_preview}'"
         )
 
+        # ── 群消息: 记录群内 bot 存在(全局指令去重依据) ──
+        if isinstance(event, GroupMessageEvent):
+            if self._ws and self._ws._bot_manager:
+                self._ws._bot_manager.note_group_message(bot_id, event.group_id)
+
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
         # 插件明确消费时发送回复并结束; 否则继续正常流程。
@@ -238,6 +243,10 @@ class MessageHandler:
         if isinstance(event, GroupMessageEvent):
             if not await self._should_respond_to_group(bot_id, event):
                 logger.debug(f"Skipping group message (not mentioned): user={event.user_id}")
+                return
+            # ── 全局指令去重: 群内多 bot 时只由 bot_id 最小者回复 ──
+            # (如 /占卜 /help; 插件可通过类属性 global_triggers 声明)
+            if self._should_defer_global_command(bot_id, event):
                 return
 
         # ── Private chat image rate-limiting ──
@@ -866,8 +875,91 @@ class MessageHandler:
     async def _send_reply(
         self, bot_id: str, event: MessageEvent, reply: str | list[dict]
     ) -> None:
-        """Alias for _send_message — send a reply."""
+        """Alias for _send_message — send a reply.
+
+        群聊超长纯文本(>300 字符且多行)自动改用合并转发, 避免刷屏;
+        合并转发失败(客户端不支持)时回退普通文本发送。
+        """
+        if (
+            isinstance(reply, str)
+            and isinstance(event, GroupMessageEvent)
+            and len(reply) >= self._forward_min_len
+            and reply.count("\n") >= 4
+        ):
+            if await self._try_send_forward(bot_id, event, reply):
+                return
         await self._send_message(bot_id, event, reply)
+
+    # 合并转发阈值: 超过此长度的群聊文本回复改用合并转发
+    _forward_min_len = 300
+
+    # 框架内置全局指令(/ 前缀, 群内多 bot 只由 bot_id 最小者回复)
+    _GLOBAL_COMMANDS = {"/help"}
+
+    def _should_defer_global_command(self, bot_id: str, event: GroupMessageEvent) -> bool:
+        """全局指令去重: 命中全局指令且群内有多个 bot 时,
+        非 bot_id 最小者静默跳过(不回复, 也不交给 LLM)。"""
+        if not (self._ws and self._ws._bot_manager):
+            return False
+        text = extract_plain_text(event.message).strip()
+        if not text:
+            return False
+        # 命中集合: 内置 /help + 插件声明的 global_triggers
+        triggers = set(self._GLOBAL_COMMANDS)
+        if self._plugins is not None:
+            for meta in getattr(self._plugins, "_plugins", []):
+                inst = meta.get("instance")
+                if inst is None:
+                    continue
+                gt = getattr(inst.__class__, "global_triggers", None)
+                if isinstance(gt, (set, list, tuple)):
+                    triggers.update(str(t) for t in gt)
+        if text not in triggers:
+            return False
+        # 群内最小 bot 才回复
+        min_bot = self._ws._bot_manager.min_bot_for_group(str(event.group_id))
+        if min_bot is None or min_bot == bot_id:
+            return False
+        logger.debug(f"全局指令 {text!r} 由 {min_bot} 回复, {bot_id} 跳过")
+        return True
+
+    async def _try_send_forward(self, bot_id: str, event: GroupMessageEvent, text: str) -> bool:
+        """把长文本按行拆成合并转发节点发送。失败返回 False(回退普通发送)。"""
+        try:
+            lines = [ln for ln in text.split("\n") if ln.strip()]
+            if len(lines) < 2:
+                return False
+            bot_qq, bot_nick = self._bot_identity(bot_id)
+            nodes = [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": str(bot_qq),
+                        "nickname": bot_nick,
+                        "content": [{"type": "text", "data": {"text": ln}}],
+                    },
+                }
+                for ln in lines
+            ]
+            if self._ws is None:
+                return False
+            await self._ws.send_group_forward_msg(bot_id, event.group_id, nodes)
+            logger.debug(
+                f"合并转发回复 bot={bot_id} group={event.group_id} "
+                f"nodes={len(nodes)}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"合并转发失败, 回退普通发送: {e}")
+            return False
+
+    def _bot_identity(self, bot_id: str) -> tuple[int, str]:
+        """当前 bot 的 (QQ 号, 昵称), 用于合并转发节点署名。"""
+        if self._ws and self._ws._bot_manager:
+            instance = self._ws._bot_manager.get(bot_id)
+            if instance is not None:
+                return instance.qq or 0, getattr(instance.config, "nickname", "") or bot_id
+        return 0, bot_id
 
     def _get_chat_type(self, event: MessageEvent) -> str:
         if isinstance(event, PrivateMessageEvent):

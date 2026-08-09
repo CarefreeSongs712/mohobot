@@ -96,6 +96,9 @@ class BotManager:
         self._pending_responses: dict[str, dict[str, asyncio.Future]] = {}
         # Track sent messages awaiting message_id: echo -> (bot_id, chat_type, chat_id)
         self._pending_sent: dict[str, tuple[str, str, str]] = {}
+        # 群内在线 bot 集合(消息驱动): group_id(str) -> set[bot_id]
+        # 用于全局指令去重: 群内多 bot 时只由 bot_id 最小者回复
+        self._group_bots: dict[str, set[str]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
 
     # ── Bot↔QQ 绑定与磁盘配置 ────────────────────────────────
@@ -290,6 +293,27 @@ class BotManager:
             logger.info(f"Legacy bot migration complete: {migrated} bot(s)")
         return migrated
 
+    # ── 群内 bot 集合(全局指令去重) ──────────────────────────
+
+    def note_group_message(self, bot_id: str, group_id: int | str) -> None:
+        """记录 bot 在群内的存在(消息驱动: 收到群消息即在该群)。"""
+        self._group_bots.setdefault(str(group_id), set()).add(bot_id)
+
+    def min_bot_for_group(self, group_id: int | str) -> str | None:
+        """该群在线 bot 中 bot_id 最小者(用于全局指令去重)。"""
+        candidates = [
+            b for b in self._group_bots.get(str(group_id), set())
+            if b in self._bots
+        ]
+        return min(candidates) if candidates else None
+
+    def forget_bot_groups(self, bot_id: str) -> None:
+        """bot 断开连接时从所有群记录移除。"""
+        for gid in list(self._group_bots):
+            self._group_bots[gid].discard(bot_id)
+            if not self._group_bots[gid]:
+                del self._group_bots[gid]
+
     # ── 连接注册 / 注销 ───────────────────────────────────────
 
     def register(self, qq: int | str, websocket: "websockets.WebSocketServerProtocol") -> BotInstance:
@@ -324,6 +348,7 @@ class BotManager:
         if instance.bound:
             if self._bots.get(instance.bot_id) is instance:
                 del self._bots[instance.bot_id]
+                self.forget_bot_groups(instance.bot_id)
                 logger.info(f"Bot unregistered: {instance.bot_id}")
         else:
             if self._unbound.get(str(instance.qq)) is instance:

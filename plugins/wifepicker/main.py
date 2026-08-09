@@ -321,6 +321,11 @@ class Plugin:
         if members:
             wife_name = resolve_member_name(members, wife_id, wife_name)
             user_name = resolve_member_name(members, user_id, user_name)
+        else:
+            # 群成员列表获取失败 → 框架 get_nickname 兜底(群名片→QQ昵称→数字)
+            from wifepicker_core.utils import resolve_name
+            wife_name = await resolve_name(self._ws_server, bot_id, group_id, wife_id, wife_name)
+            user_name = await resolve_name(self._ws_server, bot_id, group_id, user_id, user_name)
 
         timestamp = datetime.now().isoformat()
         group_records.append({
@@ -412,6 +417,11 @@ class Plugin:
                 user_name = resolve_member_name(members, user_id, user_name)
         except Exception:
             pass
+        if not members:
+            # 群成员列表获取失败 → 框架 get_nickname 兜底(群名片→QQ昵称→数字)
+            from wifepicker_core.utils import resolve_name
+            target_name = await resolve_name(self._ws_server, bot_id, group_id, target_id, target_name)
+            user_name = await resolve_name(self._ws_server, bot_id, group_id, user_id, user_name)
 
         group_records = get_group_records(self.store, group_id)
 
