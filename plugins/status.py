@@ -26,6 +26,9 @@ from loguru import logger
 class Plugin:
     """Plugin that responds to /status with system and framework status."""
 
+    # 全局指令: 群内多 bot 时只由 bot_id 最小者回复(框架去重)
+    global_triggers = {"/status", "/状态"}
+
     info = {
         "commands": [
             {"name": "status", "desc": "显示框架与系统状态(图片)"},

@@ -111,8 +111,9 @@
             },
             edges: {
                 smooth: {
-                    type: 'curvedCW',
-                    roundness: 0.2
+                    // dynamic: 根据边的相对位置自动选择弯曲方向, 显著减少交叉
+                    type: 'dynamic',
+                    roundness: 0.3
                 }
             },
             physics: {
@@ -120,16 +121,18 @@
                 // forceAtlas2(Gephi 同款): 节点均匀分散, 避免局部重叠/大片空白
                 solver: 'forceAtlas2Based',
                 forceAtlas2Based: {
-                    gravitationalConstant: -400,  // 节点间斥力(头像大, 需更强斥力)
-                    centralGravity: 0.01,         // 向心引力: 防止节点四散失衡
-                    springLength: 500,            // 期望边长度
-                    springConstant: 0.08,         // 弹簧强度: 软弹簧让斥力主导
+                    gravitationalConstant: -600,  // 节点间斥力(再加强, 布局更松)
+                    centralGravity: 0.001,        // 中心引力≈0: 互不相连的连通分量
+                                                  // 自然分离, 不挤在一起(分量内部
+                                                  // 由边弹簧约束, 不会散架)
+                    springLength: 700,            // 期望边长度(更长=更直=交叉少)
+                    springConstant: 0.06,         // 弹簧强度: 软弹簧让斥力主导
                     damping: 0.6,                 // 阻尼: 越大布局越稳定
                     avoidOverlap: 1.0             // 0-1: 1=完全避免头像重叠
                 },
                 stabilization: {
                     enabled: true,
-                    iterations: Math.max({{ iterations }}, 1000),  // 足够迭代保证收敛均匀
+                    iterations: Math.max({{ iterations }}, 1200),  // 足够迭代保证收敛均匀
                     updateInterval: 25,
                     onlyDynamicEdges: false,
                     fit: true

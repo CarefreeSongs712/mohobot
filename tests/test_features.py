@@ -166,3 +166,59 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+async def test_praise_daily_limit_cache() -> None:
+    """点赞: 当日上限缓存后不再调用 API。"""
+    import sys
+    sys.path.insert(0, "plugins")
+    from praise import Plugin
+
+    class WS:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=5.0):
+            self.calls += 1
+            if self.calls == 1:
+                # 第一次成功
+                return {"status": "ok", "retcode": 0, "data": {}}
+            # 第二次失败(已达上限)
+            return {"status": "failed", "retcode": 1, "data": None, "wording": "操作频繁,请稍后再试"}
+
+    ws = WS()
+    Plugin._ws_server = ws
+    Plugin._like_limit_cache.clear()
+
+    def ev(user_id, text):
+        from mohobot.models.onebot import GroupMessageEvent, Sender
+        return GroupMessageEvent(
+            time=0, self_id=1000, post_type="message", message_type="group",
+            message_id=1, user_id=user_id, group_id=1,
+            sender=Sender(user_id=user_id),
+            message=[{"type": "text", "data": {"text": text}}],
+        )
+
+    inst = Plugin()
+
+    # 第一次: 第一次调用成功, 第二次失败(上限) → 缓存
+    handled, reply = await inst.on_message("bot_001", ev(2001, "/赞我"), {})
+    assert handled and "点赞失败" in reply
+    assert Plugin._like_limit_cache.get("bot_001:2001"), "失败(上限)应缓存"
+
+    # 第二次: 命中缓存, 不再调用 API
+    ws.calls = 0
+    handled2, reply2 = await inst.on_message("bot_001", ev(2001, "/赞我"), {})
+    assert handled2 and "上限" in reply2
+    assert ws.calls == 0, "缓存命中后不应再调用 API"
+
+    # 其它用户不受影响
+    handled3, _ = await inst.on_message("bot_001", ev(2002, "/赞我"), {})
+    assert ws.calls > 0, "其它用户应正常调用"
+
+    # 跨天缓存失效(模拟日期变化)
+    Plugin._like_limit_cache["bot_001:2001"] = "2000-01-01"
+    ws.calls = 0
+    await inst.on_message("bot_001", ev(2001, "/赞我"), {})
+    assert ws.calls > 0, "跨天后应重新调用"
+    print("[+] 点赞上限缓存 OK")
