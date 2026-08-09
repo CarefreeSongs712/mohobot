@@ -150,6 +150,19 @@ class Plugin:
         # 关键词路由表固定, 无需重建; 开关实时读取
         logger.info("wifepicker 插件配置已热更新")
 
+    def _all_bot_qqs(self) -> set[str]:
+        """所有已连接 bot 的 QQ 号(多 bot 同群时, 其它 bot 的消息也会被收到,
+        活跃池/抽取需排除所有机器人)。"""
+        qqs: set[str] = set()
+        ws = self._ws_server
+        if ws is not None:
+            bm = getattr(ws, "_bot_manager", None)
+            if bm is not None:
+                for inst in bm.all_bots:
+                    if inst.qq:
+                        qqs.add(str(inst.qq))
+        return qqs
+
     # ── 消息观察钩子(所有消息, gate 前) ──────────────────────
 
     async def on_message_observed(
@@ -158,14 +171,16 @@ class Plugin:
         """所有消息先过这里: 活跃记录 → 求婚回复 → 关键词触发。"""
         group_id = get_group_id(event)
         if group_id:
-            # 1. 活跃记录(白名单群内发言即入池)
+            # 1. 活跃记录(白名单群内发言即入池; 排除所有 bot 的 QQ)
             if is_allowed_group(group_id, self.plugin_config):
-                self.store.active_users.setdefault(group_id, {})
-                record_active_light(self.store, group_id, get_sender_id(event), get_self_id(event))
-                # 周期性落盘(活跃记录高频, 不每条都写盘)
-                now = time.time()
-                if now - self.store._last_save_at > 120:
-                    await self.store.flush(force=True)
+                sender = get_sender_id(event)
+                if sender not in self._all_bot_qqs():
+                    self.store.active_users.setdefault(group_id, {})
+                    record_active_light(self.store, group_id, sender, get_self_id(event))
+                    # 周期性落盘(活跃记录高频, 不每条都写盘)
+                    now = time.time()
+                    if now - self.store._last_save_at > 120:
+                        await self.store.flush(force=True)
             # 2. 求婚回复(同意/拒绝/是/否)
             reply = await self._handle_propose_response(bot_id, event)
             if reply:
@@ -294,6 +309,7 @@ class Plugin:
         excluded = draw_excluded_users(self.plugin_config)
         if not self.plugin_config.get("allow_marry_bot", False):
             excluded.add(bot_self_id)
+            excluded.update(self._all_bot_qqs())  # 排除所有 bot, 不抽机器人
         excluded.update([user_id, "0"])
 
         # 只在"当前还在群里"的活跃用户中抽
@@ -399,6 +415,7 @@ class Plugin:
         force_excluded = force_marry_excluded_users(config)
         if not config.get("allow_marry_bot", False):
             force_excluded.add(bot_self_id)
+            force_excluded.update(self._all_bot_qqs())  # 排除所有 bot
         force_excluded.add("0")
         if target_id in force_excluded:
             return "该用户在强娶排除列表中，无法被强娶。"
