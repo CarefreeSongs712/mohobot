@@ -46,16 +46,26 @@ class CommandHandler(Interceptor):
         for name, desc in commands.items():
             self._plugin_commands[name] = {"desc": desc, "plugin": "", "admin": False}
 
-    def collect_plugin_commands(self) -> dict[str, dict]:
+    def collect_plugin_commands(self, bot_id: str | None = None) -> dict[str, dict]:
         """Discover plugin commands from the plugin system (status hook).
 
         返回 {name: {"desc", "plugin", "admin"}} — plugin=插件名(分组依据),
         admin 仅读取插件声明的 info.commands[].admin 字段。
+        传 bot_id 时跳过 per-bot 绑定(bind_bots)不包含该 bot 的插件命令。
         """
         discovered: dict[str, dict] = {}
         if self._plugin_system:
-            for meta in self._plugin_system.list_plugins():
+            # 优先内部列表(含 instance 可判断 bind_bots); 无则退回公开接口
+            metas = getattr(self._plugin_system, "_plugins", None)
+            if not metas:
+                metas = self._plugin_system.list_plugins()
+            for meta in metas:
                 name = meta.get("name", "")
+                inst = meta.get("instance")
+                if inst is not None and bot_id is not None:
+                    bind = getattr(inst.__class__, "bind_bots", None)
+                    if bind and bot_id not in {str(b) for b in bind}:
+                        continue
                 info = meta.get("info") or {}
                 cmd_list = info.get("commands") or []
                 for cmd in cmd_list:
@@ -72,10 +82,10 @@ class CommandHandler(Interceptor):
                         discovered[cmd] = {"desc": "", "plugin": name, "admin": False}
         return discovered
 
-    def _all_plugin_commands(self) -> dict[str, dict]:
+    def _all_plugin_commands(self, bot_id: str | None = None) -> dict[str, dict]:
         """合并手动注册 + 动态收集的插件命令(动态优先)。"""
         merged = dict(self._plugin_commands)
-        merged.update(self.collect_plugin_commands())
+        merged.update(self.collect_plugin_commands(bot_id))
         return merged
 
     async def intercept(
@@ -110,7 +120,7 @@ class CommandHandler(Interceptor):
         handler = self._commands.get(cmd_name)
         if not handler:
             # Plugin-registered command? (e.g. 赞我 via /赞我) — let plugins handle it
-            if cmd_name in self._all_plugin_commands():
+            if cmd_name in self._all_plugin_commands(bot_id):
                 return (False, None)
             # Unknown command — 60 分钟内同一会话最多提醒一次,
             # 冷却期内静默拦截(不回复, 也不传给 LLM)
@@ -258,7 +268,7 @@ class CommandHandler(Interceptor):
         "ban-help": "封禁系统使用指南",
     }
 
-    def _build_help_sections(self) -> list[dict]:
+    def _build_help_sections(self, bot_id: str | None = None) -> list[dict]:
         """构建 /help 的分组数据: 系统 / 封禁管理 / 各插件。"""
         sections = []
         # 系统(内置命令)
@@ -282,7 +292,7 @@ class CommandHandler(Interceptor):
 
         # 插件命令: 按插件名分组
         by_plugin: dict[str, list[dict]] = {}
-        for name, meta in self._all_plugin_commands().items():
+        for name, meta in self._all_plugin_commands(bot_id).items():
             plugin = meta.get("plugin") or "其他"
             by_plugin.setdefault(plugin, []).append({
                 "name": name,
@@ -296,12 +306,12 @@ class CommandHandler(Interceptor):
             })
         return sections
 
-    def _help_text(self) -> str:
+    def _help_text(self, bot_id: str | None = None) -> str:
         """文本版帮助(图片渲染失败/无法发送时的降级)。"""
         lines = ["📖 可用指令:"]
         for name, (_, help_text) in self._commands.items():
             lines.append(f"  /{name} — {help_text}")
-        for name, meta in sorted(self._all_plugin_commands().items()):
+        for name, meta in sorted(self._all_plugin_commands(bot_id).items()):
             desc = meta.get("desc") or "插件指令"
             lines.append(f"  /{name} — {desc}")
         return "\n".join(lines)
@@ -313,7 +323,7 @@ class CommandHandler(Interceptor):
         from mohobot.utils.image_card import render_help_card
         from mohobot.models.onebot import GroupMessageEvent as _G
 
-        sections = self._build_help_sections()
+        sections = self._build_help_sections(bot_id)
         img_path = render_help_card(sections)
         if img_path is not None and self._ws is not None:
             try:
@@ -332,7 +342,7 @@ class CommandHandler(Interceptor):
                     os.remove(img_path)
                 except OSError:
                     pass
-        return self._help_text()
+        return self._help_text(bot_id)
 
     async def _cmd_clear(
         self, bot_id: str, event: MessageEvent, args: list[str]

@@ -1,149 +1,197 @@
 {
-    "manage_group": {
-        "description": "审批群",
-        "hint": "bot收到的好友申请、群邀请在审批群里审批, 不填则将审批信息私发给管理员",
-        "type": "string",
-        "default": ""
-    },
-    "manage_users": {
-        "description": "额外审批员",
-        "hint": "全局管理员(配置里的 admins)已默认添加为审批员, 此外可添加其他审批员。审批员才有权限审批Bot收到的好友申请和群邀请",
+  "manage_group": {
+    "description": "审批群",
+    "hint": "bot收到的好友申请、群邀请在审批群里审批, 不填则将审批信息私发给管理员",
+    "type": "string",
+    "default": ""
+  },
+  "manage_users": {
+    "description": "额外审批员",
+    "hint": "全局管理员(配置里的 admins)已默认添加为审批员, 此外可添加其他审批员。审批员才有权限审批Bot收到的好友申请和群邀请",
+    "type": "list",
+    "default": []
+  },
+  "check": {
+    "description": "抽查配置",
+    "type": "object",
+    "items": {
+      "count": {
+        "description": "抽查消息默认数量",
+        "type": "int",
+        "hint": "每次抽查默认抽查多少条消息, “抽查”命令可输入一个数字来指定抽查数量, 自动抽查使用默认值",
+        "slider": {
+          "min": 1,
+          "max": 100,
+          "step": 1
+        },
+        "default": 20
+      },
+      "batch_size": {
+        "description": "单次转发消息数量",
+        "type": "int",
+        "hint": "一次性转发过多消息容易报错, 消息超过此数量会自动分批次转发",
+        "slider": {
+          "min": 10,
+          "max": 60,
+          "step": 1
+        },
+        "default": 40
+      },
+      "check_new_group": {
+        "description": "是否自动抽查群聊天记录",
+        "hint": "开启后, 每次bot被拉入新群时, 会自动抽查对应群的聊天记录",
+        "type": "bool",
+        "default": true
+      },
+      "delay": {
+        "description": "新群延迟抽查时间（秒）",
+        "hint": "机器人被拉入新群后, 等待多少秒再执行自动抽查",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 600,
+          "step": 1
+        },
+        "default": 30
+      }
+    }
+  },
+  "request": {
+    "description": "请求配置",
+    "hint": "请求类事件：群邀请、好友申请",
+    "type": "object",
+    "items": {
+      "group_blacklist": {
+        "description": "群聊黑名单",
+        "hint": "当收到黑名单群聊的群邀请时, bot会自动拒绝",
         "type": "list",
         "default": []
-    },
-    "check": {
-        "description": "抽查配置",
-        "type": "object",
-        "items": {
-            "count": {
-                "description": "抽查消息默认数量",
-                "type": "int",
-                "hint": "每次抽查默认抽查多少条消息, “抽查”命令可输入一个数字来指定抽查数量, 自动抽查使用默认值",
-                "slider": {"min": 1, "max": 100, "step": 1},
-                "default": 20
-            },
-            "batch_size": {
-                "description": "单次转发消息数量",
-                "type": "int",
-                "hint": "一次性转发过多消息容易报错, 消息超过此数量会自动分批次转发",
-                "slider": {"min": 10, "max": 60, "step": 1},
-                "default": 40
-            },
-            "check_new_group": {
-                "description": "是否自动抽查群聊天记录",
-                "hint": "开启后, 每次bot被拉入新群时, 会自动抽查对应群的聊天记录",
-                "type": "bool",
-                "default": true
-            },
-            "delay": {
-                "description": "新群延迟抽查时间（秒）",
-                "hint": "机器人被拉入新群后, 等待多少秒再执行自动抽查",
-                "type": "int",
-                "slider": {"min": 0, "max": 600, "step": 1},
-                "default": 30
-            }
-        }
-    },
-    "request": {
-        "description": "请求配置",
-        "hint": "请求类事件：群邀请、好友申请",
-        "type": "object",
-        "items": {
-            "group_blacklist": {
-                "description": "群聊黑名单",
-                "hint": "当收到黑名单群聊的群邀请时, bot会自动拒绝",
-                "type": "list",
-                "default": []
-            },
-            "user_blacklist": {
-                "description": "用户黑名单",
-                "hint": "黑名单用户拉bot进群或添加bot为好友时, 会被自动拒绝",
-                "type": "list",
-                "default": []
-            },
-            "auto_reject_group": {
-                "description": "自动拒绝群邀请(优先级较高)",
-                "hint": "开启后, Bot将自动拒绝所有群邀请",
-                "type": "bool",
-                "default": false
-            },
-            "auto_agree_group": {
-                "description": "自动同意群邀请",
-                "hint": "开启后, Bot将自动同意黑名单以外的所有群邀请",
-                "type": "bool",
-                "default": false
-            },
-            "auto_reject_friend": {
-                "description": "自动拒绝好友请求(优先级较高)",
-                "hint": "开启后, Bot将自动拒绝所有好友请求",
-                "type": "bool",
-                "default": false
-            },
-            "auto_agree_friend": {
-                "description": "自动同意好友请求",
-                "hint": "开启后, Bot将自动同意黑名单以外的所有好友请求",
-                "type": "bool",
-                "default": false
-            }
-        }
-    },
-    "notice": {
-        "description": "通知配置",
-        "hint": "通知类事件：被设为管理员、被撤了管理员、被禁言、被拉进群、被踢出群",
-        "type": "object",
-        "items": {
-            "block_small_group": {
-                "description": "拒绝小群",
-                "hint": "Bot加的群人数若 <=50 人将自动退群, 可有效防止被乱拉小群, 但审批员拉群不受此限制",
-                "type": "bool",
-                "default": false
-            },
-            "min_group_size": {
-                "description": "拉群最小群人数",
-                "hint": "固定值, 不显示",
-                "type": "int",
-                "default": 50,
-                "invisible": true
-            },
-            "max_group_size": {
-                "description": "拉群最大群人数",
-                "hint": "Bot加的群人数若大于此值将自动退群, 可防止被乱拉进千人大群, 但审批员拉群不受此限制",
-                "type": "int",
-                "slider": {"min": 500, "max": 3000, "step": 100},
-                "default": 2000
-            },
-            "max_group_capacity": {
-                "description": "Bot的最大群容量",
-                "hint": "Bot加的群若超过此容量将自动退群, 但审批员拉群不受此限制",
-                "type": "int",
-                "slider": {"min": 0, "max": 300, "step": 10},
-                "default": 100
-            },
-            "max_ban_days": {
-                "description": "触发自动退群的禁言天数",
-                "hint": "bot被禁言超过此时间时将自动退群, 单位为天",
-                "type": "int",
-                "slider": {"min": 0, "max": 30, "step": 1},
-                "default": 3
-            },
-            "kick_block_user": {
-                "description": "被踢则拉黑用户",
-                "hint": "当 bot 被踢出群聊时, bot 将自动拉黑踢 bot 的用户",
-                "type": "bool",
-                "default": true
-            },
-            "kick_block_group": {
-                "description": "被踢则拉黑群聊",
-                "hint": "当 bot 被踢出群聊时, bot 将自动拉黑该群",
-                "type": "bool",
-                "default": true
-            },
-            "mutual_blacklist": {
-                "description": "互斥成员",
-                "hint": "bot加入群时, 若群内有这些成员, bot将自动退群。但审批员拉群不受此限制",
-                "type": "list",
-                "default": []
-            }
-        }
+      },
+      "user_blacklist": {
+        "description": "用户黑名单",
+        "hint": "黑名单用户拉bot进群或添加bot为好友时, 会被自动拒绝",
+        "type": "list",
+        "default": []
+      },
+      "auto_reject_group": {
+        "description": "自动拒绝群邀请(优先级较高)",
+        "hint": "开启后, Bot将自动拒绝所有群邀请",
+        "type": "bool",
+        "default": false
+      },
+      "auto_agree_group": {
+        "description": "自动同意群邀请",
+        "hint": "开启后, Bot将自动同意黑名单以外的所有群邀请",
+        "type": "bool",
+        "default": false
+      },
+      "auto_reject_friend": {
+        "description": "自动拒绝好友请求(优先级较高)",
+        "hint": "开启后, Bot将自动拒绝所有好友请求",
+        "type": "bool",
+        "default": false
+      },
+      "auto_agree_friend": {
+        "description": "自动同意好友请求",
+        "hint": "开启后, Bot将自动同意黑名单以外的所有好友请求",
+        "type": "bool",
+        "default": false
+      }
     }
+  },
+  "notice": {
+    "description": "通知配置",
+    "hint": "通知类事件：被设为管理员、被撤了管理员、被禁言、被拉进群、被踢出群",
+    "type": "object",
+    "items": {
+      "block_small_group": {
+        "description": "拒绝小群",
+        "hint": "Bot加的群人数若 <=50 人将自动退群, 可有效防止被乱拉小群, 但审批员拉群不受此限制",
+        "type": "bool",
+        "default": false
+      },
+      "min_group_size": {
+        "description": "拉群最小群人数",
+        "hint": "固定值, 不显示",
+        "type": "int",
+        "default": 50,
+        "invisible": true
+      },
+      "max_group_size": {
+        "description": "拉群最大群人数",
+        "hint": "Bot加的群人数若大于此值将自动退群, 可防止被乱拉进千人大群, 但审批员拉群不受此限制",
+        "type": "int",
+        "slider": {
+          "min": 500,
+          "max": 3000,
+          "step": 100
+        },
+        "default": 2000
+      },
+      "max_group_capacity": {
+        "description": "Bot的最大群容量",
+        "hint": "Bot加的群若超过此容量将自动退群, 但审批员拉群不受此限制",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 300,
+          "step": 10
+        },
+        "default": 100
+      },
+      "max_ban_days": {
+        "description": "触发自动退群的禁言天数",
+        "hint": "bot被禁言超过此时间时将自动退群, 单位为天",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
+        "default": 3
+      },
+      "kick_block_user": {
+        "description": "被踢则拉黑用户",
+        "hint": "当 bot 被踢出群聊时, bot 将自动拉黑踢 bot 的用户",
+        "type": "bool",
+        "default": true
+      },
+      "kick_block_group": {
+        "description": "被踢则拉黑群聊",
+        "hint": "当 bot 被踢出群聊时, bot 将自动拉黑该群",
+        "type": "bool",
+        "default": true
+      },
+      "mutual_blacklist": {
+        "description": "互斥成员",
+        "hint": "bot加入群时, 若群内有这些成员, bot将自动退群。但审批员拉群不受此限制",
+        "type": "list",
+        "default": []
+      }
+    },
+    "welcome_friend_enabled": {
+      "description": "新好友欢迎开关",
+      "hint": "新加好友时自动发送欢迎消息",
+      "type": "bool",
+      "default": true
+    },
+    "welcome_friend_msg": {
+      "description": "新好友欢迎消息",
+      "hint": "占位符【此处替换为 bot 的昵称】发送时自动替换为 bot 昵称; 换行用真实换行",
+      "type": "text",
+      "default": "你好，这里是【此处替换为 bot 的昵称】～\n这是一个QQ机器人，具有AI对话等多种功能~\n介绍+使用须知：（浏览器打开） http://103.236.70.18:712\n交流群：398870315\nbot饲养员：3831097597"
+    },
+    "welcome_group_enabled": {
+      "description": "新入群欢迎开关",
+      "hint": "bot 被拉入新群时自动发送欢迎消息(自动退群的群不发)",
+      "type": "bool",
+      "default": true
+    },
+    "welcome_group_msg": {
+      "description": "新入群欢迎消息",
+      "hint": "占位符【此处替换为 bot 的昵称】发送时自动替换为 bot 昵称",
+      "type": "text",
+      "default": "你好，这里是【此处替换为 bot 的昵称】～\n这是一个QQ机器人，具有AI对话等多种功能~\n介绍+使用须知：（浏览器打开） http://103.236.70.18:712\n交流群：398870315\n\n注意：一切拉群请都需向管理员3831097597报备，否则按违规处理。"
+    }
+  }
 }

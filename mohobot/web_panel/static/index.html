@@ -985,6 +985,11 @@ function renderSchemaFields(schema, config, prefix = '') {
       const slider = spec.slider ? ` min="${spec.slider.min}" max="${spec.slider.max}" step="${spec.slider.step || 1}"` : '';
       html += `<div class="form-row"><label>${label}</label>
         <input type="number" id="pcf-${id}" value="${value == null ? '' : value}"${slider}>${hint}</div>`;
+    } else if (spec.type === 'text') {
+      // 多行文本(欢迎消息等): textarea
+      const v = String(value == null ? '' : value).replace(/</g, '&lt;');
+      html += `<div class="form-row"><label>${label}</label>
+        <textarea id="pcf-${id}" rows="6" style="font-family:inherit">${v}</textarea>${hint}</div>`;
     } else {
       html += `<div class="form-row"><label>${label}</label>
         <input type="text" id="pcf-${id}" value="${String(value == null ? '' : value).replace(/"/g, '&quot;')}">${hint}</div>`;
@@ -1009,6 +1014,8 @@ function collectSchemaFields(schema, prefix = '') {
     } else if (spec.type === 'int') {
       const v = parseInt(document.getElementById('pcf-' + id)?.value, 10);
       out[key] = isNaN(v) ? (spec.default ?? 0) : v;
+    } else if (spec.type === 'text') {
+      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
     } else {
       out[key] = document.getElementById('pcf-' + id)?.value ?? '';
     }

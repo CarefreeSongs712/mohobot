@@ -97,6 +97,9 @@ class Plugin:
     # 全局指令: 群内多 bot 时 / 前缀命令(含全部别名)只由 bot_id 最小者回复
     # (框架去重; 无前缀关键词触发在观察钩子里自行判断最小 bot)
     global_triggers = set(COMMANDS.keys())
+    # per-bot 绑定: 本插件仅对 bot_001 生效, 其他 bot 不加载此插件
+    # (框架在拦截/观察/通知/请求分发时跳过非绑定 bot)
+    bind_bots = ["bot_001"]
 
     info = {
         "commands": [

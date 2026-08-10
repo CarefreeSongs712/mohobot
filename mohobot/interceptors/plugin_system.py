@@ -478,10 +478,26 @@ class PluginSystem(Interceptor):
 
     # ── Event Dispatch ────────────────────────────────────────
 
+    @staticmethod
+    def _bot_allowed(meta: dict, bot_id: str) -> bool:
+        """per-bot 插件绑定: 插件类声明 bind_bots=["bot_001"] 时仅对这些 bot 生效。
+
+        空/未声明 = 对所有 bot 生效。观察钩子/拦截/通知/请求分发统一走此过滤。
+        """
+        inst = meta.get("instance")
+        if inst is None:
+            return True
+        bind = getattr(inst.__class__, "bind_bots", None)
+        if not bind:
+            return True
+        return bot_id in {str(b) for b in bind}
+
     async def dispatch_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Dispatch a notice event to all enabled plugins."""
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            if not self._bot_allowed(meta, bot_id):
                 continue
             plugin = meta.get("instance")
             try:
@@ -495,6 +511,8 @@ class PluginSystem(Interceptor):
         """Dispatch a meta event to all enabled plugins."""
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            if not self._bot_allowed(meta, bot_id):
                 continue
             plugin = meta.get("instance")
             try:
@@ -513,6 +531,8 @@ class PluginSystem(Interceptor):
         """
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            if not self._bot_allowed(meta, bot_id):
                 continue
             plugin = meta.get("instance")
             try:
@@ -539,6 +559,8 @@ class PluginSystem(Interceptor):
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
+            if not self._bot_allowed(meta, bot_id):
+                continue
             plugin = meta.get("instance")
             try:
                 handler = getattr(plugin, "on_message_observed", None)
@@ -559,6 +581,8 @@ class PluginSystem(Interceptor):
         parts: list[str] = []
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            if not self._bot_allowed(meta, bot_id):
                 continue
             plugin = meta.get("instance")
             try:
@@ -581,6 +605,8 @@ class PluginSystem(Interceptor):
         """Give plugins a chance to intercept messages."""
         for meta in self._plugins:
             if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            if not self._bot_allowed(meta, bot_id):
                 continue
             plugin = meta.get("instance")
             try:

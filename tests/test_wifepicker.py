@@ -509,7 +509,8 @@ async def test_jrlp_command_alias() -> None:
     ps._plugins = [{"name": "wifepicker", "enabled": True, "loaded": True, "instance": inst}]
     handler.set_interceptors([ps, cmd])
     # 新用户 3001 触发 /jrlp → 插件(先于 command_handler)消费并发送回复
-    await handler._handle_message("bot_x", make_group_event(3001, "/jrlp"), {})
+    # (插件 bind_bots=["bot_001"], 用绑定内的 bot id)
+    await handler._handle_message("bot_001", make_group_event(3001, "/jrlp"), {})
     assert inst._ws_server.sent, "插件应消费 /jrlp 并发送回复"
     sent_text = "".join(
         s.get("data", {}).get("text", "") for s in inst._ws_server.sent[-1][2]
