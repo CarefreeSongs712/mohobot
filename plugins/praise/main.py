@@ -1,7 +1,7 @@
-"""Mohobot 点赞插件 — 发送"赞我"/"/赞我"/"zanwo"/"/zanwo"时给用户点 20 个赞。
+"""Mohobot 点赞插件 — 发送"赞我"/"/赞我"/"zanwo"/"/zanwo"时给用户点赞。
 
-OneBot v11 API: send_like (user_id, times) — 每个好友每天最多 10 次,
-因此 20 个赞分两次调用,每次 10。
+OneBot v11 API: send_like (user_id, times) — 每个好友每天最多 10 次。
+点赞总数/每次点数/回复消息模板均可在 WebUI 插件配置中调整(_conf_schema.json)。
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ PRAISE_TRIGGERS = {"赞我", "/赞我", "zanwo", "/zanwo"}
 
 
 class Plugin:
-    """Responds to praise requests by sending 20 likes via send_like API."""
+    """Responds to praise requests by sending likes via send_like API."""
 
     info = {
         "commands": [
-            {"name": "赞我", "desc": "给自己点 20 个赞"},
+            {"name": "赞我", "desc": "给自己点赞(数量可在插件配置中调整)"},
         ],
     }
 
@@ -33,6 +33,18 @@ class Plugin:
     # 判定"已达上限"的错误关键词(平台返回)
     _LIMIT_HINTS = ("频繁", "上限", "过快", "too many", "频繁操作", "操作过快")
 
+    # 默认配置(_conf_schema.json 注入覆盖; 无 schema 时的兜底)
+    _DEFAULTS = {
+        "like_total": 20,
+        "like_times_per_call": 10,
+        "success_msg": "✅ 已给你点了 {count} 个赞,去名片看看吧~",
+        "fail_msg": "❌ 点赞失败: {detail}",
+        "limit_msg": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
+    }
+
+    def __init__(self):
+        self.plugin_config: dict = dict(self._DEFAULTS)
+
     @classmethod
     def inject_ws_server(cls, ws_server) -> None:
         """Inject the WS server for API calls (called from main.py)."""
@@ -44,6 +56,19 @@ class Plugin:
         for k in [k for k, v in Plugin._like_limit_cache.items() if v != today]:
             del Plugin._like_limit_cache[k]
         Plugin._like_limit_cache[cache_key] = today
+
+    def _cfg(self, key: str, default):
+        """读取插件配置(WebUI 保存后热生效), 缺失/类型异常时回退默认值。"""
+        cfg = getattr(self, "plugin_config", None) or {}
+        value = cfg.get(key, default)
+        return value if value is not None and value != "" else default
+
+    def _render(self, template: str, **kwargs) -> str:
+        """模板占位符替换(仅 {key} 形式, 避免 format 对花括号敏感)。"""
+        text = template
+        for key, val in kwargs.items():
+            text = text.replace("{" + key + "}", str(val))
+        return text
 
     async def on_message(
         self,
@@ -72,24 +97,31 @@ class Plugin:
         if ws_server is None:
             return (True, "点赞服务未配置,无法发送点赞。")
 
+        like_total = max(1, int(self._cfg("like_total", 20)))
+        times_per_call = max(1, min(10, int(self._cfg("like_times_per_call", 10))))
+        limit_msg = self._cfg("limit_msg", self._DEFAULTS["limit_msg"])
+        success_msg = self._cfg("success_msg", self._DEFAULTS["success_msg"])
+        fail_msg = self._cfg("fail_msg", self._DEFAULTS["fail_msg"])
+
         from mohobot.utils.time_utils import format_utc8
         today = format_utc8("%Y-%m-%d")
         cache_key = f"{bot_id}:{user_id}"
         # 当日已达上限 → 直接提示, 不再调用 API
         if self._like_limit_cache.get(cache_key) == today:
             logger.debug(f"Praise daily limit cached: {user_id}")
-            return (True, "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~")
+            return (True, limit_msg)
 
-        # Send 20 likes: two calls of 10 (OneBot limit: max 10 per friend per day).
+        # 按配置的每次点数分批调用(QQ 单次上限 10)。
         # Wait for each response and report the REAL result — do not claim
         # success when the platform rejects it (e.g. daily like limit reached).
+        batches = max(1, -(-like_total // times_per_call))  # ceil
         errors: list[str] = []
         ok_count = 0
         try:
-            for i in range(2):
+            for i in range(batches):
                 resp = await ws_server.send_to_bot(
                     bot_id, "send_like",
-                    {"user_id": int(user_id), "times": 10},
+                    {"user_id": int(user_id), "times": times_per_call},
                     wait_response=True,
                     timeout=5.0,
                 )
@@ -99,7 +131,7 @@ class Plugin:
                     wording = resp.get("wording") or resp.get("message") or "未知错误"
                     errors.append(f"第 {i + 1} 次失败: {wording}")
                     # First failure already tells the story (e.g. daily limit) —
-                    # no point sending the second batch.
+                    # no point sending the next batch.
                     break
                 else:
                     ok_count += 1
@@ -114,5 +146,6 @@ class Plugin:
             # 平台拒绝(如已达上限) → 缓存当天, 之后不再重复调用 API
             if any(hint in detail for hint in self._LIMIT_HINTS):
                 self._mark_like_limit(cache_key, today)
-            return (True, f"❌ 点赞失败: {detail}")
-        return (True, f"✅ 已给你点了 {ok_count * 10} 个赞,去名片看看吧~")
+            return (True, self._render(fail_msg, detail=detail))
+        total_sent = ok_count * times_per_call
+        return (True, self._render(success_msg, count=total_sent))

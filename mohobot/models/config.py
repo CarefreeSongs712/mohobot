@@ -149,6 +149,9 @@ class GlobalConfig:
     context_summary_enabled: bool = True
     context_trim_at_rounds: int = 40
     context_trim_remove_rounds: int = 15
+    # 群聊最近消息: 生成回复时把群内最近 N 条消息临时注入 prompt(不写入 context,
+    # 不参与 AI 总结压缩), 用于感知群聊氛围。0 = 关闭。
+    group_recent_msgs_count: int = 10
 
     @classmethod
     def load(cls, path: str | Path = "./config/global.yaml") -> "GlobalConfig":
@@ -243,6 +246,7 @@ class GlobalConfig:
             context_summary_enabled=bool(raw.get("context_summary_enabled", True)),
             context_trim_at_rounds=int(raw.get("context_trim_at_rounds", 40)),
             context_trim_remove_rounds=int(raw.get("context_trim_remove_rounds", 15)),
+            group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
         )
 
     def save(self, path: str | Path = "./config/global.yaml") -> None:
@@ -309,6 +313,7 @@ class GlobalConfig:
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
+            "group_recent_msgs_count": self.group_recent_msgs_count,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -375,6 +380,7 @@ class GlobalConfig:
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
+            "group_recent_msgs_count": self.group_recent_msgs_count,
         }
 
 

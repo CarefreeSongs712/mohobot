@@ -1,0 +1,32 @@
+{
+  "like_total": {
+    "type": "int",
+    "default": 20,
+    "description": "点赞总数",
+    "hint": "触发一次总共点的赞数, 会自动分批调用"
+  },
+  "like_times_per_call": {
+    "type": "int",
+    "default": 10,
+    "description": "每次调用点数",
+    "hint": "QQ 单次上限 10, 超过会被截断"
+  },
+  "success_msg": {
+    "type": "string",
+    "default": "✅ 已给你点了 {count} 个赞,去名片看看吧~",
+    "description": "成功消息模板",
+    "hint": "可用占位符: {count}=实际点赞数"
+  },
+  "fail_msg": {
+    "type": "string",
+    "default": "❌ 点赞失败: {detail}",
+    "description": "失败消息模板",
+    "hint": "可用占位符: {detail}=错误详情"
+  },
+  "limit_msg": {
+    "type": "string",
+    "default": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
+    "description": "当日已达上限提示",
+    "hint": "同一好友当天达到点赞上限后, 回复此消息且不再调用 API"
+  }
+}

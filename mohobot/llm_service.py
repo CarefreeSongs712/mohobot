@@ -511,6 +511,9 @@ class LLMService:
                     "role": "system",
                     "content": f"【较早对话总结】\n{content}",
                 })
+            elif role == "system":
+                # 临时注入段(如群聊最近消息): 直接作为 system 消息
+                messages.append({"role": "system", "content": content})
             elif role in ("user", "assistant"):
                 messages.append({"role": role, "content": content})
             else:

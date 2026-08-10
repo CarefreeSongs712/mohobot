@@ -170,9 +170,15 @@ if __name__ == "__main__":
 
 async def test_praise_daily_limit_cache() -> None:
     """点赞: 当日上限缓存后不再调用 API。"""
-    import sys
-    sys.path.insert(0, "plugins")
-    from praise import Plugin
+    # 独立模块名加载, 避免覆盖 sys.modules["main"]
+    # (test_wifepicker 也用 from main import Plugin, 全量跑时互相冲突)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "praise_plugin_main", "plugins/praise/main.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    Plugin = mod.Plugin
 
     class WS:
         def __init__(self):

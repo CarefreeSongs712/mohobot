@@ -93,6 +93,15 @@ class MessageHandler:
         self._last_image_time: dict[str, float] = {}
         self._image_cooldown = 10.0  # seconds
 
+        # 群聊最近消息缓冲: f"{bot_id}:{group_id}" -> [{"user_id","name","content","time"}, ...]
+        # 仅保存在内存, 生成回复时临时注入 prompt(不写入 context, 不参与 AI 总结)。
+        # 条数取全局配置 group_recent_msgs_count(0 = 关闭)。
+        if global_config is not None:
+            self._group_recent_count = max(0, int(getattr(global_config, "group_recent_msgs_count", 10)))
+        else:
+            self._group_recent_count = 10
+        self._group_recent_msgs: dict[str, list[dict]] = {}
+
     def set_interceptors(self, interceptors: list) -> None:
         """Set the ordered interceptor chain."""
         self._interceptors = interceptors
@@ -223,6 +232,8 @@ class MessageHandler:
         if isinstance(event, GroupMessageEvent):
             if self._ws and self._ws._bot_manager:
                 self._ws._bot_manager.note_group_message(bot_id, event.group_id)
+            # 群聊最近消息缓冲(回复时临时注入, 不写入 context)
+            self._note_group_recent(bot_id, event)
 
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
@@ -280,8 +291,8 @@ class MessageHandler:
                 return
 
         # ── Legacy path: streaming with reply-quote ──
-        # Load session context
-        context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
+        # Load session context (+ 群聊最近消息临时注入, 不写回 context 文件)
+        context = await self._build_legacy_context(bot_id, chat_type, chat_id)
 
         # Stream response — split by punctuation + length (标点符号+长度分隔法)
         full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
@@ -419,6 +430,65 @@ class MessageHandler:
 
         await runtime.handle_event(chat_type, chat_id, chat_event)
 
+    # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
+
+    def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
+        """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。"""
+        if self._group_recent_count <= 0:
+            return
+        try:
+            from mohobot.utils.cq_code import extract_plain_text
+            text = (extract_plain_text(event.message) or "").strip()
+            sender = getattr(event, "sender", None)
+            name = ""
+            if sender is not None:
+                name = (getattr(sender, "card", "") or getattr(sender, "nickname", "") or "").strip()
+            entry = {
+                "user_id": str(event.user_id),
+                "name": name or str(event.user_id),
+                "content": text[:80],  # 单条截断, 防注入过长
+                "time": int(event.time or 0),
+            }
+            key = f"{bot_id}:{event.group_id}"
+            buf = self._group_recent_msgs.setdefault(key, [])
+            buf.append(entry)
+            if len(buf) > self._group_recent_count:
+                del buf[:len(buf) - self._group_recent_count]
+        except Exception as e:
+            logger.debug(f"Note group recent message failed: {e}")
+
+    def _format_group_recent(self, bot_id: str, group_id) -> str:
+        """把缓冲中的最近群消息格式化为 prompt 文本段(空则返回 "")。"""
+        if self._group_recent_count <= 0:
+            return ""
+        buf = self._group_recent_msgs.get(f"{bot_id}:{group_id}", [])
+        if not buf:
+            return ""
+        from mohobot.utils.time_utils import TZ_UTC8
+        from datetime import datetime as _dt
+        lines = []
+        for entry in buf:
+            t = ""
+            if entry.get("time"):
+                try:
+                    t = _dt.fromtimestamp(entry["time"], TZ_UTC8).strftime("%H:%M")
+                except Exception:
+                    t = ""
+            lines.append(f"{t} {entry['name']}: {entry['content']}")
+        return "【群聊最近消息】\n" + "\n".join(lines)
+
+    async def _build_legacy_context(self, bot_id: str, chat_type: str, chat_id: str) -> list[dict]:
+        """加载会话上下文, 群聊时临时附加最近消息段(仅本次 LLM 调用)。
+
+        附加的 system 条目不写回 context 文件, 不参与上下文压缩总结。
+        """
+        context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
+        if chat_type == "group":
+            recent = self._format_group_recent(bot_id, chat_id)
+            if recent:
+                context = list(context) + [{"role": "system", "content": recent}]
+        return context
+
     async def _describe_first_image(self, bot_id: str, url: str) -> str:
         """识别图片并返回描述。
 
@@ -472,6 +542,11 @@ class MessageHandler:
                 lines.append(f"【较早对话总结】\n{content}")
             else:
                 lines.append(f"{role}: {content}")
+        # 群聊: 临时追加最近消息(仅注入, 不写入 context)
+        if chat_type == "group":
+            recent = self._format_group_recent(bot_id, chat_id)
+            if recent:
+                lines.append(recent)
         return "\n".join(lines)
 
     async def _agent_reply_handler(

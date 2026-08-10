@@ -671,9 +671,17 @@ async function loadConfigPage() {
       formField('server.port', 'WebSocket 端口', globalConfigCache.server?.port, { hint: 'OneBot 客户端连接的端口' }) +
       formField('server.host', '监听地址', globalConfigCache.server?.host) +
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
-      readonlyField('log_dir', '日志目录', globalConfigCache.log_dir, '服务端路径,请在配置文件修改') +
-      readonlyField('data_dir', '数据目录', globalConfigCache.data_dir, '服务端路径,请在配置文件修改') +
-      readonlyField('plugins_dir', '插件目录', globalConfigCache.plugins_dir, '服务端路径,请在配置文件修改') +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">📜 上下文压缩(历史对话裁剪)</div>' +
+      checkField('context_summary_enabled', '启用 AI 总结压缩', globalConfigCache.context_summary_enabled, '上下文满阈值轮数时,用 AI 总结最早的若干轮并插入对话最前; 关闭则只裁剪不总结') +
+      formField('context_trim_at_rounds', '压缩触发轮数', globalConfigCache.context_trim_at_rounds, { hint: '上下文满多少轮触发一次压缩' }) +
+      formField('context_trim_remove_rounds', '每次压缩轮数', globalConfigCache.context_trim_remove_rounds, { hint: '每次把最早的多少轮交给 AI 总结' }) +
+      formField('group_recent_msgs_count', '群聊最近消息条数', globalConfigCache.group_recent_msgs_count, { hint: '回复时临时注入群内最近 N 条消息(不写入上下文,不参与总结); 0=关闭' }) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">📁 服务端路径(保存后重启生效)</div>' +
+      formField('log_dir', '日志目录', globalConfigCache.log_dir, { hint: '日志输出目录' }) +
+      formField('data_dir', '数据目录', globalConfigCache.data_dir, { hint: '上下文/封禁名单等数据存放目录' }) +
+      formField('plugins_dir', '插件目录', globalConfigCache.plugins_dir, { hint: '插件扫描目录' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">💬 回复行为</div>' +
       checkField('reply.stream', '流式请求', globalConfigCache.reply?.stream, '逐 token 接收,false 则等完整回复') +
@@ -695,10 +703,10 @@ async function loadConfigPage() {
       '<div class="card-title">🚫 封禁系统</div>' +
       checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
       '<hr style="border-color:var(--border);margin:14px 0">' +
-      '<div class="card-title">🗄️ 数据库</div>' +
-      readonlyCheckField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite(需在配置文件修改)') +
-      readonlyField('database.folder', '数据库目录', globalConfigCache.database?.folder, '服务端路径,请在配置文件修改') +
-      readonlyField('database.file', '数据库文件名', globalConfigCache.database?.file, '服务端路径,请在配置文件修改');
+      '<div class="card-title">🗄️ 数据库(保存后重启生效)</div>' +
+      checkField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite') +
+      formField('database.folder', '数据库目录', globalConfigCache.database?.folder) +
+      formField('database.file', '数据库文件名', globalConfigCache.database?.file);
 
     const sel = document.getElementById('config-bot-select');
     const bots = (botListCache.bots || []).slice();
@@ -802,6 +810,18 @@ async function saveGlobalConfig() {
     beta_mode: document.getElementById('cfg-beta_mode')?.checked ?? true,
     server: { port, host },
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
+    context_summary_enabled: document.getElementById('cfg-context_summary_enabled')?.checked ?? true,
+    context_trim_at_rounds: parseInt(document.getElementById('cfg-context_trim_at_rounds').value) || 40,
+    context_trim_remove_rounds: parseInt(document.getElementById('cfg-context_trim_remove_rounds').value) || 15,
+    group_recent_msgs_count: parseInt(document.getElementById('cfg-group_recent_msgs_count').value) || 0,
+    log_dir: document.getElementById('cfg-log_dir')?.value ?? './logs',
+    data_dir: document.getElementById('cfg-data_dir')?.value ?? './data',
+    plugins_dir: document.getElementById('cfg-plugins_dir')?.value ?? './plugins',
+    database: {
+      enabled: document.getElementById('cfg-database.enabled')?.checked ?? true,
+      folder: document.getElementById('cfg-database.folder')?.value ?? './data/database',
+      file: document.getElementById('cfg-database.file')?.value ?? 'luotianyi.db',
+    },
     reply: {
       stream: document.getElementById('cfg-reply.stream')?.checked ?? true,
       segment_reply: document.getElementById('cfg-reply.segment_reply')?.checked ?? true,

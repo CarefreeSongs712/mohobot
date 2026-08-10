@@ -270,12 +270,16 @@ class WebPanel:
             data = body.data
 
             # Apply nested updates safely
-            # 注意: database / log_dir / data_dir / plugins_dir 属于
-            # 服务端运行路径配置, 不允许在 WebUI 修改(改错会导致服务异常)。
+            # database / log_dir / data_dir / plugins_dir 为服务端路径配置,
+            # 保存后写入配置文件, 重启服务后生效(启动时读取)。
             if "server" in data:
                 for k, v in data["server"].items():
                     if hasattr(cfg.server, k):
                         setattr(cfg.server, k, v)
+            if "database" in data:
+                for k, v in data["database"].items():
+                    if hasattr(cfg.database, k):
+                        setattr(cfg.database, k, v)
             if "web_panel" in data:
                 for k, v in data["web_panel"].items():
                     if hasattr(cfg.web_panel, k) and k != "password_hash":
@@ -317,7 +321,8 @@ class WebPanel:
                 if key in data:
                     setattr(cfg, key, data[key])
             for key in ("context_summary_enabled", "context_trim_at_rounds",
-                        "context_trim_remove_rounds"):
+                        "context_trim_remove_rounds", "group_recent_msgs_count",
+                        "log_dir", "data_dir", "plugins_dir"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
