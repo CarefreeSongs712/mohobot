@@ -23,10 +23,43 @@ from mohobot.file_store import json_read, json_update, json_write
 
 
 class ContextManager:
-    """Manages session context CRUD with trimming."""
+    """Manages session context CRUD with AI-summary compaction.
 
-    def __init__(self, data_dir: str = "./data"):
+    压缩机制: 上下文满 trim_at_rounds 轮(默认 40)时, 把最早的
+    trim_remove_rounds 轮(默认 15)交给 AI 总结, 总结作为 role="summary"
+    的新块插入对话最前; 总结失败则直接裁剪。总结块视为 1 轮参与后续压缩。
+    """
+
+    def __init__(
+        self,
+        data_dir: str = "./data",
+        summarizer=None,
+        summary_enabled: bool = True,
+        trim_at_rounds: int = 40,
+        trim_remove_rounds: int = 15,
+    ):
         self._data_dir = data_dir
+        # 异步总结回调: async (entries: list[dict]) -> str | None
+        self._summarizer = summarizer
+        self._summary_enabled = summary_enabled
+        self._trim_at_rounds = max(2, trim_at_rounds)
+        self._trim_remove_rounds = max(1, trim_remove_rounds)
+
+    def set_summarizer(self, summarizer) -> None:
+        """注入总结回调(LLMService.summarize_context)。"""
+        self._summarizer = summarizer
+
+    def set_trim_config(
+        self, *, enabled: bool | None = None,
+        at_rounds: int | None = None, remove_rounds: int | None = None,
+    ) -> None:
+        """热更新压缩配置(web 面板保存全局配置后调用)。"""
+        if enabled is not None:
+            self._summary_enabled = enabled
+        if at_rounds is not None:
+            self._trim_at_rounds = max(2, at_rounds)
+        if remove_rounds is not None:
+            self._trim_remove_rounds = max(1, remove_rounds)
 
     def _context_base(self, bot_id: str, chat_type: str) -> Path:
         return Path(self._data_dir) / "contexts" / bot_id / chat_type
@@ -93,9 +126,11 @@ class ContextManager:
         entries: list[dict[str, Any]],
         max_rounds: int = 30,
     ) -> None:
-        """Append entries to the active session context, trimming to max_rounds.
+        """Append entries to the active session context.
 
         使用 json_update 原子读改写,避免并发 append 丢失更新。
+        追加后检查轮数: 满 trim_at_rounds 轮时触发 AI 总结压缩
+        (最早的 trim_remove_rounds 轮 → 总结块插入最前)。
         """
         if chat_type == "group":
             session_id = "main"
@@ -108,12 +143,93 @@ class ContextManager:
         def _append(data):
             context = data if isinstance(data, list) else []
             context.extend(entries)
-            # Trim to max_rounds (keep last N user-assistant pairs)
-            if len(context) > max_rounds * 2:
-                context = context[-(max_rounds * 2):]
             return context
 
         await json_update(path, _append, default=[])
+
+        # 压缩检查(读最新, 锁外做 AI 总结)
+        if self._trim_at_rounds > 0:
+            context = await json_read(path)
+            if isinstance(context, list) and context:
+                rounds = self._count_rounds(context)
+                if rounds >= self._trim_at_rounds:
+                    await self._compact(path, context)
+
+    # ── AI 总结压缩 ──────────────────────────────────────────
+
+    @staticmethod
+    def _count_rounds(context: list[dict]) -> int:
+        """轮数: 普通消息两条(用户+回复)=1 轮, 总结块=1 轮。"""
+        rounds = sum(
+            1.0 if e.get("role") == "summary" else 0.5
+            for e in context
+        )
+        import math
+        return math.ceil(rounds)
+
+    @staticmethod
+    def _split_first_rounds(
+        context: list[dict], n: int,
+    ) -> tuple[list[dict], list[dict]]:
+        """从头部取出最早的 n 轮(总结块 1 轮, 普通消息 2 条=1 轮)。
+
+        返回 (head, tail); 边界可能落在半轮(未配对的用户消息)。
+        """
+        head: list[dict] = []
+        tail: list[dict] = []
+        removed = 0.0
+        for e in context:
+            if removed < n:
+                head.append(e)
+                removed += 1.0 if e.get("role") == "summary" else 0.5
+            else:
+                tail.append(e)
+        return head, tail
+
+    @staticmethod
+    def _same_entries(a: list[dict], b: list[dict]) -> bool:
+        """按内容比较两条目序列(并发压缩保护: 头部已被改则跳过)。"""
+        def _dump(lst: list[dict]) -> list[str]:
+            return [json.dumps(e, ensure_ascii=False, sort_keys=True) for e in lst]
+        return _dump(a) == _dump(b)
+
+    async def _compact(self, path: Path, context: list[dict]) -> None:
+        """压缩: 总结最早的 n 轮 → 总结块插入最前; 总结失败直接裁剪。"""
+        head, _tail = self._split_first_rounds(context, self._trim_remove_rounds)
+        if not head:
+            return
+
+        summary_text: str | None = None
+        if self._summary_enabled and self._summarizer is not None:
+            try:
+                summary_text = await self._summarizer(head)
+            except Exception as e:
+                logger.warning(f"上下文总结失败, 直接裁剪: {e}")
+                summary_text = None
+
+        summary_entry = None
+        if summary_text and summary_text.strip():
+            summary_entry = {
+                "role": "summary",
+                "content": summary_text.strip(),
+                "timestamp": int(time.time()),
+            }
+
+        def _merge(cur):
+            cur = cur if isinstance(cur, list) else []
+            # 并发保护: 头部已被其他协程压缩(内容不匹配)则跳过
+            if len(cur) < len(head) or not self._same_entries(cur[:len(head)], head):
+                return cur
+            rest = cur[len(head):]
+            if summary_entry is not None:
+                return [summary_entry] + rest
+            return rest  # 总结失败: 直接裁剪
+
+        await json_update(path, _merge, default=[])
+        logger.info(
+            f"上下文压缩: 移除 {len(head)} 条, 保留 {len(_tail)} 条, "
+            f"总结块={'有' if summary_entry else '无'}"
+        )
 
     async def clear_context(
         self, bot_id: str, chat_type: str, chat_id: str

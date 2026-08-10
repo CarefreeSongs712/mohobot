@@ -468,6 +468,8 @@ class MessageHandler:
                 continue
             if role == "assistant":
                 lines.append(f"bot: {content}")
+            elif role == "summary":
+                lines.append(f"【较早对话总结】\n{content}")
             else:
                 lines.append(f"{role}: {content}")
         return "\n".join(lines)

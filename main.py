@@ -71,6 +71,13 @@ class MohobotApplication:
         self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._llm_service = LLMService(global_config=self._config)
+        # 上下文 AI 总结压缩: 注入总结回调 + trim 配置(WebUI 保存后可热同步)
+        self._context_manager.set_summarizer(self._llm_service.summarize_context)
+        self._context_manager.set_trim_config(
+            enabled=self._config.context_summary_enabled,
+            at_rounds=self._config.context_trim_at_rounds,
+            remove_rounds=self._config.context_trim_remove_rounds,
+        )
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,

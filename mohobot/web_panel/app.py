@@ -316,8 +316,19 @@ class WebPanel:
             for key in ("beta_mode", "context_max_rounds"):
                 if key in data:
                     setattr(cfg, key, data[key])
+            for key in ("context_summary_enabled", "context_trim_at_rounds",
+                        "context_trim_remove_rounds"):
+                if key in data:
+                    setattr(cfg, key, data[key])
 
             cfg.save(self._config_path)
+            # 热同步上下文压缩配置(立即生效, 无需重启)
+            if self._context_manager is not None:
+                self._context_manager.set_trim_config(
+                    enabled=cfg.context_summary_enabled,
+                    at_rounds=cfg.context_trim_at_rounds,
+                    remove_rounds=cfg.context_trim_remove_rounds,
+                )
             # 热同步封禁拦截器(启停/管理员即时生效, 无需重启)
             if self._ban_filter is not None:
                 self._ban_filter.sync_config(

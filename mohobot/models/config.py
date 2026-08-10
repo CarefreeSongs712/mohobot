@@ -144,6 +144,11 @@ class GlobalConfig:
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
     context_max_rounds: int = 30
+    # 上下文压缩: 满 trim_at_rounds 轮时, 用 AI 总结最早的 trim_remove_rounds 轮,
+    # 总结作为新的块插入对话最前(旧内容直接裁剪)。enabled=False 时仅裁剪不总结。
+    context_summary_enabled: bool = True
+    context_trim_at_rounds: int = 40
+    context_trim_remove_rounds: int = 15
 
     @classmethod
     def load(cls, path: str | Path = "./config/global.yaml") -> "GlobalConfig":
@@ -235,6 +240,9 @@ class GlobalConfig:
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
             context_max_rounds=raw.get("context_max_rounds", 30),
+            context_summary_enabled=bool(raw.get("context_summary_enabled", True)),
+            context_trim_at_rounds=int(raw.get("context_trim_at_rounds", 40)),
+            context_trim_remove_rounds=int(raw.get("context_trim_remove_rounds", 15)),
         )
 
     def save(self, path: str | Path = "./config/global.yaml") -> None:
@@ -298,6 +306,9 @@ class GlobalConfig:
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
             "context_max_rounds": self.context_max_rounds,
+            "context_summary_enabled": self.context_summary_enabled,
+            "context_trim_at_rounds": self.context_trim_at_rounds,
+            "context_trim_remove_rounds": self.context_trim_remove_rounds,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -361,6 +372,9 @@ class GlobalConfig:
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
             "context_max_rounds": self.context_max_rounds,
+            "context_summary_enabled": self.context_summary_enabled,
+            "context_trim_at_rounds": self.context_trim_at_rounds,
+            "context_trim_remove_rounds": self.context_trim_remove_rounds,
         }
 
 

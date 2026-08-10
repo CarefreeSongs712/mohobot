@@ -360,6 +360,53 @@ class LLMService:
         except Exception as e:
             logger.debug(f"Failed to record LLM usage: {e}")
 
+    async def summarize_context(self, entries: list[dict]) -> str | None:
+        """总结一段较早的对话(上下文压缩用, 复用全局 chat_model)。
+
+        Prompt 要求 LLM 自行抉择: 先全局概要, 再对最重要的轮次(≤5)逐轮浓缩。
+        失败返回 None(调用方降级为直接裁剪)。
+        """
+        if not self._available or self._chat_client is None:
+            logger.warning("LLM 未配置, 上下文总结不可用(直接裁剪)")
+            return None
+        lines = []
+        for e in entries:
+            role = e.get("role", "user")
+            content = str(e.get("content", "")).strip()
+            if not content:
+                continue
+            if role == "assistant":
+                lines.append(f"机器人: {content}")
+            elif role == "summary":
+                lines.append(f"[早期总结]: {content}")
+            else:
+                lines.append(f"用户({role}): {content}")
+        if not lines:
+            return None
+        prompt = (
+            "你是一个对话压缩助手。下面是某段较早的对话(用户消息与机器人回复)。\n"
+            "请将其压缩为一份总结:\n"
+            "1. 先给出全局概要(2-4 句, 概括主题、重要事实、人物关系、未完成事项)\n"
+            "2. 针对最重要的轮次(不超过 5 个)逐轮浓缩, 保留关键信息\n"
+            "3. 总长度不超过 800 字, 使用简洁中文, 不要使用 markdown 标题\n\n"
+            "对话内容:\n" + "\n".join(lines)
+        )
+        try:
+            resp = await self._chat_client.chat.completions.create(
+                model=self._cfg.llm.chat_model,
+                messages=[
+                    {"role": "system", "content": "你是对话压缩助手。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=1200,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            return text or None
+        except Exception as e:
+            logger.warning(f"上下文总结失败: {e}")
+            return None
+
     async def get_usage_stats(self) -> dict[str, Any]:
         """Aggregate token usage from data/stats/llm_usage.jsonl.
 
@@ -458,7 +505,13 @@ class LLMService:
         for entry in context:
             role = entry.get("role", "user")
             content = entry.get("content", "")
-            if role in ("user", "assistant"):
+            if role == "summary":
+                # 上下文压缩产生的总结块: 作为 system 消息注入(早期对话浓缩)
+                messages.append({
+                    "role": "system",
+                    "content": f"【较早对话总结】\n{content}",
+                })
+            elif role in ("user", "assistant"):
                 messages.append({"role": role, "content": content})
             else:
                 # Named speaker role, e.g. "3831097597-墨染荷韵"
