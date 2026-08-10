@@ -1,0 +1,14 @@
+{
+  "api_url": {
+    "type": "string",
+    "default": "http://114.134.188.188:3003",
+    "description": "B 站解析 API 地址",
+    "hint": "返回 bvid 解析结果的第三方服务地址(原插件默认 http://114.134.188.188:3003)"
+  },
+  "accept_quality": {
+    "type": "int",
+    "default": 80,
+    "description": "解析清晰度",
+    "hint": "80=1080P / 64=720P / 32=480P / 16=360P; 服务不支持时可能自动降级"
+  }
+}

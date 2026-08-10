@@ -44,6 +44,76 @@ def find_cjk_font() -> str | None:
     return None
 
 
+def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = (102, 204, 255)) -> str | None:
+    """渲染"标题 + 字段行"的信息卡片 PNG, 返回临时文件路径; 失败返回 None。
+
+    fields: [(标签, 值), ...] — 每行"标签: 值", 值超长自动截断。
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    font_path = find_cjk_font()
+    if font_path is None:
+        return None
+
+    bg = (30, 34, 43)
+    fg = (214, 219, 228)
+    dim = (148, 155, 168)
+
+    width = 760
+    pad_x, pad_y = 26, 24
+    title_h = 46
+    line_h = 30
+
+    try:
+        title_font = ImageFont.truetype(font_path, 20)
+        label_font = ImageFont.truetype(font_path, 15)
+        body_font = ImageFont.truetype(font_path, 15)
+    except Exception:
+        return None
+
+    label_w = 90
+    value_x = pad_x + label_w
+    value_w = width - value_x - pad_x
+
+    # 预计算每行渲染文本(截断)
+    rows: list[tuple[str, str]] = []
+    for label, value in fields:
+        value = str(value)
+        while True:
+            try:
+                w = body_font.getlength(value)
+            except AttributeError:
+                w = body_font.getsize(value)[0]
+            if w <= value_w or len(value) <= 3:
+                break
+            value = value[:-1]
+        if w > value_w:
+            value = value.rstrip()[:-1] + "…"
+        rows.append((label, value))
+
+    height = pad_y * 2 + title_h + line_h * len(rows) + 10
+    img = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(img)
+
+    draw.text((pad_x, pad_y), title, font=title_font, fill=fg)
+    draw.rectangle([pad_x, pad_y + title_h - 10, pad_x + 170, pad_y + title_h - 6], fill=accent)
+
+    y = pad_y + title_h + 8
+    for label, value in rows:
+        draw.text((pad_x, y), label, font=label_font, fill=dim)
+        draw.text((value_x, y), value, font=body_font, fill=fg)
+        y += line_h
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="mohobot_info_")
+    os.close(fd)
+    img.save(tmp_path, "PNG")
+    img.close()
+    return tmp_path
+
+
 def render_help_card(sections: list[dict]) -> str | None:
     """把命令分组渲染成深色帮助卡片 PNG, 返回临时文件路径; 失败返回 None。
 
