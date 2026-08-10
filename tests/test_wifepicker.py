@@ -519,6 +519,57 @@ async def test_jrlp_command_alias() -> None:
     print("[13] /jrlp 别名解析(插件优先) OK")
 
 
+async def test_global_triggers_declared() -> None:
+    """抽老婆插件声明全部命令/别名为全局指令(群内多 bot 只由最小 bot 回复)。"""
+    import sys as _sys
+    _sys.path.insert(0, "plugins/wifepicker")
+    from main import COMMANDS, Plugin
+
+    gt = Plugin.global_triggers
+    assert gt == set(COMMANDS.keys()), "global_triggers 应包含全部命令与别名"
+    for cmd in ("今日老婆", "抽老婆", "jrlp", "强娶", "qiangqu", "求婚", "qh",
+                "关系图", "gxt", "重置记录", "czjl"):
+        assert cmd in gt, cmd
+    print("[14] global_triggers 声明 OK")
+
+
+async def test_keyword_trigger_min_bot_only() -> None:
+    """无前缀关键词触发(观察钩子): 群内多 bot 时只有最小 bot 处理。"""
+    import tempfile as _t
+    from mohobot.bot_manager import BotManager, BotInstance
+    from mohobot.models.config import BotConfig
+
+    tmp = _t.mkdtemp(prefix="kmb_")
+    inst = await make_plugin(tmp, config_extra={
+        "keyword_trigger_enabled": True,
+        "keyword_trigger_mode": "exact",
+        "daily_limit": 99,
+    })
+    # 群内两个 bot: bot_001 < bot_002
+    bm = BotManager(data_dir=_t.mkdtemp())
+    bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000))
+    bm._bots["bot_002"] = BotInstance("bot_002", None, BotConfig(qq=2000))
+    bm.note_group_message("bot_001", GROUP)
+    bm.note_group_message("bot_002", GROUP)
+    inst._ws_server._bot_manager = bm
+
+    ev = make_group_event(2001, "抽老婆")
+    # 先记录活跃成员(观察钩子; 需在 FakeWS 群成员 MEMBERS=1001-1003 内)
+    for uid in (1001, 1002, 1003):
+        await inst.on_message_observed("bot_001", make_group_event(uid, "发言"), {})
+    # 最小 bot(bot_001) → 触发
+    handled, reply = await inst.on_message_observed("bot_001", ev, {})
+    assert handled and reply and "今日老婆" in str(reply), reply
+    # 非最小 bot(bot_002) → 不触发
+    inst._ws_server.sent.clear()
+    handled2, reply2 = await inst.on_message_observed("bot_002", ev, {})
+    assert not handled2, "非最小 bot 不应触发关键词"
+    # 求婚回复仍由发起 bot 处理(不受去重影响): 无等待状态 → 不消费
+    handled3, _ = await inst.on_message_observed("bot_002", make_group_event(3002, "同意"), {})
+    assert not handled3
+    print("[15] 关键词触发最小 bot OK")
+
+
 async def test_all() -> None:
     await test_load_and_store()
     await test_observe_records_active_and_passthrough()
@@ -533,6 +584,8 @@ async def test_all() -> None:
     await test_graph_render_path()
     await test_concurrent_commands()
     await test_jrlp_command_alias()
+    await test_global_triggers_declared()
+    await test_keyword_trigger_min_bot_only()
     print("\nALL WIFEPICKER TESTS PASSED")
 
 
