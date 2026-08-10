@@ -194,10 +194,20 @@ class LLMService:
         if usage is not None:
             await self._record_usage(model, usage, bot_id, event)
 
-        # Handle tool calls
+        # Handle tool calls: 工具结果作为 tool 消息回传 LLM,
+        # 再调用一次生成最终自然语言回复(不向用户输出原始搜索结果)
         tool_results = None
         if tool_calls:
             tool_results = []
+            messages.append({
+                "role": "assistant",
+                "content": choice.message.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ],
+            })
             for tc in tool_calls:
                 result = await self._execute_tool(tc.function.name, tc.function.arguments)
                 tool_results.append({
@@ -206,7 +216,26 @@ class LLMService:
                     "arguments": tc.function.arguments,
                     "result": result,
                 })
-                reply_text += f"\n[工具调用: {tc.function.name} → {result}]"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+            # 二次调用: 基于工具结果生成最终回复
+            try:
+                response2 = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=self._tools_schemas,
+                    tool_choice="auto",
+                )
+                choice2 = response2.choices[0] if response2.choices else None
+                reply_text = (choice2.message.content or "") if choice2 else ""
+            except Exception as e:
+                logger.error(f"LLM API call failed (after tools): {e}")
+                reply_text = f"[LLM 调用失败: {e}]"
 
         return reply_text, tool_results
 
@@ -307,18 +336,56 @@ class LLMService:
                         if tc.function and tc.function.arguments:
                             tool_calls_buffer[idx]["arguments"] += tc.function.arguments
 
-        # After stream ends, execute tool calls if any
+        # After stream ends, execute tool calls if any:
+        # 工具结果作为 tool 消息回传 LLM, 再次流式生成最终回复
+        # (不向用户输出原始搜索结果)
         if tool_calls_buffer:
-            got_any_data = True
-            tool_results = []
+            messages.append({
+                "role": "assistant",
+                "content": full_content or None,
+                "tool_calls": [
+                    {"id": tc_data.get("id") or f"call_{idx}", "type": "function",
+                     "function": {"name": tc_data.get("function_name", ""),
+                                  "arguments": tc_data.get("arguments", "{}")}}
+                    for idx, tc_data in sorted(tool_calls_buffer.items())
+                ],
+            })
             for idx, tc_data in sorted(tool_calls_buffer.items()):
                 args_str = tc_data.get("arguments", "{}") or "{}"
                 result = await self._execute_tool(tc_data["function_name"], args_str)
-                tool_results.append(result)
-                full_content += f"\n[工具调用: {tc_data['function_name']} → {result}]"
-
-            if tool_results:
-                yield (f"\n[工具: {'; '.join(tool_results)}]", True)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_data.get("id") or f"call_{idx}",
+                    "content": result,
+                })
+            # 二次流式调用
+            try:
+                stream2 = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=self._tools_schemas,
+                    tool_choice="auto",
+                    stream=True,
+                )
+                got_final = False
+                async for chunk in stream2:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta is None:
+                        continue
+                    if delta.content:
+                        got_final = True
+                        yield (delta.content, False)
+                if not got_final:
+                    logger.warning("LLM tool-follow stream returned NO text content")
+                    yield ("[模型未返回内容——请检查模型配置]", True)
+                    return
+                yield ("", True)
+                return
+            except Exception as e:
+                logger.error(f"LLM stream call failed (after tools): {e}")
+                yield (f"[LLM 调用失败: {e}]", True)
                 return
 
         # Empty stream guard: some gateways return 0 chunks for unsupported

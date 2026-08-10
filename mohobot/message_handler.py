@@ -289,6 +289,10 @@ class MessageHandler:
                         if not (isinstance(seg, dict) and seg.get("type") == "image")
                     ]
 
+        # ── 图片引用归一化: NapCat 群聊图片常只有 file 文件名/路径而无 url,
+        # 通过 OneBot get_image API 换取 base64 → data URI(视觉描述/多模态可用)
+        await self._normalize_image_segments(bot_id, event)
+
         # ── Run interceptor chain ──
         for interceptor in self._interceptors:
             handled, response = await interceptor.intercept(bot_id, event, raw)
@@ -455,6 +459,57 @@ class MessageHandler:
         )
 
         await runtime.handle_event(chat_type, chat_id, chat_event)
+
+    # ── 图片引用归一化 ─────────────────────────────────────────
+
+    async def _normalize_image_segments(self, bot_id: str, event: MessageEvent) -> None:
+        """把无 url 的图片段(file 为文件名/路径)通过 OneBot get_image 换成 data URI。
+
+        NapCat 群聊图片的 image 段常只有 file 字段(文件名或 file:// 路径)而没有
+        可下载的 url, 视觉描述/多模态直接取不到图。这里调用 get_image API
+        换取 base64 并写入 data["url"], 下游统一走 data URI。
+        失败时保持原样(调用方降级为 "[图片]")。
+        """
+        if not isinstance(event.message, list):
+            return
+        ws = self._ws
+        if ws is None:
+            return
+        for seg in event.message:
+            if not (isinstance(seg, dict) and seg.get("type") == "image"):
+                continue
+            data = seg.setdefault("data", {})
+            if str(data.get("url", "") or "").strip():
+                continue  # 已有 url
+            file_ref = str(data.get("file", "") or "")
+            if not file_ref or file_ref.startswith("base64://"):
+                continue
+            try:
+                resp = await ws.send_to_bot(
+                    bot_id, "get_image", {"file": file_ref},
+                    wait_response=True, timeout=8.0,
+                )
+                b64 = str(((resp or {}).get("data") or {}).get("base64", "") or "")
+                if b64:
+                    # 按魔数推断 mime(视觉模型对 data URI 的 mime 敏感)
+                    import base64 as _b64
+                    mime = "image/jpeg"
+                    try:
+                        head = _b64.b64decode(b64[:64])
+                        if head[:4] == b"\x89PNG":
+                            mime = "image/png"
+                        elif head[:3] == b"GIF":
+                            mime = "image/gif"
+                        elif head[:2] == b"BM":
+                            mime = "image/bmp"
+                        elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                            mime = "image/webp"
+                    except Exception:
+                        pass
+                    data["url"] = f"data:{mime};base64,{b64}"
+                    logger.debug(f"图片 get_image 成功: {file_ref[:40]} → data URI")
+            except Exception as e:
+                logger.debug(f"get_image 失败({file_ref[:40]}): {e}")
 
     # ── ping/PONG ──────────────────────────────────────────────
 

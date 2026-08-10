@@ -127,7 +127,29 @@ class ImageCache:
         return str(local_path), description or "[图片]"
 
     async def _download_image(self, url: str) -> str | None:
-        """Download an image to the cache directory."""
+        """Download an image to the cache directory.
+
+        支持 data URI(data:image/...;base64,...)与 http(s) URL。
+        """
+        if url.startswith("data:"):
+            # data URI: base64 直接解码落盘(群聊图片经 get_image 归一化而来)
+            try:
+                import base64 as _base64
+                header, _, b64 = url.partition(",")
+                mime = header[5:].split(";")[0] if ";" in header else "image/jpeg"
+                content = _base64.b64decode(b64)
+            except Exception as e:
+                logger.warning(f"data URI 解码失败: {e}")
+                return None
+            ext = self._ext_from_content_type(mime) or ".jpg"
+            import hashlib
+            url_hash = hashlib.md5(url.encode()).hexdigest()
+            filepath = self._images_dir / f"{url_hash}{ext}"
+            async with aiofiles.open(filepath, "wb") as f:
+                await f.write(content)
+            logger.debug(f"Image decoded from data URI → {filepath} ({len(content)} bytes)")
+            return str(filepath)
+
         client = await self._get_client()
         try:
             response = await client.get(url)
