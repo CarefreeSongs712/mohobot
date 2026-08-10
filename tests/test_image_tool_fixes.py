@@ -259,6 +259,38 @@ async def test_agent_path_uses_normalized_image():
     print("[+] agent 路径图片引用 OK")
 
 
+async def test_tool_leak_sanitizer():
+    """发送层双保险: 工具结果泄漏消息在发送前被拦截/截断。"""
+    from mohobot.message_handler import MessageHandler
+    assert MessageHandler._sanitize_tool_leak("[工具: ## Search Results (5 results)") == "", "整条泄漏应丢弃"
+    assert MessageHandler._sanitize_tool_leak("[工具调用: anysearch_search → ...") == ""
+    normal = "正常的回复内容"
+    assert MessageHandler._sanitize_tool_leak(normal) == normal
+    mixed = "前面正常回复\n[工具调用: anysearch_search → 结果]"
+    assert MessageHandler._sanitize_tool_leak(mixed) == "前面正常回复", "拼接后缀应截断"
+    assert MessageHandler._sanitize_tool_leak("") == ""
+
+    # _send_agent_message 入口拦截
+    class W:
+        def __init__(self):
+            self.sent = []
+
+        async def send_group_msg(self, bot_id, group_id, message):
+            self.sent.append(message)
+
+    ws = W()
+    handler = MessageHandler(
+        ws_server=ws, context_manager=None, llm_service=None, plugin_system=None,
+        data_dir=tempfile.mkdtemp(), reply_config=ReplyConfig(),
+        global_config=GlobalConfig(),
+    )
+    await handler._send_agent_message("bot_001", "group", "888888", "[工具: ## Search Results]")
+    assert not ws.sent, "泄漏消息不应发出"
+    await handler._send_agent_message("bot_001", "group", "888888", "正常消息")
+    assert ws.sent == ["正常消息"]
+    print("[+] 发送层防御 OK")
+
+
 async def _main() -> int:
     import asyncio as _a
     import traceback

@@ -703,10 +703,31 @@ class MessageHandler:
             max_rounds=self._context_max_rounds,
         )
 
+    # ── 工具结果泄漏防御(双保险) ─────────────────────────────
+
+    @staticmethod
+    def _sanitize_tool_leak(text) -> str:
+        """发送前拦截工具结果泄漏: 整条以 "[工具" 开头 → 丢弃;
+        含 "\n[工具调用: " 拼接后缀 → 截断。返回 "" 表示不发送。"""
+        if not isinstance(text, str) or not text:
+            return text
+        if text.startswith("[工具"):
+            logger.warning("拦截工具结果泄漏消息(整条丢弃)")
+            return ""
+        idx = text.find("\n[工具调用: ")
+        if idx >= 0:
+            logger.warning("截断工具结果泄漏后缀")
+            return text[:idx]
+        return text
+
     async def _send_agent_message(
         self, bot_id: str, chat_type: str, chat_id: str,
         message: str | list[dict],
     ) -> None:
+        if isinstance(message, str):
+            message = self._sanitize_tool_leak(message)
+            if not message:
+                return
         if chat_type == "private":
             await self._ws.send_private_msg(bot_id, chat_id, message)
         else:
@@ -1066,7 +1087,12 @@ class MessageHandler:
 
         群聊超长纯文本(>300 字符且多行)自动改用合并转发, 避免刷屏;
         合并转发失败(客户端不支持)时回退普通文本发送。
+        发送前过工具结果泄漏防御(双保险, 正常链路已不回显工具结果)。
         """
+        if isinstance(reply, str):
+            reply = self._sanitize_tool_leak(reply)
+            if not reply:
+                return
         if (
             isinstance(reply, str)
             and isinstance(event, GroupMessageEvent)
