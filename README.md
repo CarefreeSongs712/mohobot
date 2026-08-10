@@ -17,11 +17,15 @@
   - `ReflectionWorker` 回合后串行反思：写入长期记忆 + 更新用户画像
   - `SubconsciousMemory` 向量检索（ChromaDB，未配置时优雅降级）+ 数据库记忆正本
 - **LLM 驱动对话** — OpenAI 兼容 API，支持流式回复（标点+长度分段发送）、函数调用（Tools）、视觉识别（Vision）
-- **会话上下文管理** — 私聊支持多会话切换，群聊单一会话；上下文自动裁剪（最近 30 轮），记录每条消息的说话人（QQ号-昵称）
+- **会话上下文管理** — 私聊支持多会话切换，群聊单一会话；记录每条消息的说话人（QQ号-昵称）
+- **上下文 AI 总结压缩** — 上下文满 40 轮时，用 AI 总结最早的 15 轮并作为"总结块"插入对话最前（不参与后续总结的只有它自己，可嵌套再总结）；总结失败自动降级为直接裁剪
+- **群聊最近消息** — 回复时临时注入群内最近 10 条消息（仅内存、不写入上下文、不参与总结），感知群聊氛围
 - **历史对话入库** — 聊天记录写入独立 SQLite `conversations` 表（`mohobot.db`），原始事件另以 JSONL 只读归档
-- **智能群聊触发** — 群聊中仅在 @机器人 或 引用机器人自己的消息 时才触发 LLM 回复
+- **智能群聊触发** — 群聊中仅在 @机器人、引用机器人消息、命令或 `ping` 时触发 LLM 回复；`ping`（忽略大小写，无需斜杠）直接回复 `PONG`
+- **全局指令去重** — 群内多个 bot 时，全局指令（`/占卜` `/help` `/status` `/点歌` 等，含"命令+空格参数"形式）只由 bot_id 最小者回复
+- **LLM 备用模型回退** — beta 各 LLM 模块主模型遇连接类错误（连接失败/超时）时自动换用全局备用模型重试一次
 - **图片缓存与去重** — phash 感知哈希去重 + LRU 缓存（300MB 上限），图片消息只解析首张
-- **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件
+- **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件；插件配置由 `_conf_schema.json` 驱动，WebUI 可视化编辑热生效
 - **Web 管理面板** — FastAPI + SSE 实时日志流、文件系统浏览器、配置在线编辑、统计看板
 - **可配置拦截器** — 指令拦截（`/` 开头）、关键词拦截（预设回复）
 
@@ -174,33 +178,36 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 回复路径移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi)，`config/global.yaml` 的 `agent:` 段配置：
 
 ```yaml
+llm:
+  chat_model: "DeepSeek-V4-Flash"   # 全局默认模型(未单独配置的模块使用)
+  chat_base_url: "http://127.0.0.1:36712/v1"
+  chat_api_key: "sk-xxx"
+  fallback_model: "DeepSeek-V4-Flash"  # 全局备用模型: 各模块连接类失败自动回退(空=不回退)
+  models:                            # 可用模型列表(WebUI 下拉选项, 可增删)
+    - "DeepSeek-V4-Flash"
+    - "Qwen3-8B"
+    - "mimo-v2.5"
+
 agent:
   enabled: true                # 全局总开关(需重启); 各 bot 是否启用流水线
                                # 由 bot 私有配置的 agent_enabled 单独控制
   # 角色名/人设/说话风格不在此配置 —— 每个 bot 自动使用自己的 nickname/persona
-  llm_modules:                 # 各模块可独立覆盖模型；留空继承 llm.* 全局配置
-    main_chat:                 # 回复生成
-      model: ""
-      base_url: ""
-      api_key: ""
+  llm_modules:                 # 各模块模型在 WebUI 从 llm.models 下拉选择;
+                               # base_url/api_key 留空继承 llm.* 全局配置
+    main_chat:                 # 回复生成(默认 DeepSeek-V4-Flash)
+      model: "DeepSeek-V4-Flash"
       temperature: 0.7
       max_tokens: 2048
-    topic_extractor:           # 话题提取（JSON 模式）
-      model: ""
-      base_url: ""
-      api_key: ""
+    topic_extractor:           # 话题提取, JSON 模式(默认 DeepSeek-V4-Flash)
+      model: "DeepSeek-V4-Flash"
       temperature: 0.3
       max_tokens: 1024
-    memory_writer:             # 记忆抽取（JSON 模式）
-      model: ""
-      base_url: ""
-      api_key: ""
+    memory_writer:             # 记忆抽取, JSON 模式(默认 Qwen3-8B)
+      model: "Qwen3-8B"
       temperature: 0.3
       max_tokens: 1024
-    user_profile_updater:      # 用户画像更新
-      model: ""
-      base_url: ""
-      api_key: ""
+    user_profile_updater:      # 用户画像更新(默认 Qwen3-8B)
+      model: "Qwen3-8B"
       temperature: 0.3
       max_tokens: 1024
   memory:
@@ -234,6 +241,19 @@ agent:
 ```
 
 > 戳一戳固定回复对所有 bot 生效（不依赖 Agent 开关），优先级：bot 私有 `touch_replies` > 全局 `agent.reflex.touch_replies` > 内置默认。
+
+### 上下文压缩与群聊最近消息
+
+```yaml
+context_max_rounds: 30                 # 上下文最大轮数(旧版直接裁剪阈值, 保留)
+context_summary_enabled: true          # 启用 AI 总结压缩
+context_trim_at_rounds: 40             # 满多少轮触发一次压缩
+context_trim_remove_rounds: 15         # 每次把最早的多少轮交给 AI 总结
+group_recent_msgs_count: 10            # 群聊最近消息条数(回复时临时注入, 0=关闭)
+```
+
+- **AI 总结压缩**：上下文满 `context_trim_at_rounds` 轮时，把最早的 `context_trim_remove_rounds` 轮交给 LLM 总结（复用全局 chat 模型，prompt 要求"全局概要 + 重点轮次浓缩"），总结作为 `role="summary"` 的块插入对话最前；总结块视为 1 轮参与后续再总结；总结失败（API 不可用）自动降级为直接裁剪
+- **群聊最近消息**：MessageHandler 内存缓冲每群最近 N 条消息（含未 @bot 的，单条截断 80 字），生成回复时临时注入 prompt（agent 路径与旧版路径都生效），**不写入上下文文件、不参与总结压缩**
 
 ### 数据库配置
 
@@ -280,6 +300,18 @@ database:
 - **适配**：管理员=全局 `admins`；数据隔离于各群白/黑名单（`whitelist_groups`/`blacklist_groups`）；`auto_withdraw`（自动撤回）因 mohobot 无删除消息追踪而停用
 
 > 移植自 [astrbot-plugin-wifepicker](https://github.com/astrbot/astrbot-plugin-wifepicker) v3.2.6（作者：Nayukiiii），核心逻辑/模板/关键词路由原样移植，事件模型与数据存储适配 mohobot。
+
+## 🎵 网易云点歌插件（移植自 astrbot_plugin_netease_music）
+
+`plugins/neteasemusic/` — 网易云音乐点歌：`/点歌 <关键词>`（别名 `/music` `/听歌` `/网易云`）搜索并展示编号列表，**群内任意成员回复数字即可选歌（无需 @bot）**，60 秒内有效：
+
+- **播放**：详情文本 + 封面图合并为同一条消息（text + image 段）→ record 语音（NapCat 直接拉取 URL 转码，失败自动降级"🔊 点击播放: 链接"）
+- **音质回退**：按配置的优先音质自动降级（lossless → exhigh → higher → standard），VIP/无版权歌曲给出提示
+- **多 bot 去重**：点歌命令由群内 bot_id 最小者回复（`global_triggers`）；数字选择状态按 `(bot_id, 会话)` 隔离，只有发起搜索的 bot 消费
+- **配置**（WebUI 插件页可改、热生效）：`api_url`（自部署的 NeteaseCloudMusicApi 地址）/ `quality`（优先音质）/ `search_limit`（结果数）/ `cookie`（VIP 解锁）
+- 明确**不支持**"来一首xxx"等自然语言模糊匹配
+
+> 移植自 [astrbot_plugin_netease_music](https://github.com/NachoCrazy/netease-music-astrbot-plugin) v2.0.0（作者：NachoCrazy），依赖自部署的 NeteaseCloudMusicApi 服务。
 
 ## 🎵 歌曲知识（移植自 Agent-LuoTianyi，beta 板块）
 
@@ -373,8 +405,9 @@ mohobot/
 │   ├── models/                    # OneBot 协议与配置模型
 │   ├── utils/                     # 日志、CQ 码解析等工具
 │   └── web_panel/                 # FastAPI 管理面板（8 板块，含封禁管理）
-├── plugins/                       # 插件目录（动态加载：status / praise）
-├── tests/                         # 冒烟测试（smoke_*）与单测
+├── plugins/                       # 插件目录（动态加载：status / praise / divination /
+│                                  #   neteasemusic / wifepicker / relationship / song_sync）
+├── tests/                         # 冒烟测试（smoke_*）与单测（tests/_run_all.py 全量回归）
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
 │   ├── history/{bot_id}/          # 【只读】原始聊天记录 JSONL
@@ -397,7 +430,7 @@ mohobot/
 | 向量索引 | `data/database/chroma/`（可选） | 可读写 | ChromaDB | 记忆语义检索（未配置 embedding 时自动降级为空实现） |
 
 - **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入
-- **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；每个上下文仅保留最近 30 轮
+- **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
 - **数据隔离**：记忆按 bot（`owner_character_id`）隔离，会话数据按 bot_id 分目录
 
 ## 💬 聊天指令
@@ -411,18 +444,20 @@ mohobot/
 | `/forget <n>` | 删除当前会话最近 n 条记录 |
 | `/hist` | 打印当前会话内容（调试） |
 | `/clear` | 清空当前会话 |
-| `/help` | 显示全部可用指令 |
-| `/status` | 显示框架与系统状态（插件） |
-| `赞我` / `zanwo` | 给自己点 20 个赞（插件，每日上限 10 次/人） |
+| `/help` | 显示全部可用指令（PIL 渲染成图片，按插件分组、标注管理员权限；失败降级文本） |
+| `/status` | 显示框架与系统状态（插件，图片） |
+| `/点歌 <关键词>` | 网易云点歌（别名 `/music` `/听歌` `/网易云`；回复数字选歌） |
+| `ping` | 全局功能：发送 ping（忽略大小写、无需斜杠、群聊不 @ 也回复）→ 回复 PONG |
+| `赞我` / `zanwo` | 给自己点赞（插件，数量/回复模板可在插件配置中调整，每日上限缓存） |
 
 ## 🖥️ Web 管理面板
 
 启动后访问 `http://127.0.0.1:9090`（默认用户名 `admin`，密码在 `config/global.yaml` 的 `web_panel.password_hash` 中配置）：
 
 1. 📊 **数据总览** — 系统/框架/Bot/LLM token 统计
-2. ⚙️ **配置文件** — 全局 + 每 Bot 配置可视化编辑（含 Agent 子系统与数据库配置）
-3. 🧠 **模型配置** — Chat / Vision 模型、端点与密钥
-4. 🔌 **插件管理** — 启停插件
+2. ⚙️ **配置文件** — 全局 + 每 Bot 配置可视化编辑（上下文压缩、群聊最近消息、Agent 模型下拉等；数据库/日志/数据/插件目录属服务端路径，不在 WebUI 修改）
+3. 🧠 **模型配置** — Chat / Vision 模型、端点与密钥；**可用模型列表**（每行一个，beta 模块下拉的选项来源）；**备用模型**（连接失败自动回退，可"不使用"）
+4. 🔌 **插件管理** — 启停/热重载插件；带 `_conf_schema.json` 的插件可"⚙️ 配置"（表单驱动，保存热生效）
 5. 💬 **对话数据** — 浏览/编辑各会话上下文
 6. 📋 **实时日志** — SSE 日志流，支持多选级别筛选（DEBUG/INFO/WARN/ERROR）
 7. 🔧 **系统设置** — 修改密码、重启服务
@@ -462,10 +497,15 @@ class Plugin:
 - [x] 长期记忆：向量检索（ChromaDB，未配置时优雅降级）+ 数据库正本 + 用户画像
 - [x] LLM 流式对话（旧路径：分段回复、工具调用、视觉识别）
 - [x] VLM 图片理解（agent 路径自动描述图片；base64:// 兼容）
-- [x] 会话上下文管理（多会话、裁剪、说话人记录，context 机制不变）
-- [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳反射回复
-- [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置）
-- [x] 插件系统（status / praise）
+- [x] 会话上下文管理（多会话、说话人记录，context 机制不变）
+- [x] 上下文 AI 总结压缩（满 40 轮裁剪 15 轮，总结块插入最前，失败降级直接裁剪）
+- [x] 群聊最近消息注入（可配置条数，不写上下文、不参与总结）
+- [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳反射回复 + ping/PONG
+- [x] 全局指令去重（群内多 bot 只由最小 bot_id 回复，支持命令+空格参数）
+- [x] LLM 备用模型回退（连接类失败自动换用全局备用模型重试）
+- [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置；模型页含可用模型列表与备用模型）
+- [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync）
+- [x] /help 图片渲染（PIL 深色卡片，按插件分组 + 管理员标注）
 - [ ] 消息发送限流与队列（当前仅图片突发限流）
 - [ ] 单元测试与 CI（当前为本地冒烟测试 `tests/`）
 - [ ] Docker 部署
