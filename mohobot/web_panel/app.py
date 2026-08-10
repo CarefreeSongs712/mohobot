@@ -455,6 +455,7 @@ class WebPanel:
                     "api_key": cfg.llm.chat_api_key or "",
                     "max_tokens": cfg.llm.chat_max_tokens,
                     "temperature": cfg.llm.chat_temperature,
+                    "fallback_model": cfg.llm.fallback_model,
                 },
                 "vision": {
                     "model": cfg.llm.vision_model,
@@ -475,6 +476,8 @@ class WebPanel:
                 for k, v in data["chat"].items():
                     if hasattr(cfg.llm, f"chat_{k}") and k != "api_key":
                         setattr(cfg.llm, f"chat_{k}", v)
+                    elif k == "fallback_model":
+                        cfg.llm.fallback_model = str(v or "")
                 if "api_key" in data["chat"]:
                     cfg.llm.chat_api_key = data["chat"]["api_key"]
             if "vision" in data:

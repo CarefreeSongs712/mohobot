@@ -655,9 +655,13 @@ function checkField(name, label, value, hint = '') {
 function selectField(name, label, value, options, hint = '') {
   const opts = (options || []).map(o =>
     `<option value="${String(o).replace(/"/g, '&quot;')}" ${String(o) === String(value) ? 'selected' : ''}>${String(o).replace(/</g, '&lt;')}</option>`
-  ).join('') || '<option value="">(无可用模型)</option>';
+  ).join('') || '<option value="">(无可用选项)</option>';
+  // 当前值不在选项中时(如空值对应"(不使用)")补一个选中项, 避免显示与实际不符
+  const known = (options || []).some(o => String(o) === String(value));
+  const extra = (!known && value !== '' && value != null)
+    ? `<option value="${String(value).replace(/"/g, '&quot;')}" selected>${String(value)}</option>` : '';
   return `<div class="form-row"><label>${label}</label>
-    <select id="cfg-${name}">${opts}</select>
+    <select id="cfg-${name}">${extra}${opts}</select>
     ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
 }
 
@@ -879,7 +883,10 @@ async function loadModels() {
       formField('chat_base_url', 'API 地址 (Base URL)', c.base_url) +
       formField('chat_api_key', 'API Key', c.api_key, { type: 'password' }) +
       formField('chat_max_tokens', '最大 Token', c.max_tokens) +
-      formField('chat_temperature', '温度 (0-2)', c.temperature);
+      formField('chat_temperature', '温度 (0-2)', c.temperature) +
+      selectField('chat_fallback_model', '备用模型(连接失败回退)', c.fallback_model,
+        ['(不使用)'].concat(modelCache.models || []),
+        'beta 各模块主模型遇到连接类错误(连接失败/超时)时自动换用此模型重试一次') ;
     document.getElementById('model-vision-form').innerHTML =
       formField('vision_model', '模型名称', v.model) +
       formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
@@ -899,6 +906,7 @@ async function saveModels() {
       api_key: document.getElementById('cfg-chat_api_key').value,
       max_tokens: parseInt(document.getElementById('cfg-chat_max_tokens').value) || 4096,
       temperature: parseFloat(document.getElementById('cfg-chat_temperature').value) || 0.7,
+      fallback_model: document.getElementById('cfg-chat_fallback_model')?.value ?? '',
     },
     vision: {
       model: document.getElementById('cfg-vision_model').value,

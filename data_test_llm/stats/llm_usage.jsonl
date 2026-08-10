@@ -1,0 +1,17 @@
+{"time": 1786328697.1446514, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328698.6780436, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328721.2406425, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328722.8030128, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328723.1850438, "bot_id": "", "module": "memory_writer", "model": "mimo-v2.5", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328745.762809, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328747.2903981, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328747.671222, "bot_id": "", "module": "memory_writer", "model": "mimo-v2.5", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328907.329459, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328908.859341, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328909.2387862, "bot_id": "", "module": "memory_writer", "model": "mimo-v2.5", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328945.169662, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328946.691138, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328947.070843, "bot_id": "", "module": "memory_writer", "model": "mimo-v2.5", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328961.5340202, "bot_id": "", "module": "memory_writer", "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328963.0537596, "bot_id": "", "module": "memory_writer", "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+{"time": 1786328963.4353647, "bot_id": "", "module": "memory_writer", "model": "mimo-v2.5", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}

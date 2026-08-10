@@ -407,6 +407,8 @@ class BotAgentRuntime:
                 temperature=float(spec.get("temperature", 0.7)),
                 data_dir=self.config.get("data_dir", "./data"),
                 bot_id=self.bot_id,
+                # 全局备用模型(连接类失败回退; 空 = 不回退)
+                fallback_model=global_llm.get("fallback_model", ""),
             )
             if not modules[name].is_available():
                 self.logger.warning(f"LLM module '{name}' NOT available (missing config)")

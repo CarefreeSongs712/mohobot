@@ -34,6 +34,10 @@ class LLMConfig:
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vision_api_key: str = ""
 
+    # 全局备用模型: beta 各 LLM 模块主模型遇到连接类错误(连接失败/超时)时
+    # 自动换用此模型重试一次(仅连接类错误; 空 = 不回退)
+    fallback_model: str = "DeepSeek-V4-Flash"
+
     # 可用模型列表(WebUI 预填, 供 beta 各 LLM 模块下拉选择; 可增删)
     models: list[str] = field(default_factory=lambda: [
         "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -227,6 +231,7 @@ class GlobalConfig:
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
                 vision_base_url=llm_raw.get("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
                 vision_api_key=llm_raw.get("vision_api_key", ""),
+                fallback_model=llm_raw.get("fallback_model", "DeepSeek-V4-Flash"),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
                 ])],
@@ -306,6 +311,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },
             "web_panel": {
@@ -374,6 +380,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },
             "web_panel": {

@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from mohobot.agent.prompts import PROMPT_TEMPLATES
 
@@ -39,6 +39,7 @@ class LLMModule:
         temperature: float = 0.7,
         data_dir: str = "",
         bot_id: str = "",
+        fallback_model: str = "",
     ):
         self.module_name = module_name
         self._cfg = config
@@ -52,6 +53,12 @@ class LLMModule:
         self.temperature = temperature
         self._data_dir = data_dir or "./data"
         self._bot_id = bot_id
+        # 全局备用模型: 主模型连接类失败时换用(空 = 不回退)
+        self.fallback_model = (
+            fallback_model
+            or (config.get("fallback_model") if isinstance(config, dict) else None)
+            or ""
+        )
 
         if self.template is None and self.prompt_name:
             self.template = PROMPT_TEMPLATES.get(self.prompt_name, "")
@@ -101,13 +108,39 @@ class LLMModule:
                 f"LLM[{self.module_name}] {self.model} OK {duration_ms:.0f}ms "
                 f"({len(prompt)} prompt chars)"
             )
-            self._record_usage(resp)
+            self._record_usage(resp, self.model)
             return content
         except Exception as e:
+            # 仅连接类错误(连接失败/超时)回退全局备用模型重试一次
+            if (
+                self.fallback_model
+                and self.fallback_model != self.model
+                and isinstance(e, (APIConnectionError, APITimeoutError))
+            ):
+                logger.warning(
+                    f"LLM[{self.module_name}] {self.model} 连接失败({e}), "
+                    f"回退备用模型 {self.fallback_model} 重试"
+                )
+                try:
+                    retry_params = dict(params)
+                    retry_params["model"] = self.fallback_model
+                    resp = await self._client.chat.completions.create(**retry_params)
+                    content = resp.choices[0].message.content or ""
+                    logger.debug(
+                        f"LLM[{self.module_name}] {self.fallback_model} 回退成功 "
+                        f"({len(prompt)} prompt chars)"
+                    )
+                    self._record_usage(resp, self.fallback_model)
+                    return content
+                except Exception as e2:
+                    logger.error(
+                        f"LLM[{self.module_name}] fallback {self.fallback_model} "
+                        f"也失败: {e2}"
+                    )
             logger.error(f"LLM[{self.module_name}] call failed: {e}")
             raise
 
-    def _record_usage(self, resp) -> None:
+    def _record_usage(self, resp, model_name: str | None = None) -> None:
         """把本次调用的 token 用量写入 stats/llm_usage.jsonl(面板统计)。"""
         usage = getattr(resp, "usage", None)
         if usage is None:
@@ -121,7 +154,7 @@ class LLMModule:
                 "time": time.time(),
                 "bot_id": self._bot_id,
                 "module": self.module_name,
-                "model": self.model,
+                "model": model_name or self.model,
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0),
                 "completion_tokens": getattr(usage, "completion_tokens", 0),
                 "total_tokens": getattr(usage, "total_tokens", 0),
