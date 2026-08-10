@@ -15,8 +15,6 @@
 from __future__ import annotations
 
 import base64
-import os
-import tempfile
 import time
 import urllib.parse
 from typing import Any
@@ -178,27 +176,27 @@ class Plugin:
         else:
             await ws.send_private_msg(bot_id, chat_id, text)
 
-    async def _send_cover(self, bot_id: str, event: Any, cover_url: str) -> None:
-        """下载封面图并发送; 失败静默(不影响主流程)。"""
+    async def _send_card(self, bot_id: str, event: Any, text: str, cover_url: str) -> None:
+        """发送"详情文本 + 封面图"同一条消息(text 段 + image 段)。
+
+        封面下载/编码失败时仅发送文本段。
+        """
         ws = self._ws_server
         if ws is None:
             return
+        segments: list[dict] = [{"type": "text", "data": {"text": text}}]
         try:
             image_data = await self._api_download_image(cover_url)
-            if not image_data:
-                return
-            fd, tmp = tempfile.mkstemp(suffix=".png", prefix="mohobot_music_cover_")
-            os.close(fd)
-            with open(tmp, "wb") as f:
-                f.write(image_data)
-            chat_type, chat_id = self._chat_of(event)
-            await ws.send_image(bot_id, chat_type, chat_id, tmp)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if image_data:
+                b64 = base64.b64encode(image_data).decode()
+                segments.append({"type": "image", "data": {"file": f"base64://{b64}"}})
         except Exception as e:
-            logger.warning(f"发送歌曲封面失败: {e}")
+            logger.warning(f"下载歌曲封面失败, 仅发送文本: {e}")
+        chat_type, chat_id = self._chat_of(event)
+        if chat_type == "group":
+            await ws.send_group_msg(bot_id, chat_id, segments)
+        else:
+            await ws.send_private_msg(bot_id, chat_id, segments)
 
     async def _send_record(self, bot_id: str, event: Any, audio_url: str) -> bool:
         """发送 record 语音(NapCat 拉取 URL); 失败返回 False(调用方降级为链接)。"""
@@ -351,8 +349,7 @@ class Plugin:
                 f"✨ 音质: {quality}\n\n"
                 f"请主人享用喵~"
             )
-            await self._send_text(bot_id, event, detail_text)
-            await self._send_cover(bot_id, event, cover_url)
+            await self._send_card(bot_id, event, detail_text, cover_url)
             ok = await self._send_record(bot_id, event, audio_url)
             if not ok:
                 await self._send_text(bot_id, event, f"🔊 点击播放: {audio_url}")

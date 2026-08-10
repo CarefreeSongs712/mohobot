@@ -130,29 +130,31 @@ class FakeWS:
     """记录所有发送内容。"""
 
     def __init__(self):
-        self.texts = []
-        self.images = []
+        self.texts = []      # 纯文本消息
+        self.cards = []      # 文本+图片混合消息(段列表)
         self.records = []
         self.record_fail = False
 
     async def send_group_msg(self, bot_id, group_id, message):
-        if isinstance(message, list) and message and message[0]["type"] == "record":
-            if self.record_fail:
-                raise RuntimeError("record not supported")
-            self.records.append((bot_id, group_id, message[0]["data"]["file"]))
-        else:
-            self.texts.append((bot_id, group_id, message))
+        self._route(bot_id, group_id, message)
 
     async def send_private_msg(self, bot_id, user_id, message):
-        if isinstance(message, list) and message and message[0]["type"] == "record":
-            if self.record_fail:
-                raise RuntimeError("record not supported")
-            self.records.append((bot_id, user_id, message[0]["data"]["file"]))
+        self._route(bot_id, user_id, message)
+
+    def _route(self, bot_id, target, message):
+        if isinstance(message, list):
+            types = [seg.get("type") for seg in message]
+            if "record" in types:
+                if self.record_fail:
+                    raise RuntimeError("record not supported")
+                self.records.append((bot_id, target, message[0]["data"]["file"]))
+            else:
+                self.cards.append((bot_id, target, message))
         else:
-            self.texts.append((bot_id, user_id, message))
+            self.texts.append((bot_id, target, message))
 
     async def send_image(self, bot_id, chat_type, chat_id, image_path):
-        self.images.append((bot_id, chat_type, chat_id, image_path))
+        pass
 
 
 def make_plugin():
@@ -199,10 +201,14 @@ async def test_number_selection():
     # 群内其他成员回数字(未 @) → 消费并播放
     handled, reply = await inst.on_message_observed("bot_001", make_group_event(3002, "2"), {})
     assert handled and reply is None, "数字选择应消费消息"
-    # 发送了详情文本 + 封面 + record
-    texts = [t for t in ws.texts if "遵命" in str(t[2])]
-    assert texts, "应发送详情文本"
-    assert ws.images and ws.images[-1][1] == "group", ws.images
+    # 详情文本 + 封面图合并为同一条消息(text 段 + image 段)
+    assert ws.cards, "应发送文本+图片卡片消息"
+    card_bot, card_target, card_msg = ws.cards[-1]
+    assert any(seg.get("type") == "text" and "遵命" in seg.get("data", {}).get("text", "")
+               for seg in card_msg), "卡片应含详情文本段"
+    assert any(seg.get("type") == "image" and seg.get("data", {}).get("file", "").startswith("base64://")
+               for seg in card_msg), "卡片应含 base64 封面图段(同一条消息)"
+    # record 语音单独一条
     assert ws.records and ws.records[-1][2] == "http://audio.example.com/202.mp3"
     # 等待会话已清除
     assert not inst._waiting_users
