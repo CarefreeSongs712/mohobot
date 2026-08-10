@@ -33,6 +33,41 @@ class LLMConfig:
     vision_model: str = "qwen-vl-plus"
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vision_api_key: str = ""
+    # 识图提示词: 发送给 VLM 的图片转述指令(WebUI 可编辑)
+    vision_prompt: str = (
+        "请将下方的图片转述为中文，描述时不要超过 100 字。图片转述时，可以参照下方的人物特征。\n"
+        "\n"
+        "洛天依\n"
+        "--发型/头发：灰色头发（具体发型不固定），带有环状的麻花辫（\"8\"字形发髻），或紧紧并拢的双环呆毛\n"
+        "--眼睛：绿色，但具体颜色不固定，黄绿色到青绿色都有可能\n"
+        "乐正绫\n"
+        "--发型：黑棕色（某些情况是黑色）头顶有呆毛，一般有麻花辫\n"
+        "--眼睛：红瞳\n"
+        "言和\n"
+        "--发型：白色短发\n"
+        "--眼睛：青蓝色\n"
+        "乐正龙牙\n"
+        "- 发型：半黑半白短发，额前碎发。背后黑白相间的麻花辫\n"
+        "- 眼睛：深绿色\n"
+        "徵羽摩柯\n"
+        "- 发型：藏青色（深蓝色）短发，两侧有长鬓角\n"
+        "- 眼睛：星空蓝（蓝色系）\n"
+        "墨清弦\n"
+        "- 发型：深紫色长发，披发造型，发尾蓬松\n"
+        "- 眼睛：紫色（薰衣草紫）\n"
+        "初音未来（Hatsune Miku）\n"
+        "- 发型：蓝绿色双马尾，标志性的葱色发系\n"
+        "- 眼睛：青绿色（也常描述为薄荷绿/湖蓝色）\n"
+        "星尘\n"
+        "- 发型：渐变淡紫色色长卷发，发梢呈星空蓝渐变，头顶有星型发饰\n"
+        "- 眼睛：黄色/金黄色\n"
+        "心华\n"
+        "- 发型：紫色长散发\n"
+        "- 眼睛：粉紫色（蔷薇紫/淡粉色）\n"
+        "\n"
+        "没有命中上面的特征人物正常描述图像的内容。如果出现人物且有其它物品/背景则都描述。"
+        "如果只是猜测（部分特征相似）则注明。"
+    )
 
     # 全局备用模型: beta 各 LLM 模块主模型遇到连接类错误(连接失败/超时)时
     # 自动换用此模型重试一次(仅连接类错误; 空 = 不回退)
@@ -231,6 +266,8 @@ class GlobalConfig:
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
                 vision_base_url=llm_raw.get("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
                 vision_api_key=llm_raw.get("vision_api_key", ""),
+                # 空/缺失时保留默认人物特征提示词
+                vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
                 fallback_model=llm_raw.get("fallback_model", "DeepSeek-V4-Flash"),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -311,6 +348,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "vision_prompt": self.llm.vision_prompt,
                 "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },
@@ -380,6 +418,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "vision_prompt": self.llm.vision_prompt,
                 "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },

@@ -461,6 +461,7 @@ class WebPanel:
                     "model": cfg.llm.vision_model,
                     "base_url": cfg.llm.vision_base_url,
                     "api_key": cfg.llm.vision_api_key or "",
+                    "prompt": cfg.llm.vision_prompt,
                 },
                 "models": list(cfg.llm.models),
             }
@@ -484,6 +485,8 @@ class WebPanel:
                 for k, v in data["vision"].items():
                     if hasattr(cfg.llm, f"vision_{k}") and k != "api_key":
                         setattr(cfg.llm, f"vision_{k}", v)
+                    elif k == "prompt":
+                        cfg.llm.vision_prompt = str(v or "")
                 if "api_key" in data["vision"]:
                     cfg.llm.vision_api_key = data["vision"]["api_key"]
             if "models" in data and isinstance(data["models"], list):

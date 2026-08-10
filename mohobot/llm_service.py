@@ -634,20 +634,22 @@ class LLMService:
 
         return messages
 
-    async def describe_image(self, url: str, max_tokens: int = 256) -> str:
+    async def describe_image(self, url: str, max_tokens: int = 512) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
 
-        返回简短描述;视觉不可用或调用失败时返回空串(调用方降级为占位符)。
+        提示词取全局配置 llm.vision_prompt(默认含中V人物特征参照);
+        视觉不可用或调用失败时返回空串(调用方降级为占位符)。
         """
         if not self._vision_available or self._vision_client is None:
             return ""
         try:
+            prompt = (self._cfg.llm.vision_prompt or "").strip() or "请用一句简短、客观的话描述这张图片的内容。"
             response = await self._vision_client.chat.completions.create(
                 model=self._cfg.llm.vision_model,
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "请用一句简短、客观的话描述这张图片的内容。"},
+                        {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": url}},
                     ],
                 }],
@@ -662,7 +664,7 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
-    async def describe_image_file(self, local_path: str, max_tokens: int = 256) -> str:
+    async def describe_image_file(self, local_path: str, max_tokens: int = 512) -> str:
         """用视觉模型描述本地图片文件。
 
         图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网

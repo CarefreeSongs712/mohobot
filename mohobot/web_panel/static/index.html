@@ -890,7 +890,9 @@ async function loadModels() {
     document.getElementById('model-vision-form').innerHTML =
       formField('vision_model', '模型名称', v.model) +
       formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
-      formField('vision_api_key', 'API Key', v.api_key, { type: 'password' });
+      formField('vision_api_key', 'API Key', v.api_key, { type: 'password' }) +
+      textareaField('vision_prompt', '识图提示词(VLM)', v.prompt,
+        '发送给视觉模型的图片转述指令(默认含中V人物特征参照); 留空恢复默认') ;
     // 可用模型列表(每行一个) — beta 各 LLM 模块下拉的选项来源
     document.getElementById('model-list-form').innerHTML =
       textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
@@ -912,6 +914,7 @@ async function saveModels() {
       model: document.getElementById('cfg-vision_model').value,
       base_url: document.getElementById('cfg-vision_base_url').value,
       api_key: document.getElementById('cfg-vision_api_key').value,
+      prompt: document.getElementById('cfg-vision_prompt')?.value ?? '',
     },
     models: (document.getElementById('cfg-models')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),

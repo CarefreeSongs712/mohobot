@@ -104,21 +104,21 @@ async def test_group_recent_record_and_format():
     handler = make_handler(recent_count=3)
     # 记录 4 条 → 只保留最近 3 条
     for i in range(4):
-        handler._note_group_recent("bot_001", make_group_event(2000 + i, f"消息{i}", time=1000 + i))
-    text = handler._format_group_recent("bot_001", 888888)
+        await handler._note_group_recent("bot_001", make_group_event(2000 + i, f"消息{i}", time=1000 + i))
+    text = await handler._format_group_recent("bot_001", 888888)
     assert "消息0" not in text, "最旧 1 条应被淘汰"
     assert "消息1" in text and "消息3" in text and "消息2" in text
     assert "张三" in text and "08:16" in text  # 昵称 + 时间戳 1003 → 08:16 (UTC+8)
     # 其他群/其他 bot 无缓冲
-    assert handler._format_group_recent("bot_001", 999999) == ""
-    assert handler._format_group_recent("bot_002", 888888) == ""
+    assert await handler._format_group_recent("bot_001", 999999) == ""
+    assert await handler._format_group_recent("bot_002", 888888) == ""
     print("[+] 群聊最近消息缓冲 OK")
 
 
 async def test_group_recent_inject_agent_and_legacy():
     handler = make_handler(recent_count=10)
-    handler._note_group_recent("bot_001", make_group_event(2001, "今晚吃什么", time=1000000))
-    handler._note_group_recent("bot_001", make_group_event(2002, "火锅吧", time=1000001))
+    await handler._note_group_recent("bot_001", make_group_event(2001, "今晚吃什么", time=1000000))
+    await handler._note_group_recent("bot_001", make_group_event(2002, "火锅吧", time=1000001))
 
     # agent 路径: _agent_context_provider 群聊追加最近消息
     ctx_text = await handler._agent_context_provider("bot_001", "group", "888888")
@@ -141,8 +141,8 @@ async def test_group_recent_inject_agent_and_legacy():
 
 async def test_group_recent_disabled():
     handler = make_handler(recent_count=0)
-    handler._note_group_recent("bot_001", make_group_event(2001, "你好"))
-    assert handler._format_group_recent("bot_001", 888888) == ""
+    await handler._note_group_recent("bot_001", make_group_event(2001, "你好"))
+    assert await handler._format_group_recent("bot_001", 888888) == ""
     # 关闭时注入为空
     ctx_text = await handler._agent_context_provider("bot_001", "group", "888888")
     assert "【群聊最近消息】" not in ctx_text

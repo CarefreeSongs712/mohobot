@@ -10,6 +10,7 @@ Cache size limit: 300 MB (LRU eviction).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -45,6 +46,8 @@ class ImageCache:
         self._map_path = Path(cache_dir) / "image_cache_map.json"
         self._max_size = 300 * 1024 * 1024  # 300 MB
         self._http_client: httpx.AsyncClient | None = None
+        # 单飞去重: image_url -> Future(识别进行中)
+        self._in_flight: dict[str, Any] = {}
         self._images_dir.mkdir(parents=True, exist_ok=True)
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -63,7 +66,35 @@ class ImageCache:
 
         Returns:
             (local_path, description_text)
+
+        并发去重(单飞): 同一图片的识别任务进行中时, 其他调用(如多个 bot
+        同时收到同一张图)等待并复用结果, 避免重复调 VLM。
         """
+        existing = self._in_flight.get(image_url)
+        if existing is not None and not existing.done():
+            try:
+                return await asyncio.shield(existing)
+            except Exception:
+                pass  # 原任务失败, 重新识别
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self._in_flight[image_url] = future
+        try:
+            result = await self._get_or_describe_impl(image_url, vision_callback)
+            if not future.done():
+                future.set_result(result)
+            return result
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+        finally:
+            self._in_flight.pop(image_url, None)
+
+    async def _get_or_describe_impl(
+        self, image_url: str, vision_callback=None
+    ) -> tuple[str, str]:
+        """get_or_describe 主体(单飞锁内执行)。"""
         # Check cache map
         cache_map = await self._load_cache_map()
         cached = cache_map.get(image_url)

@@ -240,7 +240,7 @@ class MessageHandler:
             if self._ws and self._ws._bot_manager:
                 self._ws._bot_manager.note_group_message(bot_id, event.group_id)
             # 群聊最近消息缓冲(回复时临时注入, 不写入 context)
-            self._note_group_recent(bot_id, event)
+            await self._note_group_recent(bot_id, event)
 
         # ── 环境感知: 每次消息刷新缓存(时间/节假日/农历/节气/群聊环境) ──
         # 供 LLM 回复请求注入(agent 与 legacy 路径), 不写入 context
@@ -462,6 +462,43 @@ class MessageHandler:
 
     # ── 图片引用归一化 ─────────────────────────────────────────
 
+    async def _resolve_image_data_uri(self, bot_id: str, file_ref: str) -> str:
+        """file 文件名/路径 → OneBot get_image → data URI(失败返回 "")。
+
+        NapCat 群聊图片的 image 段常只有 file 字段而没有可下载 url,
+        需调用 get_image API 换取 base64(按魔数推断 mime)。
+        """
+        if not file_ref or file_ref.startswith("base64://"):
+            return ""
+        ws = self._ws
+        if ws is None:
+            return ""
+        try:
+            resp = await ws.send_to_bot(
+                bot_id, "get_image", {"file": file_ref},
+                wait_response=True, timeout=8.0,
+            )
+            b64 = str(((resp or {}).get("data") or {}).get("base64", "") or "")
+            if b64:
+                import base64 as _b64
+                mime = "image/jpeg"
+                try:
+                    head = _b64.b64decode(b64[:64])
+                    if head[:4] == b"\x89PNG":
+                        mime = "image/png"
+                    elif head[:3] == b"GIF":
+                        mime = "image/gif"
+                    elif head[:2] == b"BM":
+                        mime = "image/bmp"
+                    elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                        mime = "image/webp"
+                except Exception:
+                    pass
+                return f"data:{mime};base64,{b64}"
+        except Exception as e:
+            logger.debug(f"get_image 失败({file_ref[:40]}): {e}")
+        return ""
+
     async def _normalize_image_segments(self, bot_id: str, event: MessageEvent) -> None:
         """把无 url 的图片段(file 为文件名/路径)通过 OneBot get_image 换成 data URI。
 
@@ -472,9 +509,6 @@ class MessageHandler:
         """
         if not isinstance(event.message, list):
             return
-        ws = self._ws
-        if ws is None:
-            return
         for seg in event.message:
             if not (isinstance(seg, dict) and seg.get("type") == "image"):
                 continue
@@ -484,32 +518,26 @@ class MessageHandler:
             file_ref = str(data.get("file", "") or "")
             if not file_ref or file_ref.startswith("base64://"):
                 continue
+            uri = await self._resolve_image_data_uri(bot_id, file_ref)
+            if uri:
+                data["url"] = uri
+                logger.debug(f"图片 get_image 成功: {file_ref[:40]} → data URI")
+
+    def _vision_callback(self, bot_id: str):
+        """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。"""
+        async def _cb(image_url: str, local_path: str) -> str:
             try:
-                resp = await ws.send_to_bot(
-                    bot_id, "get_image", {"file": file_ref},
-                    wait_response=True, timeout=8.0,
+                return await asyncio.wait_for(
+                    self._llm.describe_image_file(local_path),
+                    timeout=30.0,
                 )
-                b64 = str(((resp or {}).get("data") or {}).get("base64", "") or "")
-                if b64:
-                    # 按魔数推断 mime(视觉模型对 data URI 的 mime 敏感)
-                    import base64 as _b64
-                    mime = "image/jpeg"
-                    try:
-                        head = _b64.b64decode(b64[:64])
-                        if head[:4] == b"\x89PNG":
-                            mime = "image/png"
-                        elif head[:3] == b"GIF":
-                            mime = "image/gif"
-                        elif head[:2] == b"BM":
-                            mime = "image/bmp"
-                        elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-                            mime = "image/webp"
-                    except Exception:
-                        pass
-                    data["url"] = f"data:{mime};base64,{b64}"
-                    logger.debug(f"图片 get_image 成功: {file_ref[:40]} → data URI")
+            except asyncio.TimeoutError:
+                logger.warning(f"Vision describe timeout for bot {bot_id}")
+                return ""
             except Exception as e:
-                logger.debug(f"get_image 失败({file_ref[:40]}): {e}")
+                logger.warning(f"Vision describe failed for bot {bot_id}: {e}")
+                return ""
+        return _cb
 
     # ── ping/PONG ──────────────────────────────────────────────
 
@@ -528,23 +556,41 @@ class MessageHandler:
 
     # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
 
-    def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
-        """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。"""
+    async def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
+        """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。
+
+        图片消息标记 image=True 并记录引用(url/file), 注入时只对最新一张
+        调 VLM 识别(走全局缓存), 旧图显示 "[图片]" 占位。
+        """
         if self._group_recent_count <= 0:
             return
         try:
-            from mohobot.utils.cq_code import extract_plain_text
+            from mohobot.utils.cq_code import extract_image_urls, extract_plain_text
             text = (extract_plain_text(event.message) or "").strip()
             sender = getattr(event, "sender", None)
             name = ""
             if sender is not None:
                 name = (getattr(sender, "card", "") or getattr(sender, "nickname", "") or "").strip()
-            entry = {
+            entry: dict = {
                 "user_id": str(event.user_id),
                 "name": name or str(event.user_id),
                 "content": text[:80],  # 单条截断, 防注入过长
                 "time": int(event.time or 0),
             }
+            # 图片引用: 优先 url/data URI; 未归一化时兜底 file(识别时再 get_image)
+            image_urls = extract_image_urls(event.message)
+            if image_urls:
+                entry["image"] = True
+                entry["image_ref"] = image_urls[0]
+            elif isinstance(event.message, list):
+                for seg in event.message:
+                    if isinstance(seg, dict) and seg.get("type") == "image":
+                        file_ref = str((seg.get("data") or {}).get("file", "") or "")
+                        if file_ref and not file_ref.startswith("base64://"):
+                            entry["image"] = True
+                            entry["image_ref"] = ""
+                            entry["image_file"] = file_ref
+                        break
             key = f"{bot_id}:{event.group_id}"
             buf = self._group_recent_msgs.setdefault(key, [])
             buf.append(entry)
@@ -553,24 +599,58 @@ class MessageHandler:
         except Exception as e:
             logger.debug(f"Note group recent message failed: {e}")
 
-    def _format_group_recent(self, bot_id: str, group_id) -> str:
-        """把缓冲中的最近群消息格式化为 prompt 文本段(空则返回 "")。"""
+    async def _describe_recent_image(self, bot_id: str, entry: dict) -> str:
+        """识别群聊临时上下文中的一张图片(走全局 ImageCache 缓存)。"""
+        ref = entry.get("image_ref") or ""
+        if not ref and entry.get("image_file"):
+            ref = await self._resolve_image_data_uri(bot_id, entry["image_file"])
+        if not ref or self._image_cache is None or self._llm is None:
+            return ""
+        try:
+            _, desc = await self._image_cache.get_or_describe(
+                ref, vision_callback=self._vision_callback(bot_id),
+            )
+            return desc if desc and desc != "[图片]" else ""
+        except Exception as e:
+            logger.debug(f"Describe recent image failed: {e}")
+            return ""
+
+    async def _format_group_recent(self, bot_id: str, group_id) -> str:
+        """把缓冲中的最近群消息格式化为 prompt 文本段(空则返回 "")。
+
+        图片消息: 只对最新一张调 VLM 识别(走缓存), 其他标 "[图片]" 占位。
+        """
         if self._group_recent_count <= 0:
             return ""
         buf = self._group_recent_msgs.get(f"{bot_id}:{group_id}", [])
         if not buf:
             return ""
+        # 最新一张图片的索引(从后往前找)
+        latest_img_idx = None
+        for i in range(len(buf) - 1, -1, -1):
+            if buf[i].get("image"):
+                latest_img_idx = i
+                break
+        desc = ""
+        if latest_img_idx is not None:
+            desc = await self._describe_recent_image(bot_id, buf[latest_img_idx])
         from mohobot.utils.time_utils import TZ_UTC8
         from datetime import datetime as _dt
         lines = []
-        for entry in buf:
+        for i, entry in enumerate(buf):
             t = ""
             if entry.get("time"):
                 try:
                     t = _dt.fromtimestamp(entry["time"], TZ_UTC8).strftime("%H:%M")
                 except Exception:
                     t = ""
-            lines.append(f"{t} {entry['name']}: {entry['content']}")
+            content = entry.get("content", "")
+            if entry.get("image"):
+                if i == latest_img_idx and desc:
+                    content = f"{content} [图片]（{desc}）" if content else f"[图片]（{desc}）"
+                else:
+                    content = f"{content} [图片]" if content else "[图片]"
+            lines.append(f"{t} {entry['name']}: {content}")
         return "【群聊最近消息】\n" + "\n".join(lines)
 
     async def _build_legacy_context(self, bot_id: str, chat_type: str, chat_id: str) -> list[dict]:
@@ -581,7 +661,7 @@ class MessageHandler:
         context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
         context = list(context)
         if chat_type == "group":
-            recent = self._format_group_recent(bot_id, chat_id)
+            recent = await self._format_group_recent(bot_id, chat_id)
             if recent:
                 context.append({"role": "system", "content": recent})
         # 环境感知(仅 LLM 请求, 不写入 context)
@@ -596,28 +676,16 @@ class MessageHandler:
     async def _describe_first_image(self, bot_id: str, url: str) -> str:
         """识别图片并返回描述。
 
-        走 ImageCache: 下载到本地 → phash 去重 → 描述缓存;
+        走 ImageCache: 下载到本地 → phash 去重 → 描述缓存(全局共享, 单飞去重);
         未命中时调视觉模型(本地文件 base64, 不依赖网关访问外网)。
         下载失败/无缓存时降级为占位符。
         """
         if self._image_cache is None or self._llm is None:
             return ""
-
-        async def _vision_cb(image_url: str, local_path: str) -> str:
-            try:
-                return await asyncio.wait_for(
-                    self._llm.describe_image_file(local_path),
-                    timeout=30.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"Vision describe timeout for bot {bot_id}")
-                return ""
-            except Exception as e:
-                logger.warning(f"Vision describe failed for bot {bot_id}: {e}")
-                return ""
-
         try:
-            _, description = await self._image_cache.get_or_describe(url, vision_callback=_vision_cb)
+            _, description = await self._image_cache.get_or_describe(
+                url, vision_callback=self._vision_callback(bot_id),
+            )
         except Exception as e:
             logger.warning(f"Image cache failed for bot {bot_id}: {e}")
             return ""
@@ -654,7 +722,7 @@ class MessageHandler:
                 lines.append(f"{role}: {content}")
         # 群聊: 临时追加最近消息(仅注入, 不写入 context)
         if chat_type == "group":
-            recent = self._format_group_recent(bot_id, chat_id)
+            recent = await self._format_group_recent(bot_id, chat_id)
             if recent:
                 lines.append(recent)
         return "\n".join(lines)
