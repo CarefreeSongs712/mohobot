@@ -234,3 +234,4 @@ _test_*.py
 
 # ── Local reference docs (kept locally, not pushed) ──
 onebot-11-doc/
+data_test_llm/
