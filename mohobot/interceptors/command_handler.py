@@ -36,18 +36,23 @@ class CommandHandler(Interceptor):
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
         }
-        # Plugin-provided commands appear in /help (name -> description)
-        self._plugin_commands: dict[str, str] = {}
+        # Plugin-provided commands appear in /help (name -> {desc, plugin, admin})
+        self._plugin_commands: dict[str, dict] = {}
         # 未知指令提醒时间戳: {(bot_id, chat_type, chat_id): last_remind_ts}
         self._unknown_remind_at: dict[tuple[str, str, str], float] = {}
 
     def register_plugin_commands(self, commands: dict[str, str]) -> None:
         """Register commands provided by plugins, shown in /help output."""
-        self._plugin_commands.update(commands)
+        for name, desc in commands.items():
+            self._plugin_commands[name] = {"desc": desc, "plugin": "", "admin": False}
 
-    def collect_plugin_commands(self) -> dict[str, str]:
-        """Discover plugin commands from the plugin system (status hook)."""
-        discovered: dict[str, str] = {}
+    def collect_plugin_commands(self) -> dict[str, dict]:
+        """Discover plugin commands from the plugin system (status hook).
+
+        返回 {name: {"desc", "plugin", "admin"}} — plugin=插件名(分组依据),
+        admin 仅读取插件声明的 info.commands[].admin 字段。
+        """
+        discovered: dict[str, dict] = {}
         if self._plugin_system:
             for meta in self._plugin_system.list_plugins():
                 name = meta.get("name", "")
@@ -55,10 +60,23 @@ class CommandHandler(Interceptor):
                 cmd_list = info.get("commands") or []
                 for cmd in cmd_list:
                     if isinstance(cmd, dict):
-                        discovered[cmd.get("name", "")] = cmd.get("desc", "")
+                        cmd_name = cmd.get("name", "")
+                        if not cmd_name:
+                            continue
+                        discovered[cmd_name] = {
+                            "desc": cmd.get("desc", ""),
+                            "plugin": name,
+                            "admin": bool(cmd.get("admin", False)),
+                        }
                     elif isinstance(cmd, str):
-                        discovered[cmd] = ""
+                        discovered[cmd] = {"desc": "", "plugin": name, "admin": False}
         return discovered
+
+    def _all_plugin_commands(self) -> dict[str, dict]:
+        """合并手动注册 + 动态收集的插件命令(动态优先)。"""
+        merged = dict(self._plugin_commands)
+        merged.update(self.collect_plugin_commands())
+        return merged
 
     async def intercept(
         self,
@@ -92,9 +110,7 @@ class CommandHandler(Interceptor):
         handler = self._commands.get(cmd_name)
         if not handler:
             # Plugin-registered command? (e.g. 赞我 via /赞我) — let plugins handle it
-            plugin_cmds = dict(self._plugin_commands)
-            plugin_cmds.update(self.collect_plugin_commands())
-            if cmd_name in plugin_cmds:
+            if cmd_name in self._all_plugin_commands():
                 return (False, None)
             # Unknown command — 60 分钟内同一会话最多提醒一次,
             # 冷却期内静默拦截(不回复, 也不传给 LLM)
@@ -225,19 +241,98 @@ class CommandHandler(Interceptor):
             lines.append(f"  {i}. [{role}] {preview}")
         return "\n".join(lines)
 
-    async def _cmd_help(
-        self, bot_id: str, event: MessageEvent, args: list[str]
-    ) -> str | None:
-        """Show help."""
+    # 封禁管理命令(管理员) — 与 ban_filter 的命令集对应
+    _BAN_CMD_DESC = {
+        "ban": "封禁 <@|QQ> [时间] [理由]",
+        "ban-all": "全局封禁 <@|QQ> [时间] [理由]",
+        "pass": "临时解禁 <@|QQ> [时间] [理由]",
+        "pass-all": "全局临时解禁 <@|QQ> [时间] [理由]",
+        "dec-ban": "删除/削减会话封禁",
+        "dec-ban-all": "删除/削减全局封禁",
+        "dec-pass": "删除/削减会话解禁",
+        "dec-pass-all": "删除/削减全局解禁",
+        "ban-reset": "清除该用户全部记录",
+        "banlist": "查看封禁/解禁名单(所有人可用)",
+        "ban-enable": "临时启用封禁",
+        "ban-disable": "临时禁用封禁",
+        "ban-help": "封禁系统使用指南",
+    }
+
+    def _build_help_sections(self) -> list[dict]:
+        """构建 /help 的分组数据: 系统 / 封禁管理 / 各插件。"""
+        sections = []
+        # 系统(内置命令)
+        builtin = []
+        for name, (_, help_text) in self._commands.items():
+            if name == "help":
+                continue  # help 本身在标题下方说明
+            desc = help_text.split("|")[0].strip()
+            builtin.append({"name": name, "desc": desc, "admin": False})
+        sections.append({"title": "系统", "commands": builtin})
+
+        # 封禁管理(管理员)
+        ban_cmds = [
+            {"name": name, "desc": self._BAN_CMD_DESC.get(name, ""),
+             "admin": name not in ("banlist", "ban-help")}
+            for name in ("ban", "ban-all", "pass", "pass-all",
+                         "dec-ban", "dec-ban-all", "dec-pass", "dec-pass-all",
+                         "ban-reset", "banlist", "ban-enable", "ban-disable", "ban-help")
+        ]
+        sections.append({"title": "封禁管理 (管理员)", "commands": ban_cmds})
+
+        # 插件命令: 按插件名分组
+        by_plugin: dict[str, list[dict]] = {}
+        for name, meta in self._all_plugin_commands().items():
+            plugin = meta.get("plugin") or "其他"
+            by_plugin.setdefault(plugin, []).append({
+                "name": name,
+                "desc": meta.get("desc", ""),
+                "admin": bool(meta.get("admin", False)),
+            })
+        for plugin in sorted(by_plugin):
+            sections.append({
+                "title": f"插件 · {plugin}",
+                "commands": sorted(by_plugin[plugin], key=lambda c: c["name"]),
+            })
+        return sections
+
+    def _help_text(self) -> str:
+        """文本版帮助(图片渲染失败/无法发送时的降级)。"""
         lines = ["📖 可用指令:"]
         for name, (_, help_text) in self._commands.items():
             lines.append(f"  /{name} — {help_text}")
-        # Plugin commands
-        plugin_cmds = dict(self._plugin_commands)
-        plugin_cmds.update(self.collect_plugin_commands())
-        for name, desc in sorted(plugin_cmds.items()):
-            lines.append(f"  /{name} — {desc or '插件指令'}")
+        for name, meta in sorted(self._all_plugin_commands().items()):
+            desc = meta.get("desc") or "插件指令"
+            lines.append(f"  /{name} — {desc}")
         return "\n".join(lines)
+
+    async def _cmd_help(
+        self, bot_id: str, event: MessageEvent, args: list[str]
+    ) -> str | None:
+        """Show help — 渲染成 PIL 图片发送, 失败降级为文本。"""
+        from mohobot.utils.image_card import render_help_card
+        from mohobot.models.onebot import GroupMessageEvent as _G
+
+        sections = self._build_help_sections()
+        img_path = render_help_card(sections)
+        if img_path is not None and self._ws is not None:
+            try:
+                if isinstance(event, _G):
+                    chat_type, chat_id = "group", str(event.group_id)
+                else:
+                    chat_type, chat_id = "private", str(event.user_id)
+                await self._ws.send_image(bot_id, chat_type, chat_id, img_path)
+                import os
+                os.remove(img_path)
+                return None  # 已发送图片
+            except Exception as e:
+                logger.warning(f"发送帮助图片失败, 降级为文本: {e}")
+                try:
+                    import os
+                    os.remove(img_path)
+                except OSError:
+                    pass
+        return self._help_text()
 
     async def _cmd_clear(
         self, bot_id: str, event: MessageEvent, args: list[str]

@@ -301,6 +301,10 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div id="model-vision-form"></div>
       </div>
     </div>
+    <div class="card">
+      <div class="card-title">📋 可用模型列表</div>
+      <div id="model-list-form"></div>
+    </div>
     <button class="btn" onclick="saveModels()">保存模型配置</button>
   </div>
 
@@ -648,16 +652,12 @@ function checkField(name, label, value, hint = '') {
     ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
 }
 
-function readonlyField(name, label, value, hint = '') {
-  const v = value == null ? '' : value;
+function selectField(name, label, value, options, hint = '') {
+  const opts = (options || []).map(o =>
+    `<option value="${String(o).replace(/"/g, '&quot;')}" ${String(o) === String(value) ? 'selected' : ''}>${String(o).replace(/</g, '&lt;')}</option>`
+  ).join('') || '<option value="">(无可用模型)</option>';
   return `<div class="form-row"><label>${label}</label>
-    <input type="text" id="cfg-${name}" value="${String(v).replace(/"/g, '&quot;')}" readonly style="background:var(--bg2);color:var(--dim);cursor:not-allowed">
-    ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
-}
-
-function readonlyCheckField(name, label, value, hint = '') {
-  return `<div class="form-row"><label style="display:inline-block;margin-right:10px">${label}</label>
-    <label class="switch"><input type="checkbox" id="cfg-${name}" ${value ? 'checked' : ''} disabled><span class="slider" style="cursor:not-allowed;opacity:.6"></span></label>
+    <select id="cfg-${name}">${opts}</select>
     ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
 }
 
@@ -678,11 +678,6 @@ async function loadConfigPage() {
       formField('context_trim_remove_rounds', '每次压缩轮数', globalConfigCache.context_trim_remove_rounds, { hint: '每次把最早的多少轮交给 AI 总结' }) +
       formField('group_recent_msgs_count', '群聊最近消息条数', globalConfigCache.group_recent_msgs_count, { hint: '回复时临时注入群内最近 N 条消息(不写入上下文,不参与总结); 0=关闭' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
-      '<div class="card-title">📁 服务端路径(保存后重启生效)</div>' +
-      formField('log_dir', '日志目录', globalConfigCache.log_dir, { hint: '日志输出目录' }) +
-      formField('data_dir', '数据目录', globalConfigCache.data_dir, { hint: '上下文/封禁名单等数据存放目录' }) +
-      formField('plugins_dir', '插件目录', globalConfigCache.plugins_dir, { hint: '插件扫描目录' }) +
-      '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">💬 回复行为</div>' +
       checkField('reply.stream', '流式请求', globalConfigCache.reply?.stream, '逐 token 接收,false 则等完整回复') +
       checkField('reply.segment_reply', '分段回复', globalConfigCache.reply?.segment_reply, '按标点符号+长度切分为多条消息') +
@@ -694,6 +689,11 @@ async function loadConfigPage() {
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🤖 Agent 子系统</div>' +
       checkField('agent.enabled', '全局启用 Agent 流水线', globalConfigCache.agent?.enabled, '各 bot 是否使用流水线由 bot 私有配置的"启用 Agent 子系统"单独控制') +
+      selectField('agent.llm_modules.main_chat.model', '主回复模型 (main_chat)', globalConfigCache.agent?.llm_modules?.main_chat?.model, globalConfigCache.llm?.models, '群聊/私聊回复的主模型') +
+      selectField('agent.llm_modules.topic_extractor.model', '话题提取模型', globalConfigCache.agent?.llm_modules?.topic_extractor?.model, globalConfigCache.llm?.models, '从群消息中提取话题(可换轻量模型)') +
+      selectField('agent.llm_modules.memory_writer.model', '记忆写入模型', globalConfigCache.agent?.llm_modules?.memory_writer?.model, globalConfigCache.llm?.models, '把对话写入长期记忆') +
+      selectField('agent.llm_modules.user_profile_updater.model', '用户画像模型', globalConfigCache.agent?.llm_modules?.user_profile_updater?.model, globalConfigCache.llm?.models, '更新用户画像标签') +
+      '<div class="hint" style="margin-top:-6px">4 个模块共用模型配置页的 API 地址与 Key; 选项来自"可用模型列表"(模型配置页可增删)</div>' +
       textareaField('agent.reflex.touch_replies', '戳一戳回复(每行一条)', (globalConfigCache.agent?.reflex?.touch_replies || []).join('\n'), 'bot 私有配置留空时使用这里; 都留空则用内置默认') +
       '<div class="hint" style="margin-top:-6px">角色名/人设/说话风格无需在此配置 —— 每个 bot 自动使用自己的昵称与人设(BotConfig.persona)</div>' +
       '<hr style="border-color:var(--border);margin:14px 0">' +
@@ -701,12 +701,7 @@ async function loadConfigPage() {
       formField('admins', '管理员 QQ(逗号分隔)', (globalConfigCache.admins || []).join(','), { hint: '可执行 /ban、插件管理命令(如 /群列表 /退群)的管理员 QQ 号' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🚫 封禁系统</div>' +
-      checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
-      '<hr style="border-color:var(--border);margin:14px 0">' +
-      '<div class="card-title">🗄️ 数据库(保存后重启生效)</div>' +
-      checkField('database.enabled', '启用数据库存储', globalConfigCache.database?.enabled, '历史/记忆写入 SQLite') +
-      formField('database.folder', '数据库目录', globalConfigCache.database?.folder) +
-      formField('database.file', '数据库文件名', globalConfigCache.database?.file);
+      checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略');
 
     const sel = document.getElementById('config-bot-select');
     const bots = (botListCache.bots || []).slice();
@@ -814,14 +809,6 @@ async function saveGlobalConfig() {
     context_trim_at_rounds: parseInt(document.getElementById('cfg-context_trim_at_rounds').value) || 40,
     context_trim_remove_rounds: parseInt(document.getElementById('cfg-context_trim_remove_rounds').value) || 15,
     group_recent_msgs_count: parseInt(document.getElementById('cfg-group_recent_msgs_count').value) || 0,
-    log_dir: document.getElementById('cfg-log_dir')?.value ?? './logs',
-    data_dir: document.getElementById('cfg-data_dir')?.value ?? './data',
-    plugins_dir: document.getElementById('cfg-plugins_dir')?.value ?? './plugins',
-    database: {
-      enabled: document.getElementById('cfg-database.enabled')?.checked ?? true,
-      folder: document.getElementById('cfg-database.folder')?.value ?? './data/database',
-      file: document.getElementById('cfg-database.file')?.value ?? 'luotianyi.db',
-    },
     reply: {
       stream: document.getElementById('cfg-reply.stream')?.checked ?? true,
       segment_reply: document.getElementById('cfg-reply.segment_reply')?.checked ?? true,
@@ -833,6 +820,12 @@ async function saveGlobalConfig() {
     },
     agent: {
       enabled: document.getElementById('cfg-agent.enabled')?.checked ?? true,
+      llm_modules: {
+        main_chat: { model: document.getElementById('cfg-agent.llm_modules.main_chat.model')?.value ?? '' },
+        topic_extractor: { model: document.getElementById('cfg-agent.llm_modules.topic_extractor.model')?.value ?? '' },
+        memory_writer: { model: document.getElementById('cfg-agent.llm_modules.memory_writer.model')?.value ?? '' },
+        user_profile_updater: { model: document.getElementById('cfg-agent.llm_modules.user_profile_updater.model')?.value ?? '' },
+      },
       reflex: {
         touch_replies: (document.getElementById('cfg-agent.reflex.touch_replies')?.value || '')
           .split('\n').map(s => s.trim()).filter(Boolean),
@@ -891,6 +884,10 @@ async function loadModels() {
       formField('vision_model', '模型名称', v.model) +
       formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
       formField('vision_api_key', 'API Key', v.api_key, { type: 'password' });
+    // 可用模型列表(每行一个) — beta 各 LLM 模块下拉的选项来源
+    document.getElementById('model-list-form').innerHTML =
+      textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
+        'beta 模式下各 LLM 模块从此列表下拉选择; 增删后保存, 与全局同一 API 地址/Key') ;
   } catch (e) { showToast('加载模型配置失败: ' + e.message, false); }
 }
 
@@ -908,6 +905,8 @@ async function saveModels() {
       base_url: document.getElementById('cfg-vision_base_url').value,
       api_key: document.getElementById('cfg-vision_api_key').value,
     },
+    models: (document.getElementById('cfg-models')?.value || '')
+      .split('\n').map(s => s.trim()).filter(Boolean),
   };
   try {
     await apiJSON('/api/models', { method: 'PUT', body: { data } });

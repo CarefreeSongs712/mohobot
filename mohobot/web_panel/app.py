@@ -270,16 +270,12 @@ class WebPanel:
             data = body.data
 
             # Apply nested updates safely
-            # database / log_dir / data_dir / plugins_dir 为服务端路径配置,
-            # 保存后写入配置文件, 重启服务后生效(启动时读取)。
+            # 注意: database / log_dir / data_dir / plugins_dir 属于
+            # 服务端运行路径配置, 不允许在 WebUI 修改(改错会导致服务异常)。
             if "server" in data:
                 for k, v in data["server"].items():
                     if hasattr(cfg.server, k):
                         setattr(cfg.server, k, v)
-            if "database" in data:
-                for k, v in data["database"].items():
-                    if hasattr(cfg.database, k):
-                        setattr(cfg.database, k, v)
             if "web_panel" in data:
                 for k, v in data["web_panel"].items():
                     if hasattr(cfg.web_panel, k) and k != "password_hash":
@@ -296,8 +292,16 @@ class WebPanel:
                 agent_data = data["agent"] or {}
                 if "enabled" in agent_data:
                     cfg.agent.enabled = bool(agent_data["enabled"])
+                # llm_modules: 深合并(面板只提交 model, 保留模块级 base_url/temperature 等)
+                if isinstance(agent_data.get("llm_modules"), dict):
+                    merged_modules = dict(cfg.agent.llm_modules or {})
+                    for mod, spec in agent_data["llm_modules"].items():
+                        if isinstance(spec, dict):
+                            old = merged_modules.get(mod) or {}
+                            merged_modules[mod] = {**old, **spec}
+                    cfg.agent.llm_modules = merged_modules
                 # persona 已移除(每个 bot 的人设取自其私有配置)
-                for k in ("llm_modules", "memory", "main_chat",
+                for k in ("memory", "main_chat",
                           "topic_planner", "topic_replier", "reflection_worker", "reflex",
                           "music_knowledge"):
                     if k in agent_data and isinstance(agent_data[k], dict):
@@ -321,8 +325,7 @@ class WebPanel:
                 if key in data:
                     setattr(cfg, key, data[key])
             for key in ("context_summary_enabled", "context_trim_at_rounds",
-                        "context_trim_remove_rounds", "group_recent_msgs_count",
-                        "log_dir", "data_dir", "plugins_dir"):
+                        "context_trim_remove_rounds", "group_recent_msgs_count"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
@@ -458,6 +461,7 @@ class WebPanel:
                     "base_url": cfg.llm.vision_base_url,
                     "api_key": cfg.llm.vision_api_key or "",
                 },
+                "models": list(cfg.llm.models),
             }
 
         @app.put("/api/models")
@@ -479,6 +483,8 @@ class WebPanel:
                         setattr(cfg.llm, f"vision_{k}", v)
                 if "api_key" in data["vision"]:
                     cfg.llm.vision_api_key = data["vision"]["api_key"]
+            if "models" in data and isinstance(data["models"], list):
+                cfg.llm.models = [str(m).strip() for m in data["models"] if str(m).strip()]
 
             cfg.save(self._config_path)
             logger.info("Web panel: LLM model config updated")

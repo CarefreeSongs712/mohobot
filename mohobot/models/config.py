@@ -34,6 +34,11 @@ class LLMConfig:
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vision_api_key: str = ""
 
+    # 可用模型列表(WebUI 预填, 供 beta 各 LLM 模块下拉选择; 可增删)
+    models: list[str] = field(default_factory=lambda: [
+        "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
+    ])
+
 
 @dataclass
 class WebPanelConfig:
@@ -80,7 +85,15 @@ class AgentConfig:
     "是否启用" 也在每个 bot 的私有配置里(agent_enabled)。
     """
     enabled: bool = True             # 全局总开关(各 bot 私有 agent_enabled 再单独控制)
-    llm_modules: dict = field(default_factory=dict)    # main_chat / topic_extractor / memory_writer / user_profile_updater
+    # beta 流水线 4 个 LLM 模块: 前两个(主回复/话题提取)默认主回复模型,
+    # 后两个(记忆写入/用户画像)默认轻量模型; base_url/api_key 留空继承全局 llm。
+    # 模型名在 WebUI 从可用模型列表(llm.models)下拉选择。
+    llm_modules: dict = field(default_factory=lambda: {
+        "main_chat": {"model": "DeepSeek-V4-Flash"},
+        "topic_extractor": {"model": "DeepSeek-V4-Flash"},
+        "memory_writer": {"model": "Qwen3-8B"},
+        "user_profile_updater": {"model": "Qwen3-8B"},
+    })
     memory: dict = field(default_factory=dict)         # vector_store / dedup 阈值等
     main_chat: dict = field(default_factory=dict)
     topic_planner: dict = field(default_factory=dict)  # listen_timer / unread_store
@@ -124,6 +137,26 @@ class BanConfig:
     管理员从顶层 GlobalConfig.admins 获取(ban 段不再单独配置 admins)。
     """
     enabled: bool = True
+
+
+# beta 流水线 4 个 LLM 模块的默认模型:
+# 前两个(主回复/话题提取)用主回复模型, 后两个(记忆/画像)用轻量模型
+_DEFAULT_BETA_MODELS = {
+    "main_chat": "DeepSeek-V4-Flash",
+    "topic_extractor": "DeepSeek-V4-Flash",
+    "memory_writer": "Qwen3-8B",
+    "user_profile_updater": "Qwen3-8B",
+}
+
+
+def _fill_agent_llm_defaults(llm_modules: dict) -> dict:
+    """填充 beta 各 LLM 模块的默认模型(旧配置 model 为空时生效)。"""
+    out = dict(llm_modules or {})
+    for mod, model in _DEFAULT_BETA_MODELS.items():
+        spec = out.setdefault(mod, {})
+        if isinstance(spec, dict) and not (spec.get("model") or "").strip():
+            spec["model"] = model
+    return out
 
 
 @dataclass
@@ -194,6 +227,9 @@ class GlobalConfig:
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
                 vision_base_url=llm_raw.get("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
                 vision_api_key=llm_raw.get("vision_api_key", ""),
+                models=[str(m) for m in (llm_raw.get("models") or [
+                    "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
+                ])],
             ),
             web_panel=WebPanelConfig(
                 enabled=panel_raw.get("enabled", True),
@@ -221,7 +257,7 @@ class GlobalConfig:
             ),
             agent=AgentConfig(
                 enabled=agent_raw.get("enabled", True),
-                llm_modules=agent_raw.get("llm_modules", {}) or {},
+                llm_modules=_fill_agent_llm_defaults(agent_raw.get("llm_modules", {}) or {}),
                 memory=agent_raw.get("memory", {}) or {},
                 main_chat=agent_raw.get("main_chat", {}) or {},
                 topic_planner=agent_raw.get("topic_planner", {}) or {},
@@ -270,6 +306,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "models": list(self.llm.models),
             },
             "web_panel": {
                 "enabled": self.web_panel.enabled,
@@ -337,6 +374,7 @@ class GlobalConfig:
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
+                "models": list(self.llm.models),
             },
             "web_panel": {
                 "enabled": self.web_panel.enabled,

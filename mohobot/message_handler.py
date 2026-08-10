@@ -158,6 +158,9 @@ class MessageHandler:
         text = extract_plain_text(event.message)
         if text.startswith("/"):
             return True
+        # ping/PONG: 群聊不 @ 也回复(全局功能, 无需斜杠)
+        if text.strip().lower() == "ping":
+            return True
 
         # Direct @mention of the bot (bot_id 是内部编号, @ 的是绑定 QQ)
         instance = None
@@ -277,6 +280,12 @@ class MessageHandler:
                 if response:
                     await self._send_reply(bot_id, event, response)
                 return
+
+        # ── ping/PONG: 去除首尾空白后完全匹配(忽略大小写), 群聊不 @ 也回复 ──
+        # (群 gate 已放行 ping; 被 ban 用户已被拦截链过滤)
+        if self._is_ping_text(event):
+            await self._send_reply(bot_id, event, "PONG")
+            return
 
         # ── LLM path ──
         chat_type = self._get_chat_type(event)
@@ -429,6 +438,21 @@ class MessageHandler:
         )
 
         await runtime.handle_event(chat_type, chat_id, chat_event)
+
+    # ── ping/PONG ──────────────────────────────────────────────
+
+    @staticmethod
+    def _is_ping_text(event) -> bool:
+        """去除首尾空白后完全匹配 ping(忽略大小写)。"""
+        from mohobot.utils.cq_code import extract_plain_text as _ept
+        text = ""
+        if isinstance(event.message, str):
+            text = event.message
+        elif isinstance(event.message, list):
+            for seg in event.message:
+                if isinstance(seg, dict) and seg.get("type") == "text":
+                    text += seg.get("data", {}).get("text", "")
+        return text.strip().lower() == "ping"
 
     # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
 
