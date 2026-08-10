@@ -1,0 +1,26 @@
+{
+  "api_url": {
+    "type": "string",
+    "default": "http://127.0.0.1:3000",
+    "description": "网易云 API 地址",
+    "hint": "自行部署的 NeteaseCloudMusicApi 服务地址, 例如 http://127.0.0.1:3000"
+  },
+  "quality": {
+    "type": "string",
+    "default": "exhigh",
+    "description": "优先音质",
+    "hint": "lossless / exhigh / higher / standard; 不可用时自动尝试更低音质"
+  },
+  "search_limit": {
+    "type": "int",
+    "default": 5,
+    "description": "搜索结果数量",
+    "hint": "每次搜索展示的歌曲选项数量"
+  },
+  "cookie": {
+    "type": "string",
+    "default": "",
+    "description": "网易云 Cookie",
+    "hint": "登录网易云网页版后从浏览器开发者工具复制; 填写后可播放 VIP 歌曲"
+  }
+}

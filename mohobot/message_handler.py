@@ -1020,7 +1020,13 @@ class MessageHandler:
                 gt = getattr(inst.__class__, "global_triggers", None)
                 if isinstance(gt, (set, list, tuple)):
                     triggers.update(str(t) for t in gt)
-        is_global = text in triggers or text.startswith(self._GLOBAL_COMMAND_PREFIXES)
+        is_global = text.startswith(self._GLOBAL_COMMAND_PREFIXES)
+        if not is_global:
+            # 精确匹配 + 命令+空格参数的前缀匹配(如 "/点歌 白鸟" 命中 "/点歌")
+            for t in triggers:
+                if text == t or text.startswith(t + " "):
+                    is_global = True
+                    break
         if not is_global:
             return False
         # 群内最小 bot 才回复
