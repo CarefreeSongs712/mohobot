@@ -1,0 +1,26 @@
+{
+  "enable_holiday": {
+    "type": "bool",
+    "default": true,
+    "description": "节假日/工作日感知",
+    "hint": "含调休判断(依赖 chinese-calendar, 缺库时降级为周末判断)"
+  },
+  "enable_lunar": {
+    "type": "bool",
+    "default": true,
+    "description": "农历日期感知",
+    "hint": "天干地支年/生肖/农历月日(依赖 lunarcalendar, 缺库自动跳过)"
+  },
+  "enable_solar_term": {
+    "type": "bool",
+    "default": true,
+    "description": "二十四节气感知",
+    "hint": "简化节气日期表, 前后 3 天临近判断"
+  },
+  "enable_platform": {
+    "type": "bool",
+    "default": true,
+    "description": "群聊环境感知",
+    "hint": "群聊/私聊 + 群名 + 消息是否含图片/语音/视频"
+  }
+}

@@ -550,6 +550,28 @@ class PluginSystem(Interceptor):
                 logger.error(f"Plugin {meta['name']} observe handler error: {e}")
         return (False, None)
 
+    async def collect_perception(self, bot_id: str, event, raw: dict) -> str:
+        """收集"环境感知"文本: 遍历插件调用 on_perception(bot_id, event, raw)。
+
+        感知插件返回当前环境信息(时间/节假日/农历/节气/群聊环境等),
+        由 message_handler 附加到 LLM 请求(仅回复生成, 不写入 context)。
+        """
+        parts: list[str] = []
+        for meta in self._plugins:
+            if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            plugin = meta.get("instance")
+            try:
+                handler = getattr(plugin, "on_perception", None)
+                if not handler:
+                    continue
+                text = await handler(bot_id, event, raw)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            except Exception as e:
+                logger.error(f"Plugin {meta['name']} perception handler error: {e}")
+        return "\n".join(parts)
+
     async def intercept(
         self,
         bot_id: str,

@@ -142,6 +142,30 @@ class SessionPipeline:
             self.runtime.bot_id, self.chat_type, self.chat_id,
         )
 
+    # ── 环境感知(仅回复生成注入) ───────────────────────────
+
+    async def _get_perception(self) -> str:
+        if self.runtime.perception_provider is None:
+            return ""
+        try:
+            text = await self.runtime.perception_provider(
+                self.runtime.bot_id, self.chat_type, self.chat_id,
+            )
+            return text if isinstance(text, str) else ""
+        except Exception as e:
+            self.logger.debug(f"获取环境感知失败: {e}")
+            return ""
+
+    @staticmethod
+    def _attach_perception(conversation_history: str, perception: str) -> str:
+        """把感知段附加到上下文文本末尾(感知只进 LLM 请求, 不写入 context)。"""
+        perception = perception.strip()
+        if not perception:
+            return conversation_history
+        if conversation_history and conversation_history.strip():
+            return f"{conversation_history}\n\n【环境感知】\n{perception}"
+        return f"【环境感知】\n{perception}"
+
     # ── 流水线回调 ────────────────────────────────────────────
 
     async def _extract_topic(
@@ -162,6 +186,12 @@ class SessionPipeline:
         """规划 + 实现一个话题的回复(由 replier 调用)。"""
         user_id = self.chat_id
         conversation_history = await self._get_context()
+        # 环境感知: 仅附加到回复生成(plan/realize), 不写入 context
+        perception = await self._get_perception()
+        if perception:
+            conversation_history = self._attach_perception(
+                conversation_history, perception
+            )
         plan = await self.runtime.agent.plan_topic_turn(
             user_id=user_id,
             topic=topic,
@@ -268,6 +298,7 @@ class BotAgentRuntime:
         persona: str = "",
         touch_replies: Optional[list[str]] = None,
         context_provider: Optional[Callable[..., Awaitable[str]]] = None,
+        perception_provider: Optional[Callable[..., Awaitable[str]]] = None,
     ):
         self.config = config
         self.database_manager = database_manager
@@ -275,6 +306,8 @@ class BotAgentRuntime:
         self.bot_nickname = bot_nickname or f"Bot-{bot_id}"
         self.logger = logger.bind(agent=bot_id)
         self.context_provider = context_provider
+        # 环境感知提供者(仅注入回复生成; 话题提取/记忆写入等不注入)
+        self.perception_provider = perception_provider
         self.reply_handler: Optional[Callable[..., Awaitable[None]]] = None
 
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
@@ -517,6 +550,7 @@ class BotAgentManager:
         persona: str = "",
         touch_replies: Optional[list[str]] = None,
         context_provider=None,
+        perception_provider=None,
     ) -> BotAgentRuntime:
         runtime = self._runtimes.get(bot_id)
         if runtime is None:
@@ -528,6 +562,7 @@ class BotAgentManager:
                 persona=persona,
                 touch_replies=touch_replies,
                 context_provider=context_provider,
+                perception_provider=perception_provider,
             )
             self._runtimes[bot_id] = runtime
             self.logger.info(f"Agent runtime created for bot {bot_id}")

@@ -102,6 +102,10 @@ class MessageHandler:
             self._group_recent_count = 10
         self._group_recent_msgs: dict[str, list[dict]] = {}
 
+        # 环境感知缓存: {(bot_id, chat_type, chat_id): 感知文本}
+        # 每次收到消息时从插件收集, 附加到 LLM 回复请求(不写入 context)
+        self._perception_text: dict[tuple, str] = {}
+
     def set_interceptors(self, interceptors: list) -> None:
         """Set the ordered interceptor chain."""
         self._interceptors = interceptors
@@ -238,6 +242,18 @@ class MessageHandler:
             # 群聊最近消息缓冲(回复时临时注入, 不写入 context)
             self._note_group_recent(bot_id, event)
 
+        # ── 环境感知: 每次消息刷新缓存(时间/节假日/农历/节气/群聊环境) ──
+        # 供 LLM 回复请求注入(agent 与 legacy 路径), 不写入 context
+        if self._plugins is not None:
+            try:
+                chat_type = self._get_chat_type(event)
+                chat_id = self._get_chat_id(event)
+                perception = await self._plugins.collect_perception(bot_id, event, raw)
+                if perception:
+                    self._perception_text[(bot_id, chat_type, chat_id)] = perception
+            except Exception as e:
+                logger.debug(f"Collect perception failed: {e}")
+
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
         # 插件明确消费时发送回复并结束; 否则继续正常流程。
@@ -360,6 +376,7 @@ class MessageHandler:
                 persona=persona,
                 touch_replies=touch_replies,
                 context_provider=self._agent_context_provider,
+                perception_provider=self._agent_perception_provider,
             )
             runtime.set_reply_handler(self._agent_reply_handler)
             logger.info(f"Agent runtime wired for bot {bot_id}")
@@ -502,15 +519,23 @@ class MessageHandler:
         return "【群聊最近消息】\n" + "\n".join(lines)
 
     async def _build_legacy_context(self, bot_id: str, chat_type: str, chat_id: str) -> list[dict]:
-        """加载会话上下文, 群聊时临时附加最近消息段(仅本次 LLM 调用)。
+        """加载会话上下文, 群聊时临时附加最近消息段 + 环境感知段。
 
         附加的 system 条目不写回 context 文件, 不参与上下文压缩总结。
         """
         context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
+        context = list(context)
         if chat_type == "group":
             recent = self._format_group_recent(bot_id, chat_id)
             if recent:
-                context = list(context) + [{"role": "system", "content": recent}]
+                context.append({"role": "system", "content": recent})
+        # 环境感知(仅 LLM 请求, 不写入 context)
+        perception = self._perception_text.get((bot_id, chat_type, chat_id), "")
+        if perception:
+            context.append({
+                "role": "system",
+                "content": f"【环境感知】\n{perception}",
+            })
         return context
 
     async def _describe_first_image(self, bot_id: str, url: str) -> str:
@@ -542,6 +567,12 @@ class MessageHandler:
             logger.warning(f"Image cache failed for bot {bot_id}: {e}")
             return ""
         return description or ""
+
+    async def _agent_perception_provider(
+        self, bot_id: str, chat_type: str, chat_id: str,
+    ) -> str:
+        """环境感知提供者(agent 回复生成路径): 返回最近一次收集的感知文本。"""
+        return self._perception_text.get((bot_id, chat_type, chat_id), "")
 
     async def _agent_context_provider(
         self, bot_id: str, chat_type: str, chat_id: str,
