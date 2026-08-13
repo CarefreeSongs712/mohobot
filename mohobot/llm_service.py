@@ -5,6 +5,7 @@ Handles prompt assembly, tool calling, vision integration, and response generati
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import json
@@ -28,8 +29,10 @@ from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
 class LLMService:
     """LLM interaction service with prompt assembly and vision support."""
 
-    def __init__(self, global_config: GlobalConfig):
+    def __init__(self, global_config: GlobalConfig, image_cache=None):
         self._cfg = global_config
+        # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
+        self._image_cache = image_cache
         self._available = False
 
         api_key = self._cfg.llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
@@ -150,14 +153,8 @@ class LLMService:
         max_tokens = self._cfg.llm.chat_max_tokens
         client = self._chat_client
 
-        # Check for image content — use vision model if images present
-        has_images = bool(extract_image_urls(event.message))
-        if has_images and self._vision_available:
-            model = self._cfg.llm.vision_model
-            client = self._vision_client
-            logger.debug(f"Using vision model {model} for message with images")
-
-        # Allow per-bot model override
+        # 图片不再切视觉模型: 描述已由 _build_messages 内预调用视觉模型转成文本,
+        # 主模型(纯文本 chat_model)统一处理、不接收图片原始信息。
         if bot_config and bot_config.chat_model_override:
             model = bot_config.chat_model_override
 
@@ -261,12 +258,8 @@ class LLMService:
         max_tokens = self._cfg.llm.chat_max_tokens
         client = self._chat_client
 
-        # Check for image content
-        has_images = bool(extract_image_urls(event.message))
-        if has_images and self._vision_available:
-            model = self._cfg.llm.vision_model
-            client = self._vision_client
-            logger.debug(f"Using vision model {model} for streaming with images")
+        # 图片不再切视觉模型: 描述已由 _build_messages 内预调用视觉模型转成文本,
+        # 主模型(纯文本 chat_model)统一处理、不接收图片原始信息。
 
         if bot_config and bot_config.chat_model_override:
             model = bot_config.chat_model_override
@@ -604,35 +597,64 @@ class LLMService:
             logger.debug(f"Limiting {len(image_urls)} images to first 1 for LLM input")
         image_urls = image_urls[:1]  # Never send more than 1 image per message
 
-        user_content: str | list = user_text or ""
+        user_content = user_text or ""
 
-        if image_urls and self._vision_available:
-            # Multi-modal message: text + first image only (仅视觉模型可处理)
-            content_parts: list[dict] = []
-            if user_text:
-                content_parts.append({"type": "text", "text": user_text})
-            for url in image_urls:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": url},
-                })
-            user_content = content_parts
-        elif image_urls:
-            # 无视觉能力: 不给纯文本模型塞 image_url 内容(会报错),降级为占位文本
-            placeholder = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
-            logger.debug("Vision unavailable — image content degraded to text placeholder")
-            user_content = placeholder
+        if image_urls:
+            # 与 beta(Agent)路径一致的图片语义: 先预调用视觉模型取描述,
+            # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
+            vision_desc = await self._describe_image_for_text(image_urls[0])
+            if user_text and vision_desc:
+                user_content = f"{user_text}（图片内容：{vision_desc}）"
+            elif vision_desc:
+                user_content = f"[图片]（{vision_desc}）"
+            else:
+                # 视觉不可用或描述失败: 降级为占位文本
+                user_content = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
 
         # 5. Final user message — the @mention check is now done in message_handler.py
-        if isinstance(user_content, list):
-            # Prepend time info as text
-            user_content.insert(0, {"type": "text", "text": time_msg})
-        else:
-            user_content = f"{time_msg}\n\n{user_content}" if user_content else time_msg
+        #    (主模型始终为纯文本, 不再构造多模态 image_url 分片)
+        user_content = f"{time_msg}\n\n{user_content}" if user_content else time_msg
 
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    async def _describe_image_for_text(self, url: str) -> str:
+        """Legacy 路径用: 预调用视觉模型把图片转述为文本描述。
+
+        优先走 ImageCache(下载 → phash 去重 → 描述缓存, 命中缓存不再调 vision);
+        未注入 image_cache 时降级直调 describe_image(每次调用)。
+        视觉不可用或调用失败返回空串(调用方降级为占位文本)。
+        """
+        if not self._vision_available or self._vision_client is None:
+            return ""
+        if self._image_cache is not None:
+            try:
+                _, description = await self._image_cache.get_or_describe(
+                    url, vision_callback=self._vision_callback(),
+                )
+                return description or ""
+            except Exception as e:
+                logger.warning(f"ImageCache failed in _build_messages: {e}")
+                return ""
+        # 无缓存注入: 直调 describe_image(不支持下载的 URL 可能返回空)
+        return await self.describe_image(url)
+
+    def _vision_callback(self):
+        """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。"""
+        async def _cb(image_url: str, local_path: str) -> str:
+            try:
+                return await asyncio.wait_for(
+                    self.describe_image_file(local_path),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Vision describe timeout in _build_messages")
+                return ""
+            except Exception as e:
+                logger.warning(f"Vision describe failed in _build_messages: {e}")
+                return ""
+        return _cb
 
     async def describe_image(self, url: str, max_tokens: int = 512) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
