@@ -111,7 +111,9 @@ class NoticeHandle:
         if not template:
             return
         nickname = await self._get_bot_nickname(bot_id)
+        # 兼容两种占位写法: 旧「【此处替换为 bot 的昵称】」与 新「xxx（bot昵称）」
         text = template.replace("【此处替换为 bot 的昵称】", nickname)
+        text = text.replace("xxx（bot昵称）", nickname)
         # 随机延迟 3~5s, 模拟真人
         await asyncio.sleep(random.uniform(3.0, 5.0))
         try:

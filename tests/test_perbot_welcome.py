@@ -136,6 +136,12 @@ async def test_friend_welcome():
     with mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
         await handle.handle("bot_001", None, raw)
     assert "你好，这里是天依" in ws.private[-1][2], ws.private[-1][2]
+
+    # 新占位「xxx（bot昵称）」同样替换
+    handle2 = make_handle(ws, welcome_friend_msg="这里是xxx（bot昵称）！\n介绍页: http://x")
+    with mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
+        await handle2.handle("bot_001", None, raw)
+    assert "这里是天依！" in ws.private[-1][2], ws.private[-1][2]
     print("[+] 新好友欢迎 OK")
 
 

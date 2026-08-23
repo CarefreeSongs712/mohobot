@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,9 @@ class BotInstance:
         self.ws: "websockets.WebSocketServerProtocol" = websocket
         self.config: BotConfig = config
         self.bound: bool = bound
-        self.connected_at: float = asyncio.get_event_loop().time()
+        # 在线时长统一用 wall clock(time.time): 与 WebUI 面板/status 插件的
+        # time.time() - connected_at 计算一致, 避免 monotonic 混用导致时长显示异常
+        self.connected_at: float = time.time()
         self.message_count: int = 0
         self._send_lock: asyncio.Lock = asyncio.Lock()
         # Track message IDs this bot has SENT, per chat: {"group:123": {"456", "789"}}
