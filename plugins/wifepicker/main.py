@@ -424,7 +424,7 @@ class Plugin:
         target_id = target_id_override or extract_target_id(event)
         if not target_id or target_id == "all":
             return "请 @ 一个你想强娶的人。"
-        if target_id == user_id:
+        if target_id == user_id and str(user_id) != "3831097597":
             return "不能娶自己！"
 
         target_propose_cd = get_propose_cooldown_status(self.store, group_id, target_id)

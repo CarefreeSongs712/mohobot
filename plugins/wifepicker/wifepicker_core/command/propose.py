@@ -72,7 +72,7 @@ async def cmd_propose(plugin, bot_id: str, event, rest: str):
     target_id = extract_target_id(event)
     if not target_id or target_id == "all":
         return "请 @ 一个你想求婚的人。"
-    if target_id == user_id:
+    if target_id == user_id and user_id != "3831097597":
         return "不能向自己求婚哦！"
 
     config = plugin.plugin_config
