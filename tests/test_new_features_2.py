@@ -327,6 +327,42 @@ async def test_usage_stats():
     print("[+] 用量统计 OK")
 
 
+async def test_no_prefix_global_dedup():
+    """无前缀"占卜"在群内多 bot 时只由最小 bot 处理; "赞我"不去重(每 bot 都处理)。"""
+    from mohobot.interceptors.plugin_system import PluginSystem
+    from mohobot.bot_manager import BotManager, BotInstance
+    from mohobot.models.config import BotConfig
+
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp())
+    ps.set_admin_ids([1001])
+    bm = BotManager(data_dir=tempfile.mkdtemp())
+    bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000))
+    bm._bots["bot_002"] = BotInstance("bot_002", None, BotConfig(qq=2000))
+    bm.note_group_message("bot_001", 888888)
+    bm.note_group_message("bot_002", 888888)
+    ps.set_runtime_refs(bot_manager=bm)
+    await ps.load_plugins()
+
+    # "占卜"(无 /, 命中 divination 的 global_triggers) → 群内只最小 bot 处理
+    ev = make_group_event(2001, "占卜")
+    handled_min, _ = await ps.dispatch_observed("bot_001", ev, {})
+    handled_other, _ = await ps.dispatch_observed("bot_002", ev, {})
+    assert handled_min, "最小 bot 应处理占卜"
+    assert not handled_other, "非最小 bot 不应处理占卜"
+
+    # "赞我"(praise 无 global_triggers) → 不去重, 每个 bot 都处理
+    ev2 = make_group_event(2002, "赞我")
+    h1, _ = await ps.dispatch_observed("bot_001", ev2, {})
+    h2, _ = await ps.dispatch_observed("bot_002", ev2, {})
+    assert h1 and h2, "赞我无 global_triggers, 各 bot 都应处理"
+
+    # 私聊不去重
+    ev3 = make_private_event(2001, "占卜")
+    h_p, _ = await ps.dispatch_observed("bot_002", ev3, {})
+    assert h_p, "私聊占卜不受群内去重影响"
+    print("[+] no_prefix 群内去重 OK")
+
+
 async def _main() -> int:
     import traceback
     failed = 0

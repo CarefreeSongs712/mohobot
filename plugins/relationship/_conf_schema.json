@@ -168,30 +168,6 @@
         "type": "list",
         "default": []
       }
-    },
-    "welcome_friend_enabled": {
-      "description": "新好友欢迎开关",
-      "hint": "新加好友时自动发送欢迎消息",
-      "type": "bool",
-      "default": true
-    },
-    "welcome_friend_msg": {
-      "description": "新好友欢迎消息",
-      "hint": "占位符“xxx（bot昵称）”发送时自动替换为 bot 昵称; 换行用真实换行",
-      "type": "text",
-      "default": "这里是xxx（bot昵称）！\n这是一个QQ机器人，具有AI对话等多种功能~\n介绍+使用须知（浏览器打开）：http://103.236.70.18:712/ 或 https://7121099.xyz/ \n交流群：398870315"
-    },
-    "welcome_group_enabled": {
-      "description": "新入群欢迎开关",
-      "hint": "bot 被拉入新群时自动发送欢迎消息(自动退群的群不发)",
-      "type": "bool",
-      "default": true
-    },
-    "welcome_group_msg": {
-      "description": "新入群欢迎消息",
-      "hint": "占位符“xxx（bot昵称）”发送时自动替换为 bot 昵称",
-      "type": "text",
-      "default": "这里是xxx（bot昵称）！\n这是一个QQ机器人，具有AI对话等多种功能~\n介绍+使用须知（浏览器打开）：http://103.236.70.18:712/ 或 https://7121099.xyz/ \n交流群：398870315"
     }
   },
   "batch_delay_min": {

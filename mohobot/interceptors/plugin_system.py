@@ -578,6 +578,10 @@ class PluginSystem(Interceptor):
                 if text:
                     npt = getattr(plugin.__class__, "no_prefix_triggers", None)
                     if npt and text in {str(t) for t in npt}:
+                        # 群内去重: 该词同时是插件的全局指令(global_triggers)时,
+                        # 群聊只由 bot_id 最小者处理(与 / 前缀命令去重一致)
+                        if not self._is_min_bot_for_global(bot_id, event, text, plugin):
+                            continue
                         msg_handler = getattr(plugin, "on_message", None)
                         if msg_handler:
                             handled, response = await msg_handler(bot_id, event, raw)
@@ -586,6 +590,23 @@ class PluginSystem(Interceptor):
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} no-prefix trigger error: {e}")
         return (False, None)
+
+    def _is_min_bot_for_global(self, bot_id: str, event, text: str, plugin) -> bool:
+        """无前缀触发词同时是全局指令时, 群聊只由最小 bot 处理。"""
+        gt = getattr(plugin.__class__, "global_triggers", None)
+        if not (gt and text in {str(t) for t in gt}):
+            return True  # 非全局指令词 → 不去重
+        from mohobot.models.onebot import GroupMessageEvent
+        if not isinstance(event, GroupMessageEvent):
+            return True  # 私聊不去重
+        bm = self._bot_manager
+        if bm is None:
+            return True
+        min_bot = bm.min_bot_for_group(str(event.group_id))
+        if min_bot is None or min_bot == bot_id:
+            return True
+        logger.debug(f"无前缀全局指令 {text!r} 由 {min_bot} 回复, {bot_id} 跳过")
+        return False
 
     async def collect_perception(self, bot_id: str, event, raw: dict) -> str:
         """收集"环境感知"文本: 遍历插件调用 on_perception(bot_id, event, raw)。

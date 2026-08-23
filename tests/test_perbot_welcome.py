@@ -95,25 +95,25 @@ class WelcomeWS:
         return {"status": "ok", "retcode": 0, "data": {}}
 
 
-def make_cfg(ws, **extra):
-    sys.path.insert(0, "plugins/relationship")
-    from relationship_core.config import PluginConfig
+def make_handle(ws, **cfg_extra):
+    """welcome 插件实例(独立欢迎插件)。"""
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("welcome_plugin_main", "plugins/welcome/main.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    inst = _mod.Plugin()
+    inst._ws_server = ws
     data = {
-        "manage_group": "",
-        "manage_users": [],
         "welcome_friend_enabled": True,
         "welcome_friend_msg": "你好，这里是【此处替换为 bot 的昵称】～\n欢迎~",
         "welcome_group_enabled": True,
         "welcome_group_msg": "你好，这里是【此处替换为 bot 的昵称】～\n欢迎进群~",
+        "delay_min": 0,
+        "delay_max": 0,
     }
-    data.update(extra)
-    return PluginConfig(data, admins=[1001], ws_server=ws, data_dir=tempfile.mkdtemp())
-
-
-def make_handle(ws, **cfg_extra):
-    sys.path.insert(0, "plugins/relationship")
-    from relationship_core.notice.handle import NoticeHandle
-    return NoticeHandle(make_cfg(ws, **cfg_extra))
+    data.update(cfg_extra)
+    inst.plugin_config = data
+    return inst
 
 
 async def test_friend_welcome():
@@ -121,8 +121,7 @@ async def test_friend_welcome():
     handle = make_handle(ws)
     raw = {"post_type": "notice", "notice_type": "friend_add",
            "user_id": "12345", "self_id": "1000"}
-    with mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
-        await handle.handle("bot_001", None, raw)
+    await handle.on_notice("bot_001", None, raw)
     assert ws.private and ws.private[-1][1] == 12345
     text = ws.private[-1][2]
     assert "你好，这里是bot_001" in text, "昵称替换应回退 bot_id"
@@ -133,14 +132,12 @@ async def test_friend_welcome():
     bm = BotManager(data_dir=tempfile.mkdtemp())
     bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000, nickname="天依"))
     ws._bot_manager = bm
-    with mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
-        await handle.handle("bot_001", None, raw)
+    await handle.on_notice("bot_001", None, raw)
     assert "你好，这里是天依" in ws.private[-1][2], ws.private[-1][2]
 
     # 新占位「xxx（bot昵称）」同样替换
     handle2 = make_handle(ws, welcome_friend_msg="这里是xxx（bot昵称）！\n介绍页: http://x")
-    with mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
-        await handle2.handle("bot_001", None, raw)
+    await handle2.on_notice("bot_001", None, raw)
     assert "这里是天依！" in ws.private[-1][2], ws.private[-1][2]
     print("[+] 新好友欢迎 OK")
 
@@ -150,38 +147,38 @@ async def test_friend_welcome_disabled():
     handle = make_handle(ws, welcome_friend_enabled=False)
     raw = {"post_type": "notice", "notice_type": "friend_add",
            "user_id": "12345", "self_id": "1000"}
-    await handle.handle("bot_001", None, raw)
+    await handle.on_notice("bot_001", None, raw)
     assert not ws.private, "开关关闭不应发送"
     # 模板为空也不发送
     handle2 = make_handle(ws, welcome_friend_msg="")
-    await handle2.handle("bot_001", None, raw)
+    await handle2.on_notice("bot_001", None, raw)
     assert not ws.private
     print("[+] 开关/空模板关闭 OK")
 
 
-async def test_group_welcome_only_when_stay():
-    from relationship_core.notice.decision import NoticeDecision, NoticeResult
-
+async def test_group_welcome():
     ws = WelcomeWS()
     handle = make_handle(ws)
     raw = {"post_type": "notice", "notice_type": "group_increase", "sub_type": "invite",
            "group_id": "888", "user_id": "1000", "self_id": "1000", "operator_id": "666"}
 
-    # 不退群 → 发欢迎
-    with mock.patch.object(NoticeDecision, "decide",
-                           new=mock.AsyncMock(return_value=NoticeResult(leave_group=False))), \
-         mock.patch("relationship_core.notice.handle.random.uniform", return_value=0.01):
-        await handle.handle("bot_001", None, raw)
+    # 群存在 → 发欢迎
+    await handle.on_notice("bot_001", None, raw)
     assert ws.group and ws.group[-1][1] == 888
     assert "欢迎进群~" in ws.group[-1][2]
 
-    # 自动退群 → 不发欢迎
-    ws.group.clear()
-    with mock.patch.object(NoticeDecision, "decide",
-                           new=mock.AsyncMock(return_value=NoticeResult(leave_group=True))):
-        await handle.handle("bot_001", None, raw)
-    assert not ws.group, "自动退群的场景不应发欢迎"
-    print("[+] 新入群欢迎(仅不退群) OK")
+    # 群已不存在(自动退群) → 不发
+    class GoneWS(WelcomeWS):
+        async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
+            if action == "get_group_info":
+                return {"status": "failed", "retcode": 100, "data": None}
+            return {"status": "ok", "retcode": 0, "data": {}}
+
+    ws2 = GoneWS()
+    handle2 = make_handle(ws2)
+    await handle2.on_notice("bot_001", None, raw)
+    assert not ws2.group, "群不存在时不应发欢迎"
+    print("[+] 新入群欢迎(群存在检查) OK")
 
 
 async def _main() -> int:
