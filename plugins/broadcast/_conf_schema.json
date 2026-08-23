@@ -1,0 +1,32 @@
+{
+  "preview_qq": {
+    "type": "int",
+    "default": 3831097597,
+    "description": "预览接收 QQ(私聊)",
+    "hint": "/广播预览 时把内容发到此 QQ 查看效果"
+  },
+  "preview_group": {
+    "type": "int",
+    "default": 398870315,
+    "description": "预览接收群号",
+    "hint": "/广播预览 时把内容发到此群查看效果"
+  },
+  "confirm_timeout_sec": {
+    "type": "int",
+    "default": 600,
+    "description": "确认有效期(秒)",
+    "hint": "预览后多久内需 /广播确认, 超时自动取消"
+  },
+  "max_content_len": {
+    "type": "int",
+    "default": 2000,
+    "description": "内容最大长度(字)",
+    "hint": "超出拒绝广播, 防刷屏"
+  },
+  "send_interval": {
+    "type": "int",
+    "default": 0,
+    "description": "每条发送间隔(秒)",
+    "hint": "0=不间隔; 大批量广播建议 1~2 秒防风控"
+  }
+}

@@ -29,6 +29,7 @@ from mohobot.models.onebot import (
     MetaEvent,
     NoticeEvent,
 )
+from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
 
 class PluginSystem(Interceptor):
@@ -570,6 +571,20 @@ class PluginSystem(Interceptor):
                         return (True, response)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} observe handler error: {e}")
+            # 无前缀命令触发: 插件声明 no_prefix_triggers 后, 消息文本精确匹配
+            # 集合中的词(群聊无需 @, 私聊直接) → 调用插件 on_message 处理
+            try:
+                text = _extract_plain_text(getattr(event, "message", None))
+                if text:
+                    npt = getattr(plugin.__class__, "no_prefix_triggers", None)
+                    if npt and text in {str(t) for t in npt}:
+                        msg_handler = getattr(plugin, "on_message", None)
+                        if msg_handler:
+                            handled, response = await msg_handler(bot_id, event, raw)
+                            if handled:
+                                return (True, response)
+            except Exception as e:
+                logger.error(f"Plugin {meta['name']} no-prefix trigger error: {e}")
         return (False, None)
 
     async def collect_perception(self, bot_id: str, event, raw: dict) -> str:

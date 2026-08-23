@@ -1217,12 +1217,17 @@ class MessageHandler:
         return True
 
     async def _try_send_forward(self, bot_id: str, event: GroupMessageEvent, text: str) -> bool:
-        """把长文本按行拆成合并转发节点发送。失败返回 False(回退普通发送)。"""
+        """把长文本按字数切块(每块 _forward_chunk_chars 字)作为合并转发节点发送。
+
+        不按行拆分 — 纯按字数分条。失败返回 False(回退普通发送)。
+        """
         try:
-            lines = [ln for ln in text.split("\n") if ln.strip()]
-            if len(lines) < 2:
-                # 单行长文本: 按 500 字切块
-                lines = [text[i:i + 500] for i in range(0, len(text), 500)]
+            chunks = [
+                text[i:i + self._forward_chunk_chars]
+                for i in range(0, len(text), self._forward_chunk_chars)
+            ]
+            if len(chunks) < 2:
+                return False  # 不足两块不应走到这里
             bot_qq, bot_nick = self._bot_identity(bot_id)
             nodes = [
                 {
@@ -1230,22 +1235,25 @@ class MessageHandler:
                     "data": {
                         "user_id": str(bot_qq),
                         "nickname": bot_nick,
-                        "content": [{"type": "text", "data": {"text": ln}}],
+                        "content": [{"type": "text", "data": {"text": chunk}}],
                     },
                 }
-                for ln in lines
+                for chunk in chunks
             ]
             if self._ws is None:
                 return False
             await self._ws.send_group_forward_msg(bot_id, event.group_id, nodes)
             logger.debug(
                 f"合并转发回复 bot={bot_id} group={event.group_id} "
-                f"nodes={len(nodes)}"
+                f"nodes={len(nodes)} (每块 {self._forward_chunk_chars} 字)"
             )
             return True
         except Exception as e:
             logger.warning(f"合并转发失败, 回退普通发送: {e}")
             return False
+
+    # 合并转发分块字数(纯按字数分条, 不按行)
+    _forward_chunk_chars = 1000
 
     def _bot_identity(self, bot_id: str) -> tuple[int, str]:
         """当前 bot 的 (QQ 号, 昵称), 用于合并转发节点署名。"""

@@ -43,6 +43,8 @@ COMMANDS = {
     "拉黑": "cmd_block",
     "抽查": "cmd_check",
     "推荐": "cmd_contact",
+    "批量加群": "cmd_batch_join_group",
+    "批量加好友": "cmd_batch_add_friend",
 }
 
 
@@ -62,6 +64,8 @@ class Plugin:
             {"name": "拉黑", "desc": "拒绝并拉黑好友申请人或邀请群(引用审批消息, 审批员)"},
             {"name": "抽查", "desc": "抽查 <群号|@群友|@QQ> <数量>(管理员)"},
             {"name": "推荐", "desc": "推荐 <群号/@群友/@qq>"},
+            {"name": "批量加群", "desc": "批量加群 <群号1,群号2,...> — 逐个申请加群, 随机延迟(管理员)"},
+            {"name": "批量加好友", "desc": "批量加好友 <QQ1,QQ2,...> — 逐个申请加好友, 随机延迟(管理员)"},
         ],
     }
 
@@ -94,6 +98,7 @@ class Plugin:
         self._request = None
         self._notice = None
         self._contact = None
+        self._batch_running = False  # 批量加群/加好友任务锁
         # 配置修改串行化锁(跨 _ensure_handlers 重建的 cfg 实例共享,
         # 6 bot 并发 /加审批员 /拉黑 时防止丢更新)
         import asyncio
@@ -250,3 +255,100 @@ class Plugin:
 
     async def cmd_contact(self, bot_id: str, event: Any, rest: str) -> str:
         return await self._contact.contact(bot_id, event, rest)
+
+    # ── 批量加群 / 批量加好友 ────────────────────────────────
+
+    async def cmd_batch_join_group(self, bot_id: str, event: Any, rest: str) -> str:
+        """批量加群 <群号1,群号2,...> — 逐个申请, 随机延迟 10~30s(可配置)。"""
+        if not self._check_admin(event):
+            return "❌ 你没有权限执行此操作。"
+        ids = self._parse_batch_ids(rest)
+        if not ids:
+            return "用法: /批量加群 <群号1,群号2,...>(逗号分隔)"
+        return self._start_batch(bot_id, event, "group", ids)
+
+    async def cmd_batch_add_friend(self, bot_id: str, event: Any, rest: str) -> str:
+        """批量加好友 <QQ1,QQ2,...> — 逐个申请, 随机延迟 10~30s(可配置)。"""
+        if not self._check_admin(event):
+            return "❌ 你没有权限执行此操作。"
+        ids = self._parse_batch_ids(rest)
+        if not ids:
+            return "用法: /批量加好友 <QQ1,QQ2,...>(逗号分隔)"
+        return self._start_batch(bot_id, event, "friend", ids)
+
+    @staticmethod
+    def _parse_batch_ids(rest: str) -> list[str]:
+        parts = [p.strip() for p in (rest or "").replace("，", ",").split(",")]
+        return [p for p in parts if p.isdigit()]
+
+    def _start_batch(
+        self, bot_id: str, event: Any, kind: str, ids: list[str],
+    ) -> str:
+        """启动后台批量任务(同 bot 同时只允许一个批量任务)。"""
+        if getattr(self, "_batch_running", False):
+            return "⚠️ 已有批量任务在进行中, 请等待完成后再试。"
+        self._batch_running = True
+        import asyncio as _aio
+        _aio.create_task(self._run_batch(bot_id, event, kind, ids))
+        total_sec = len(ids) * 20  # 按默认延迟区间估算
+        return (
+            f"🚀 开始批量{'加群' if kind == 'group' else '加好友'} {len(ids)} 个目标,"
+            f"每个间隔随机 10~30 秒, 预计约 {total_sec // 60 + 1} 分钟完成。\n"
+            f"完成后会在这里汇报成功/失败统计。"
+        )
+
+    async def _run_batch(
+        self, bot_id: str, event: Any, kind: str, ids: list[str],
+    ) -> None:
+        """后台执行: 逐个调用 NapCat 申请接口, 中间随机延迟, 失败跳过继续。"""
+        import asyncio
+        import random
+
+        ws = self._ws_server
+        try:
+            if ws is None:
+                return
+            # 延迟区间(秒), 配置可调
+            data = getattr(self, "plugin_config", {}) or {}
+            delay_min = max(0, int(data.get("batch_delay_min", 10)))
+            delay_max = max(delay_min, int(data.get("batch_delay_max", 30)))
+
+            ok, failed = 0, 0
+            failed_list: list[str] = []
+            for target in ids:
+                try:
+                    if kind == "group":
+                        resp = await ws.send_to_bot(
+                            bot_id, "set_group_add", {"group_id": int(target)},
+                            wait_response=True, timeout=10.0,
+                        )
+                    else:
+                        resp = await ws.send_to_bot(
+                            bot_id, "set_friend_add", {"user_id": int(target)},
+                            wait_response=True, timeout=10.0,
+                        )
+                    if resp is None or resp.get("status") != "ok" or resp.get("retcode") != 0:
+                        failed += 1
+                        failed_list.append(target)
+                    else:
+                        ok += 1
+                except Exception as e:
+                    logger.warning(f"批量{'加群' if kind == 'group' else '加好友'} {target} 失败: {e}")
+                    failed += 1
+                    failed_list.append(target)
+                await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+            label = "加群" if kind == "group" else "加好友"
+            summary = (
+                f"📋 批量{label}完成: 成功 {ok} 个, 失败 {failed} 个\n"
+                + (f"失败列表: {', '.join(failed_list)}" if failed_list else "全部成功 ✅")
+            )
+            await self._send_reply(bot_id, event, summary)
+        except Exception as e:
+            logger.error(f"批量任务异常: {e}")
+            try:
+                await self._send_reply(bot_id, event, f"❌ 批量任务异常: {e}")
+            except Exception:
+                pass
+        finally:
+            self._batch_running = False

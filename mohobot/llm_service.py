@@ -322,7 +322,7 @@ class LLMService:
         # Record token usage
         usage = getattr(response, "usage", None)
         if usage is not None:
-            await self._record_usage(model, usage, bot_id, event)
+            await self._record_usage(model, usage, bot_id, event, module="chat")
 
         # Handle tool calls: 工具结果作为 tool 消息回传 LLM,
         # 再调用一次生成最终自然语言回复(不向用户输出原始搜索结果)
@@ -526,13 +526,16 @@ class LLMService:
 
         # Record token usage from the final stream chunk
         if stream_usage is not None:
-            await self._record_usage(model, stream_usage, bot_id, event)
+            await self._record_usage(model, stream_usage, bot_id, event, module="chat")
 
         yield ("", True)  # Signal completion with no extra text
 
     # ── Token usage tracking (web panel stats) ─────────────────
 
-    async def _record_usage(self, model: str, usage: Any, bot_id: str, event: MessageEvent) -> None:
+    async def _record_usage(
+        self, model: str, usage: Any, bot_id: str, event: MessageEvent,
+        module: str = "chat",
+    ) -> None:
         """Append one usage record to data/stats/llm_usage.jsonl."""
         try:
             from mohobot.file_store import JSONLWriter
@@ -542,6 +545,7 @@ class LLMService:
             record = {
                 "time": time.time(),
                 "bot_id": bot_id,
+                "module": module,
                 "model": model,
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0),
                 "completion_tokens": getattr(usage, "completion_tokens", 0),
@@ -592,7 +596,7 @@ class LLMService:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.3,
-                max_tokens=1200,
+                max_tokens=4096,
             )
             text = (resp.choices[0].message.content or "").strip()
             return text or None

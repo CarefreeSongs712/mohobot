@@ -72,11 +72,16 @@ async def test_perception_content():
     inst._ws_server = ws
     mod._GROUP_NAME_CACHE.clear()
 
-    # 群聊 + 图片
+    # 群聊 + 图片(星期/工作日动态计算, 避免日期依赖)
+    from mohobot.utils.time_utils import format_utc8
+    weekday_cn = {"Mon": "周一", "Tue": "周二", "Wed": "周三", "Thu": "周四",
+                  "Fri": "周五", "Sat": "周六", "Sun": "周日"}[format_utc8("%a")]
     text = await inst.on_perception("bot_001", make_group_event(2001, "hi", with_image=True), {})
-    assert "发送时间:" in text and "周一" in text and "工作日" in text
+    assert "发送时间:" in text and weekday_cn in text
+    assert ("工作日" in text) or ("周末" in text) or ("休息日" in text), text
     assert "农历" in text and "年" in text
-    assert "节气" in text
+    # 节气: 当天=“今日X”, 临近=“临近X/X已过”, 之间=“当前节气: X”
+    assert ("节气" in text) or ("今日" in text) or ("临近" in text) or ("已过" in text), text
     assert "平台: QQ" in text and "群聊" in text and "群名: 测试群" in text and "含图片" in text
     # 私聊
     text2 = await inst.on_perception("bot_001", make_private_event(2002, "hi"), {})

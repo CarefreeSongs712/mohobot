@@ -29,7 +29,7 @@ async def test_plugin_config_system() -> None:
 
     # schema 解析
     schema = meta["config_schema"]
-    assert set(schema.keys()) == {"manage_group", "manage_users", "check", "request", "notice"}
+    assert set(schema.keys()) == {"manage_group", "manage_users", "check", "request", "notice", "batch_delay_min", "batch_delay_max"}
     assert schema["check"]["items"]["count"]["default"] == 20
     assert schema["notice"]["items"]["max_group_capacity"]["default"] == 100
 

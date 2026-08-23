@@ -24,6 +24,8 @@ class Plugin:
 
     # 全局指令: 群内多 bot 时只由 bot_id 最小者回复(框架去重)
     global_triggers = TRIGGERS
+    # 无前缀触发: 群聊不 @ 直接发"占卜/今日占卜"也可触发(框架观察钩子精确匹配)
+    no_prefix_triggers = {"占卜", "今日占卜"}
 
     info = {
         "commands": [

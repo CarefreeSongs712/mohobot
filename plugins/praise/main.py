@@ -23,6 +23,9 @@ class Plugin:
         ],
     }
 
+    # 无前缀触发: 群聊不 @ 直接发"赞我/zanwo"也可触发(框架观察钩子精确匹配)
+    no_prefix_triggers = {"赞我", "zanwo"}
+
     # WS server injected by main.py via inject_ws_server() classmethod
     _ws_server = None
 

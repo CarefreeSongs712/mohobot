@@ -135,7 +135,7 @@ async def test_forward_long_reply() -> None:
     )
     ev = make_group_event(2001, "/help")
 
-    # 长文本(>600 字符) → 合并转发
+    # 长文本(>600 字符) → 合并转发(按 1000 字分条, 不按行)
     long_text = "\n".join(f"第 {i} 行: " + "帮助说明内容" * 8 for i in range(20))
     assert len(long_text) > 600
     await handler._send_reply("bot_001", ev, long_text)
@@ -143,7 +143,8 @@ async def test_forward_long_reply() -> None:
     assert not ws.plain_calls
     bot_id, gid, nodes = ws.forward_calls[-1]
     assert str(gid) == "888888"
-    assert len(nodes) == 20
+    expected = -(-len(long_text) // 1000)  # ceil(字数/1000)
+    assert len(nodes) == expected, f"应按 1000 字分 {expected} 条, 实际 {len(nodes)}"
     node = nodes[0]
     assert node["type"] == "node"
     assert node["data"]["user_id"] == "1000", "节点署名应为 bot QQ"
