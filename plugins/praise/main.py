@@ -40,7 +40,7 @@ class Plugin:
     _DEFAULTS = {
         "like_total": 20,
         "like_times_per_call": 10,
-        "success_msg": "✅ 已给你点了 {count} 个赞,去名片看看吧~",
+        "success_msg": "✅ 已给你点了 {count} 个赞~",
         "fail_msg": "❌ 点赞失败: {detail}",
         "limit_msg": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
     }
