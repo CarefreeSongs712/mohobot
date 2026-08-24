@@ -363,6 +363,42 @@ async def test_no_prefix_global_dedup():
     print("[+] no_prefix 群内去重 OK")
 
 
+async def test_plugin_tick_tasks():
+    """框架周期任务: interval_sec + on_tick 启动/停止。"""
+    import asyncio
+    from mohobot.interceptors.plugin_system import PluginSystem
+
+    class TickPlugin:
+        interval_sec = 1
+        ticks = 0
+
+        async def on_tick(self):
+            TickPlugin.ticks += 1
+
+    ps = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp())
+    ps._plugins = [{
+        "name": "tick_test", "enabled": True, "loaded": True,
+        "instance": TickPlugin(),
+    }]
+    ps.start_tick_tasks()
+    await asyncio.sleep(2.3)
+    assert TickPlugin.ticks >= 2, f"2.3s 内应至少 tick 2 次(1s 间隔), 实际 {TickPlugin.ticks}"
+    # 停止后不再 tick
+    ps.stop_tick_tasks()
+    n = TickPlugin.ticks
+    await asyncio.sleep(1.2)
+    assert TickPlugin.ticks == n, "停止后不应再 tick"
+    # 无 interval_sec 的插件不启动任务
+    class NoTick:
+        async def on_tick(self):
+            pass
+    ps2 = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp())
+    ps2._plugins = [{"name": "no_tick", "enabled": True, "loaded": True, "instance": NoTick()}]
+    ps2.start_tick_tasks()
+    assert ps2._tick_tasks == [], "未声明 interval_sec 不应启动任务"
+    print("[+] 框架周期任务 OK")
+
+
 async def _main() -> int:
     import traceback
     failed = 0

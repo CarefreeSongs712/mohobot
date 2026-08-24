@@ -113,15 +113,11 @@ def make_handle(ws, data_dir, **cfg_extra):
         "welcome_group_msg": "你好，这里是【此处替换为 bot 的昵称】～\n欢迎进群~",
         "delay_min": 0,
         "delay_max": 0,
-        "check_every_heartbeats": 1,
+        "check_interval_sec": 60,
     }
     data.update(cfg_extra)
     inst.plugin_config = data
     return inst
-
-
-def heartbeat():
-    return {"post_type": "meta_event", "meta_event_type": "heartbeat"}
 
 
 async def test_first_boot_baseline():
@@ -129,7 +125,7 @@ async def test_first_boot_baseline():
     td = tempfile.mkdtemp()
     ws = WelcomeWS()
     handle = make_handle(ws, td)
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     assert not ws.group and not ws.private, "首启不应欢迎已有"
     # 基线已持久化
     from mohobot.file_store import json_read
@@ -144,11 +140,11 @@ async def test_new_group_and_friend_welcome():
     ws = WelcomeWS()
     handle = make_handle(ws, td)
     # 首启基线
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     # 新群 + 新好友
     ws.groups = [{"group_id": 100}, {"group_id": 200}]
     ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     assert ws.group and ws.group[-1][1] == 200
     assert "欢迎进群~" in ws.group[-1][2]
     assert ws.private and ws.private[-1][1] == 2002
@@ -161,7 +157,7 @@ async def test_new_group_and_friend_welcome():
     # 再次检查无变化 → 不重复欢迎
     ws.private.clear()
     ws.group.clear()
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     assert not ws.group and not ws.private, "无新增不应重复欢迎"
     print("[+] 新增群/好友欢迎 OK")
 
@@ -170,32 +166,26 @@ async def test_friend_welcome_disabled():
     td = tempfile.mkdtemp()
     ws = WelcomeWS()
     handle = make_handle(ws, td, welcome_friend_enabled=False)
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
     ws.groups = [{"group_id": 100}, {"group_id": 200}]
-    await handle.on_meta("bot_001", None, heartbeat())
+    await handle._check_all("bot_001")
     assert not ws.private, "好友开关关闭不应发送"
     assert ws.group and ws.group[-1][1] == 200, "群开关仍生效"
     print("[+] 开关关闭 OK")
 
 
-async def test_low_frequency_check():
+async def test_interval_config():
+    """interval_sec 从配置读取(默认 60, 可调, 下限 5s)。"""
     td = tempfile.mkdtemp()
     ws = WelcomeWS()
-    handle = make_handle(ws, td, check_every_heartbeats=2)
-    # 第 1 次心跳: 不检查(不建基线)
-    await handle.on_meta("bot_001", None, heartbeat())
-    ws.groups = [{"group_id": 100}, {"group_id": 200}]
-    # 第 2 次心跳: 检查 → 首启基线(此时 200 已存在 → 作为基线不欢迎)
-    await handle.on_meta("bot_001", None, heartbeat())
-    assert not ws.group, "第 2 次心跳是首启基线, 不应欢迎"
-    # 第 3 次心跳: 不检查; 第 4 次: 检查 → 发现新群 300
-    ws.groups.append({"group_id": 300})
-    await handle.on_meta("bot_001", None, heartbeat())
-    assert not ws.group, "奇数心跳不应检查"
-    await handle.on_meta("bot_001", None, heartbeat())
-    assert ws.group and ws.group[-1][1] == 300
-    print("[+] 降低频率 OK")
+    handle = make_handle(ws, td)
+    assert handle.interval_sec == 60, "默认间隔 60s"
+    handle.plugin_config["check_interval_sec"] = 30
+    assert handle.interval_sec == 30
+    handle.plugin_config["check_interval_sec"] = 2
+    assert handle.interval_sec == 5, "下限 5s 防止过频"
+    print("[+] interval 配置 OK")
 
 
 async def _main() -> int:

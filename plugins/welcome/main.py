@@ -1,7 +1,7 @@
 """Mohobot 欢迎插件 — 新加好友 / 新入群时自动发送欢迎消息。
 
 采用"监控列表对比"方式(不使用 group_increase/friend_add 通知):
-- 每 N 次心跳(meta_event heartbeat, 约 30s 一次)触发一次检查:
+- 框架周期任务每 check_interval_sec 秒(默认 60)触发一次检查:
   拉取 get_group_list / get_friend_list, 与持久化的已知集合对比
 - 发现新群/新好友 → 随机延迟 3~5s 发送欢迎, 并更新已知集合
 - 消失的群/好友 → 从已知集合移除(被踢/退群/删好友)
@@ -48,13 +48,11 @@ class Plugin:
         "welcome_group_msg": _NEW_MSG,
         "delay_min": 3,
         "delay_max": 5,
-        "check_every_heartbeats": 5,  # 每 N 次心跳检查一次(约 30s×N)
+        "check_interval_sec": 60,  # 列表对比间隔(秒)
     }
 
     def __init__(self):
         self.plugin_config: dict = dict(self._DEFAULTS)
-        # 心跳计数(每 bot)
-        self._heartbeat_count: dict[str, int] = {}
 
     @classmethod
     def inject_ws_server(cls, ws_server) -> None:
@@ -69,23 +67,26 @@ class Plugin:
         value = cfg.get(key, default)
         return value if value is not None else default
 
-    # ── 心跳触发检查 ─────────────────────────────────────────
+    # ── 周期任务(框架调度) ───────────────────────────────────
 
-    async def on_meta(self, bot_id: str, event: Any, raw: dict) -> None:
-        """heartbeat 低频触发: 每 check_every_heartbeats 次心跳检查一次列表对比。"""
-        if not raw or not isinstance(raw, dict):
+    @property
+    def interval_sec(self) -> int:
+        """框架周期任务间隔: 读取配置, 热更新即时生效。"""
+        return max(5, int(self._cfg("check_interval_sec", 60)))
+
+    async def on_tick(self) -> None:
+        """周期任务: 遍历所有已注册 bot, 逐个对比群/好友列表。"""
+        ws = self._ws_server
+        if ws is None:
             return
-        if raw.get("meta_event_type") != "heartbeat":
+        bm = getattr(ws, "_bot_manager", None)
+        if bm is None:
             return
-        n = self._heartbeat_count.get(bot_id, 0) + 1
-        self._heartbeat_count[bot_id] = n
-        every = max(1, int(self._cfg("check_every_heartbeats", 5)))
-        if n % every != 0:
-            return
-        try:
-            await self._check_all(bot_id)
-        except Exception as e:
-            logger.warning(f"欢迎插件列表检查失败({bot_id}): {e}")
+        for bot in list(bm.all_bots):
+            try:
+                await self._check_all(bot.bot_id)
+            except Exception as e:
+                logger.warning(f"欢迎插件列表检查失败({bot.bot_id}): {e}")
 
     # ── 列表对比 ─────────────────────────────────────────────
 

@@ -48,6 +48,52 @@ class PluginSystem(Interceptor):
         self._bot_manager = None
         self._anysearch_client = None
         self._admin_ids: set[str] = set()  # 全局管理员(封禁/插件命令共用)
+        # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
+        self._tick_tasks: list[Any] = []
+
+    # ── 周期任务 ─────────────────────────────────────────────
+
+    def start_tick_tasks(self) -> None:
+        """为声明了 interval_sec + on_tick 的插件启动后台周期任务(幂等)。
+
+        每个插件一个循环: 每 interval_sec 秒(每次循环前读取, 配置热更新即时生效)
+        调用一次插件 on_tick()。热重载前需先 stop_tick_tasks()。
+        """
+        self.stop_tick_tasks()
+        import asyncio
+
+        for meta in self._plugins:
+            if not meta.get("enabled") or not meta.get("loaded"):
+                continue
+            plugin = meta.get("instance")
+            if plugin is None:
+                continue
+            ticker = getattr(plugin, "on_tick", None)
+            interval = getattr(plugin, "interval_sec", None)
+            if ticker is None or interval is None:
+                continue
+
+            async def _loop(inst=plugin, name=meta.get("name", "?")):
+                while True:
+                    try:
+                        secs = max(1, int(getattr(inst, "interval_sec", 60)))
+                        await asyncio.sleep(secs)
+                        await inst.on_tick()
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        logger.error(f"插件 {name} 周期任务异常: {e}")
+
+            task = asyncio.create_task(_loop())
+            self._tick_tasks.append(task)
+            logger.info(f"插件周期任务已启动: {meta.get('name')}")
+
+    def stop_tick_tasks(self) -> None:
+        """取消全部插件周期任务(热重载/关闭时调用)。"""
+        for task in self._tick_tasks:
+            if not task.done():
+                task.cancel()
+        self._tick_tasks.clear()
 
     # ── 管理员注入 ─────────────────────────────────────────────
 
@@ -227,6 +273,8 @@ class PluginSystem(Interceptor):
         logger.info(f"Plugin system loaded {count} plugin(s)")
         # 加载完成后注入运行时引用(热重载也走这里)
         self.apply_injections()
+        # 启动周期任务(声明 interval_sec + on_tick 的插件)
+        self.start_tick_tasks()
         return count
 
     # ── 插件配置 (schema 驱动) ────────────────────────────────
@@ -417,6 +465,7 @@ class PluginSystem(Interceptor):
         新增/修改/删除插件文件、启停状态均立即生效, 无需重启。
         """
         logger.info("Hot-reloading plugins...")
+        self.stop_tick_tasks()  # 取消旧周期任务(load 会重建)
         self._plugins.clear()
         count = await self.load_plugins()
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
