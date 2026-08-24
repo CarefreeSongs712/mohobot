@@ -34,5 +34,11 @@
     "default": 5,
     "description": "发送延迟上限(秒)",
     "hint": "随机延迟区间上限"
+  },
+  "check_every_heartbeats": {
+    "type": "int",
+    "default": 5,
+    "description": "检查频率(心跳次数)",
+    "hint": "每 N 次心跳(约 30s 一次)检查一次群/好友列表对比; 越大越省, 发现新群/新好友越慢"
   }
 }

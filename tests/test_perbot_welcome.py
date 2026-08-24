@@ -74,12 +74,14 @@ async def test_command_collection_filtered():
 # ── 2/3/4. relationship 欢迎消息 ────────────────────────────
 
 class WelcomeWS:
-    """mock ws_server: 记录私聊/群聊发送 + API 响应。"""
+    """mock ws_server: 群/好友列表可配置, 记录发送。"""
 
     def __init__(self):
         self.private = []
         self.group = []
         self._bot_manager = None
+        self.groups = [{"group_id": 100}]      # 当前群列表
+        self.friends = [{"user_id": 1001}]     # 当前好友列表
 
     async def send_private_msg(self, bot_id, user_id, message):
         self.private.append((bot_id, user_id, message))
@@ -88,21 +90,22 @@ class WelcomeWS:
         self.group.append((bot_id, group_id, message))
 
     async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
-        if action == "get_group_info":
-            return {"status": "ok", "retcode": 0, "data": {"group_name": "测试群"}}
-        if action == "get_group_member_list":
-            return {"status": "ok", "retcode": 0, "data": [{"user_id": 1001}, {"user_id": 1002}, {"user_id": 1003}]}
+        if action == "get_group_list":
+            return {"status": "ok", "retcode": 0, "data": list(self.groups)}
+        if action == "get_friend_list":
+            return {"status": "ok", "retcode": 0, "data": list(self.friends)}
         return {"status": "ok", "retcode": 0, "data": {}}
 
 
-def make_handle(ws, **cfg_extra):
-    """welcome 插件实例(独立欢迎插件)。"""
+def make_handle(ws, data_dir, **cfg_extra):
+    """welcome 插件实例(独立欢迎插件, 监控模式)。"""
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location("welcome_plugin_main", "plugins/welcome/main.py")
     _mod = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
     inst = _mod.Plugin()
     inst._ws_server = ws
+    inst._data_dir = data_dir
     data = {
         "welcome_friend_enabled": True,
         "welcome_friend_msg": "你好，这里是【此处替换为 bot 的昵称】～\n欢迎~",
@@ -110,75 +113,89 @@ def make_handle(ws, **cfg_extra):
         "welcome_group_msg": "你好，这里是【此处替换为 bot 的昵称】～\n欢迎进群~",
         "delay_min": 0,
         "delay_max": 0,
+        "check_every_heartbeats": 1,
     }
     data.update(cfg_extra)
     inst.plugin_config = data
     return inst
 
 
-async def test_friend_welcome():
-    ws = WelcomeWS()
-    handle = make_handle(ws)
-    raw = {"post_type": "notice", "notice_type": "friend_add",
-           "user_id": "12345", "self_id": "1000"}
-    await handle.on_notice("bot_001", None, raw)
-    assert ws.private and ws.private[-1][1] == 12345
-    text = ws.private[-1][2]
-    assert "你好，这里是bot_001" in text, "昵称替换应回退 bot_id"
-    assert "欢迎~" in text
-    # 昵称替换(bot_manager 提供 nickname)
-    from mohobot.bot_manager import BotManager, BotInstance
-    from mohobot.models.config import BotConfig
-    bm = BotManager(data_dir=tempfile.mkdtemp())
-    bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000, nickname="天依"))
-    ws._bot_manager = bm
-    await handle.on_notice("bot_001", None, raw)
-    assert "你好，这里是天依" in ws.private[-1][2], ws.private[-1][2]
+def heartbeat():
+    return {"post_type": "meta_event", "meta_event_type": "heartbeat"}
 
-    # 新占位「xxx（bot昵称）」同样替换
-    handle2 = make_handle(ws, welcome_friend_msg="这里是xxx（bot昵称）！\n介绍页: http://x")
-    await handle2.on_notice("bot_001", None, raw)
-    assert "这里是天依！" in ws.private[-1][2], ws.private[-1][2]
-    print("[+] 新好友欢迎 OK")
+
+async def test_first_boot_baseline():
+    """首启: 当前列表为基线, 不欢迎已有群/好友。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert not ws.group and not ws.private, "首启不应欢迎已有"
+    # 基线已持久化
+    from mohobot.file_store import json_read
+    known = await json_read(Path(td) / "plugins_data" / "welcome" / "known.json")
+    assert known["groups"]["bot_001"] == ["100"]
+    assert known["friends"]["bot_001"] == ["1001"]
+    print("[+] 首启基线 OK")
+
+
+async def test_new_group_and_friend_welcome():
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    # 首启基线
+    await handle.on_meta("bot_001", None, heartbeat())
+    # 新群 + 新好友
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert ws.group and ws.group[-1][1] == 200
+    assert "欢迎进群~" in ws.group[-1][2]
+    assert ws.private and ws.private[-1][1] == 2002
+    assert "你好，这里是bot_001" in ws.private[-1][2], "昵称回退 bot_id"
+    # 基线更新
+    from mohobot.file_store import json_read
+    known = await json_read(Path(td) / "plugins_data" / "welcome" / "known.json")
+    assert known["groups"]["bot_001"] == ["100", "200"]
+    assert known["friends"]["bot_001"] == ["1001", "2002"]
+    # 再次检查无变化 → 不重复欢迎
+    ws.private.clear()
+    ws.group.clear()
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert not ws.group and not ws.private, "无新增不应重复欢迎"
+    print("[+] 新增群/好友欢迎 OK")
 
 
 async def test_friend_welcome_disabled():
+    td = tempfile.mkdtemp()
     ws = WelcomeWS()
-    handle = make_handle(ws, welcome_friend_enabled=False)
-    raw = {"post_type": "notice", "notice_type": "friend_add",
-           "user_id": "12345", "self_id": "1000"}
-    await handle.on_notice("bot_001", None, raw)
-    assert not ws.private, "开关关闭不应发送"
-    # 模板为空也不发送
-    handle2 = make_handle(ws, welcome_friend_msg="")
-    await handle2.on_notice("bot_001", None, raw)
-    assert not ws.private
-    print("[+] 开关/空模板关闭 OK")
+    handle = make_handle(ws, td, welcome_friend_enabled=False)
+    await handle.on_meta("bot_001", None, heartbeat())
+    ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert not ws.private, "好友开关关闭不应发送"
+    assert ws.group and ws.group[-1][1] == 200, "群开关仍生效"
+    print("[+] 开关关闭 OK")
 
 
-async def test_group_welcome():
+async def test_low_frequency_check():
+    td = tempfile.mkdtemp()
     ws = WelcomeWS()
-    handle = make_handle(ws)
-    raw = {"post_type": "notice", "notice_type": "group_increase", "sub_type": "invite",
-           "group_id": "888", "user_id": "1000", "self_id": "1000", "operator_id": "666"}
-
-    # 群存在 → 发欢迎
-    await handle.on_notice("bot_001", None, raw)
-    assert ws.group and ws.group[-1][1] == 888
-    assert "欢迎进群~" in ws.group[-1][2]
-
-    # 群已不存在(自动退群) → 不发
-    class GoneWS(WelcomeWS):
-        async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
-            if action == "get_group_info":
-                return {"status": "failed", "retcode": 100, "data": None}
-            return {"status": "ok", "retcode": 0, "data": {}}
-
-    ws2 = GoneWS()
-    handle2 = make_handle(ws2)
-    await handle2.on_notice("bot_001", None, raw)
-    assert not ws2.group, "群不存在时不应发欢迎"
-    print("[+] 新入群欢迎(群存在检查) OK")
+    handle = make_handle(ws, td, check_every_heartbeats=2)
+    # 第 1 次心跳: 不检查(不建基线)
+    await handle.on_meta("bot_001", None, heartbeat())
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    # 第 2 次心跳: 检查 → 首启基线(此时 200 已存在 → 作为基线不欢迎)
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert not ws.group, "第 2 次心跳是首启基线, 不应欢迎"
+    # 第 3 次心跳: 不检查; 第 4 次: 检查 → 发现新群 300
+    ws.groups.append({"group_id": 300})
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert not ws.group, "奇数心跳不应检查"
+    await handle.on_meta("bot_001", None, heartbeat())
+    assert ws.group and ws.group[-1][1] == 300
+    print("[+] 降低频率 OK")
 
 
 async def _main() -> int:
