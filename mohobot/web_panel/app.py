@@ -132,6 +132,8 @@ class WebPanel:
         self._tokens: dict[str, float] = {}
         self._token_expiry = 3600  # 1 hour
         self._start_time = time.time()
+        # framework 统计缓存(60s TTL): history 遍历开销大, 避免每次刷新阻塞
+        self._fw_stats_cache: tuple[float, dict] | None = None
         self._setup_routes()
 
         # Forward loguru messages to SSE subscribers (best-effort)
@@ -1066,20 +1068,26 @@ class WebPanel:
             "uptime": time.time() - self._start_time,
         }
         if HAS_PSUTIL:
-            result["cpu_percent"] = psutil.cpu_percent(interval=0.3)
-            result["cpu_count"] = psutil.cpu_count()
-            mem = psutil.virtual_memory()
-            result["memory"] = {
-                "total": mem.total,
-                "used": mem.used,
-                "percent": mem.percent,
-            }
-            disk = psutil.disk_usage(str(Path.cwd()))
-            result["disk"] = {
-                "total": disk.total,
-                "used": disk.used,
-                "percent": disk.percent,
-            }
+            # psutil.cpu_percent(interval=...) 同步阻塞, 丢线程池避免卡事件循环
+            def _sys():
+                mem = psutil.virtual_memory()
+                disk = psutil.disk_usage(str(Path.cwd()))
+                return {
+                    "cpu_percent": psutil.cpu_percent(interval=0.3),
+                    "cpu_count": psutil.cpu_count(),
+                    "memory": {
+                        "total": mem.total,
+                        "used": mem.used,
+                        "percent": mem.percent,
+                    },
+                    "disk": {
+                        "total": disk.total,
+                        "used": disk.used,
+                        "percent": disk.percent,
+                    },
+                }
+            import asyncio
+            result.update(await asyncio.to_thread(_sys))
         else:
             result["cpu_percent"] = None
             result["memory"] = None
@@ -1087,48 +1095,73 @@ class WebPanel:
         return result
 
     async def _get_framework_stats(self) -> dict[str, Any]:
-        """Framework-level stats: message counts from history files."""
-        result: dict[str, Any] = {
-            "start_time": self._start_time,
-            "uptime": time.time() - self._start_time,
-            "total_messages": 0,
-            "history_files": 0,
-            "context_files": 0,
-            "bot_count": 0,
-        }
-        if self._bot_manager:
-            result["bot_count"] = self._bot_manager.bot_count
+        """Framework-level stats: message counts from history files.
 
-        history_dir = self._data_dir / "history"
-        if history_dir.exists():
-            for bot_dir in history_dir.iterdir():
-                if not bot_dir.is_dir():
-                    continue
-                for chat_dir in bot_dir.iterdir():
-                    if not chat_dir.is_dir():
+        history 目录可能很大(数百 MB/数百文件), 同步全量遍历会阻塞事件循环
+        导致 WebUI 其他请求排队 — 丢线程池执行 + 结果缓存 60s。
+        """
+        import asyncio
+        now = time.time()
+        if self._fw_stats_cache is not None and now - self._fw_stats_cache[0] < 60:
+            cached = dict(self._fw_stats_cache[1])
+            cached["start_time"] = self._start_time
+            cached["uptime"] = now - self._start_time
+            if self._bot_manager:
+                cached["bot_count"] = self._bot_manager.bot_count
+            return cached
+
+        def _count_sync() -> dict[str, int]:
+            result: dict[str, int] = {
+                "total_messages": 0,
+                "history_files": 0,
+                "context_files": 0,
+            }
+            history_dir = self._data_dir / "history"
+            if history_dir.exists():
+                for bot_dir in history_dir.iterdir():
+                    if not bot_dir.is_dir():
                         continue
-                    for f in chat_dir.iterdir():
-                        if f.suffix == ".jsonl":
-                            result["history_files"] += 1
-                            try:
-                                result["total_messages"] += sum(
-                                    1 for _ in f.read_text(encoding="utf-8").splitlines()
-                                    if _.strip()
-                                )
-                            except OSError:
-                                pass
+                    for chat_dir in bot_dir.iterdir():
+                        if not chat_dir.is_dir():
+                            continue
+                        for f in chat_dir.iterdir():
+                            if f.suffix == ".jsonl":
+                                result["history_files"] += 1
+                                try:
+                                    # 逐行迭代(内存友好), 大文件也不一次性读入
+                                    with open(f, "r", encoding="utf-8") as fh:
+                                        result["total_messages"] += sum(
+                                            1 for line in fh if line.strip()
+                                        )
+                                except OSError:
+                                    pass
+            contexts_dir = self._data_dir / "contexts"
+            if contexts_dir.exists():
+                for bot_dir in contexts_dir.iterdir():
+                    if bot_dir.is_dir():
+                        for chat_type in bot_dir.iterdir():
+                            if chat_type.is_dir():
+                                for user_dir in chat_type.iterdir():
+                                    if user_dir.is_dir():
+                                        for f in user_dir.iterdir():
+                                            if f.suffix == ".json":
+                                                result["context_files"] += 1
+            return result
 
-        contexts_dir = self._data_dir / "contexts"
-        if contexts_dir.exists():
-            for bot_dir in contexts_dir.iterdir():
-                if bot_dir.is_dir():
-                    for chat_type in bot_dir.iterdir():
-                        if chat_type.is_dir():
-                            for user_dir in chat_type.iterdir():
-                                if user_dir.is_dir():
-                                    for f in user_dir.iterdir():
-                                        if f.suffix == ".json":
-                                            result["context_files"] += 1
+        counts = await asyncio.to_thread(_count_sync)
+        result = {
+            "start_time": self._start_time,
+            "uptime": now - self._start_time,
+            "total_messages": counts["total_messages"],
+            "history_files": counts["history_files"],
+            "context_files": counts["context_files"],
+            "bot_count": self._bot_manager.bot_count if self._bot_manager else 0,
+        }
+        self._fw_stats_cache = (now, {
+            "total_messages": counts["total_messages"],
+            "history_files": counts["history_files"],
+            "context_files": counts["context_files"],
+        })
         return result
 
     def _get_unbound_list(self) -> list[dict[str, Any]]:
