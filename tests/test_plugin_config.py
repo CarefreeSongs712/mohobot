@@ -194,7 +194,7 @@ async def test_request_dispatch() -> None:
     await handler._handle_request("bot_001", ev, {"post_type": "request"})
     assert plugins.called, "应先把 request 交给插件"
 
-    # 插件未处理 → 框架默认自动同意
+    # 插件未处理 → 框架静默不处理(不自动同意, 申请留在那)
     class FakeWS2:
         def __init__(self):
             self.sent = []
@@ -222,9 +222,9 @@ async def test_request_dispatch() -> None:
         data_dir=tempfile.mkdtemp(),
     )
     await handler2._handle_request("bot_001", ev, {})
-    assert ws2.sent and ws2.sent[0][0] == "set_friend_add_request"
-    assert ws2.sent[0][1]["approve"] is True
-    print("[4] request 事件先 dispatch 插件, 未处理则自动同意 OK")
+    assert plugins2_result.called, "应先 dispatch 插件"
+    assert not ws2.sent, "插件未接管时框架应静默, 不发送任何 approve/拒绝"
+    print("[4] request 事件先 dispatch 插件, 未处理则静默不处理 OK")
 
 
 async def test_schema_coercion() -> None:

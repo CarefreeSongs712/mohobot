@@ -1105,10 +1105,11 @@ class MessageHandler:
         return list(DEFAULT_TOUCH_REPLIES)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
-        """Handle request events (friend add, group invite).
+        """Handle request events (friend add, group add/invite).
 
         先交给插件(关系管理器等)处理: 插件 on_request 返回 True 表示已接管
-        (自动规则/审批转发); 否则框架默认自动同意。
+        (自动规则/审批转发)。未接管时**静默不处理** —— 不自动同意也不拒绝,
+        申请保留由人工/群管理员处理(bot 作为群管理员不应自动通过用户进群申请)。
         """
         if self._plugins is not None:
             try:
@@ -1118,18 +1119,11 @@ class MessageHandler:
             except Exception as e:
                 logger.error(f"Request dispatch failed: {e}")
 
-        logger.info(f"Request from bot {bot_id}: {event.request_type} from {event.user_id}")
-        if event.request_type == "friend":
-            await self._ws.send_to_bot(bot_id, "set_friend_add_request", {
-                "flag": event.flag,
-                "approve": True,
-            })
-        elif event.request_type == "group":
-            await self._ws.send_to_bot(bot_id, "set_group_add_request", {
-                "flag": event.flag,
-                "sub_type": event.sub_type or "add",
-                "approve": True,
-            })
+        # 插件未接管 → 静默跳过(不再自动同意)
+        logger.info(
+            f"Request 未被插件接管, 静默不处理: bot={bot_id} "
+            f"type={event.request_type} user={event.user_id} flag={event.flag}"
+        )
 
     async def _handle_meta(self, bot_id: str, event: MetaEvent, raw: dict) -> None:
         """Handle meta events (heartbeat, lifecycle)."""
