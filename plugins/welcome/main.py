@@ -4,12 +4,14 @@
 - 框架周期任务每 check_interval_sec 秒(默认 60)触发一次检查:
   拉取 get_group_list / get_friend_list, 与持久化的已知集合对比
 - 发现新群/新好友 → 随机延迟 3~5s 发送欢迎, 并更新已知集合
+- 同时向全局管理员(admins)私聊通知(含目标名称)
 - 消失的群/好友 → 从已知集合移除(被踢/退群/删好友)
 - 已知集合持久化到 data/plugins_data/welcome/known.json:
   首次运行时以当前列表为基线(已有群/好友不欢迎), 重启后继续对比
 
 配置(WebUI 插件页可编辑): welcome_friend_enabled/welcome_friend_msg/
-welcome_group_enabled/welcome_group_msg/delay_min/delay_max/check_every_heartbeats。
+welcome_group_enabled/welcome_group_msg/delay_min/delay_max/
+check_interval_sec/admin_notify_enabled。
 模板占位符「xxx（bot昵称）」(兼容旧「【此处替换为 bot 的昵称】」)
 发送时自动替换为该 bot 昵称(取不到回退 bot_id)。
 """
@@ -38,8 +40,10 @@ class Plugin:
         "description": "新加好友/新入群自动发送欢迎消息(监控列表对比方式, 可配置)",
     }
 
+    # 框架注入引用
     _ws_server = None
     _data_dir = "./data"
+    _admin_ids: list[str] = []  # 全局管理员(框架注入, 通知接收者)
 
     _DEFAULTS = {
         "welcome_friend_enabled": True,
@@ -48,11 +52,9 @@ class Plugin:
         "welcome_group_msg": _NEW_MSG,
         "delay_min": 3,
         "delay_max": 5,
-        "check_interval_sec": 60,  # 列表对比间隔(秒)
+        "check_interval_sec": 60,      # 列表对比间隔(秒)
+        "admin_notify_enabled": True,  # 发现新群/新好友时通知管理员
     }
-
-    def __init__(self):
-        self.plugin_config: dict = dict(self._DEFAULTS)
 
     @classmethod
     def inject_ws_server(cls, ws_server) -> None:
@@ -61,6 +63,14 @@ class Plugin:
     @classmethod
     def inject_data_dir(cls, data_dir: str) -> None:
         cls._data_dir = data_dir
+
+    @classmethod
+    def inject_admin_ids(cls, admin_ids) -> None:
+        """框架注入全局管理员(欢迎通知接收者)。"""
+        cls._admin_ids = [str(a) for a in (admin_ids or [])]
+
+    def __init__(self):
+        self.plugin_config: dict = dict(self._DEFAULTS)
 
     def _cfg(self, key: str, default):
         cfg = getattr(self, "plugin_config", None) or {}
@@ -140,13 +150,25 @@ class Plugin:
             logger.debug(f"欢迎插件首启基线: {bot_id} 群 {len(groups_now)} 个, 好友 {len(friends_now)} 个")
             return
 
-        # 发现新群/新好友 → 欢迎
+        # 发现新群/新好友 → 欢迎 + 通知管理员
         new_groups = [g for g in groups_now if g not in groups_known]
         new_friends = [f for f in friends_now if f not in friends_known]
         for gid in new_groups:
             await self._send_welcome(bot_id, target_type="group", target_id=gid)
+            await self._notify_admin(
+                bot_id, target_type="group", target_id=gid,
+                name=await self._get_target_name(
+                    bot_id, target_type="group", target_id=gid,
+                ),
+            )
         for fid in new_friends:
             await self._send_welcome(bot_id, target_type="friend", target_id=fid)
+            await self._notify_admin(
+                bot_id, target_type="friend", target_id=fid,
+                name=await self._get_target_name(
+                    bot_id, target_type="friend", target_id=fid,
+                ),
+            )
 
         # 更新基线(新增 + 移除消失的)
         known["groups"][bot_id] = groups_now
@@ -154,6 +176,58 @@ class Plugin:
         await self._save_known(known)
         if new_groups or new_friends:
             logger.info(f"欢迎插件: {bot_id} 新群 {new_groups}, 新好友 {new_friends}")
+
+    # ── 管理员通知 ───────────────────────────────────────────
+
+    async def _get_target_name(
+        self, bot_id: str, *, target_type: str, target_id: str,
+    ) -> str:
+        """查目标名称(群名/好友昵称); 失败或缺失回退目标 ID, 绝不让通知失败。"""
+        ws = self._ws_server
+        if ws is None or not target_id:
+            return target_id
+        try:
+            if target_type == "group":
+                resp = await ws.send_to_bot(
+                    bot_id, "get_group_info",
+                    {"group_id": int(target_id)},
+                    wait_response=True, timeout=8.0,
+                )
+                data = (resp or {}).get("data") or {}
+                return str(data.get("group_name") or "") or target_id
+            resp = await ws.send_to_bot(
+                bot_id, "get_stranger_info",
+                {"user_id": int(target_id)},
+                wait_response=True, timeout=8.0,
+            )
+            data = (resp or {}).get("data") or {}
+            return str(data.get("nickname") or "") or target_id
+        except Exception as e:
+            logger.debug(f"查询目标名称失败({target_type}={target_id}): {e}")
+            return target_id
+
+    async def _notify_admin(
+        self, bot_id: str, *, target_type: str, target_id: str, name: str,
+    ) -> None:
+        """向全局管理员私聊通知: 发现新群/新好友(含目标名称)。"""
+        if not self._cfg("admin_notify_enabled", True):
+            return
+        if not self._admin_ids:
+            return
+        ws = self._ws_server
+        if ws is None:
+            return
+        label = "新群" if target_type == "group" else "新好友"
+        text = (
+            f"【welcome】{label}: {name}({target_id})\n"
+            f"bot {bot_id} 已发送欢迎消息"
+        )
+        for admin in self._admin_ids:
+            try:
+                await ws.send_private_msg(bot_id, int(admin), text)
+                logger.info(f"管理员通知已发送: {admin} ({label}={target_id})")
+            except Exception as e:
+                logger.warning(f"管理员通知发送失败({admin}): {e}")
 
     # ── 发送 ─────────────────────────────────────────────────
 

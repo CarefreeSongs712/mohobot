@@ -188,6 +188,42 @@ async def test_interval_config():
     print("[+] interval 配置 OK")
 
 
+async def test_admin_notify():
+    """发现新群/新好友时, 向全局管理员私聊通知(含目标名称)。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    handle._admin_ids = ["9001"]  # 注入全局管理员
+    # 首启基线
+    await handle._check_all("bot_001")
+    # 新群 + 新好友
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
+    await handle._check_all("bot_001")
+    # 管理员收到两条私聊通知(新群 + 新好友)
+    admin_msgs = [m for b, uid, m in ws.private if uid == 9001]
+    assert len(admin_msgs) == 2, f"应通知管理员 2 次, 实际 {len(admin_msgs)}"
+    assert "新群" in admin_msgs[0] and "200" in admin_msgs[0], admin_msgs[0]
+    assert "新好友" in admin_msgs[1] and "2002" in admin_msgs[1], admin_msgs[1]
+    print("[+] 管理员通知 OK")
+
+
+async def test_admin_notify_disabled():
+    """admin_notify_enabled=False 时不通知管理员。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td, admin_notify_enabled=False)
+    handle._admin_ids = ["9001"]
+    await handle._check_all("bot_001")
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    await handle._check_all("bot_001")
+    admin_msgs = [m for b, uid, m in ws.private if uid == 9001]
+    assert not admin_msgs, "关闭通知后不应私聊管理员"
+    # 但欢迎消息仍发到新群
+    assert ws.group and ws.group[-1][1] == 200
+    print("[+] 管理员通知关闭 OK")
+
+
 async def _main() -> int:
     import asyncio
     import traceback
