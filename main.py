@@ -25,8 +25,10 @@ from mohobot.interceptors.command_handler import CommandHandler
 from mohobot.interceptors.keyword_filter import KeywordFilter
 from mohobot.interceptors.plugin_system import PluginSystem
 from mohobot.llm_service import LLMService
+from mohobot.services.usage import UsageRecorder
 from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig
+from mohobot.services.task_supervisor import TaskSupervisor
 from mohobot.utils.logger import setup_logger
 from mohobot.web_panel.app import WebPanel
 from mohobot.ws_server import WSServer
@@ -48,10 +50,14 @@ class MohobotApplication:
         self._web_panel: WebPanel | None = None
         self._database_manager: DatabaseManager | None = None
         self._agent_manager: BotAgentManager | None = None
+        self._usage_recorder: UsageRecorder | None = None
+        self._task_supervisor = TaskSupervisor()
         self._running = False
 
     async def startup(self) -> None:
         """Initialize all components and start servers."""
+        if self._task_supervisor.stopping:
+            self._task_supervisor.reset()
         logger.info(f"Mohobot v{__version__} starting up...")
 
         # 1. Load config
@@ -70,7 +76,11 @@ class MohobotApplication:
         # 旧格式迁移: data/bots/{qq} (无 bot_id) → 自动编号 bot_id 目录
         self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
-        self._llm_service = LLMService(global_config=self._config)
+        self._usage_recorder = UsageRecorder(self._config.data_dir)
+        self._llm_service = LLMService(
+            global_config=self._config,
+            usage_recorder=self._usage_recorder,
+        )
         # 上下文 AI 总结压缩: 注入总结回调 + trim 配置(WebUI 保存后可热同步)
         self._context_manager.set_summarizer(self._llm_service.summarize_context)
         self._context_manager.set_trim_config(
@@ -83,6 +93,7 @@ class MohobotApplication:
             plugins_dir=self._config.plugins_dir,
             data_dir=self._config.data_dir,
         )
+        self._plugin_system.set_task_supervisor(self._task_supervisor)
 
         # 4. Load plugins
         # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
@@ -115,6 +126,7 @@ class MohobotApplication:
                 self._agent_manager = BotAgentManager(
                     self._config.to_dict(),
                     self._database_manager,
+                    usage_recorder=self._usage_recorder,
                 )
                 logger.info("Beta mode enabled — agent 流水线 per-bot runtimes")
             else:
@@ -165,6 +177,10 @@ class MohobotApplication:
             host=self._config.server.host,
             port=self._config.server.port,
             max_size=self._config.server.max_size,
+            task_supervisor=self._task_supervisor,
+            outbound_interval=self._config.server.outbound_interval,
+            outbound_maxsize=self._config.server.outbound_maxsize,
+            outbound_enqueue_timeout=self._config.server.outbound_enqueue_timeout,
         )
 
         # Wire up circular references
@@ -199,7 +215,9 @@ class MohobotApplication:
                 restart_callback=self.restart,
             )
             # Start web panel in background
-            self._web_panel_task = asyncio.create_task(self._run_web_panel())
+            self._web_panel_task = self._task_supervisor.create_task(
+                self._run_web_panel(), name="web-panel", owner="web-panel"
+            )
 
         self._running = True
         logger.info(
@@ -248,6 +266,10 @@ class MohobotApplication:
             self._web_panel_task = None
             self._web_panel = None
 
+        # Stop plugin lifecycle before core transports are closed so hooks can release resources.
+        if self._plugin_system:
+            await self._plugin_system.shutdown_plugins()
+
         # Stop WS server
         if self._ws_server:
             await self._ws_server.stop()
@@ -268,6 +290,10 @@ class MohobotApplication:
         if self._agent_manager:
             await self._agent_manager.stop_all()
 
+        if self._usage_recorder:
+            await self._usage_recorder.close()
+
+        await self._task_supervisor.shutdown()
         logger.info("Mohobot shutdown complete.")
 
     async def run_forever(self) -> None:

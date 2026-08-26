@@ -82,14 +82,26 @@ class WelcomeWS:
         self._bot_manager = None
         self.groups = [{"group_id": 100}]      # 当前群列表
         self.friends = [{"user_id": 1001}]     # 当前好友列表
+        self.list_responses = {}
+        self.fail_group_ids = set()
+        self.fail_friend_ids = set()
 
     async def send_private_msg(self, bot_id, user_id, message):
+        if user_id in self.fail_friend_ids:
+            raise RuntimeError("friend send failed")
         self.private.append((bot_id, user_id, message))
 
     async def send_group_msg(self, bot_id, group_id, message):
+        if group_id in self.fail_group_ids:
+            raise RuntimeError("group send failed")
         self.group.append((bot_id, group_id, message))
 
     async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
+        if action in self.list_responses:
+            response = self.list_responses[action]
+            if isinstance(response, Exception):
+                raise response
+            return response
         if action == "get_group_list":
             return {"status": "ok", "retcode": 0, "data": list(self.groups)}
         if action == "get_friend_list":
@@ -219,9 +231,87 @@ async def test_admin_notify_disabled():
     await handle._check_all("bot_001")
     admin_msgs = [m for b, uid, m in ws.private if uid == 9001]
     assert not admin_msgs, "关闭通知后不应私聊管理员"
-    # 但欢迎消息仍发到新群
     assert ws.group and ws.group[-1][1] == 200
     print("[+] 管理员通知关闭 OK")
+
+
+async def test_invalid_list_does_not_overwrite_baseline():
+    """列表失败、非 ok、非 list 均不得把基线误更新为空。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    await handle._check_all("bot_001")
+    from mohobot.file_store import json_read
+    path = Path(td) / "plugins_data" / "welcome" / "known.json"
+    for response in (
+        RuntimeError("timeout"),
+        {"status": "failed", "retcode": 1, "data": []},
+        {"status": "ok", "retcode": 0, "data": {}},
+    ):
+        ws.list_responses["get_group_list"] = response
+        await handle._check_all("bot_001")
+        known = await json_read(path)
+        assert known["groups"]["bot_001"] == ["100"]
+    print("[+] 无效列表不覆盖基线 OK")
+
+
+async def test_relationships_initialized_independently_and_empty_legacy():
+    """群/好友独立初始化, 且旧格式中存在空列表表示已初始化。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    from mohobot.file_store import json_update, json_read
+    path = Path(td) / "plugins_data" / "welcome" / "known.json"
+    await json_update(path, lambda _: {"groups": {"bot_001": []}, "friends": {}}, default={})
+    await handle._check_all("bot_001")
+    known = await json_read(path)
+    assert known["groups"]["bot_001"] == ["100"]
+    assert known["friends"]["bot_001"] == ["1001"]
+    assert ws.group and ws.group[-1][1] == 100
+    assert not ws.private
+    print("[+] 独立初始化/旧空基线 OK")
+
+
+async def test_send_failure_retries_without_commit():
+    """欢迎发送失败时新增对象不提交, 下一轮继续重试。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    await handle._check_all("bot_001")
+    ws.groups = [{"group_id": 100}, {"group_id": 200}]
+    ws.fail_group_ids.add(200)
+    await handle._check_all("bot_001")
+    from mohobot.file_store import json_read
+    path = Path(td) / "plugins_data" / "welcome" / "known.json"
+    known = await json_read(path)
+    assert known["groups"]["bot_001"] == ["100"]
+    ws.fail_group_ids.clear()
+    await handle._check_all("bot_001")
+    assert ws.group[-1][1] == 200
+    known = await json_read(path)
+    assert known["groups"]["bot_001"] == ["100", "200"]
+    print("[+] 发送失败重试 OK")
+
+
+async def test_admin_failure_does_not_block_commit():
+    """管理员通知失败不影响欢迎消息和基线提交。"""
+    td = tempfile.mkdtemp()
+    ws = WelcomeWS()
+    handle = make_handle(ws, td)
+    handle._admin_ids = ["9001"]
+    original = ws.send_private_msg
+    async def fail_admin(bot_id, user_id, message):
+        if user_id == 9001:
+            raise RuntimeError("admin failed")
+        await original(bot_id, user_id, message)
+    ws.send_private_msg = fail_admin
+    await handle._check_all("bot_001")
+    ws.friends = [{"user_id": 1001}, {"user_id": 2002}]
+    await handle._check_all("bot_001")
+    from mohobot.file_store import json_read
+    known = await json_read(Path(td) / "plugins_data" / "welcome" / "known.json")
+    assert known["friends"]["bot_001"] == ["1001", "2002"]
+    print("[+] 管理员通知失败隔离 OK")
 
 
 async def _main() -> int:

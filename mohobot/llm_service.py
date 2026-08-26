@@ -24,6 +24,7 @@ from mohobot.models.onebot import (
     PrivateMessageEvent,
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
+from mohobot.services.usage import UsageRecorder
 
 # ── 写死的按用户人设覆盖(不随 config 改变) ────────────────────
 # 规则: 当 bot_001 收到来自这些 QQ 的消息时(Legacy 直接回复路径),
@@ -162,8 +163,10 @@ def _hardcoded_persona(bot_id: str, user_id: int) -> str | None:
 class LLMService:
     """LLM interaction service with prompt assembly and vision support."""
 
-    def __init__(self, global_config: GlobalConfig, image_cache=None):
+    def __init__(self, global_config: GlobalConfig, image_cache=None, usage_recorder: UsageRecorder | None = None):
         self._cfg = global_config
+        self._usage_recorder = usage_recorder or UsageRecorder(self._cfg.data_dir)
+        self._owns_usage_recorder = usage_recorder is None
         # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
         self._image_cache = image_cache
         self._available = False
@@ -312,17 +315,15 @@ class LLMService:
             logger.error(f"LLM API call failed: {e}")
             return f"[LLM 调用失败: {e}]", None
 
+        await self._record_usage(
+            model, getattr(response, "usage", None), bot_id, event, module="chat"
+        )
         choice = response.choices[0] if response.choices else None
         if not choice:
             return None, None
 
         reply_text = choice.message.content or ""
         tool_calls = choice.message.tool_calls
-
-        # Record token usage
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            await self._record_usage(model, usage, bot_id, event, module="chat")
 
         # Handle tool calls: 工具结果作为 tool 消息回传 LLM,
         # 再调用一次生成最终自然语言回复(不向用户输出原始搜索结果)
@@ -362,6 +363,10 @@ class LLMService:
                     tool_choice="auto",
                 )
                 choice2 = response2.choices[0] if response2.choices else None
+                await self._record_usage(
+                    model, getattr(response2, "usage", None), bot_id, event,
+                    module="chat", kind="tool_follow_up",
+                )
                 reply_text = (choice2.message.content or "") if choice2 else ""
             except Exception as e:
                 logger.error(f"LLM API call failed (after tools): {e}")
@@ -462,6 +467,12 @@ class LLMService:
                         if tc.function and tc.function.arguments:
                             tool_calls_buffer[idx]["arguments"] += tc.function.arguments
 
+        if stream_usage is not None:
+            await self._record_usage(
+                model, stream_usage, bot_id, event,
+                module="chat", kind="stream",
+            )
+
         # After stream ends, execute tool calls if any:
         # 工具结果作为 tool 消息回传 LLM, 再次流式生成最终回复
         # (不向用户输出原始搜索结果)
@@ -494,15 +505,25 @@ class LLMService:
                     tools=self._tools_schemas,
                     tool_choice="auto",
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
                 got_final = False
+                stream2_usage = None
                 async for chunk in stream2:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        stream2_usage = usage
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if delta is None:
                         continue
                     if delta.content:
                         got_final = True
                         yield (delta.content, False)
+                if stream2_usage is not None:
+                    await self._record_usage(
+                        model, stream2_usage, bot_id, event,
+                        module="chat", kind="tool_follow_up",
+                    )
                 if not got_final:
                     logger.warning("LLM tool-follow stream returned NO text content")
                     yield ("[模型未返回内容——请检查模型配置]", True)
@@ -524,10 +545,6 @@ class LLMService:
             yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
             return
 
-        # Record token usage from the final stream chunk
-        if stream_usage is not None:
-            await self._record_usage(model, stream_usage, bot_id, event, module="chat")
-
         yield ("", True)  # Signal completion with no extra text
 
     # ── Token usage tracking (web panel stats) ─────────────────
@@ -535,27 +552,16 @@ class LLMService:
     async def _record_usage(
         self, model: str, usage: Any, bot_id: str, event: MessageEvent,
         module: str = "chat",
+        kind: str = "chat",
     ) -> None:
-        """Append one usage record to data/stats/llm_usage.jsonl."""
-        try:
-            from mohobot.file_store import JSONLWriter
-
-            usage_dir = Path(self._cfg.data_dir) / "stats"
-            usage_dir.mkdir(parents=True, exist_ok=True)
-            record = {
-                "time": time.time(),
-                "bot_id": bot_id,
-                "module": module,
-                "model": model,
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage, "completion_tokens", 0),
-                "total_tokens": getattr(usage, "total_tokens", 0),
-            }
-            # JSONLWriter 带 per-file 锁: 6 bot 并发回复结束时同时写 usage 不交错
-            writer = JSONLWriter(usage_dir / "llm_usage.jsonl")
-            await writer.append(record)
-        except Exception as e:
-            logger.debug(f"Failed to record LLM usage: {e}")
+        """Record one provider request through the shared async recorder."""
+        await self._usage_recorder.record(
+            usage,
+            model=model,
+            bot_id=bot_id,
+            module=module,
+            kind=kind,
+        )
 
     async def summarize_context(self, entries: list[dict]) -> str | None:
         """总结一段较早的对话(上下文压缩用, 复用全局 chat_model)。
@@ -597,6 +603,10 @@ class LLMService:
                 ],
                 temperature=0.3,
                 max_tokens=4096,
+            )
+            await self._record_usage(
+                self._cfg.llm.chat_model, getattr(resp, "usage", None),
+                "", None, module="summary", kind="summary",
             )
             text = (resp.choices[0].message.content or "").strip()
             return text or None
@@ -819,6 +829,10 @@ class LLMService:
                 max_tokens=max_tokens,
                 temperature=0.3,
             )
+            await self._record_usage(
+                self._cfg.llm.vision_model, getattr(response, "usage", None),
+                "", None, module="vision", kind="vision",
+            )
             text = (response.choices[0].message.content or "").strip()
             if not text:
                 logger.debug("Vision describe returned empty")
@@ -881,3 +895,5 @@ class LLMService:
             await self._chat_client.close()
         if self._vision_client and self._vision_client is not self._chat_client:
             await self._vision_client.close()
+        if self._owns_usage_recorder:
+            await self._usage_recorder.close()

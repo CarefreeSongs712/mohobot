@@ -20,6 +20,8 @@ from loguru import logger
 
 from mohobot.models.onebot import Event
 from mohobot.bot_manager import BotManager
+from mohobot.services.outbound import ChatAddress, OutboundScheduler, ReplySender
+from mohobot.services.task_supervisor import TaskSupervisor, TaskSupervisorClosed
 
 # Type alias for the event callback
 EventCallback = Callable[[str, Event, dict[str, Any]], Awaitable[None]]
@@ -34,11 +36,26 @@ class WSServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         max_size: int = 10 * 1024 * 1024,
+        task_supervisor: TaskSupervisor | None = None,
+        outbound_scheduler: OutboundScheduler | None = None,
+        reply_sender: ReplySender | None = None,
+        outbound_interval: float = 0.5,
+        outbound_maxsize: int = 100,
+        outbound_enqueue_timeout: float = 2.0,
     ):
         self._host = host
         self._port = port
         self._max_size = max_size
         self._bot_manager = bot_manager
+        self._task_supervisor = task_supervisor
+        self._outbound_scheduler = outbound_scheduler or OutboundScheduler(
+            send_interval_sec=outbound_interval,
+            queue_maxsize=outbound_maxsize,
+            enqueue_timeout_sec=outbound_enqueue_timeout,
+        )
+        self._reply_sender = reply_sender or ReplySender(self._outbound_scheduler)
+        if self._reply_sender.scheduler is not self._outbound_scheduler:
+            self._outbound_scheduler = self._reply_sender.scheduler
         self._on_event: EventCallback | None = None
         self._server: websockets.asyncio.server.Server | None = None
         self._heartbeat_interval: float = 30.0  # seconds
@@ -61,11 +78,17 @@ class WSServer:
         logger.info(f"WebSocket server listening on ws://{self._host}:{self._port}")
 
     async def stop(self) -> None:
-        """Gracefully stop the WebSocket server."""
+        """Gracefully stop the WebSocket server and outbound workers."""
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+            self._server = None
             logger.info("WebSocket server stopped")
+        await self._outbound_scheduler.close()
+
+    async def close(self) -> None:
+        """Alias for lifecycle integrations that expose close()."""
+        await self.stop()
 
     async def _handle_connection(
         self, websocket: websockets.asyncio.server.ServerConnection
@@ -129,7 +152,16 @@ class WSServer:
         if "post_type" in data:
             event = Event.from_dict(data)
             if self._on_event:
-                asyncio.create_task(self._on_event(bot_id, event, data))
+                coro = self._on_event(bot_id, event, data)
+                try:
+                    if self._task_supervisor is not None:
+                        self._task_supervisor.create_task(
+                            coro, name=f"event:{bot_id}", owner="events"
+                        )
+                    else:
+                        asyncio.create_task(coro, name=f"event:{bot_id}")
+                except TaskSupervisorClosed:
+                    logger.debug("Ignoring event after task supervisor shutdown")
             return
 
         # Unknown message type (诊断: 客户端回的非标准消息)
@@ -157,26 +189,30 @@ class WSServer:
         payload = {"action": action, "params": params or {}}
 
         if not wait_response:
-            await instance.send(payload)
+            await self._reply_sender.call(
+                bot_id, lambda: instance.send(payload), label=action
+            )
             return None
 
-        # Generate unique echo and wait for the response
+        # Generate unique echo and register the future before queueing the send.
         import uuid
         echo = f"api_{uuid.uuid4().hex}"
         payload["echo"] = echo
         future = self._bot_manager.create_response_future(bot_id, echo)
         try:
-            await instance.send(payload)
+            await self._reply_sender.call(
+                bot_id, lambda: instance.send(payload), label=action
+            )
         except Exception:
-            # Send failed — don't leave the future dangling
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
-            self._bot_manager.remove_response_future(bot_id, echo)
             return None
+        finally:
+            self._bot_manager.remove_response_future(bot_id, echo)
 
     async def _send_tracked(
         self, bot_id: str, action: str, params: dict[str, Any],
@@ -196,7 +232,11 @@ class WSServer:
         echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
         try:
-            await instance.send({"action": action, "params": params, "echo": echo})
+            await self._reply_sender.send(
+                ChatAddress(bot_id, chat_type, chat_id),
+                lambda: instance.send({"action": action, "params": params, "echo": echo}),
+                label=action,
+            )
         except Exception:
             # Send failed — don't leave the tracked entry dangling
             self._bot_manager.drop_pending_sent(echo)

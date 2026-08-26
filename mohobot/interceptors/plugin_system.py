@@ -50,6 +50,37 @@ class PluginSystem(Interceptor):
         self._admin_ids: set[str] = set()  # 全局管理员(封禁/插件命令共用)
         # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
         self._tick_tasks: list[Any] = []
+        self._task_supervisor = None
+
+    def set_task_supervisor(self, supervisor) -> None:
+        """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
+        self._task_supervisor = supervisor
+
+    async def _call_hook(self, meta: dict[str, Any], hook_name: str) -> None:
+        """调用可选生命周期 hook, 同步/异步实现均可且互不影响。"""
+        plugin = meta.get("instance")
+        hook = getattr(plugin, hook_name, None) if plugin is not None else None
+        if not callable(hook):
+            return
+        try:
+            result = hook()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
+
+    async def startup_plugins(self) -> None:
+        """运行已加载插件的可选 on_startup hook。"""
+        for meta in list(self._plugins):
+            if meta.get("enabled") and meta.get("loaded"):
+                await self._call_hook(meta, "on_startup")
+
+    async def shutdown_plugins(self) -> None:
+        """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
+        await self.stop_tick_tasks_async()
+        for meta in reversed(list(self._plugins)):
+            if meta.get("loaded"):
+                await self._call_hook(meta, "on_shutdown")
 
     # ── 周期任务 ─────────────────────────────────────────────
 
@@ -78,21 +109,38 @@ class PluginSystem(Interceptor):
                     try:
                         secs = max(1, int(getattr(inst, "interval_sec", 60)))
                         await asyncio.sleep(secs)
-                        await inst.on_tick()
+                        result = inst.on_tick()
+                        if inspect.isawaitable(result):
+                            await result
                     except asyncio.CancelledError:
                         break
                     except Exception as e:
                         logger.error(f"插件 {name} 周期任务异常: {e}")
 
-            task = asyncio.create_task(_loop())
+            task_name = f"plugin-tick:{meta.get('name', '?')}"
+            if self._task_supervisor is not None:
+                task = self._task_supervisor.create_task(
+                    _loop(), name=task_name, owner="plugins"
+                )
+            else:
+                task = asyncio.create_task(_loop(), name=task_name)
             self._tick_tasks.append(task)
             logger.info(f"插件周期任务已启动: {meta.get('name')}")
 
     def stop_tick_tasks(self) -> None:
-        """取消全部插件周期任务(热重载/关闭时调用)。"""
+        """同步兼容包装器: 发出取消请求；异步调用者应使用 stop_tick_tasks_async。"""
         for task in self._tick_tasks:
             if not task.done():
                 task.cancel()
+
+    async def stop_tick_tasks_async(self) -> None:
+        """取消全部插件周期任务并等待其真正退出。"""
+        import asyncio
+
+        tasks = list(self._tick_tasks)
+        self.stop_tick_tasks()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tick_tasks.clear()
 
     # ── 管理员注入 ─────────────────────────────────────────────
@@ -273,6 +321,7 @@ class PluginSystem(Interceptor):
         logger.info(f"Plugin system loaded {count} plugin(s)")
         # 加载完成后注入运行时引用(热重载也走这里)
         self.apply_injections()
+        await self.startup_plugins()
         # 启动周期任务(声明 interval_sec + on_tick 的插件)
         self.start_tick_tasks()
         return count
@@ -465,7 +514,7 @@ class PluginSystem(Interceptor):
         新增/修改/删除插件文件、启停状态均立即生效, 无需重启。
         """
         logger.info("Hot-reloading plugins...")
-        self.stop_tick_tasks()  # 取消旧周期任务(load 会重建)
+        await self.shutdown_plugins()
         self._plugins.clear()
         count = await self.load_plugins()
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
@@ -509,7 +558,10 @@ class PluginSystem(Interceptor):
             # 未扫描到(如新文件) — 全量重载以纳入
             await self.reload_plugins()
             return True
-        if enabled:
+        if not enabled:
+            # 禁用已加载插件时走完整关闭流程，确保资源与周期任务释放
+            await self.reload_plugins()
+        elif enabled:
             # 热启用: 若该插件此前加载失败或未加载, 重新加载它
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is not None and not meta.get("loaded"):

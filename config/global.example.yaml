@@ -34,6 +34,9 @@ server:
   host: "0.0.0.0"
   port: 8081
   max_size: 10485760  # 10 MB
+  outbound_interval: 0.5         # 每个 bot 的消息发送间隔(秒)
+  outbound_maxsize: 100          # 每个 bot 的发送队列容量
+  outbound_enqueue_timeout: 2.0  # 队列入队超时(秒)
 
 llm:
   # Chat model

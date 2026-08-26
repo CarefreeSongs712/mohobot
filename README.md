@@ -151,7 +151,45 @@ asyncio.run(t())"
 
 > 中文渲染需安装 CJK 字体（`fonts-noto-cjk`）；无外网访问时头像（qlogo）加载会留白，其余正常。
 
-### 3. 运行（screen 守护）
+### 3. 初始化 Web 管理密码
+
+WebUI 不再提供 `admin/admin` 默认密码。首次部署必须通过环境变量初始化，服务会将 PBKDF2-SHA256 哈希写入 `config/global.yaml`，不会保存明文：
+
+```bash
+export MOHOBOT_WEB_PASSWORD='替换为高强度密码'
+python main.py
+# 首次成功启动后，从 shell 历史和服务环境中移除明文变量。
+```
+
+使用 systemd 时，将变量放入仅 root 可读的 `/etc/mohobot/mohobot.env`：
+
+```bash
+sudo install -d -m 700 /etc/mohobot
+sudo sh -c 'printf "%s\n" "MOHOBOT_WEB_PASSWORD=替换为高强度密码" > /etc/mohobot/mohobot.env'
+sudo chmod 600 /etc/mohobot/mohobot.env
+```
+
+LLM、Vision、Anysearch 和 embedding 密钥同样应保存在未纳入 Git 的 `config/global.yaml` 或服务 Secret 中。WebUI 只返回密钥是否已设置，不回传原始值。
+
+### 4. 使用 systemd 运行（推荐）
+
+仓库提供 [`deploy/mohobot.service`](deploy/mohobot.service)。先创建专用用户和虚拟环境，再安装服务：
+
+```bash
+sudo useradd --system --home /opt/mohobot --shell /usr/sbin/nologin mohobot || true
+sudo python3 -m venv /opt/mohobot/.venv
+sudo /opt/mohobot/.venv/bin/pip install -r /opt/mohobot/requirements.txt
+sudo chown -R mohobot:mohobot /opt/mohobot
+sudo install -m 644 deploy/mohobot.service /etc/systemd/system/mohobot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mohobot
+sudo systemctl status mohobot
+journalctl -u mohobot -f
+```
+
+服务通过 SIGTERM 优雅停止：停止接收新事件，关闭插件周期任务和网络会话，等待发送队列，再关闭 Agent、LLM 和文件写入器。
+
+### 5. 运行（screen，开发/临时部署）
 
 ```bash
 screen -S mohobot
@@ -452,7 +490,9 @@ mohobot/
 
 ## 🖥️ Web 管理面板
 
-启动后访问 `http://127.0.0.1:9090`（默认用户名 `admin`，密码在 `config/global.yaml` 的 `web_panel.password_hash` 中配置）：
+启动后访问 `http://127.0.0.1:9090`。管理面板不提供默认密码：必须先在 `web_panel.password_hash` 配置 PBKDF2 哈希，或使用 `MOHOBOT_WEB_PASSWORD` 完成首次初始化。面板默认只允许本机来源，并且不会回传已保存的 API Key：留空保存即保留原密钥。
+
+> 不要将 WebUI 直接暴露到公网。若确有远程管理需求，应使用 HTTPS 反向代理、VPN 或 IP 白名单，并将可信 Origin 显式加入部署配置后再开放访问。
 
 1. 📊 **数据总览** — 系统/框架/Bot/LLM token 统计
 2. ⚙️ **配置文件** — 全局 + 每 Bot 配置可视化编辑（上下文压缩、群聊最近消息、Agent 模型下拉等；数据库/日志/数据/插件目录属服务端路径，不在 WebUI 修改）

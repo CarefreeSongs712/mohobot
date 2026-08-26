@@ -15,6 +15,7 @@ from loguru import logger
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from mohobot.agent.prompts import PROMPT_TEMPLATES
+from mohobot.services.usage import UsageRecorder
 
 
 class LLMModule:
@@ -40,6 +41,7 @@ class LLMModule:
         data_dir: str = "",
         bot_id: str = "",
         fallback_model: str = "",
+        usage_recorder: UsageRecorder | None = None,
     ):
         self.module_name = module_name
         self._cfg = config
@@ -53,6 +55,8 @@ class LLMModule:
         self.temperature = temperature
         self._data_dir = data_dir or "./data"
         self._bot_id = bot_id
+        self._usage_recorder = usage_recorder or UsageRecorder(self._data_dir)
+        self._owns_usage_recorder = usage_recorder is None
         # 全局备用模型: 主模型连接类失败时换用(空 = 不回退)
         self.fallback_model = (
             fallback_model
@@ -108,7 +112,7 @@ class LLMModule:
                 f"LLM[{self.module_name}] {self.model} OK {duration_ms:.0f}ms "
                 f"({len(prompt)} prompt chars)"
             )
-            self._record_usage(resp, self.model)
+            await self._record_usage_async(resp, self.model)
             return content
         except Exception as e:
             # 仅连接类错误(连接失败/超时)回退全局备用模型重试一次
@@ -130,7 +134,7 @@ class LLMModule:
                         f"LLM[{self.module_name}] {self.fallback_model} 回退成功 "
                         f"({len(prompt)} prompt chars)"
                     )
-                    self._record_usage(resp, self.fallback_model)
+                    await self._record_usage_async(resp, self.fallback_model)
                     return content
                 except Exception as e2:
                     logger.error(
@@ -140,31 +144,32 @@ class LLMModule:
             logger.error(f"LLM[{self.module_name}] call failed: {e}")
             raise
 
+    async def _record_usage_async(self, resp, model_name: str | None = None) -> None:
+        """异步记录一次成功的 provider HTTP 调用。"""
+        await self._usage_recorder.record(
+            getattr(resp, "usage", None),
+            model=model_name or self.model,
+            bot_id=self._bot_id,
+            module=self.module_name,
+            kind="chat",
+        )
+
     def _record_usage(self, resp, model_name: str | None = None) -> None:
-        """把本次调用的 token 用量写入 stats/llm_usage.jsonl(面板统计)。"""
-        usage = getattr(resp, "usage", None)
-        if usage is None:
-            return
+        """保留旧私有方法签名；调度异步记录，不再同步 open 写文件。"""
+        import asyncio
         try:
-            import aiofiles as _aiofiles
-            from pathlib import Path as _Path
-            usage_dir = _Path(self._data_dir) / "stats"
-            usage_dir.mkdir(parents=True, exist_ok=True)
-            record = {
-                "time": time.time(),
-                "bot_id": self._bot_id,
-                "module": self.module_name,
-                "model": model_name or self.model,
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage, "completion_tokens", 0),
-                "total_tokens": getattr(usage, "total_tokens", 0),
-            }
-            # 同步写文件即可(每次调用一次, 量小); 失败不影响主流程
-            import json as _json
-            with open(usage_dir / "llm_usage.jsonl", "a", encoding="utf-8") as f:
-                f.write(_json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.debug(f"Record LLM usage failed: {e}")
+            asyncio.get_running_loop().create_task(
+                self._record_usage_async(resp, model_name)
+            )
+        except RuntimeError:
+            logger.debug("Record LLM usage skipped: no running event loop")
+
+    async def close(self) -> None:
+        """关闭 OpenAI client；仅关闭本模块自行创建的 recorder。"""
+        if self._client is not None:
+            await self._client.close()
+        if self._owns_usage_recorder:
+            await self._usage_recorder.close()
 
     def _render_prompt(self, kwargs: dict[str, Any]) -> str:
         """Jinja2 渲染模板。"""

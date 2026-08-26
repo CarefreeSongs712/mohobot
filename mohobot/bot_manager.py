@@ -392,6 +392,8 @@ class BotManager:
         pending = self._pending_responses.get(bot_id)
         if echo and pending and echo in pending:
             future = pending.pop(echo)
+            if not pending:
+                self._pending_responses.pop(bot_id, None)
             if not future.done():
                 future.set_result(response)
         elif not echo and pending and len(pending) == 1:

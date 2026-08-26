@@ -17,6 +17,9 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8060
     max_size: int = 10 * 1024 * 1024  # 10 MB max message size
+    outbound_interval: float = 0.5
+    outbound_maxsize: int = 100
+    outbound_enqueue_timeout: float = 2.0
 
 
 @dataclass
@@ -86,7 +89,7 @@ class WebPanelConfig:
     host: str = "127.0.0.1"
     port: int = 9090
     username: str = "admin"
-    password_hash: str = ""  # bcrypt hash — set via CLI or initial setup
+    password_hash: str = ""  # pbkdf2_sha256$salt$hex; MOHOBOT_WEB_PASSWORD may initialize it
 
 
 @dataclass
@@ -256,6 +259,9 @@ class GlobalConfig:
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8080),
                 max_size=server_raw.get("max_size", 10 * 1024 * 1024),
+                outbound_interval=server_raw.get("outbound_interval", 0.5),
+                outbound_maxsize=server_raw.get("outbound_maxsize", 100),
+                outbound_enqueue_timeout=server_raw.get("outbound_enqueue_timeout", 2.0),
             ),
             llm=LLMConfig(
                 chat_model=llm_raw.get("chat_model", "deepseek-chat"),

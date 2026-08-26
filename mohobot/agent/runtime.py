@@ -28,6 +28,7 @@ from mohobot.agent.subconscious_memory import SubconsciousMemory
 from mohobot.agent.topic_planner import TopicPlanner
 from mohobot.agent.topic_replier import TopicReplier
 from mohobot.agent.vector_store import VectorStore, create_vector_store
+from mohobot.services.usage import UsageRecorder
 
 
 class SessionPipeline:
@@ -299,6 +300,7 @@ class BotAgentRuntime:
         touch_replies: Optional[list[str]] = None,
         context_provider: Optional[Callable[..., Awaitable[str]]] = None,
         perception_provider: Optional[Callable[..., Awaitable[str]]] = None,
+        usage_recorder: UsageRecorder | None = None,
     ):
         self.config = config
         self.database_manager = database_manager
@@ -309,6 +311,10 @@ class BotAgentRuntime:
         # 环境感知提供者(仅注入回复生成; 话题提取/记忆写入等不注入)
         self.perception_provider = perception_provider
         self.reply_handler: Optional[Callable[..., Awaitable[None]]] = None
+        self._usage_recorder = usage_recorder or UsageRecorder(
+            self.config.get("data_dir", "./data")
+        )
+        self._owns_usage_recorder = usage_recorder is None
 
         agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
         # 角色名/人设/说话风格全部来自 bot 私有配置, 不再读取 agent.persona
@@ -409,6 +415,7 @@ class BotAgentRuntime:
                 bot_id=self.bot_id,
                 # 全局备用模型(连接类失败回退; 空 = 不回退)
                 fallback_model=global_llm.get("fallback_model", ""),
+                usage_recorder=self._usage_recorder,
             )
             if not modules[name].is_available():
                 self.logger.warning(f"LLM module '{name}' NOT available (missing config)")
@@ -533,15 +540,20 @@ class BotAgentRuntime:
         for session in self._sessions.values():
             await session.stop()
         self._sessions.clear()
+        for module in self.llm_modules.values():
+            await module.close()
+        if self._owns_usage_recorder:
+            await self._usage_recorder.close()
         self.logger.info(f"Agent runtime stopped for bot {self.bot_id}")
 
 
 class BotAgentManager:
     """按 bot_id 管理 BotAgentRuntime。"""
 
-    def __init__(self, config: Dict[str, Any], database_manager):
+    def __init__(self, config: Dict[str, Any], database_manager, usage_recorder: UsageRecorder | None = None):
         self.config = config
         self.database_manager = database_manager
+        self._usage_recorder = usage_recorder
         self._runtimes: Dict[str, BotAgentRuntime] = {}
         self.logger = logger.bind(agent="manager")
 
@@ -565,6 +577,7 @@ class BotAgentManager:
                 touch_replies=touch_replies,
                 context_provider=context_provider,
                 perception_provider=perception_provider,
+                usage_recorder=self._usage_recorder,
             )
             self._runtimes[bot_id] = runtime
             self.logger.info(f"Agent runtime created for bot {bot_id}")

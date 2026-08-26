@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import socket
@@ -27,6 +29,8 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
+
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,6 +100,36 @@ def _remove_file_background(path: str):
 class WebPanel:
     """FastAPI-based web admin panel with 7 dashboard sections."""
 
+    _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+    _MASK = "********"
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+        return f"pbkdf2_sha256${salt}${digest}"
+
+    @staticmethod
+    def _verify_password(password: str, stored: str) -> bool:
+        try:
+            method, salt, expected = stored.split("$", 2)
+            if method != "pbkdf2_sha256":
+                return False
+            actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+            return hmac.compare_digest(actual, expected)
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _safe_id(cls, value: str, label: str = "参数") -> str:
+        if not cls._SAFE_ID.fullmatch(value):
+            raise HTTPException(status_code=400, detail=f"{label} 无效")
+        return value
+
+    @classmethod
+    def _mask_secret(cls, value: Any) -> str:
+        return cls._MASK if value else ""
+
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -115,10 +149,32 @@ class WebPanel:
         self._host = host
         self._port = port
         self._username = username
+        # Resolve the current persisted configuration when available.  A panel
+        # must never silently fall back to the historical admin/admin login.
+        if not password_hash:
+            try:
+                from mohobot.models.config import GlobalConfig
+                password_hash = GlobalConfig.load(config_path).web_panel.password_hash
+            except Exception:
+                password_hash = ""
+        env_password = os.environ.get("MOHOBOT_WEB_PASSWORD", "")
         self._password_hash = password_hash
         self._data_dir = Path(data_dir)
+        if env_password and not self._password_hash:
+            self._password_hash = self._hash_password(env_password)
+            try:
+                from mohobot.models.config import GlobalConfig
+                cfg = GlobalConfig.load(config_path)
+                cfg.web_panel.password_hash = self._password_hash
+                cfg.save(config_path)
+            except Exception as exc:
+                logger.error(f"Could not persist MOHOBOT_WEB_PASSWORD hash: {exc}")
+                raise
+        if not self._password_hash:
+            raise ValueError("WebPanel requires web_panel.password_hash or MOHOBOT_WEB_PASSWORD")
         self._config_path = Path(config_path)
         self._bot_manager = bot_manager
+        self._audit = None
         self._context_manager = context_manager
         self._llm_service = llm_service
         self._plugin_system = plugin_system
@@ -130,10 +186,13 @@ class WebPanel:
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
         self._active_sse_connections: set[asyncio.Queue] = set()
         self._tokens: dict[str, float] = {}
+        self._sse_tickets: dict[str, float] = {}
         self._token_expiry = 3600  # 1 hour
         self._start_time = time.time()
         # framework 统计缓存(60s TTL): history 遍历开销大, 避免每次刷新阻塞
         self._fw_stats_cache: tuple[float, dict] | None = None
+        from mohobot.services.audit import AuditLogger
+        self._audit = AuditLogger(str(self._data_dir))
         self._setup_routes()
 
         # Forward loguru messages to SSE subscribers (best-effort)
@@ -173,57 +232,70 @@ class WebPanel:
 
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=["http://127.0.0.1", "http://localhost"],
             allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
         )
 
         # ── Auth helpers ──────────────────────────────────────
 
-        def _hash_password(password: str) -> str:
-            salt = secrets.token_hex(16)
-            h = hashlib.pbkdf2_hmac(
-                "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000
-            ).hex()
-            return f"pbkdf2_sha256${salt}${h}"
-
-        def _verify_password(password: str, stored: str) -> bool:
-            try:
-                method, salt, expected = stored.split("$", 2)
-                if method != "pbkdf2_sha256":
-                    return False
-                test = hashlib.pbkdf2_hmac(
-                    "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000
-                ).hex()
-                return test == expected
-            except ValueError:
-                return False
-
         async def _verify_token(request: Request) -> bool:
+            # Expired entries are removed opportunistically on every auth check.
+            now = time.time()
+            for token, expiry in list(self._tokens.items()):
+                if expiry <= now:
+                    self._tokens.pop(token, None)
             auth = request.headers.get("Authorization", "")
-            if auth.startswith("Bearer "):
-                token = auth[7:]
-                expiry = self._tokens.get(token, 0)
-                if expiry > time.time():
-                    return True
-            return False
+            if not auth.startswith("Bearer "):
+                return False
+            token = auth[7:]
+            expiry = self._tokens.get(token, 0)
+            return bool(expiry > now and hmac.compare_digest(token, token))
 
         async def _require_auth(request: Request):
             if not await _verify_token(request):
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
+        async def _audit(request: Request, action: str, target: str = "", details: Any = None, success: bool = True):
+            token = request.headers.get("Authorization", "")[7:]
+            from mohobot.services.audit import AuditLogger
+            audit_logger = AuditLogger(str(self._data_dir))
+            try:
+                await audit_logger.write(actor=self._username, action=action, target=target,
+                                         success=success, details=details,
+                                         remote=request.client.host if request.client else "")
+            except Exception as exc:
+                logger.warning(f"Web panel audit write failed: {exc}")
+            finally:
+                await audit_logger.close()
+
         # ── Auth ──────────────────────────────────────────────
+
+        @app.middleware("http")
+        async def audit_mutations(request: Request, call_next):
+            response = await call_next(request)
+            if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {"/api/login"}:
+                details = {k: v for k, v in request.query_params.items() if k.lower() not in {"token", "password"}}
+                from mohobot.services.audit import AuditLogger
+                audit_logger = AuditLogger(str(self._data_dir))
+                try:
+                    await audit_logger.write(
+                        actor=self._username, action=f"{request.method} {request.url.path}",
+                        target=request.url.path, success=response.status_code < 400,
+                        details=details, remote=request.client.host if request.client else "",
+                    )
+                except Exception as exc:
+                    logger.warning(f"Web panel audit write failed: {exc}")
+                finally:
+                    await audit_logger.close()
+            return response
 
         @app.post("/api/login")
         async def login(req: LoginRequest):
             if req.username != self._username:
                 raise HTTPException(status_code=401, detail="用户名或密码错误")
-            if self._password_hash:
-                if not _verify_password(req.password, self._password_hash):
-                    raise HTTPException(status_code=401, detail="用户名或密码错误")
-            elif req.password != "admin":
-                # Default fallback when no hash is configured
+            if not self._password_hash or not self._verify_password(req.password, self._password_hash):
                 raise HTTPException(status_code=401, detail="用户名或密码错误")
 
             token = os.urandom(32).hex()
@@ -232,9 +304,9 @@ class WebPanel:
 
         @app.post("/api/logout")
         async def logout(request: Request):
+            await _require_auth(request)
             auth = request.headers.get("Authorization", "")
-            if auth.startswith("Bearer "):
-                self._tokens.pop(auth[7:], None)
+            self._tokens.pop(auth[7:], None)
             return {"status": "ok"}
 
         # ── 1. Dashboard (数据总览) ──────────────────────────
@@ -262,7 +334,13 @@ class WebPanel:
             await _require_auth(request)
             from mohobot.models.config import GlobalConfig
             cfg = GlobalConfig.load(self._config_path)
-            return cfg.to_dict()
+            result = cfg.to_dict()
+            result["web_panel"]["password_hash"] = self._mask_secret(cfg.web_panel.password_hash)
+            for section in ("llm", "anysearch"):
+                for key, value in list(result.get(section, {}).items()):
+                    if any(marker in key.lower() for marker in ("key", "token", "secret", "password")):
+                        result[section][key] = self._mask_secret(value)
+            return result
 
         @app.put("/api/config")
         async def update_config(request: Request, body: ConfigUpdateRequest):
@@ -394,6 +472,7 @@ class WebPanel:
             await _require_auth(request)
             if not self._bot_manager:
                 raise HTTPException(status_code=500, detail="Bot 管理器不可用")
+            bot_id = self._safe_id(bot_id, "bot_id")
             qq = int((body.data or {}).get("qq", 0) or 0)
             if not qq:
                 raise HTTPException(status_code=400, detail="QQ 不能为空")
@@ -405,7 +484,7 @@ class WebPanel:
 
         @app.post("/api/bots/{bot_id}/unbind")
         async def unbind_bot_qq(bot_id: str, request: Request):
-            await _require_auth(request)
+            bot_id = self._safe_id(bot_id, "bot_id")
             if not self._bot_manager:
                 raise HTTPException(status_code=500, detail="Bot 管理器不可用")
             ok = self._bot_manager.unbind_qq(bot_id)
@@ -418,14 +497,17 @@ class WebPanel:
         async def get_bot_config(bot_id: str, request: Request):
             await _require_auth(request)
             from mohobot.models.config import BotConfig
+            bot_id = self._safe_id(bot_id, "bot_id")
             config_path = self._data_dir / "bots" / bot_id / "config.json"
             cfg = BotConfig.load(config_path)
-            return cfg.to_dict()
+            result = cfg.to_dict()
+            return result
 
         @app.put("/api/bots/{bot_id}/config")
         async def update_bot_config(bot_id: str, request: Request, body: BotConfigUpdateRequest):
             await _require_auth(request)
             from mohobot.models.config import BotConfig
+            bot_id = self._safe_id(bot_id, "bot_id")
             config_path = self._data_dir / "bots" / bot_id / "config.json"
             cfg = BotConfig.load(config_path)
             data = body.data
@@ -454,7 +536,7 @@ class WebPanel:
                 "chat": {
                     "model": cfg.llm.chat_model,
                     "base_url": cfg.llm.chat_base_url,
-                    "api_key": cfg.llm.chat_api_key or "",
+                    "api_key": self._mask_secret(cfg.llm.chat_api_key),
                     "max_tokens": cfg.llm.chat_max_tokens,
                     "temperature": cfg.llm.chat_temperature,
                     "fallback_model": cfg.llm.fallback_model,
@@ -462,7 +544,7 @@ class WebPanel:
                 "vision": {
                     "model": cfg.llm.vision_model,
                     "base_url": cfg.llm.vision_base_url,
-                    "api_key": cfg.llm.vision_api_key or "",
+                    "api_key": self._mask_secret(cfg.llm.vision_api_key),
                     "prompt": cfg.llm.vision_prompt,
                 },
                 "models": list(cfg.llm.models),
@@ -481,16 +563,16 @@ class WebPanel:
                         setattr(cfg.llm, f"chat_{k}", v)
                     elif k == "fallback_model":
                         cfg.llm.fallback_model = str(v or "")
-                if "api_key" in data["chat"]:
-                    cfg.llm.chat_api_key = data["chat"]["api_key"]
+                if "api_key" in data["chat"] and data["chat"]["api_key"] not in ("", self._MASK):
+                    cfg.llm.chat_api_key = str(data["chat"]["api_key"])
             if "vision" in data:
                 for k, v in data["vision"].items():
                     if hasattr(cfg.llm, f"vision_{k}") and k != "api_key":
                         setattr(cfg.llm, f"vision_{k}", v)
                     elif k == "prompt":
                         cfg.llm.vision_prompt = str(v or "")
-                if "api_key" in data["vision"]:
-                    cfg.llm.vision_api_key = data["vision"]["api_key"]
+                if "api_key" in data["vision"] and data["vision"]["api_key"] not in ("", self._MASK):
+                    cfg.llm.vision_api_key = str(data["vision"]["api_key"])
             if "models" in data and isinstance(data["models"], list):
                 cfg.llm.models = [str(m).strip() for m in data["models"] if str(m).strip()]
 
@@ -644,16 +726,21 @@ class WebPanel:
 
         # ── 6. Live Logs (实时日志) ──────────────────────────
 
+        @app.post("/api/logs/ticket")
+        async def create_log_ticket(request: Request):
+            await _require_auth(request)
+            ticket = secrets.token_urlsafe(32)
+            self._sse_tickets[ticket] = time.time() + 30
+            return {"ticket": ticket}
+
         @app.get("/api/logs/stream")
         async def log_stream(request: Request):
-            # EventSource in browsers CANNOT set custom headers, so accept
-            # the token via query param as well as the Authorization header.
-            query_token = request.query_params.get("token", "")
-            if query_token:
-                expiry = self._tokens.get(query_token, 0)
-                if expiry <= time.time():
-                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-            elif not await _verify_token(request):
+            # EventSource cannot set Authorization. Exchange the bearer token
+            # via POST for a short-lived, one-use ticket so the session token is
+            # never placed in URLs, browser history, access logs or Referer.
+            ticket = request.query_params.get("ticket", "")
+            expiry = self._sse_tickets.pop(ticket, 0) if ticket else 0
+            if expiry <= time.time():
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
             # Multi-select levels: comma-separated, e.g. ?level=DEBUG,INFO
@@ -691,16 +778,12 @@ class WebPanel:
         async def change_password(request: Request, body: PasswordChangeRequest):
             await _require_auth(request)
 
-            # Verify old password
-            if self._password_hash:
-                if not _verify_password(body.old_password, self._password_hash):
-                    raise HTTPException(status_code=400, detail="原密码错误")
-            elif body.old_password != "admin":
+            if not self._verify_password(body.old_password, self._password_hash):
                 raise HTTPException(status_code=400, detail="原密码错误")
 
             from mohobot.models.config import GlobalConfig
             cfg = GlobalConfig.load(self._config_path)
-            cfg.web_panel.password_hash = _hash_password(body.new_password)
+            cfg.web_panel.password_hash = self._hash_password(body.new_password)
             cfg.save(self._config_path)
             self._password_hash = cfg.web_panel.password_hash
 
@@ -738,7 +821,7 @@ class WebPanel:
             if bots_raw == "all" or bots_raw is None:
                 bot_list: list[str] | None = None
             elif isinstance(bots_raw, list):
-                bot_list = [str(b) for b in bots_raw if str(b)]
+                bot_list = [self._safe_id(str(b), "bot_id") for b in bots_raw if str(b)]
                 if not bot_list:
                     raise HTTPException(status_code=400, detail="未选择任何 Bot")
             else:
@@ -827,7 +910,7 @@ class WebPanel:
             await _require_auth(request)
             form = await request.form()
             password = str(form.get("password", ""))
-            if not _verify_password(password, self._password_hash):
+            if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
 
             try:
@@ -875,7 +958,7 @@ class WebPanel:
             await _require_auth(request)
             data = body.data or {}
             password = str(data.get("password", ""))
-            if not _verify_password(password, self._password_hash):
+            if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
             removed = self._cleanup_data(bot_list, dir_set)
@@ -965,7 +1048,8 @@ class WebPanel:
             return HTMLResponse("<h1>Mohobot Web Panel</h1><p>static/index.html not found</p>")
 
         @app.get("/api/health")
-        async def health():
+        async def health(request: Request):
+            await _require_auth(request)
             from mohobot.utils.time_utils import now_utc8
             return {"status": "ok", "time": now_utc8().isoformat()}
 

@@ -112,70 +112,88 @@ class Plugin:
         data.setdefault("friends", {})
         return data
 
-    async def _save_known(self, data: dict) -> None:
-        from mohobot.file_store import json_write
-        await json_write(self._known_path(), data)
-
-    async def _fetch_list(self, bot_id: str, action: str) -> list[dict]:
-        """拉取群/好友列表; 失败返回 []。"""
+    async def _fetch_list(self, bot_id: str, action: str) -> tuple[bool, list[dict]]:
+        """拉取列表并校验响应; 失败时返回无效标记, 绝不当作空列表。"""
         ws = self._ws_server
         if ws is None:
-            return []
+            return False, []
         try:
             resp = await ws.send_to_bot(
                 bot_id, action, {}, wait_response=True, timeout=10.0,
             )
-            data = (resp or {}).get("data") or []
-            return data if isinstance(data, list) else []
+            if (not isinstance(resp, dict) or resp.get("status") != "ok"
+                    or resp.get("retcode", 0) not in (0, None)):
+                return False, []
+            data = resp.get("data")
+            if not isinstance(data, list):
+                return False, []
+            return True, data
         except Exception as e:
             logger.warning(f"获取列表失败({bot_id} {action}): {e}")
-            return []
+            return False, []
+
+    async def _commit_baseline(self, bot_id: str, kind: str, current: list[str]) -> None:
+        """原子提交单个 bot 的群或好友基线。"""
+        from mohobot.file_store import json_update
+
+        def update(data: Any) -> dict:
+            if not isinstance(data, dict):
+                data = {}
+            data.setdefault("groups", {})
+            data.setdefault("friends", {})
+            data[kind][bot_id] = current
+            return data
+
+        await json_update(self._known_path(), update, default={})
+
+    async def _check_relationship(self, bot_id: str, kind: str, valid: bool,
+                                  current: list[str], known: dict) -> None:
+        if not valid:
+            return
+        known_map = known[kind]
+        initialized = bot_id in known_map
+        previous = set(str(value) for value in (known_map.get(bot_id) or []))
+        if not initialized:
+            await self._commit_baseline(bot_id, kind, current)
+            logger.debug(f"欢迎插件首启基线: {bot_id} {kind} {len(current)} 个")
+            return
+
+        target_type = "group" if kind == "groups" else "friend"
+        new_items = [value for value in current if value not in previous]
+        failed = set()
+        for target_id in new_items:
+            sent = await self._send_welcome(
+                bot_id, target_type=target_type, target_id=target_id,
+            )
+            if not sent:
+                failed.add(target_id)
+                continue
+            await self._notify_admin(
+                bot_id, target_type=target_type, target_id=target_id,
+                name=await self._get_target_name(
+                    bot_id, target_type=target_type, target_id=target_id,
+                ),
+            )
+
+        # Disabled/empty templates report success; actual send failures remain retryable.
+        committed = [value for value in current if value not in failed]
+        await self._commit_baseline(bot_id, kind, committed)
+        if new_items:
+            logger.info(f"欢迎插件: {bot_id} {kind} 新增 {new_items}, 失败 {sorted(failed)}")
 
     async def _check_all(self, bot_id: str) -> None:
         ws = self._ws_server
         if ws is None:
             return
         known = await self._load_known()
-        groups_known = set(str(g) for g in known["groups"].get(bot_id, []))
-        friends_known = set(str(f) for f in known["friends"].get(bot_id, []))
-
-        groups_now = [str(g.get("group_id", "")) for g in await self._fetch_list(bot_id, "get_group_list") if g.get("group_id")]
-        friends_now = [str(f.get("user_id", "")) for f in await self._fetch_list(bot_id, "get_friend_list") if f.get("user_id")]
-
-        # 首次(无基线): 以当前列表为基线, 不欢迎已有
-        if not groups_known and not friends_known and not known["groups"].get(bot_id) and not known["friends"].get(bot_id):
-            known["groups"][bot_id] = groups_now
-            known["friends"][bot_id] = friends_now
-            await self._save_known(known)
-            logger.debug(f"欢迎插件首启基线: {bot_id} 群 {len(groups_now)} 个, 好友 {len(friends_now)} 个")
-            return
-
-        # 发现新群/新好友 → 欢迎 + 通知管理员
-        new_groups = [g for g in groups_now if g not in groups_known]
-        new_friends = [f for f in friends_now if f not in friends_known]
-        for gid in new_groups:
-            await self._send_welcome(bot_id, target_type="group", target_id=gid)
-            await self._notify_admin(
-                bot_id, target_type="group", target_id=gid,
-                name=await self._get_target_name(
-                    bot_id, target_type="group", target_id=gid,
-                ),
-            )
-        for fid in new_friends:
-            await self._send_welcome(bot_id, target_type="friend", target_id=fid)
-            await self._notify_admin(
-                bot_id, target_type="friend", target_id=fid,
-                name=await self._get_target_name(
-                    bot_id, target_type="friend", target_id=fid,
-                ),
-            )
-
-        # 更新基线(新增 + 移除消失的)
-        known["groups"][bot_id] = groups_now
-        known["friends"][bot_id] = friends_now
-        await self._save_known(known)
-        if new_groups or new_friends:
-            logger.info(f"欢迎插件: {bot_id} 新群 {new_groups}, 新好友 {new_friends}")
+        groups_ok, groups_data = await self._fetch_list(bot_id, "get_group_list")
+        friends_ok, friends_data = await self._fetch_list(bot_id, "get_friend_list")
+        groups_now = [str(g.get("group_id")) for g in groups_data
+                      if isinstance(g, dict) and g.get("group_id")] if groups_ok else []
+        friends_now = [str(f.get("user_id")) for f in friends_data
+                       if isinstance(f, dict) and f.get("user_id")] if friends_ok else []
+        await self._check_relationship(bot_id, "groups", groups_ok, groups_now, known)
+        await self._check_relationship(bot_id, "friends", friends_ok, friends_now, known)
 
     # ── 管理员通知 ───────────────────────────────────────────
 
@@ -233,19 +251,19 @@ class Plugin:
 
     async def _send_welcome(
         self, bot_id: str, *, target_type: str, target_id: str,
-    ) -> None:
+    ) -> bool:
         ws = self._ws_server
         if ws is None or not target_id:
-            return
+            return False
         if target_type == "friend":
             enabled_key, msg_key = "welcome_friend_enabled", "welcome_friend_msg"
         else:
             enabled_key, msg_key = "welcome_group_enabled", "welcome_group_msg"
         if not self._cfg(enabled_key, True):
-            return
+            return True
         template = str(self._cfg(msg_key, "") or "").strip()
         if not template:
-            return
+            return True
 
         nickname = await self._get_bot_nickname(bot_id)
         text = template.replace("【此处替换为 bot 的昵称】", nickname)
@@ -261,8 +279,10 @@ class Plugin:
             else:
                 await ws.send_private_msg(bot_id, int(target_id), text)
             logger.info(f"欢迎消息已发送: {target_type}={target_id} (bot {bot_id})")
+            return True
         except Exception as e:
             logger.warning(f"欢迎消息发送失败({target_type}={target_id}): {e}")
+            return False
 
     async def _get_bot_nickname(self, bot_id: str) -> str:
         """取 bot 配置的昵称; 无 bot_manager 引用时回退 bot_id。"""

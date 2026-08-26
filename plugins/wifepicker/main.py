@@ -157,6 +157,14 @@ class Plugin:
         # 关键词路由表固定, 无需重建; 开关实时读取
         logger.info("wifepicker 插件配置已热更新")
 
+    async def on_shutdown(self) -> None:
+        if self._maintenance_task is not None and not self._maintenance_task.done():
+            self._maintenance_task.cancel()
+            await asyncio.gather(self._maintenance_task, return_exceptions=True)
+        self._maintenance_task = None
+        from wifepicker_core.renderer import shutdown
+        await shutdown()
+
     def _all_bot_qqs(self) -> set[str]:
         """所有已连接 bot 的 QQ 号(多 bot 同群时, 其它 bot 的消息也会被收到,
         活跃池/抽取需排除所有机器人)。"""

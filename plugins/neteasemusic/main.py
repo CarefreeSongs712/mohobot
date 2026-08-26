@@ -89,6 +89,14 @@ class Plugin:
             )
         return self._http_session
 
+    async def on_shutdown(self) -> None:
+        session = self._http_session
+        self._http_session = None
+        if session is not None and not getattr(session, "closed", False):
+            await session.close()
+        self._waiting_users.clear()
+        self._song_cache.clear()
+
     @staticmethod
     def _extract_text(event: Any) -> str:
         if isinstance(event.message, str):

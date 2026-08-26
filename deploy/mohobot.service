@@ -1,0 +1,24 @@
+[Unit]
+Description=Mohobot QQ bot framework
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mohobot
+Group=mohobot
+WorkingDirectory=/opt/mohobot
+Environment=MOHOBOT_CONFIG=/opt/mohobot/config/global.yaml
+EnvironmentFile=-/etc/mohobot/mohobot.env
+ExecStart=/opt/mohobot/.venv/bin/python /opt/mohobot/main.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/mohobot/data /opt/mohobot/logs /opt/mohobot/config
+
+[Install]
+WantedBy=multi-user.target
