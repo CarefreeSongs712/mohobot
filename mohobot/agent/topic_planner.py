@@ -104,6 +104,7 @@ class TopicPlanner:
 
     async def feed_unread_message(self, message: ChatInputEvent) -> None:
         """接收一条用户消息: 入缓冲 + 重置等待超时 + 唤醒处理循环。"""
+        payload = message.payload or {}
         unread = UnreadMessage(
             message_id=message.message_id or str(uuid4()),
             content=message.content or "",
@@ -111,7 +112,8 @@ class TopicPlanner:
             target_character_ids=(message.character_id or self.character_id,),
             terms=message.terms or [],
             timestamp=message.timestamp or time.time(),
-            speaker=message.payload.get("speaker", ""),
+            speaker=payload.get("speaker", ""),
+            song_annotation=payload.get("song_annotation", "") or "",
         )
         await self.unread_store.append(unread)
         await self.listen_timer.set_deadline()
@@ -279,7 +281,6 @@ class TopicPlanner:
             ),
             memory_attempts=[],
             fact_constraints=[],
-            sing_attempts=[],
             target_character_ids=(self.character_id,),
             is_forced_from_incomplete=force_complete,
         )

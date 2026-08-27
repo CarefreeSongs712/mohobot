@@ -60,6 +60,7 @@ class MessageHandler:
         database_manager=None,
         image_cache=None,
         global_config=None,
+        song_matcher=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -70,6 +71,8 @@ class MessageHandler:
         self._interceptors: list = []  # Ordered list of interceptors
         self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
         self._writer_registry: dict[str, JSONLWriter] = {}
+        # 全局歌曲匹配器(识别 + 注解, legacy/agent 共用; 未注入时降级)
+        self._song_matcher = song_matcher
 
         # Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
         self._agent_manager = agent_manager
@@ -424,15 +427,22 @@ class MessageHandler:
         # 确保 runtime 已创建(首条消息时惰性创建), 再取歌曲链接器
         runtime = self._ensure_agent_runtime(bot_id)
 
-        # 歌曲实体检出: FlashText 链接器(触发动词门控) → 消息 terms
-        # 术语会进入话题提取 prompt, 约束 LLM 输出(防编造歌/歌词)
+        # 歌曲实体检出 + 注解(全局识别, 私聊+群聊, legacy/agent 共用):
+        # 识别结果:
+        #   - 注解文案存入 payload["song_annotation"], 由 agent 在回复生成时
+        #     紧跟用户消息下方注入(不写入 context);
+        #   - 识别出的歌名继续作为 terms(话题提取 prompt 的实体提示)。
         terms: list[str] = []
-        linker = getattr(runtime, "song_entity_linker", None) if runtime else None
-        if linker is not None:
-            try:
-                terms = linker.extract_and_verify(content)
-            except Exception as e:
-                logger.debug(f"Song entity extraction failed: {e}")
+        song_annotation = ""
+        try:
+            if self._song_matcher is not None:
+                text_for_match = content or extract_plain_text(event.message) or ""
+                match = self._song_matcher.match(text_for_match)
+                if match is not None:
+                    song_annotation = match.build_annotation()
+                    terms.append(f"《{match.name}》是一首歌")
+        except Exception as e:
+            logger.debug(f"Song entity extraction failed: {e}")
 
         chat_event = ChatInputEvent(
             event_type=ChatInputEventType.USER_MESSAGE,
@@ -448,6 +458,7 @@ class MessageHandler:
                 "chat_type": chat_type,
                 "chat_id": chat_id,
                 "qq": str(event.user_id),
+                "song_annotation": song_annotation,
             },
         )
 
@@ -555,6 +566,26 @@ class MessageHandler:
         return text.strip().lower() == "ping"
 
     # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
+
+    async def _song_annotation_for_event(self, event: MessageEvent) -> str:
+        """识别消息中的歌曲并返回【歌曲信息】注解段(无命中返回 "")。
+
+        供 legacy 路径(LLMService 注入)与 agent 路径共用。
+        消息原文(含图片描述)做识别; 库为空/失败 → 空串, 正常走 LLM。
+        """
+        if self._song_matcher is None:
+            return ""
+        try:
+            text = (extract_plain_text(event.message) or "").strip()
+            if not text:
+                return ""
+            match = self._song_matcher.match(text)
+            if match is None:
+                return ""
+            return match.build_annotation()
+        except Exception as e:
+            logger.debug(f"歌曲识别失败: {e}")
+            return ""
 
     async def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
         """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。
@@ -740,7 +771,7 @@ class MessageHandler:
         texts = [
             item.get_content()
             for item in reply_items
-            if item.type in (ContextType.TEXT, ContextType.SING)
+            if item.type == ContextType.TEXT
             and item.get_content().strip()
         ]
         if not texts:

@@ -60,6 +60,7 @@ class UnreadMessage:
     terms: list[str] = field(default_factory=list)
     timestamp: float = 0.0
     speaker: str = ""  # 发言者,如 "{qq}-{nickname}"(群聊多人时用于话题提取)
+    song_annotation: str = ""  # 歌曲信息注解(LLM 前注入, 紧跟用户消息下方)
 
 
 @dataclass
@@ -80,7 +81,6 @@ class ExtractedTopic:
     topic_content: str
     memory_attempts: list[str]
     fact_constraints: list[str]
-    sing_attempts: list[str]
     target_character_ids: tuple[str, ...] = ("bot",)
     source_event_type: str | None = None
     is_forced_from_incomplete: bool = False
@@ -208,7 +208,6 @@ class AgentState:
 
 class ActionType(str, Enum):
     SAY = "say"
-    SING = "sing"
     WRITE_MEMORY = "write_memory"
     WRITE_DIARY = "write_diary"
     ASK_FOLLOWUP = "ask_followup"
@@ -246,7 +245,6 @@ class TopicAttentionPlan:
     agent_state: AgentState | None = None
     memory_hits: list[str] = field(default_factory=list)
     fact_hits: list[str] = field(default_factory=list)
-    sing_plan: tuple[str | None, str | None] = (None, None)
     attention_notes: tuple[str, ...] = ()
     action_plan: ActionPlan | None = None
 
@@ -256,7 +254,6 @@ class TopicAttentionPlan:
 
 class ContextType(str, Enum):
     TEXT = "text"
-    SING = "sing"
     CMD = "cmd"
     IMAGE = "image"
 
@@ -268,21 +265,6 @@ class OneResponseLine:
 
     def get_content(self) -> str:
         raise NotImplementedError
-
-
-@dataclass
-class SongSegmentChat(OneResponseLine):
-    type: ContextType = ContextType.SING
-    lyrics: str = ""
-    song: str = ""
-    segment: str = ""
-    uuid: str = ""
-
-    def get_content(self) -> str:
-        # mohobot 无 TTS: 唱段以歌词文本呈现
-        if self.lyrics:
-            return f"《{self.song}》\n{self.lyrics}"
-        return f"《{self.song}》"
 
 
 @dataclass

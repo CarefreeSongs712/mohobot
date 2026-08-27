@@ -163,12 +163,16 @@ def _hardcoded_persona(bot_id: str, user_id: int) -> str | None:
 class LLMService:
     """LLM interaction service with prompt assembly and vision support."""
 
-    def __init__(self, global_config: GlobalConfig, image_cache=None, usage_recorder: UsageRecorder | None = None):
+    def __init__(self, global_config: GlobalConfig, image_cache=None, usage_recorder: UsageRecorder | None = None,
+                 song_annotator=None):
         self._cfg = global_config
         self._usage_recorder = usage_recorder or UsageRecorder(self._cfg.data_dir)
         self._owns_usage_recorder = usage_recorder is None
         # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
         self._image_cache = image_cache
+        # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
+        # 在发送给 LLM 前把歌曲信息注入用户消息下方(不写入 context)。
+        self._song_annotator = song_annotator
         self._available = False
 
         api_key = self._cfg.llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
@@ -765,6 +769,17 @@ class LLMService:
         # 5. Final user message — the @mention check is now done in message_handler.py
         #    (主模型始终为纯文本, 不再构造多模态 image_url 分片)
         user_content = f"{time_msg}\n\n{user_content}" if user_content else time_msg
+
+        # 6. 歌曲信息注入(全局, 私聊+群聊): 消息含歌曲信息时, 在用户消息下方
+        #    追加【歌曲信息】段(介绍 + 词/曲/混/调等 + 完整歌词)。
+        #    仅本次请求携带, 不写入 context 文件。
+        if self._song_annotator is not None:
+            try:
+                annotation = await self._song_annotator(event)
+                if annotation:
+                    user_content = f"{user_content}\n\n{annotation}"
+            except Exception as e:
+                logger.debug(f"Song annotation failed: {e}")
 
         messages.append({"role": "user", "content": user_content})
 

@@ -193,6 +193,13 @@ class SessionPipeline:
             conversation_history = self._attach_perception(
                 conversation_history, perception
             )
+        # 歌曲信息注解: 用户消息含歌曲时, 紧跟用户消息下方注入
+        # (取此话题最后一条触发消息的注解; 不写入 context 文件)
+        topic_song_annotation = ""
+        if topic.source_messages:
+            topic_song_annotation = (
+                topic.source_messages[-1].song_annotation or ""
+            ).strip()
         plan = await self.runtime.agent.plan_topic_turn(
             user_id=user_id,
             topic=topic,
@@ -200,6 +207,7 @@ class SessionPipeline:
         )
         reply_items = await self.runtime.agent.realize_topic_plan(
             user_id=user_id, plan=plan,
+            song_annotation=topic_song_annotation,
         )
         # 记录本次会话信息,供发送回调使用(引用最后一条触发消息)
         self._last_plan = plan
@@ -344,8 +352,7 @@ class BotAgentRuntime:
         )
 
         # 潜意识
-        self.song_entity_linker = None  # FlashText 歌名/歌词链接器(消息预处理用)
-        self.song_knowledge = self._build_song_knowledge(agent_cfg)
+        self.song_info_service = self._build_song_info_service(agent_cfg)
         self.mind = CharacterSubconscious(
             agent_cfg,
             database_manager=database_manager,
@@ -354,7 +361,7 @@ class BotAgentRuntime:
             character_id=bot_id,
             character_name=self.character_name,
             anysearch_client=self._build_anysearch_client(),
-            song_knowledge=self.song_knowledge,
+            song_knowledge=self.song_info_service,
         )
 
         # 意识层
@@ -435,25 +442,29 @@ class BotAgentRuntime:
             timeout=int(cfg.get("timeout", 30)),
         )
 
-    def _build_song_knowledge(self, agent_cfg: Dict[str, Any]):
-        """构建歌曲知识(SQLite 事实库 + 关键词链接器)。
+    def _build_song_info_service(self, agent_cfg: Dict[str, Any]):
+        """构建歌曲知识门面(SQLite 事实库; 识别/注入走全局 SongInfoMatcher)。
 
-        未启用/缺依赖时返回 None(歌名识别与点歌功能自动降级)。
+        未启用/缺依赖时返回 None(歌曲事实检索降级, 不影响聊天)。
         """
         try:
-            from mohobot.agent.music_knowledge import SongEntityLinker, SongKnowledgeMemory
+            from mohobot.music_knowledge import SongInfoService
 
             music_cfg = agent_cfg.get("music_knowledge") or {}
             if not music_cfg.get("enabled", True):
                 self.logger.info("music_knowledge 未启用, 歌曲知识降级")
                 return None
-            knowledge = SongKnowledgeMemory(music_cfg)
-            linker = SongEntityLinker(music_cfg)
-            self.song_entity_linker = linker
-            self.logger.info("歌曲知识已加载(SQLite 事实库 + FlashText 链接器)")
+            # 复用全局 SongInfoService(同一 DB; 不重复建 engine)
+            from mohobot.music_knowledge import pool
+            from mohobot.music_knowledge.song_database import init_song_db
+            db_cfg = music_cfg.get("song_database") or {}
+            if db_cfg:
+                init_song_db(db_cfg)
+            knowledge = SongInfoService(music_cfg)
+            self.logger.info("歌曲知识已加载(SQLite 事实库)")
             return knowledge
         except ImportError as e:
-            self.logger.warning(f"歌曲知识依赖缺失(flashtext?), 已降级: {e}")
+            self.logger.warning(f"歌曲知识依赖缺失, 已降级: {e}")
         except Exception as e:
             self.logger.warning(f"歌曲知识初始化失败, 已降级: {e}")
         return None

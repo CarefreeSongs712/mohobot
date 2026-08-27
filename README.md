@@ -351,17 +351,20 @@ database:
 
 > 移植自 [astrbot_plugin_netease_music](https://github.com/NachoCrazy/netease-music-astrbot-plugin) v2.0.0（作者：NachoCrazy），依赖自部署的 NeteaseCloudMusicApi 服务。
 
-## 🎵 歌曲知识（移植自 Agent-LuoTianyi，beta 板块）
+## 🎵 歌曲知识（全局歌曲识别 + LLM 前注入）
 
-歌曲知识部分**直接移植自 [Agent-LuoTianyi](https://github.com/CarefreeSongs712/Agent-LuoTianyi) 的 server 端实现**（`src/subconscious/music_knowledge/`、`src/subconscious/memory/song_knowledge.py`、`src/world/get_new_songs/`），包含：
+歌曲知识已重写为**全局（非 beta 专属）**能力，legacy 与 agent 两条 LLM 路径共用（私聊+群聊）：用户消息里含歌曲信息（歌名或歌词）时，在发送给 LLM 之前识别出是哪首歌，把「歌曲介绍 + 词/曲/混/调等创作人员 + 完整歌词」作为一段注脚，**紧跟该条用户消息下方**拼进 LLM 请求（仅请求级注入，不写入 context 文件）；不再输出 `[sing]` 唱歌文本。
 
-1. **SQLite 事实库**（`mohobot/agent/music_knowledge/song_database.py`）— `songs` 表：`name / safe_name(过滤非字母数字的规范化名) / uploader(UP主) / singers(演唱) / introduction / lyrics`
-2. **查询服务**（`knowledge_service.py`）— 精确匹配优先（name/safe_name 相等），兜底 `ilike` 模糊；按 UP主/歌手（逗号分隔）/歌词片段查询
-3. **FlashText 关键词链接器**（`jargon.py`）— `SongEntityLinker` 加载两份 txt（歌名/歌词关键词）为 Aho-Corasick 风格匹配器；**触发动词门控**：消息必须命中 `{听,唱,点,循环,安利,写,作曲,调教,歌}` 才激活歌名识别（防日常误触发），产出 `《歌名》是一首歌` / `歌词是《歌名》的歌词` 术语写入消息 `terms`
-4. **对话使用链路** — 术语进话题提取 prompt → LLM 产出 `fact_constraints`（歌名约束）→ 并行检索 SQLite 返回《歌名》的介绍/歌词去重文本 → 注入回复 prompt 约束输出防编造；`sing_attempts`（点歌）→ 从事实库取歌词文本呈现（**无 TTS/音频，只发歌词文本**）
-5. **VCPedia 新歌同步**（`vcpedia.py`）— 手动触发（`/sync-songs` 管理员命令 或 `scripts/sync_vcpedia.py`），无定时器
+实现位于 `mohobot/music_knowledge/`：
 
-**默认知识库**随仓库提供（`res/song_knowledge/`：`knowledge_db.db` 3412 首 + 两个关键词 txt，数据来自用户提供的《音乐知识库0726》，非仓库代码）；**首次启动自动复制到 `data/song_knowledge/`**，已有数据不会被覆盖。配置在 `agent.music_knowledge`：
+1. **SQLite 事实库**（`song_database.py`，新 schema）— `songs` 表字段：`name / safe_name / uploader(UP主) / singers(演唱) / lyricist(作词) / composer(作曲) / arranger(编曲) / mixer(混音) / tuner(调教) / mastering(母带) / pv / illustrator(曲绘) / year(年份) / introduction(介绍) / lyrics(完整歌词，保留换行)`；启动时按新 schema 建空库（不再复制内置库）
+2. **匹配器**（`matcher.py`）— `SongInfoMatcher` 直接和爬取库比对（不再依赖 FlashText/关键词 txt）：`《歌名》` 书名号高置信命中 → 裸文本含歌名（长度≥3）且含歌曲语境词（唱/听/歌/歌词等）→ 歌词片段（采样 3 个 12–20 字子串做包含检测）。命中即取详情节并格式化为 `【歌曲信息】` 注解段（介绍 + 演唱/UP主 + 词/曲/编/混/调 + 完整歌词）
+3. **VCPedia 新歌同步**（`vcpedia.py`，重写）— 站点现为 **Anubis PoW 反爬**（明文请求 403），同步器内置 PoW 解题 + auth cookie 持久化复用；列表走 `api.php list=categorymembers` 全量分页；词条优先 `rest.php` wikitext（兜底渲染 HTML）；解析完整创作人员与完整歌词。手动触发：`/sync-songs`（管理员）或 `python scripts/sync_vcpedia.py`
+4. **旧数据迁移** — `python scripts/migrate_legacy_songs.py` 把旧版 3412 首（name/uploader/singers/introduction/lyrics）迁移进新 schema（credits 留空）
+
+**网易云点歌插件（`/点歌`）不受影响**：仍走独立命令路径，不进入本歌曲知识链路。
+
+配置在 `agent.music_knowledge`：
 
 ```yaml
 agent:
@@ -370,13 +373,10 @@ agent:
     song_database:
       db_folder: "./data/song_knowledge"
       db_file: "knowledge_db.db"
-    songname_file: "./data/song_knowledge/song_name_keywords.txt"
-    lyric_file: "./data/song_knowledge/song_lyric_keywords.txt"
     crawler:
       base_url: "https://vcpedia.cn"
+      category: "Category:洛天依歌曲"
 ```
-
-> 依赖：`flashtext`（已从 PyPI 下架，需 `pip install --no-build-isolation git+https://github.com/vi3k6i5/flashtext.git`）、`requests`、`beautifulsoup4`（VCPedia 同步用）。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 

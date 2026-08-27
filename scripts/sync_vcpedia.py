@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mohobot.agent.music_knowledge.vcpedia import sync_vcpedia_new_songs
+from mohobot.music_knowledge.vcpedia import sync_vcpedia_new_songs
 
 
 def load_music_knowledge_config() -> dict:

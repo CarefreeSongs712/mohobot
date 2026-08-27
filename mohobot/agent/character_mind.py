@@ -183,7 +183,6 @@ class CharacterSubconscious:
                 user_id=user_id, queries=queries, similarity_threshold=0.8,
             ),
             fact_search=self.search_fact_constraints_for_topic,
-            sing_planner=self._plan_sing_attempts_for_topic,
             external_context=external_context,
             agent_state=self.state.get_snapshot(),
         )
@@ -212,54 +211,3 @@ class CharacterSubconscious:
             context=context,
             character_name=self.character_name,
         )
-
-    async def _plan_sing_attempts_for_topic(
-        self, sing_attempts: List[str],
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """点歌规划: 从歌曲知识库取歌词作为"唱段"文本。
-
-        返回 (歌名, 歌词文本):
-        - 指定歌名 → 查知识库歌词(查不到 → 歌名, None, 表示"不会唱")
-        - random_song → 随机抽一首有歌词的歌
-        """
-        if not sing_attempts or self.song_knowledge is None:
-            return (None, None)
-
-        for attempt in sing_attempts:
-            candidate = (attempt or "").strip()
-            if not candidate:
-                continue
-            if candidate in ("random_song", "random"):
-                try:
-                    return await self.song_knowledge.get_random_song_with_lyrics()
-                except Exception as e:
-                    self.logger.warning(f"Random song failed: {e}")
-                    return (None, None)
-
-            song_name = self._extract_song_name(candidate)
-            if not song_name:
-                continue
-            try:
-                lyrics = await self.song_knowledge.get_song_lyrics_text(song_name)
-            except Exception as e:
-                self.logger.warning(f"Song lyrics lookup failed: {e}")
-                lyrics = ""
-            return (song_name, lyrics or None)
-        return (None, None)
-
-    @staticmethod
-    def _extract_song_name(text: str) -> str:
-        """从点歌文本提取歌名(去掉《》/描述后缀)。"""
-        content = (text or "").strip()
-        if not content:
-            return ""
-        # 去掉 "点一首" "唱" 等动词语气前缀
-        for prefix in ("唱一首", "点一首", "唱个", "来一首", "点个", "循环", "安利"):
-            if content.startswith(prefix):
-                content = content[len(prefix):].strip()
-                break
-        import re
-        m = re.search(r"《([^》]+)》", content)
-        if m:
-            return m.group(1).strip()
-        return content.strip("\"'“”‘’《》")

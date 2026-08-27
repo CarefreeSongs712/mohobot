@@ -1,7 +1,7 @@
 """主聊天 — 移植自 Agent-LuoTianyi (src/agent/main_chat.py + prompt_assembly.py + response_parser.py)。
 
-把"话题 + 用户信息 + 记忆/事实命中"渲染成 prompt,调 LLM,
-解析成结构化回复行([tone]content 或 [sing]歌名)。
+把"话题 + 用户信息 + 记忆/事实命中 + 歌曲信息注解"渲染成 prompt,调 LLM,
+解析成结构化回复行([tone]content)。唱歌([sing])机制已移除。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from mohobot.agent.domain import ContextType, OneResponseLine, OneSentenceChat, SongSegmentChat
+from mohobot.agent.domain import ContextType, OneResponseLine, OneSentenceChat
 from mohobot.agent.llm_module import LLMModule
 
 
@@ -32,8 +32,8 @@ class RealizationPromptInput:
     conversation_history: str
     current_time: str
     reply_topic: str
-    sing_requirement: str
     extra_knowledge: str
+    song_annotation: str = ""
 
 
 class RealizationPromptAssembler:
@@ -52,7 +52,7 @@ class RealizationPromptAssembler:
         conversation_history: str = "",
         fact_hits: Optional[list[str]] = None,
         memory_hits: Optional[list[str]] = None,
-        sing_plan: Optional[tuple[str, str]] = None,
+        song_annotation: str = "",
     ) -> RealizationPromptInput:
         from mohobot.utils.time_utils import format_utc8
         return RealizationPromptInput(
@@ -64,22 +64,12 @@ class RealizationPromptAssembler:
             conversation_history=conversation_history or "无",
             current_time=format_utc8("%Y-%m-%d %H:%M:%S"),
             reply_topic=reply_topic or "",
-            sing_requirement=self.build_sing_requirement(sing_plan),
             extra_knowledge=self.build_extra_knowledge(fact_hits or [], memory_hits or []),
+            song_annotation=song_annotation or "",
         )
 
     def build_user_persona(self, user_nickname: str, user_description: str) -> str:
         return (user_description or "").strip()
-
-    def build_sing_requirement(self, sing_plan: Optional[tuple[str, str]]) -> str:
-        if not sing_plan or not sing_plan[0]:
-            return "在回复中你不需要为用户唱歌"
-        if sing_plan[0] is not None and sing_plan[1] is None:
-            return f"用户想要听《{sing_plan[0]}》，但是你还不会唱。"
-        normalized = self.normalize_sing_song(sing_plan[0])
-        if normalized:
-            return f"你要为用户唱一段《{normalized}》。"
-        return "在回复中你不需要为用户唱歌"
 
     def build_extra_knowledge(self, fact_hits: list[str], memory_hits: list[str]) -> str:
         merged: list[str] = []
@@ -94,34 +84,19 @@ class RealizationPromptAssembler:
             return "无"
         return "\n".join(merged)
 
-    def normalize_sing_song(self, sing_song: Optional[str]) -> Optional[str]:
-        if not sing_song:
-            return None
-        value = str(sing_song).strip()
-        if not value:
-            return None
-        if "|" in value:
-            value = value.split("|", 1)[0].strip()
-        return value.strip("'\"")
-
 
 # ── 响应解析 ──────────────────────────────────────────────────
 
 
 class StructuredResponseParser:
-    """把 LLM 的多行文本解析成回复行。"""
+    """把 LLM 的多行文本解析成回复行([tone]content)。"""
 
     tone_pattern = re.compile(r"^\[([^\]]+)\](.*)$", flags=re.IGNORECASE)
-    sing_pattern = re.compile(r"^\[sing\]\s*(.+)$", flags=re.IGNORECASE)
 
     def __init__(self):
         self.default_response = OneSentenceChat(content="", tone=DEFAULT_TONE)
 
-    def parse(
-        self,
-        response: str,
-        sing_plan: Optional[tuple[str, str]],
-    ) -> list[OneResponseLine]:
+    def parse(self, response: str) -> list[OneResponseLine]:
         if not response:
             return [self.default_response]
 
@@ -133,22 +108,8 @@ class StructuredResponseParser:
             line = raw_line.strip()
             if not line:
                 continue
-
-            sing_match = self.sing_pattern.match(line)
-            if sing_match:
-                # 唱段: 歌词由 sing_plan(歌曲知识库检索结果)补上
-                structured_found = True
-                song_name = sing_match.group(1).strip()
-                lyrics = ""
-                if sing_plan and sing_plan[0] and sing_plan[1]:
-                    # sing_plan[0]=歌名(可能带《》), 归一化后匹配
-                    plan_song = self._strip_brackets(sing_plan[0])
-                    if song_name in (plan_song, f"《{plan_song}》") or plan_song in song_name:
-                        lyrics = sing_plan[1]
-                results.append(SongSegmentChat(
-                    song=song_name,
-                    lyrics=lyrics,
-                ))
+            # 唱歌标记(旧[sing]<歌名>)已移除: 整行丢弃, 不再产生回复对象
+            if line.lower().startswith("[sing]"):
                 continue
 
             tone_match = self.tone_pattern.match(line)
@@ -167,11 +128,6 @@ class StructuredResponseParser:
 
         logger.warning("No structured format detected in LLM response, returning empty text")
         return [self.default_response]
-
-    @staticmethod
-    def _strip_brackets(name: str) -> str:
-        """去掉歌名两端的《》等装饰。"""
-        return (name or "").strip().strip("《》\"'“”‘’")
 
     def _strip_code_fence(self, response: str) -> str:
         text = response.strip()
@@ -214,7 +170,7 @@ class MainChat:
         conversation_history: str = "",
         fact_hits: Optional[List[str]] = None,
         memory_hits: Optional[List[str]] = None,
-        sing_plan: Optional[Tuple[str, str]] = None,
+        song_annotation: str = "",
     ) -> List[OneResponseLine]:
         if self.llm is None:
             return [OneSentenceChat(content="(LLM 未配置)", tone=DEFAULT_TONE)]
@@ -230,10 +186,10 @@ class MainChat:
             conversation_history=conversation_history,
             fact_hits=fact_hits,
             memory_hits=memory_hits,
-            sing_plan=sing_plan,
+            song_annotation=song_annotation,
         )
         response = await self._call_llm(**asdict(prompt_input))
-        return self._parse_response(response, sing_plan)
+        return self._parse_response(response)
 
     async def _call_llm(self, **kwargs) -> str:
         try:
@@ -242,5 +198,5 @@ class MainChat:
             logger.error(f"MainChat LLM call failed: {e}")
             return ""
 
-    def _parse_response(self, response: str, sing_plan: Optional[Tuple[str, str]]) -> List[OneResponseLine]:
-        return self.response_parser.parse(response, sing_plan)
+    def _parse_response(self, response: str) -> List[OneResponseLine]:
+        return self.response_parser.parse(response)

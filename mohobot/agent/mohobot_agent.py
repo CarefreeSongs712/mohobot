@@ -86,6 +86,7 @@ class MohobotAgent:
         self,
         user_id: str,
         plan: TopicAttentionPlan,
+        song_annotation: str = "",
     ) -> List[OneResponseLine]:
         """把注意力计划实现为回复行。"""
         user_context = await self._load_user_expression_context(user_id)
@@ -97,7 +98,7 @@ class MohobotAgent:
             conversation_history=plan.conversation_history,
             fact_hits=plan.fact_hits,
             memory_hits=plan.memory_hits,
-            sing_plan=plan.sing_plan,
+            song_annotation=song_annotation,
         )
 
     async def generate_topic_reply(
@@ -106,7 +107,6 @@ class MohobotAgent:
         topic_content: str,
         memory_hits: Optional[List[str]] = None,
         fact_hits: Optional[List[str]] = None,
-        sing_plan: Optional[Tuple[str, str]] = None,
         conversation_history: Optional[str] = None,
     ) -> List[OneResponseLine]:
         user_context = await self._load_user_expression_context(user_id)
@@ -118,7 +118,6 @@ class MohobotAgent:
             conversation_history=conversation_history or "",
             fact_hits=fact_hits or [],
             memory_hits=memory_hits or [],
-            sing_plan=sing_plan,
         )
 
     async def write_topic_memories(

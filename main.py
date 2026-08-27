@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -51,6 +52,8 @@ class MohobotApplication:
         self._database_manager: DatabaseManager | None = None
         self._agent_manager: BotAgentManager | None = None
         self._usage_recorder: UsageRecorder | None = None
+        self._song_matcher: Any | None = None
+        self._song_info_service: Any | None = None
         self._task_supervisor = TaskSupervisor()
         self._running = False
 
@@ -77,9 +80,34 @@ class MohobotApplication:
         self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._usage_recorder = UsageRecorder(self._config.data_dir)
+
+        # 全局歌曲知识库(识别 + LLM 前注入; 供 legacy 与 agent 路径共用)。
+        # music_knowledge 未启用/初始化失败 → 降级(正常聊天不受影响)。
+        self._song_matcher: SongInfoMatcher | None = None
+        music_cfg = (self._config.agent.music_knowledge or {})
+        if music_cfg.get("enabled", True):
+            try:
+                from mohobot.music_knowledge import SongInfoMatcher, SongInfoService
+                song_db_cfg = music_cfg.get("song_database") or {}
+                db_folder = song_db_cfg.get("db_folder", "./data/song_knowledge")
+                db_file = song_db_cfg.get("db_file", "knowledge_db.db")
+                self._song_matcher = SongInfoMatcher(
+                    db_folder=db_folder, db_file=db_file,
+                )
+                self._song_info_service: SongInfoService | None = SongInfoService(music_cfg)
+                logger.info("全局歌曲知识库已加载(SongInfoMatcher + SongInfoService)")
+            except Exception as e:
+                self._song_matcher = None
+                self._song_info_service = None
+                logger.warning(f"全局歌曲知识库初始化失败, 已降级: {e}")
+        else:
+            self._song_matcher = None
+            self._song_info_service = None
+
         self._llm_service = LLMService(
             global_config=self._config,
             usage_recorder=self._usage_recorder,
+            song_annotator=self._make_song_annotator(),
         )
         # 上下文 AI 总结压缩: 注入总结回调 + trim 配置(WebUI 保存后可热同步)
         self._context_manager.set_summarizer(self._llm_service.summarize_context)
@@ -147,6 +175,7 @@ class MohobotApplication:
             database_manager=self._database_manager,
             image_cache=self._image_cache,
             global_config=self._config,
+            song_matcher=self._song_matcher,
         )
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
@@ -232,6 +261,28 @@ class MohobotApplication:
         await self.shutdown()
         await self.startup()
         logger.info("Mohobot restarted successfully")
+
+    def _make_song_annotator(self):
+        """构造 legacy 路径用的歌曲注解回调(event → 注解文本)。"""
+        matcher = self._song_matcher
+
+        async def annotator(event) -> str:
+            if matcher is None:
+                return ""
+            try:
+                from mohobot.utils.cq_code import extract_plain_text
+                text = (extract_plain_text(event.message) or "").strip()
+                if not text:
+                    return ""
+                match = matcher.match(text)
+                if match is None:
+                    return ""
+                return match.build_annotation()
+            except Exception as e:
+                logger.debug(f"歌曲注解失败: {e}")
+                return ""
+
+        return annotator
 
     async def _run_web_panel(self) -> None:
         """Run the web panel (wraps uvicorn)."""

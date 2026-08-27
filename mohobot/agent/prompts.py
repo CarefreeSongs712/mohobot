@@ -19,8 +19,7 @@ TOPIC_EXTRACTION_PROMPT = """你需要从用户的消息中提取出可以用于
 - topic_type: str：话题类型，它可以是以下几种之一：chat（完整话题），incomplete（不完整话题）
 - fact_constraints: list[str]，对于完整话题：①如果需要歌曲介绍或歌词（用户提到某首歌、想知道歌词、问某首歌的演唱者/UP主等），把歌名（用《》包裹，如《千年食谱颂》）作为一个约束条件加入；②如果需要最新实时信息（新闻、百科知识、价格、事件、人物资料等，或用户明确要求查询某事实），在这里放入需要联网搜索的具体查询问题，每个问题单独一条、简洁明确。如果都不需要则为空，或者省略此字段。
 - memory_attempts: list[str]，对于完整话题，在这里放入你认为回复时需要回忆的记忆，记忆仅包括之前的对话内容和用户的个人信息。每个检索表述简单，一句话多个对象时，每个对象单独写一个。如果没有需要回忆的内容则为空。
-- sing_attempts: list[str]，对于完整话题，如果用户明确指出要听某首歌（"唱/听/点"某首歌），则将歌名加入列表，否则为空。如果用户只是想听歌但没说歌名，则将'random_song'加入列表。
-示例如下：{"source_message_ids": [1, 2], "topic_content": "用户想了解机器人最近的情况", "topic_type": "chat", "fact_constraints": [], "memory_attempts": [], "sing_attempts": []}
+示例如下：{"source_message_ids": [1, 2], "topic_content": "用户想了解机器人最近的情况", "topic_type": "chat", "fact_constraints": [], "memory_attempts": []}
 如果没有任何完整话题需要处理，返回：{"source_message_ids": [], "topic_content": "", "topic_type": "incomplete"}
 请严格按照可以被python loads函数处理的JSON格式返回，直接以左大括号开始输出"""
 
@@ -31,11 +30,11 @@ TOPIC_REPLY_PROMPT = """你需要扮演{{character_name}}与用户进行对话�
 你的说话风格是{{speaking_style}}
 与你对话的用户：{{user_persona}}
 {% if preference_context %}【用户偏好】{{ preference_context }}{% endif %}
-{{reply_topic}}，你需要针对这个主题轻松简洁地回复，不要说太多，如同闲聊（除非用户需要详细回答，或情绪异常），保证对话的连续性。{{ sing_requirement }}。不要重复用户或自己已经说过的话。
+{{reply_topic}}，你需要针对这个主题轻松简洁地回复，不要说太多，如同闲聊（除非用户需要详细回答，或情绪异常），保证对话的连续性。不要重复用户或自己已经说过的话。
 请认真阅读以下信息，你可能需要利用这些信息更好地回复:{{ extra_knowledge }}
 你输出的每一行对应一条聊天信息，一条信息只包含一句话。你的输出格式为。[<tone>]<content>，其中tone为语气，可选语气包括：中性，欣喜，温柔，伤心，生气，惊讶，害怕。除了强烈情绪外均选择第一个。content为回复的内容。例如[中性]你好！
-当你需要唱歌的时候，单独一行写“[sing]<歌名>”即可。
-现在的时间是{{ current_time }}，下面是最近的聊天，你需要在此之后进行回复:{{ conversation_history }}"""
+现在的时间是{{ current_time }}，下面是最近的聊天，你需要在此之后进行回复:{{ conversation_history }}
+{% if song_annotation %}【歌曲信息】{{ song_annotation }}{% endif %}"""
 
 # ── 记忆写入 ──────────────────────────────────────────────────
 

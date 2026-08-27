@@ -1,11 +1,12 @@
-"""歌曲知识测试(移植自 Agent-LuoTianyi 的 music_knowledge):
-1. 默认知识库自动复制(res/song_knowledge/ → data/)
-2. knowledge_service 查询(精确/safe_name/ilike 兜底/UP主/歌手随机/歌词片段)
-3. SongEntityLinker 触发动词门控 + 歌名/歌词术语
-4. search_song_facts_for_topic 去重文本
-5. 点歌规划: 指定歌名取歌词 / random_song / 查不到
-6. fact_constraints 分流: 歌曲约束 vs 联网查询
-7. parser [sing] → SongSegmentChat(带歌词)
+"""歌曲知识测试(重写: 全局库 + 识别 + LLM 前注入)。
+
+覆盖:
+1. 新 schema 建库/增删查(get_song_detail 完整字段 / 歌词片段搜索)
+2. SongInfoMatcher 歌名/书名号/裸文本+语境词/歌词子串/防误伤
+3. 注解格式化(【歌曲信息】段含介绍/演唱/UP主/词曲/歌词)
+4. Legacy 路径注入: LLMService._build_messages 用户消息下方追加注解
+5. Agent 路径注入: payload["song_annotation"] → UnreadMessage → prompt
+6. 删除唱歌: 无 [sing] 解析 / 无 sing_plan
 """
 
 import asyncio
@@ -16,217 +17,254 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 隔离全局 SQLite engine 状态, 每个测试用独立临时目录(避免类级 engine 复用冲突)
+_TMP_DIRS = []
+
 
 def make_config(tmp: str) -> dict:
-    """构造指向临时 data 目录的 music_knowledge 配置(默认库会自动复制)。"""
+    """构造指向临时 data 目录的 music_knowledge 配置(新 schema 空库)。"""
     data_dir = os.path.join(tmp, "data", "song_knowledge")
     return {
+        "enabled": True,
         "song_database": {"db_folder": data_dir, "db_file": "knowledge_db.db"},
-        "songname_file": os.path.join(data_dir, "song_name_keywords.txt"),
-        "lyric_file": os.path.join(data_dir, "song_lyric_keywords.txt"),
     }
 
 
-async def test_default_copy_and_query() -> None:
-    """默认知识库复制 + 各查询函数。"""
-    from mohobot.agent.music_knowledge.knowledge_service import (
-        get_random_songs_by_singer,
-        get_song_introduction,
-        get_song_lyrics,
-        get_songs_by_uploader,
-        search_songs_by_lyrics,
-    )
-    from mohobot.agent.music_knowledge.song_database import get_song_session
-    from mohobot.agent.music_knowledge.song_knowledge import SongKnowledgeMemory
+def seed_songs(tmp: str) -> None:
+    """向临时库写入测试歌曲(走 SongInfoService 初始化新 schema)。"""
+    from mohobot.music_knowledge import SongInfoService
+    from mohobot.music_knowledge.song_database import get_song_session, Song
+
+    cfg = make_config(tmp)
+    SongInfoService(cfg)  # 建库
+    db = get_song_session()
+    db.add(Song(
+        name="千年食谱颂", safe_name="千年食谱颂", uploader="H.K.君", singers="洛天依",
+        lyricist="青柠", composer="Wing翼", arranger="Wing翼", mixer="某人", tuner="某某",
+        year=2017, introduction="一首关于美食与温馨的歌。", lyrics="小笼包啊小笼包\n好吃得不得了\n一口一个香",
+    ))
+    db.add(Song(
+        name="九九八十一", safe_name="九九八十一", uploader="康师傅の海鲜面", singers="洛天依",
+        introduction="洛天依名曲。", lyrics="刚擒住了几个妖\n又降住了几个魔",
+    ))
+    db.commit()
+    db.close()
+
+
+async def test_schema_and_query() -> None:
+    """新 schema: 建库 + 完整字段查询 + 歌词片段搜索。"""
+    from mohobot.music_knowledge import SongInfoService, get_song_detail, search_songs_by_lyrics
+    from mohobot.music_knowledge.song_database import get_song_session
 
     tmp = tempfile.mkdtemp(prefix="songlib_")
+    _TMP_DIRS.append(tmp)
     cfg = make_config(tmp)
-    sk = SongKnowledgeMemory(cfg)
-
-    # 默认文件已复制
-    data_dir = os.path.join(tmp, "data", "song_knowledge")
-    for f in ("knowledge_db.db", "song_name_keywords.txt", "song_lyric_keywords.txt"):
-        assert os.path.exists(os.path.join(data_dir, f)), f"{f} 未复制"
+    SongInfoService(cfg)
+    from mohobot.music_knowledge.song_database import Song
+    db = get_song_session()
+    s = Song(name="测试歌", safe_name="测试歌", uploader="UP", singers="歌手",
+             lyricist="词", composer="曲", arranger="编", mixer="混", tuner="调",
+             introduction="简介", lyrics="歌词第一行\n歌词第二行", year=2024)
+    db.add(s)
+    db.commit()
+    db.close()
 
     db = get_song_session()
-    try:
-        # 精确查询
-        intro = await asyncio.to_thread(get_song_introduction, db, "千年食谱颂")
-        assert intro and "洛天依" in intro, intro[:60]
-        lyrics = await asyncio.to_thread(get_song_lyrics, db, "千年食谱颂")
-        assert lyrics, "应有歌词"
+    detail = await asyncio.to_thread(get_song_detail, db, "测试歌")
+    assert detail["name"] == "测试歌"
+    assert detail["lyricist"] == "词" and detail["composer"] == "曲"
+    assert detail["arranger"] == "编" and detail["mixer"] == "混" and detail["tuner"] == "调"
+    assert detail["year"] == "2024"
+    assert "\n" in detail["lyrics"], "歌词应保留换行"
 
-        # safe_name 匹配(原名含特殊字符, safe_name 过滤后匹配)
-        intro2 = await asyncio.to_thread(get_song_introduction, db, "（0，0）")
-        assert intro2, "原名查询应命中"
-
-        # 不存在的歌 → None
-        assert await asyncio.to_thread(get_song_introduction, db, "不存在的歌XYZ") is None
-
-        # UP主查询(ilike 模糊, uploader 可能是多人)
-        uploader_songs = await asyncio.to_thread(get_songs_by_uploader, db, "H.K.君")
-        assert "千年食谱颂" in uploader_songs, uploader_songs[:5]
-
-        # 歌手随机
-        singer_songs = await asyncio.to_thread(get_random_songs_by_singer, db, "洛天依", 3)
-        assert len(singer_songs) == 3, singer_songs
-
-        # 歌词片段搜歌
-        snippet_songs = await asyncio.to_thread(
-            search_songs_by_lyrics, db, "小笼包"
-        )
-        assert snippet_songs, "歌词片段应能搜到歌"
-    finally:
-        db.close()
-    print("[1] 默认复制 + knowledge_service 查询 OK")
+    hits = await asyncio.to_thread(search_songs_by_lyrics, db, "歌词第二行")
+    assert hits == ["测试歌"], hits
+    db.close()
+    print("[1] 新 schema 建库/查询 OK")
 
 
-async def test_linker_gate() -> None:
-    """FlashText 链接器: 触发动词门控。"""
-    from mohobot.agent.music_knowledge.jargon import SongEntityLinker
-    from mohobot.agent.music_knowledge.song_knowledge import SongKnowledgeMemory
+async def test_matcher() -> None:
+    """SongInfoMatcher: 书名号/裸文本+语境/歌词子串/防误伤。"""
+    from mohobot.music_knowledge import SongInfoMatcher
 
-    tmp = tempfile.mkdtemp(prefix="songlink_")
+    tmp = tempfile.mkdtemp(prefix="songmatch_")
+    _TMP_DIRS.append(tmp)
+    seed_songs(tmp)
     cfg = make_config(tmp)
-    SongKnowledgeMemory(cfg)  # 先复制默认知识库(链接器才能加载关键词文件)
-    linker = SongEntityLinker(cfg)
+    m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
+                        db_file=cfg["song_database"]["db_file"])
 
-    # 命中触发动词 → 歌名识别
-    terms = linker.extract_and_verify("唱一首千年食谱颂")
-    assert "《千年食谱颂》是一首歌" in terms, terms
+    # 书名号 → 高置信
+    r = m.match("你会唱《千年食谱颂》吗")
+    assert r and r.name == "千年食谱颂"
+    assert "歌曲信息" in r.build_annotation()
+    assert "小笼包啊小笼包" in r.build_annotation()
 
-    # 无触发动词 → 不激活(防日常误触发)
-    assert linker.extract_and_verify("千年食谱颂今天天气不错") == []
+    # 裸文本 + 语境词
+    r2 = m.match("唱一首九九八十一")
+    assert r2 and r2.name == "九九八十一"
 
-    # 歌词片段术语(歌词关键词文件格式: 片段=>片段是《歌名》的歌词)
-    lyric_terms = linker.extract_and_verify("我想听小笼包快点拿过来") or []
-    assert lyric_terms, "应命中歌词术语"
+    # lyrics 子串(换行在歌词库中, 消息空格)
+    r3 = m.match("刚擒住了几个妖 又降住了几个魔")
+    assert r3 and r3.name == "九九八十一"
+
+    # 无语境裸文本 → 不误伤
+    assert m.match("今天天气不错 九九八十一") is None
+
+    # 普通消息 → None
+    assert m.match("晚上吃什么呀") is None
 
     # 空输入
-    assert linker.extract_and_verify("") == []
-    print("[2] 链接器触发动词门控 OK")
+    assert m.match("") is None
+    assert m.match(None) is None
+    print("[2] 匹配器 OK")
 
 
-async def test_song_facts_for_topic() -> None:
-    """search_song_facts_for_topic 去重文本。"""
-    from mohobot.agent.music_knowledge.song_knowledge import SongKnowledgeMemory
+async def test_annotation_format() -> None:
+    """注解格式化: 介绍 + 演唱/UP主 + 词/曲/混/调 + 完整歌词。"""
+    from mohobot.music_knowledge import SongInfoMatcher
 
-    tmp = tempfile.mkdtemp(prefix="songfact_")
-    sk = SongKnowledgeMemory(make_config(tmp))
-
-    hits = await sk.search_song_facts_for_topic(["《千年食谱颂》"])
-    assert len(hits) == 2, hits  # 介绍 + 歌词
-    assert "《千年食谱颂》的介绍:" in hits[0]
-    assert "《千年食谱颂》的歌词:" in hits[1]
-
-    # 无约束 → 空
-    assert await sk.search_song_facts_for_topic([]) == []
-
-    # 未知歌 → 空
-    assert await sk.search_song_facts_for_topic(["《不存在的歌XYZ》"]) == []
-    print("[3] search_song_facts_for_topic OK")
-
-
-async def test_sing_plan() -> None:
-    """点歌规划: 指定歌名取歌词 / random_song / 查不到 → (歌名, None)。"""
-    from mohobot.agent.character_mind import CharacterSubconscious
-    from mohobot.agent.music_knowledge.song_knowledge import SongKnowledgeMemory
-
-    tmp = tempfile.mkdtemp(prefix="singplan_")
-    sk = SongKnowledgeMemory(make_config(tmp))
-
-    class FakeMind:
-        def __init__(self):
-            self.song_knowledge = sk
-
-    mind = FakeMind()
-    subconscious = CharacterSubconscious.__new__(CharacterSubconscious)
-    subconscious.song_knowledge = sk
-    subconscious.logger = __import__("loguru").logger
-
-    # 指定歌名
-    song, lyrics = await subconscious._plan_sing_attempts_for_topic(["千年食谱颂"])
-    assert song == "千年食谱颂" and lyrics, (song, (lyrics or "")[:30])
-
-    # 带《》+ 动词前缀
-    song, lyrics = await subconscious._plan_sing_attempts_for_topic(["唱一首《九九八十一》"])
-    assert song == "九九八十一" and lyrics
-
-    # random_song
-    song, lyrics = await subconscious._plan_sing_attempts_for_topic(["random_song"])
-    assert song and lyrics
-
-    # 查不到 → (歌名, None)
-    song, lyrics = await subconscious._plan_sing_attempts_for_topic(["不存在的歌XYZ"])
-    assert song == "不存在的歌XYZ" and lyrics is None
-
-    # 空
-    assert await subconscious._plan_sing_attempts_for_topic([]) == (None, None)
-    print("[4] 点歌规划 OK")
+    tmp = tempfile.mkdtemp(prefix="songann_")
+    _TMP_DIRS.append(tmp)
+    seed_songs(tmp)
+    cfg = make_config(tmp)
+    m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
+                        db_file=cfg["song_database"]["db_file"])
+    r = m.match("你可以唱《千年食谱颂》吗")
+    assert r is not None
+    text = r.build_annotation()
+    lines = text.split("\n")
+    assert lines[0] == "【歌曲信息】消息中提到歌曲《千年食谱颂》"
+    joined = "\n".join(lines)
+    assert "歌曲介绍：" in joined and "一首关于美食" in joined
+    assert "演唱：洛天依" in joined and "UP主：H.K.君" in joined
+    assert "作词：青柠" in joined and "作曲：Wing翼" in joined
+    assert "编曲：Wing翼" in joined and "混音：某人" in joined and "调教：某某" in joined
+    assert "完整歌词：" in joined
+    assert "小笼包啊小笼包" in joined
+    print("[3] 注解格式化 OK")
 
 
-async def test_fact_constraint_routing() -> None:
-    """fact_constraints 分流: 歌曲约束 → 知识库; 其余 → 联网(未配置时降级)。"""
-    from mohobot.agent.character_mind import CharacterSubconscious
+async def test_legacy_injection() -> None:
+    """Legacy 路径: LLMService._build_messages 在用户消息下方追加注解。"""
+    from mohobot.llm_service import LLMService
+    from mohobot.models.config import GlobalConfig
+    from mohobot.models.onebot import PrivateMessageEvent, GroupMessageEvent, Sender
+    from mohobot.music_knowledge import SongInfoMatcher
 
-    tmp = tempfile.mkdtemp(prefix="route_")
-    from mohobot.agent.music_knowledge.song_knowledge import SongKnowledgeMemory
+    tmp = tempfile.mkdtemp(prefix="legacyinj_")
+    _TMP_DIRS.append(tmp)
+    seed_songs(tmp)
+    cfg = make_config(tmp)
+    m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
+                        db_file=cfg["song_database"]["db_file"])
 
-    sk = SongKnowledgeMemory(make_config(tmp))
+    async def annotator(event):
+        from mohobot.utils.cq_code import extract_plain_text
+        text = (extract_plain_text(event.message) or "").strip()
+        match = m.match(text) if text else None
+        return match.build_annotation() if match else ""
 
-    subconscious = CharacterSubconscious.__new__(CharacterSubconscious)
-    subconscious.song_knowledge = sk
-    subconscious.anysearch = None  # 未配置 → 联网降级为空
-    subconscious.logger = __import__("loguru").logger
+    svc = LLMService(GlobalConfig(), song_annotator=annotator)
 
-    hits = await subconscious.search_fact_constraints_for_topic(["《千年食谱颂》"])
-    assert len(hits) == 2, hits  # 走知识库
-
-    # 混合: 歌曲 + 联网查询(联网未配置 → 只返回歌曲命中)
-    mixed = await subconscious.search_fact_constraints_for_topic(
-        ["《千年食谱颂》", "洛天依最新动态"]
+    ev = PrivateMessageEvent(
+        time=0, self_id=0, post_type="message",
+        message=[{"type": "text", "data": {"text": "你会唱《千年食谱颂》吗"}}],
+        user_id=123456, message_id=1, sender=Sender(user_id=123456, nickname="测试"),
     )
-    assert len(mixed) == 2, mixed
+    msgs = await svc._build_messages("bot_001", ev, context=[])
+    user_msg = msgs[-1]["content"]
+    assert "你会唱《千年食谱颂》吗" in user_msg
+    # 注解在用户消息同一内容里(下方)
+    assert "【歌曲信息】消息中提到歌曲《千年食谱颂》" in user_msg
+    assert "完整歌词：" in user_msg
 
-    # 空
-    assert await subconscious.search_fact_constraints_for_topic([]) == []
-    print("[5] fact_constraints 分流 OK")
+    # 无命中 → 无注解
+    ev2 = PrivateMessageEvent(
+        time=0, self_id=0, post_type="message",
+        message=[{"type": "text", "data": {"text": "晚上吃什么呀"}}],
+        user_id=123456, message_id=2, sender=Sender(user_id=123456, nickname="测试"),
+    )
+    msgs2 = await svc._build_messages("bot_001", ev2, context=[])
+    assert "【歌曲信息】" not in msgs2[-1]["content"]
+
+    # 群聊事件同样注入
+    ev3 = GroupMessageEvent(
+        time=0, self_id=0, post_type="message",
+        message=[{"type": "text", "data": {"text": "唱一首九九八十一"}}],
+        user_id=123456, message_id=3, group_id=555,
+        sender=Sender(user_id=123456, nickname="测试"),
+    )
+    msgs3 = await svc._build_messages("bot_001", ev3, context=[])
+    assert "《九九八十一》" in msgs3[-1]["content"]
+    print("[4] Legacy 路径注入 OK")
 
 
-async def test_parser_sing_line() -> None:
-    """StructuredResponseParser: [sing] 行 → SongSegmentChat(带歌词)。"""
+async def test_agent_annotation_flow() -> None:
+    """Agent 路径: 消息 → payload["song_annotation"] → UnreadMessage → 回复 prompt。"""
+    from mohobot.agent.domain import ChatInputEvent, UnreadMessage
+    from mohobot.music_knowledge import SongInfoMatcher
+
+    tmp = tempfile.mkdtemp(prefix="agentinj_")
+    _TMP_DIRS.append(tmp)
+    seed_songs(tmp)
+    cfg = make_config(tmp)
+    m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
+                        db_file=cfg["song_database"]["db_file"])
+
+    content = "你会唱《千年食谱颂》吗"
+    match = m.match(content)
+    assert match is not None
+    song_annotation = match.build_annotation()
+    terms = [f"《{match.name}》是一首歌"]
+
+    # 模拟 message_handler._handle_agent_path
+    ev = ChatInputEvent(
+        event_type="user_message",
+        user_id="123456",
+        character_id="bot_001",
+        content=content,
+        terms=terms,
+        payload={"speaker": "123456-测试", "song_annotation": song_annotation},
+    )
+    assert ev.payload["song_annotation"]
+
+    # UnreadMessage 传递
+    um = UnreadMessage(
+        message_id="m1", content=content, terms=terms, speaker="123456-测试",
+        song_annotation=song_annotation,
+    )
+    assert um.song_annotation == song_annotation
+    print("[5] Agent 注解流转 OK")
+
+
+async def test_no_sing_chain() -> None:
+    """删除唱歌: 解析器不再解析 [sing], 无 sing_plan 字段。"""
     from mohobot.agent.main_chat import StructuredResponseParser
-    from mohobot.agent.domain import ContextType, SongSegmentChat
+    from mohobot.agent.domain import TopicAttentionPlan
 
     parser = StructuredResponseParser()
-    lines = "[中性]好呀，这就唱给你听~\n[sing]千年食谱颂"
-    items = parser.parse(lines, ("千年食谱颂", "歌词文本XYZ"))
-    assert len(items) == 2, items
-    sing_item = items[1]
-    assert isinstance(sing_item, SongSegmentChat)
-    assert sing_item.song == "千年食谱颂"
-    assert sing_item.lyrics == "歌词文本XYZ"
-    assert "歌词文本XYZ" in sing_item.get_content()
-    assert sing_item.type == ContextType.SING
+    items = parser.parse("[中性]好呀\n[sing]千年食谱颂")
+    # [sing] 行不产生回复对象(唱歌已移除)
+    contents = [it.get_content() for it in items]
+    assert contents == ["好呀"], contents
 
-    # 无 sing_plan → 空歌词但保留歌名
-    items2 = parser.parse("[sing]别的歌", None)
-    assert len(items2) == 1 and isinstance(items2[0], SongSegmentChat)
-    assert items2[0].lyrics == ""
-
-    # 纯文本行仍解析
-    items3 = parser.parse("[欣喜]今天开心", None)
-    assert items3[0].type == ContextType.TEXT
-    print("[6] [sing] 解析 → SongSegmentChat OK")
+    # TopicAttentionPlan 无 sing_plan 字段
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(TopicAttentionPlan)}
+    assert "sing_plan" not in fields
+    assert "sing_attempts" not in {f.name for f in dataclasses.fields(
+        __import__("mohobot.agent.domain", fromlist=["ExtractedTopic"]).ExtractedTopic)}
+    print("[6] 唱歌链路已删除 OK")
 
 
 async def main() -> None:
-    await test_default_copy_and_query()
-    await test_linker_gate()
-    await test_song_facts_for_topic()
-    await test_sing_plan()
-    await test_fact_constraint_routing()
-    await test_parser_sing_line()
+    await test_schema_and_query()
+    await test_matcher()
+    await test_annotation_format()
+    await test_legacy_injection()
+    await test_agent_annotation_flow()
+    await test_no_sing_chain()
     print("\nALL SONG KNOWLEDGE TESTS PASSED")
 
 

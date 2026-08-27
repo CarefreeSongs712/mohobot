@@ -91,13 +91,15 @@ class Plugin:
             return
         try:
             async with _sync_lock:
-                from mohobot.agent.music_knowledge.vcpedia import sync_vcpedia_new_songs
+                from mohobot.music_knowledge.vcpedia import sync_vcpedia_new_songs
 
                 music_cfg = cfg.agent.music_knowledge or {}
                 result = await asyncio.to_thread(sync_vcpedia_new_songs, music_cfg)
                 added = result.get("added", [])
                 failed = result.get("failed", [])
-                lines = [f"✅ 同步完成: 新增 {len(added)} 首, 失败 {len(failed)} 首"]
+                skipped = result.get("skipped", 0)
+                lines = [f"✅ 同步完成: 新增 {len(added)} 首, 失败 {len(failed)} 首"
+                         + (f", 跳过 {skipped} 首" if skipped else "")]
                 if added:
                     lines.append("新增: " + "、".join(added[:10]) + ("…" if len(added) > 10 else ""))
                 if failed:

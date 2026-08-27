@@ -88,7 +88,6 @@ class TopicExtractor:
             topic_content=topic_content,
             memory_attempts=self._normalize_str_list(item.get("memory_attempts")),
             fact_constraints=self._normalize_str_list(item.get("fact_constraints")),
-            sing_attempts=self._normalize_str_list(item.get("sing_attempts")),
             is_forced_from_incomplete=(topic_type == "incomplete" and force_complete),
         )
         max_index = max(source_indexes)
@@ -113,7 +112,6 @@ class TopicExtractor:
             ),
             memory_attempts=[],
             fact_constraints=[],
-            sing_attempts=[],
             is_forced_from_incomplete=force_complete,
         )
         return topic, []
