@@ -12,7 +12,7 @@
 配置(WebUI 插件页可编辑): welcome_friend_enabled/welcome_friend_msg/
 welcome_group_enabled/welcome_group_msg/delay_min/delay_max/
 check_interval_sec/admin_notify_enabled。
-模板占位符「xxx（bot昵称）」(兼容旧「【此处替换为 bot 的昵称】」)
+模板占位符「{BOT_NAME}」(兼容旧「【此处替换为 bot 的昵称】」)
 发送时自动替换为该 bot 昵称(取不到回退 bot_id)。
 """
 
@@ -26,7 +26,7 @@ from typing import Any
 from loguru import logger
 
 _NEW_MSG = (
-    "这里是xxx（bot昵称）！\n"
+    "这里是{BOT_NAME}bot！\n"
     "这是一个QQ机器人，具有AI对话等多种功能~\n"
     "介绍+使用须知（浏览器打开）：http://103.236.70.18:712/ 或 https://7121099.xyz/ \n"
     "交流群：398870315"
@@ -267,7 +267,7 @@ class Plugin:
 
         nickname = await self._get_bot_nickname(bot_id)
         text = template.replace("【此处替换为 bot 的昵称】", nickname)
-        text = text.replace("xxx（bot昵称）", nickname)
+        text = text.replace("{BOT_NAME}", nickname)
 
         delay_min = max(0, int(self._cfg("delay_min", 3)))
         delay_max = max(delay_min, int(self._cfg("delay_max", 5)))
