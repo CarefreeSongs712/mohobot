@@ -276,8 +276,8 @@ class SongInfoMatcher:
     def _find_by_lyrics(self, text: str) -> Optional[str]:
         """按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。"""
         self._ensure_index()
-        if not self._index:
-            return None
+        with self._lock:
+            index = tuple(self._index)
         message = re.sub(r"[\s！？!?。，、；;：:,.，？]+", "", text or "")
         if len(message) < 10:
             return None
@@ -285,7 +285,7 @@ class SongInfoMatcher:
             if len(message) < size:
                 continue
             snippets = {message[i:i + size] for i in range(len(message) - size + 1)}
-            for name, lyrics in self._index:
+            for name, lyrics in index:
                 normalized = re.sub(r"\s+", "", lyrics or "")
                 if any(snippet in normalized for snippet in snippets):
                     return name
