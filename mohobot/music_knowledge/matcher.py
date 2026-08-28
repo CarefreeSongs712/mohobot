@@ -253,10 +253,10 @@ class SongInfoMatcher:
         """在自然语言消息中找库内歌名, 按歌名长度倒序避免短名抢先。"""
         try:
             with get_session() as db:
-                from mohobot.music_knowledge.song_database import Song
+                from sqlalchemy import func
                 rows = (
                     db.query(Song.name)
-                    .filter(Song.name.length() >= self._min_song_name_len)
+                    .filter(func.length(Song.name) >= self._min_song_name_len)
                     .all()
                 )
                 hits = [name for (name,) in rows if name and name in text]
@@ -292,7 +292,29 @@ class SongInfoMatcher:
                 return best[0]
         return None
 
-    def _query_detail(self, name: str) -> Dict[str, str]:
+    def _find_by_lyrics(self, text: str) -> Optional[str]:
+        """歌词片段匹配: 内存索引 substring 检测(直接和爬取库比对)。
+
+        歌词库中可能夹杂换行/空白, 因此采样片段先按空白切词后逐段做包含检测。
+        """
+        self._ensure_index()
+        if not self._index:
+            return None
+        for snippet in _sample_substrings(text, min_len=self._lyric_min_len):
+            parts = sorted(
+                {p for p in re.split(r"\s+", snippet) if p},
+                key=len, reverse=True,
+            )
+            if not parts:
+                continue
+            best: Optional[Tuple[str, int]] = None
+            for name, lyrics in self._index:
+                votes = sum(1 for p in parts if len(p) >= 3 and p in lyrics)
+                if votes and (best is None or votes > best[1]):
+                    best = (name, votes)
+            if best is not None and best[1] >= 2:
+                return best[0]
+        return None
         try:
             with get_session() as db:
                 return get_song_detail(db, name)
