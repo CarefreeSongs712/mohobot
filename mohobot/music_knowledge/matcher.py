@@ -179,6 +179,7 @@ class SongInfoMatcher:
 
     def _match_uncached(self, text: str) -> Optional[SongMatch]:
         clean = _strip_cq_codes(text).strip()
+        clean = re.sub(r"[！？!?。，、；;：:,.，？]+", " ", clean)
         if not clean:
             return None
 
@@ -307,12 +308,18 @@ class SongInfoMatcher:
             )
             if not parts:
                 continue
-            best: Optional[Tuple[str, int]] = None
+            best: Optional[Tuple[str, int, int]] = None
             for name, lyrics in self._index:
-                votes = sum(1 for p in parts if len(p) >= 3 and p in lyrics)
-                if votes and (best is None or votes > best[1]):
-                    best = (name, votes)
-            if best is not None and best[1] >= 2:
+                matched_parts = [p for p in parts if len(p) >= 3 and p in lyrics]
+                votes = len(matched_parts)
+                longest = max((len(p) for p in matched_parts), default=0)
+                # 一段足够长且连续的歌词也足以识别(用户常会省略标点/空格);
+                # 短段仍要求至少两票, 防止“很久很久以前”等常见词误报。
+                if (votes >= 2 or longest >= max(8, self._lyric_min_len)) and (
+                    best is None or (votes, longest) > (best[1], best[2])
+                ):
+                    best = (name, votes, longest)
+            if best is not None:
                 return best[0]
         return None
 
