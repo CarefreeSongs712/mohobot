@@ -83,6 +83,8 @@ class PluginSystem(Interceptor):
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
         await self.stop_tick_tasks_async()
+        if self._task_supervisor is not None:
+            await self._task_supervisor.cancel_owner("plugins")
         for meta in reversed(list(self._plugins)):
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
