@@ -41,6 +41,11 @@ _VERSION_SCRIPT_ID = "anubis_version"
 _ANUBIS_COOKIE_FILE = "anubis_cookies.json"
 
 
+def _is_challenge_body(html: str) -> bool:
+    """判断某响应体是否为 Anubis 挑战页(DOM 含 anubis_challenge 脚本)。"""
+    return bool(html) and f'id="{_CHALLENGE_SCRIPT_ID}"' in html
+
+
 # ── Anubis PoW 客户端 ──────────────────────────────────────────
 
 
@@ -108,7 +113,7 @@ class AnubisClient:
         JSON 形如 {"challenge": {"id": ..., "randomData": ..., "method": "fast"},
                    "rules": {"difficulty": 4}}。
         """
-        m = re.search(rf'<script id="{_CHALLENGE_SCRIPT_ID}">(.*?)</script>', html, re.S)
+        m = re.search(rf'<script id="{_CHALLENGE_SCRIPT_ID}"\s*[^>]*>(.*?)</script>', html, re.S)
         if not m:
             raise RuntimeError("VCPedia: 未找到 Anubis challenge 脚本")
         raw = m.group(1).strip()
@@ -140,16 +145,24 @@ class AnubisClient:
         raise RuntimeError("VCPedia: PoW 未能在限定次数内解出")
 
     def _fetch_cookie(self) -> None:
-        """完整走一遍: GET 挑战页 → 解 PoW → pass-challenge → 取 auth cookie。"""
+        """完整走一遍: GET 挑战页 → 解 PoW → pass-challenge → 取 auth cookie。
+
+        注意: 站点根路径会 301 重定向到 /首页, 挑战页(403 + Anubis)在重定向
+        后的 URL 上, 因此这里跟随重定向再抓取挑战。
+        """
         sess = requests.Session()
         sess.headers.update({"User-Agent": USER_AGENT})
         sess.headers.update({"Accept": "text/html,application/xhtml+xml,*/*"})
-        cache_buster = int(_time.time() * 1000)
-        target = f"{self.base_url}/?cb={cache_buster}"
-        r = sess.get(target, timeout=self.timeout, allow_redirects=False)
-        if r.status_code != 403:
-            # 可能没有挑战(反爬关闭): 无 auth cookie 也能直连? 保守起见视为失败
-            logger.info(f"VCPedia: GET {target} 返回 {r.status_code}, 尝试直接使用会话")
+        # 命中挑战页的入口: 主页(跟随重定向到 /首页 或 /wiki/首页, 返回 403)
+        target = self.base_url + "/"
+        r = sess.get(target, timeout=self.timeout, allow_redirects=True)
+        challenge_url = r.url
+        if r.status_code != 403 or not _is_challenge_body(r.text):
+            # 反爬可能临时关闭: 无挑战, 直接以当前会话请求即可
+            # (仍保存 session 用的 cookies —— 但通常无权; 返回让上层重试/失败)
+            logger.warning(
+                f"VCPedia: 首页返回 {r.status_code}, 未命中 Anubis 挑战(可能反爬关闭)"
+            )
             sess.close()
             return
         html = r.text
@@ -161,37 +174,37 @@ class AnubisClient:
             return
         nonce = self._solve_pow(ch["randomData"], ch["difficulty"])
 
-        # 保留挑战设置的验证 cookie(Partitioned; SameSite=None)
-        cookies = sess.cookies
+        # 挑战过程中服务端会下发验证 cookie(Partitioned; SameSite=None), 保留到 pass 请求
+        cookies = dict(sess.cookies)
         pass_url = (
             f"{self.base_url}/.within.website/x/cmd/anubis/api/pass-challenge"
             f"?id={quote(ch['id'])}&response=1&nonce={nonce}"
-            f"&redir={quote(target)}&elapsedTime={_time.time() * 1000:.0f}"
+            f"&redir={quote(challenge_url)}&elapsedTime={_time.time() * 1000:.0f}"
         )
         resp = sess.get(
             pass_url, timeout=self.timeout, allow_redirects=False,
-            headers={"Referer": target},
+            headers={"Referer": challenge_url},
         )
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 302):
             logger.warning(f"VCPedia: pass-challenge 返回 {resp.status_code}")
             sess.close()
             return
-        # 从 Set-Cookie 提取 auth cookie
-        for name, value in sess.cookies.items():
-            if "anubis-auth" in name:
-                self.cookie_name = name
-                self.auth_cookie = value
-        if not self.auth_cookie:
-            for name, value in cookies.items():
-                if "anubis-auth" in name:
-                    self.cookie_name = name
-                    self.auth_cookie = value
+        # 从 Set-Cookie 提取 auth cookie(可能在此响应, 也可能在下一次请求带上)
+        self._pick_auth_cookie(sess.cookies)
         if self.auth_cookie:
             logger.info("VCPedia: Anubis PoW 解题成功, 已取得 auth cookie")
             self._save_cookie()
         else:
             logger.warning("VCPedia: pass-challenge 后未找到 auth cookie")
         sess.close()
+
+    def _pick_auth_cookie(self, jar) -> None:
+        """从 cookie jar 中挑出 auth cookie(域名不限定, 找 anubis-auth 名)。"""
+        for name, value in jar.items():
+            if "anubis-auth" in name:
+                self.cookie_name = name
+                self.auth_cookie = value
+                return
 
     # ── 对外请求 ───────────────────────────────────────────────
 
@@ -288,13 +301,13 @@ def _parse_credits_from_lines(lines: List[str]) -> Dict[str, str]:
             token = token.strip()
             if not token:
                 continue
-            m = re.match(r"^([^=：:]{1,8})\s*[=：:]\s*(.+)$", token)
+            m = re.match(r"^([^=：:]{1,16})\s*[=：:]\s*(.+)$", token)
             if m:
                 key_raw, val_raw = m.group(1).strip(), m.group(2).strip()
                 key = _normalize_credit_key(key_raw)
                 if key and key not in credits:
-                    val = _clean_value(val_raw)
-                    if val and len(val) < 64:
+                    val = _clean_credit_values(val_raw)
+                    if val and len(val) < 200:
                         credits[key] = val
                         break  # 每行只取第一个命中键(防一行内多个键串扰)
         # 年份: 页面标题/内容中 "2025年X月X日投稿"
@@ -305,67 +318,263 @@ def _parse_credits_from_lines(lines: List[str]) -> Dict[str, str]:
     return credits
 
 
+def _clean_credit_values(v: str) -> str:
+    """清洗创作人员值: 模板内可能用 <br/> 分隔多人, 归一为顿号分隔。"""
+    v = v.replace("<br/>", "、").replace("<br>", "、")
+    v = _clean_value(v)
+    # 多个值取全部(如 "平安夜的噩梦／H.K.君"), 不要只取第一个
+    v = v.replace("／", "/")
+    return v
+
+
 def _normalize_credit_key(raw: str) -> str:
-    """把 wikitext 键名规范化到 CREDIT_ALIASES 的标准键。"""
+    """把 wikitext 键名规范化到 CREDIT_ALIASES 的标准键。
+
+    真实词条中键常带 <br/> 复合, 如 "作编曲<br/>作词<br/>吉他<br/>混音":
+    取第一个 "键" 前的内容; 若含 "编曲" 则归为 arranger, "作词" 归 lyricist。
+    """
+    raw0 = raw.split("<br")[0].strip()
     for key, aliases in _CREDIT_ALIASES.items():
-        if raw == key or raw in aliases:
-            return key
+        for a in aliases:
+            if raw0 == a or raw0.startswith(a):
+                return key
+    # 复合键: 取第一个别名(作编曲→编曲方向)
+    for key, aliases in _CREDIT_ALIASES.items():
+        for a in aliases:
+            if raw.startswith(a):
+                return key
     return ""
 
 
 def _parse_lyrics_from_source(source: str) -> str:
-    """从 wikitext 提取完整歌词(==歌词== 段, 保留换行)。
+    """从 wikitext 提取完整歌词。
 
-    仅把各演唱者的「歌词行」按出现顺序拼接; 排除 STAFF/注释/标题行。
+    VCPedia 歌词章节标题并不统一(== 歌词 == / == 普通的歌词 == / ==歌词及人设==),
+    歌词多用 <poem>...</poem> 包裹(行内可能有 {{color|样式|歌词}} / {{交叉颜色|...|歌词}}
+    等模板), 少数页面(如 九九八十一(乐正绫))用 {{LyricsKai|...|original=...}} 模板。
+
+    只截取到下一个同级标题为止——"== 二次创作 ==" 章节里收录了所有衍生作品的
+    歌词, 若一并抓取会把几十首翻唱词灌进原曲(如达拉崩吧 2.2w 字符)。
     """
-    # 定位 ===歌词=== 段(有的用 === / ==== 层级)
-    m = re.search(r"^={2,4}\s*歌词\s*={2,4}\s*$", source, re.M)
+    # 定位歌词章节(标题含 "歌词")
+    m = re.search(r"^={2,4}\s*[^=\n]*歌词[^=\n]*\s*={2,4}\s*$", source, re.M)
     if not m:
         return ""
+    level = len(m.group(0)) - len(m.group(0).lstrip("="))
     tail = source[m.end():]
-    lines: List[str] = []
-    for line in tail.splitlines():
-        if re.match(r"^\s*={2,4}\s*\S+\s*={2,4}\s*$", line):
-            break  # 下一个章节
-        s = line.strip()
-        if not s:
-            lines.append("")
-            continue
-        # 跳过注释/模板/文字说明(只保留歌词内容行)
-        if s.startswith("{{") or s.startswith("<!--") or  \
-                re.match(r"^\s*(?:演唱|作词|作曲|编曲|调教|混音|母带|曲绘|PV)\s*[：:=]", s):
-            continue
-        # 去 span/引用/全角空格
-        s = re.sub(r"<ref[^>]*>.*?</ref>", "", s, flags=re.S)
-        s = re.sub(r"<[^>]+>", "", s)
-        s = s.replace("[", "").replace("]", "").replace("\u3000", " ")
-        # 保留“词句”中的内部格式(如“【间奏】”)
-        if s.startswith("{{") or s.startswith("}") or s.startswith("[["):
-            continue
-        lines.append(s.strip())
-    # 合并空行(去除连续空行)
-    cleaned: List[str] = []
-    prev_blank = False
-    for ln in lines:
-        if not ln:
-            if not prev_blank:
-                cleaned.append("")
-            prev_blank = True
+    # 截到下一个同级(或更高级)标题, 如 "== 二次创作 =="
+    nxt = re.search(rf"^={{1,{level}}}\s+[^=\n]", tail, re.M)
+    if nxt:
+        tail = tail[:nxt.start()]
+    # 取歌词章节内的 <poem>..</poem>(可能有多个诗节)
+    poems = list(re.finditer(r"<poem>(.*?)</poem>", tail, re.S))
+    if poems:
+        texts = [_unwrap_poem(pm.group(1)) for pm in poems]
+        text = "\n\n".join(t for t in texts if t.strip())
+    else:
+        text = _extract_lyricskai(tail)
+    # 去掉注释/引用/残留模板/全角空格/<br>
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.S)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"\{\{[^}]*\}\}", "", text)
+    text = text.replace("\u3000", " ").strip()
+    # 合并连续空行(保留单空行分段)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _extract_lyricskai(tail: str) -> str:
+    """从 {{LyricsKai|...|original=...}} 模板提取歌词(VCPedia 一部分页面用该模板)。
+
+    九九八十一(乐正绫) 等页面的歌词在 LyricsKai 的 original= 参数里,
+    行内是 {{color|black|-{歌词}-}} 形式; 取 original= 到模板结束,
+    展开 color 模板并去掉 -{-}/-} 转义括号。
+    """
+    m = re.search(r"\{\{LyricsKai\b", tail)
+    if not m:
+        return ""
+    # 找模板闭合: depth 从 1 起(计入 LyricsKai 自身的 {{), 忽略 -{-}/-} 花括号对
+    depth = 1
+    end = len(tail)
+    i = m.start() + 2
+    while i < len(tail):
+        if tail.startswith("{{", i):
+            depth += 1
+            i += 2
+        elif tail.startswith("}}", i):
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+            i += 2
         else:
-            cleaned.append(ln)
-            prev_blank = False
-    return "\n".join(cleaned).strip()
+            i += 1
+    if depth != 0:
+        return ""
+    body = tail[m.start() + 2 : end]
+    oi = body.find("|original=")
+    if oi < 0:
+        return ""
+    lines = body[oi + len("|original="):].split("\n")
+    out: List[str] = []
+    for ln in lines:
+        # 遇到后续命名参数(如 |translated=)且已有歌词时截断
+        if out and re.match(r"^\s*\|[a-zA-Z]+\s*=", ln):
+            break
+        out.append(ln)
+    text = "\n".join(out)
+    # 展开行内模板({{color|black|-{歌词}-}}): 逐字符扫描处理嵌套模板
+    text = _expand_inline_templates(text)
+    text = text.replace("-{", "").replace("}-", "")
+    return text
+
+
+def _expand_inline_templates(text: str) -> str:
+    """把歌词里的行内模板 {{color|样式|正文}} / {{ruby|...|正文}} 展开为正文。
+
+    逐字符扫描并处理嵌套(如 {{color|black|-{歌词}-}} 内含 -{ }- 花括号),
+    模板正文取第一个非参数段之后的全部内容, 去掉 -{-}/-} 转义括号。
+    """
+    out: List[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("{{", i):
+            j = i + 2
+            depth = 1
+            while j < n and depth:
+                if text.startswith("{{", j):
+                    depth += 1
+                    j += 2
+                elif text.startswith("}}", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            if depth != 0:
+                break
+            body = text[i + 2 : j - 2]
+            out.append(_template_tail(body))
+            i = j
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _unwrap_poem(inner: str) -> str:
+    """展开 <poem> 内部内容: 处理 {{color|样式|正文}} / {{交叉颜色|a|b|正文}} 等。
+
+    策略: 按括号深度拆块; 只有 **模板外** 的 '|' 才是歌词段落分隔;
+    模板内的 '|' 由 _template_tail 统一处理(取样式参数后的正文)。
+    """
+    out: List[str] = []
+    buf = ""
+    depth = 0
+    i = 0
+    while i < len(inner):
+        if inner.startswith("{{", i):
+            depth += 1
+            buf += "{{"
+            i += 2
+            continue
+        if inner.startswith("}}", i):
+            depth -= 1
+            buf += "}}"
+            i += 2
+            if depth == 0:
+                out.append(_template_tail(buf))
+                buf = ""
+            continue
+        if depth == 0 and inner[i] == "|":
+            # 模板外 '|' = 歌词段落分隔
+            if buf.strip():
+                out.append(buf)
+            buf = ""
+            i += 1
+            continue
+        buf += inner[i]
+        i += 1
+    if buf.strip():
+        out.append(buf)
+    # 拼接: 每个缓冲为一段; 丢弃样式残留
+    merged: List[str] = []
+    for piece in out:
+        if not piece:
+            continue
+        for seg in piece.split("\n"):
+            seg = seg.strip()
+            if not seg:
+                continue
+            if _is_template_junk(seg):
+                continue
+            merged.append(seg)
+    text = "\n".join(merged)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _is_template_junk(seg: str) -> bool:
+    """判断歌词段落是否为模板样式残留(应丢弃)。
+
+    - 残留的模板名(交叉颜色 / color)与样式参数形如 c1=#66ccff、#66ccff、
+      text-shadow:0 0 4px、transparent 等(不含中文且长度有限)。
+    """
+    s = seg.strip()
+    if not s:
+        return True
+    if s in ("交叉颜色", "color", "颜色", "ruby", "ps"):
+        return True
+    if re.match(r"^[#\w;:,.()\- ]+$", s) and len(s) <= 60 and not re.search(r"[\u4e00-\u9fff]", s):
+        return True
+    return False
+
+
+def _template_tail(tpl: str) -> str:
+    """把 {{color|样式|正文}} / {{交叉颜色|c1=..|c2=..|正文}} 里的正文取出。
+
+    策略(针对实际 VCPedia 形态):
+    - {{color|样式|正文}}           → 正文 = 第 3 段(样式在第 2 段)
+    - {{交叉颜色|c1=|c2=|正文...}} → 正文 = 第 4 段及之后(前 3 段是参数)
+    模板名称本身(第 1 段)总是跳过; 被跳过的参数段为纯样式/含 '='/空。
+    """
+    body = tpl[2:-2]  # 去掉 {{ }}
+    if "|" not in body:
+        return ""
+    parts = body.split("|")
+
+    def is_param(p: str) -> bool:
+        p = p.strip()
+        if not p:
+            return True
+        if "=" in p:
+            return True
+        # 纯色值/样式/数字(不含中文与非样式符号)
+        if re.match(r"^[#\w;:,.()\- ]+$", p) and not re.search(r"[\u4e00-\u9fff]", p) \
+                and len(p) <= 80:
+            return True
+        return False
+
+    # 跳过模板名(parts[0])
+    start = 1
+    # 再跳过参数段(纯样式/含 '=' / 空)
+    while start < len(parts) and is_param(parts[start]):
+        start += 1
+    if start >= len(parts):
+        return ""
+    return "|".join(parts[start:]).strip(" \n|")
 
 
 def _parse_introduction_from_source(source: str) -> str:
-    """从 wikitext 提取简介(==简介== 段前若干行文本)。"""
-    m = re.search(r"^={2,4}\s*(?:简介|概述|歌曲信息)\s*={2,4}\s*$", source, re.M)
+    """从 wikitext 提取简介(简介章节, 样式化标题如 普通的简介 也能命中)。"""
+    m = re.search(r"^={2,4}\s*[^=\n]*简介[^=\n]*\s*={2,4}\s*$", source, re.M)
     if not m:
         return ""
     tail = source[m.end():]
     lines: List[str] = []
     for line in tail.splitlines():
-        if re.match(r"^\s*={2,4}\s*\S+\s*={2,4}\s*$", line):
+        if re.match(r"^\s*={2,4}\s*[^=\n]*\s*={2,4}\s*$", line):
             break
         s = line.strip()
         if not s or s.startswith("{{"):
@@ -537,14 +746,25 @@ class VCPediaFetcher:
         }
 
     def _fetch_wikitext(self, entity_name: str) -> Optional[Dict[str, Any]]:
-        url = f"{self.base_url}/rest.php/v1/page/{quote(entity_name, safe='')}/source"
+        """优先走 api.php prop=revisions 取 wikitext(rest.php 在该站被禁)。"""
+        from urllib.parse import quote as _q
+        url = (
+            f"{self.base_url}/api.php?action=query&prop=revisions&rvprop=content"
+            f"&rvslots=main&format=json&titles={_q(entity_name, safe='')}"
+        )
         try:
             resp = self.anubis.get(url)
-            if resp.status_code == 200 and resp.text.strip():
+            if resp.status_code == 200:
                 try:
-                    return resp.json()
-                except Exception:
-                    return {"source": resp.text}
+                    data = resp.json()
+                    pages = ((data.get("query") or {}).get("pages") or {})
+                    for page in pages.values():
+                        revs = page.get("revisions") or []
+                        if revs:
+                            slot = revs[0].get("slots", {}).get("main", {})
+                            return {"source": slot.get("*", "")}
+                except Exception as e:
+                    logger.debug(f"wikitext JSON 解析失败 {entity_name}: {e}")
         except Exception as e:
             logger.debug(f"wikitext 抓取失败 {entity_name}: {e}")
         return None
