@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -414,10 +415,10 @@ class BotAgentRuntime:
                 prompt_name=prompt_name,
                 model=spec.get("model") or global_llm.get("chat_model", ""),
                 base_url=spec.get("base_url") or global_llm.get("chat_base_url", ""),
-                api_key=spec.get("api_key") or global_llm.get("chat_api_key", ""),
+                api_key=spec.get("api_key") or global_llm.get("chat_api_key", "") or os.environ.get("MOHOBOT_LLM_API_KEY", ""),
                 use_json=use_json,
-                max_tokens=int(spec.get("max_tokens", 2048)),
-                temperature=float(spec.get("temperature", 0.7)),
+                max_tokens=int(spec.get("max_tokens", global_llm.get("chat_max_tokens", 2048))),
+                temperature=float(spec.get("temperature", global_llm.get("chat_temperature", 0.7))),
                 data_dir=self.config.get("data_dir", "./data"),
                 bot_id=self.bot_id,
                 # 全局备用模型(连接类失败回退; 空 = 不回退)

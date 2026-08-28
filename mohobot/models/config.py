@@ -257,7 +257,7 @@ class GlobalConfig:
             ) if str(a).isdigit()],
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
-                port=server_raw.get("port", 8080),
+                port=server_raw.get("port", 8060),
                 max_size=server_raw.get("max_size", 10 * 1024 * 1024),
                 outbound_interval=server_raw.get("outbound_interval", 0.5),
                 outbound_maxsize=server_raw.get("outbound_maxsize", 100),
@@ -344,6 +344,9 @@ class GlobalConfig:
                 "host": self.server.host,
                 "port": self.server.port,
                 "max_size": self.server.max_size,
+                "outbound_interval": self.server.outbound_interval,
+                "outbound_maxsize": self.server.outbound_maxsize,
+                "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,
@@ -414,6 +417,9 @@ class GlobalConfig:
                 "host": self.server.host,
                 "port": self.server.port,
                 "max_size": self.server.max_size,
+                "outbound_interval": self.server.outbound_interval,
+                "outbound_maxsize": self.server.outbound_maxsize,
+                "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,
