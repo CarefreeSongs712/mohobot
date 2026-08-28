@@ -263,7 +263,7 @@ class SongInfoMatcher:
                 hits = [name for (name,) in rows if name and name in text]
                 return max(hits, key=len) if hits else None
         except Exception as e:
-            logger.debug(f”消息内歌名匹配失败: {e}”)
+            logger.debug(f"消息内歌名匹配失败: {e}")
             return None
 
     def _find_by_lyrics(self, text: str) -> Optional[str]:
