@@ -548,8 +548,30 @@ class LLMService:
                         module="chat", kind="tool_follow_up",
                     )
                 if not got_final:
-                    logger.warning("LLM tool-follow stream returned NO text content")
-                    yield ("[模型未返回内容——请检查模型配置]", True)
+                    logger.warning("LLM tool-follow stream returned NO text content; retrying non-stream")
+                    try:
+                        response3 = await client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            tools=self._current_tools_schemas(),
+                            tool_choice="auto",
+                            stream=False,
+                        )
+                        choice3 = response3.choices[0] if response3.choices else None
+                        fallback_text = (choice3.message.content or "") if choice3 else ""
+                        await self._record_usage(
+                            model, getattr(response3, "usage", None), bot_id, event,
+                            module="chat", kind="tool_follow_up_retry",
+                        )
+                        if fallback_text:
+                            yield (fallback_text, False)
+                            yield ("", True)
+                            return
+                    except Exception as e:
+                        logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
+                    yield ("[工具调用完成，但模型未返回文本]", True)
                     return
                 yield ("", True)
                 return
