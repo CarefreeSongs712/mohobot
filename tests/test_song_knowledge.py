@@ -258,6 +258,53 @@ async def test_no_sing_chain() -> None:
     print("[6] 唱歌链路已删除 OK")
 
 
+async def test_legacy_schema_migration() -> None:
+    """旧 songs 表缺 credits 列时, pool 初始化应原地补列并保留数据。"""
+    import sqlite3
+    from mohobot.music_knowledge.pool import close_all, ensure_init, get_session
+    from mohobot.music_knowledge.song_database import Song
+
+    tmp = tempfile.mkdtemp(prefix="songlegacy_")
+    path = os.path.join(tmp, "old.db")
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE songs (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, safe_name TEXT NOT NULL, "
+        "uploader TEXT, singers TEXT, introduction TEXT NOT NULL DEFAULT '', lyrics TEXT NOT NULL DEFAULT '')"
+    )
+    con.execute("INSERT INTO songs VALUES ('1','旧歌','旧歌','UP','歌手','简介','歌词')")
+    con.commit()
+    con.close()
+    close_all()
+    ensure_init(tmp, "old.db")
+    with get_session() as db:
+        song = db.query(Song).first()
+        assert song.name == "旧歌" and song.lyricist is None and song.year is None
+    close_all()
+    print("[7] 旧歌曲库 schema 自动迁移 OK")
+
+
+async def test_real_db_dialogue_cases() -> None:
+    """真实大库存在时验证自然歌名和歌词问句; CI 无库时跳过。"""
+    db_path = Path("data/song_knowledge/knowledge_db.db")
+    if not db_path.exists():
+        print("[8] 真实库不存在, 跳过自然对话用例")
+        return
+    from mohobot.music_knowledge import SongInfoMatcher
+    from mohobot.music_knowledge.pool import close_all
+    close_all()
+    matcher = SongInfoMatcher(db_folder=str(db_path.parent), db_file=db_path.name)
+    cases = {
+        "你知道白鸟过河滩吗": "白鸟过河滩",
+        "你是信的开头诗的内容这是哪首的？": "勾指起誓",
+    }
+    for text, expected in cases.items():
+        match = matcher.match(text)
+        assert match and match.name == expected, (text, match.name if match else None)
+        assert "\n" in match.detail["lyrics"]
+    close_all()
+    print("[8] 真实库自然对话识别 OK")
+
+
 async def main() -> None:
     await test_schema_and_query()
     await test_matcher()
@@ -265,6 +312,8 @@ async def main() -> None:
     await test_legacy_injection()
     await test_agent_annotation_flow()
     await test_no_sing_chain()
+    await test_legacy_schema_migration()
+    await test_real_db_dialogue_cases()
     print("\nALL SONG KNOWLEDGE TESTS PASSED")
 
 
