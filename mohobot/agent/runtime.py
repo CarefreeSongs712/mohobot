@@ -603,11 +603,17 @@ class BotAgentManager:
         if runtime is not None:
             asyncio.ensure_future(runtime.stop())
 
+    async def remove_and_wait(self, bot_id: str) -> None:
+        """Remove a runtime and await its resource cleanup."""
+        runtime = self._runtimes.pop(bot_id, None)
+        if runtime is not None:
+            await runtime.stop()
+
     @property
     def all_runtimes(self) -> List[BotAgentRuntime]:
         return list(self._runtimes.values())
 
     async def stop_all(self) -> None:
-        for runtime in self._runtimes.values():
+        for runtime in list(self._runtimes.values()):
             await runtime.stop()
         self._runtimes.clear()

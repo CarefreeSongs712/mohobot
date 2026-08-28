@@ -330,6 +330,7 @@ class MohobotApplication:
         # Stop plugin lifecycle before core transports are closed so hooks can release resources.
         if self._plugin_system:
             await self._plugin_system.shutdown_plugins()
+        await self._task_supervisor.cancel_owner("plugins")
 
         # Stop WS server
         if self._ws_server:
@@ -347,9 +348,8 @@ class MohobotApplication:
         if self._message_handler:
             await self._message_handler.close()
 
-        # Stop agent runtimes
-        if self._agent_manager:
-            await self._agent_manager.stop_all()
+        # Stop agent runtimes (already stopped before dependency teardown).
+        self._agent_manager = None
 
         if self._usage_recorder:
             await self._usage_recorder.close()
