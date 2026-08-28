@@ -724,17 +724,9 @@ class VCPediaFetcher:
 
     def fetch_entity(self, entity_name: str) -> Optional[Dict[str, Any]]:
         """抓取并解析词条: 返回 {name, credits, introduction, lyrics, source}。"""
-        data = self._fetch_wikitext(entity_name)
-        source = ""
-        if data:
-            source = data.get("source") or ""
-            if source:
-                return self._parse_wikitext_entity(entity_name, source)
-        # wikitext 不可用 → HTML 兜底
-        html = self._fetch_html_page(entity_name)
-        if not html:
+        if not data or not (data.get("source") or ""):
             return None
-        return self._parse_html_entity(entity_name, html)
+        return self._parse_wikitext_entity(entity_name, data.get("source") or "")
 
     @staticmethod
     def _parse_wikitext_entity(name: str, source: str) -> Dict[str, Any]:
