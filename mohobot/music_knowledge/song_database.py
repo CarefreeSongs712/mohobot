@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Generator, Optional
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -48,6 +48,36 @@ class SongStats(Base):
     id = Column(String, primary_key=True, default="default")
     total_songs = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, nullable=True)
+
+
+_SONG_MIGRATION_COLUMNS = {
+    "lyricist": "TEXT",
+    "composer": "TEXT",
+    "arranger": "TEXT",
+    "mixer": "TEXT",
+    "tuner": "TEXT",
+    "mastering": "TEXT",
+    "pv": "TEXT",
+    "illustrator": "TEXT",
+    "year": "INTEGER",
+}
+
+
+def migrate_song_schema(db_engine) -> None:
+    """补齐旧 songs 表新增列; 幂等且不覆盖已有数据。"""
+    inspector = inspect(db_engine)
+    if "songs" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("songs")}
+    missing = [(name, sql_type) for name, sql_type in _SONG_MIGRATION_COLUMNS.items()
+               if name not in existing]
+    if not missing:
+        return
+    with db_engine.begin() as connection:
+        for name, sql_type in missing:
+            connection.exec_driver_sql(
+                f"ALTER TABLE songs ADD COLUMN {name} {sql_type}"
+            )
 
 
 SessionLocal = None
@@ -86,6 +116,7 @@ def init_song_db(config: Dict):
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     _engine_url = DATABASE_URL
     Base.metadata.create_all(bind=engine)
+    migrate_song_schema(engine)
 
 
 def get_song_db() -> Generator[Session, None, None]:

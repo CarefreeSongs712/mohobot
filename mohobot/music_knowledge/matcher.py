@@ -151,13 +151,19 @@ class SongInfoMatcher:
         try:
             with get_session() as db:
                 rows = db.query(Song.name, Song.lyrics).all()
-                self._index = [(name, lyrics or "") for name, lyrics in rows]
-            self._index_loaded = True
-            logger.info(f"歌曲歌词索引已加载: {len(self._index)} 首")
+            new_index = [(name, lyrics or "") for name, lyrics in rows]
+            with self._lock:
+                self._index = new_index
+                self._index_loaded = True
+                self._cache.clear()
+                count = len(self._index)
+            logger.info(f"歌曲歌词索引已加载: {count} 首")
         except Exception as e:
             logger.warning(f"歌曲歌词索引加载失败: {e}")
-            self._index = []
-            self._index_loaded = True
+            with self._lock:
+                self._index = []
+                self._index_loaded = True
+                self._cache.clear()
 
     def _ensure_index(self) -> None:
         if not self._index_loaded:
@@ -169,7 +175,8 @@ class SongInfoMatcher:
         """识别消息中的歌曲并返回行内命中结果(未命中返回 None)。"""
         if not text:
             return None
-        cached = self._cache.get(text)
+        with self._lock:
+            cached = self._cache.get(text)
         if cached is not None:
             return cached
         result = self._match_uncached(text)

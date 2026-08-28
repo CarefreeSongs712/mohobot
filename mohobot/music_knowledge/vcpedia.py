@@ -20,7 +20,7 @@ import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -58,6 +58,7 @@ class AnubisClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.cookie_file = Path(cookie_file) if cookie_file else None
+        self.cookie_host = urlparse(self.base_url).hostname or "vcpedia.cn"
         self.auth_cookie: Optional[str] = None  # techaro.lol-anubis-auth-* 值
         self.cookie_name: str = ""
 
@@ -66,7 +67,7 @@ class AnubisClient:
     def _cookie_jar(self):
         jar = requests.cookies.RequestsCookieJar()
         if self.auth_cookie and self.cookie_name:
-            jar.set(self.cookie_name, self.auth_cookie, domain="vcpedia.cn", path="/")
+            jar.set(self.cookie_name, self.auth_cookie, domain=self.cookie_host, path="/")
         return jar
 
     def _load_cookie(self) -> bool:
@@ -368,7 +369,7 @@ def _parse_lyrics_from_source(source: str) -> str:
     level = len(m.group(0)) - len(m.group(0).lstrip("="))
     tail = source[m.end():]
     # 截到下一个同级(或更高级)标题, 如 "== 二次创作 =="
-    nxt = re.search(rf"^={{1,{level}}}\s+[^=\n]", tail, re.M)
+    nxt = re.search(rf"^={{1,{level}}}\s*[^=\n]", tail, re.M)
     if nxt:
         tail = tail[:nxt.start()]
     # 取歌词章节内的 <poem>..</poem>(可能有多个诗节; 标签可能带 class/style 属性)
@@ -821,7 +822,7 @@ class VCPediaFetcher:
 
     def _fetch_wikitext(self, entity_name: str) -> Optional[Dict[str, Any]]:
         """优先走 api.php prop=revisions 取 wikitext(rest.php 在该站被禁)。"""
-        from urllib.parse import quote as _q
+        from urllib.parse import quote, urlparse as _q
         url = (
             f"{self.base_url}/api.php?action=query&prop=revisions&rvprop=content"
             f"&rvslots=main&format=json&titles={_q(entity_name, safe='')}"
@@ -934,7 +935,8 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
     failed: List[str] = []
     skipped = 0
     interval = float(crawler_cfg.get("interval", 0.8))
-    max_fail = int(crawler_cfg.get("max_fail", 30))
+    max_fail_limit = max(1, int(crawler_cfg.get("max_fail", 30)))
+    consecutive_failures = 0
 
     with get_session() as db:
         for name in titles:
@@ -945,8 +947,8 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
                 entity = fetcher.fetch_entity(name)
                 if not entity or not (entity.get("introduction") or entity.get("lyrics")):
                     failed.append(name)
-                    max_fail -= 1
-                    if max_fail <= 0:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_fail_limit:
                         logger.warning("VCPedia: 连续失败过多, 提前停止")
                         break
                     continue
@@ -957,13 +959,13 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
                 ))
                 db.commit()
                 added.append(name)
-                max_fail = 30  # 成功一次重置失败计数
+                consecutive_failures = 0
             except Exception as e:
                 db.rollback()
                 logger.warning(f"VCPedia: 入库失败 {name}: {e}")
                 failed.append(name)
-                max_fail -= 1
-                if max_fail <= 0:
+                consecutive_failures += 1
+                if consecutive_failures >= max_fail_limit:
                     break
             _time.sleep(interval)
         update_song_stats(db)

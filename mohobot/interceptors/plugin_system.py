@@ -51,6 +51,11 @@ class PluginSystem(Interceptor):
         # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
         self._tick_tasks: list[Any] = []
         self._task_supervisor = None
+        self._matcher = None
+
+    def set_song_matcher(self, matcher) -> None:
+        """注入全局歌曲匹配器, 供同步插件刷新内存索引。"""
+        self._matcher = matcher
 
     def set_task_supervisor(self, supervisor) -> None:
         """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
@@ -199,6 +204,14 @@ class PluginSystem(Interceptor):
                 injector = getattr(inst.__class__, "inject_anysearch_client", None)
                 if injector:
                     injector(self._anysearch_client)
+            if self._task_supervisor is not None:
+                injector = getattr(inst.__class__, "inject_task_supervisor", None)
+                if injector:
+                    injector(self._task_supervisor)
+            if self._matcher is not None:
+                injector = getattr(inst.__class__, "inject_song_matcher", None)
+                if injector:
+                    injector(self._matcher)
         # 管理员注入(类级)
         self.apply_admin_injection()
 

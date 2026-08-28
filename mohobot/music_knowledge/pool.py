@@ -21,7 +21,7 @@ from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from mohobot.music_knowledge.song_database import Base
+from mohobot.music_knowledge.song_database import Base, migrate_song_schema
 
 _lock = threading.Lock()
 _engine = None
@@ -46,6 +46,7 @@ def ensure_init(db_folder: str, db_file: str) -> None:
             pool_pre_ping=True,
         )
         Base.metadata.create_all(bind=_engine)
+        migrate_song_schema(_engine)
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
         _engine_url = url
 

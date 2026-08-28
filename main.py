@@ -56,11 +56,12 @@ class MohobotApplication:
         self._song_info_service: Any | None = None
         self._task_supervisor = TaskSupervisor()
         self._running = False
+        self._shutting_down = False
 
     async def startup(self) -> None:
         """Initialize all components and start servers."""
         if self._task_supervisor.stopping:
-            self._task_supervisor.reset()
+            self._task_supervisor = TaskSupervisor()
         logger.info(f"Mohobot v{__version__} starting up...")
 
         # 1. Load config
@@ -122,6 +123,7 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
         )
         self._plugin_system.set_task_supervisor(self._task_supervisor)
+        self._plugin_system.set_song_matcher(self._song_matcher)
 
         # 4. Load plugins
         # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
@@ -293,8 +295,16 @@ class MohobotApplication:
 
     async def shutdown(self) -> None:
         """Gracefully shut down all components."""
+        if getattr(self, "_shutting_down", False):
+            return
+        self._shutting_down = True
         logger.info("Shutting down Mohobot...")
         self._running = False
+
+        # Stop agent runtimes before closing their shared callbacks/resources.
+        if self._agent_manager:
+            await self._agent_manager.stop_all()
+        self._agent_manager = None
 
         # Stop web panel (await its server task so the port is freed
         # before a restart rebinds it — otherwise "Address already in use")
@@ -316,6 +326,10 @@ class MohobotApplication:
                 pass
             self._web_panel_task = None
             self._web_panel = None
+
+        # Stop agent runtimes before closing their shared callbacks/resources.
+        if self._agent_manager:
+            await self._agent_manager.stop_all()
 
         # Stop plugin lifecycle before core transports are closed so hooks can release resources.
         if self._plugin_system:
@@ -345,6 +359,7 @@ class MohobotApplication:
             await self._usage_recorder.close()
 
         await self._task_supervisor.shutdown()
+        self._shutting_down = False
         logger.info("Mohobot shutdown complete.")
 
     async def run_forever(self) -> None:

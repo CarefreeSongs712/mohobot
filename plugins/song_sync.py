@@ -30,11 +30,21 @@ class Plugin:
 
     # WS server injected by main.py via inject_ws_server() classmethod
     _ws_server = None
+    _matcher = None
+    _task_supervisor = None
 
     @classmethod
     def inject_ws_server(cls, ws_server) -> None:
         """Set the WS server reference for sending results (called from main.py)."""
         cls._ws_server = ws_server
+
+    @classmethod
+    def inject_song_matcher(cls, matcher) -> None:
+        cls._matcher = matcher
+
+    @classmethod
+    def inject_task_supervisor(cls, supervisor) -> None:
+        cls._task_supervisor = supervisor
 
     @classmethod
     def inject_data_dir(cls, data_dir: str) -> None:
@@ -70,7 +80,13 @@ class Plugin:
         if str(event.user_id) not in admins:
             return (True, "❌ 你没有权限执行此操作。")
 
-        asyncio.create_task(self._run_sync(bot_id, event, cfg))
+        task_coro = self._run_sync(bot_id, event, cfg)
+        if self._task_supervisor is not None:
+            self._task_supervisor.create_task(
+                task_coro, name=f"song-sync:{bot_id}", owner="plugins:song_sync"
+            )
+        else:
+            asyncio.create_task(task_coro)
         return (True, "🔄 正在同步 VCPedia 新歌(约需几分钟), 完成后会通知你~")
 
     async def _run_sync(self, bot_id: str, event: Any, cfg) -> None:
@@ -95,6 +111,8 @@ class Plugin:
 
                 music_cfg = cfg.agent.music_knowledge or {}
                 result = await asyncio.to_thread(sync_vcpedia_new_songs, music_cfg)
+                if self._matcher is not None:
+                    self._matcher.reload_index()
                 added = result.get("added", [])
                 failed = result.get("failed", [])
                 skipped = result.get("skipped", 0)
