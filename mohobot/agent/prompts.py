@@ -34,7 +34,7 @@ TOPIC_REPLY_PROMPT = """你需要扮演{{character_name}}与用户进行对话�
 请认真阅读以下信息，你可能需要利用这些信息更好地回复:{{ extra_knowledge }}
 你输出的每一行对应一条聊天信息，一条信息只包含一句话。你的输出格式为。[<tone>]<content>，其中tone为语气，可选语气包括：中性，欣喜，温柔，伤心，生气，惊讶，害怕。除了强烈情绪外均选择第一个。content为回复的内容。例如[中性]你好！
 现在的时间是{{ current_time }}，下面是最近的聊天，你需要在此之后进行回复:{{ conversation_history }}
-{% if song_annotation %}【歌曲信息】{{ song_annotation }}{% endif %}"""
+{% if song_annotation %}{{ song_annotation }}{% endif %}"""
 
 # ── 记忆写入 ──────────────────────────────────────────────────
 

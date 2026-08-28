@@ -371,8 +371,8 @@ def _parse_lyrics_from_source(source: str) -> str:
     nxt = re.search(rf"^={{1,{level}}}\s+[^=\n]", tail, re.M)
     if nxt:
         tail = tail[:nxt.start()]
-    # 取歌词章节内的 <poem>..</poem>(可能有多个诗节)
-    poems = list(re.finditer(r"<poem>(.*?)</poem>", tail, re.S))
+    # 取歌词章节内的 <poem>..</poem>(可能有多个诗节; 标签可能带 class/style 属性)
+    poems = list(re.finditer(r"<poem[^>]*>(.*?)</poem>", tail, re.S))
     if poems:
         texts = [_unwrap_poem(pm.group(1)) for pm in poems]
         text = "\n\n".join(t for t in texts if t.strip())
@@ -525,11 +525,15 @@ def _is_template_junk(seg: str) -> bool:
 
     - 残留的模板名(交叉颜色 / color)与样式参数形如 c1=#66ccff、#66ccff、
       text-shadow:0 0 4px、transparent 等(不含中文且长度有限)。
+    - 单独的 '|' 残留(模板参数分隔符, 展开后内联出现)也丢弃。
     """
     s = seg.strip()
     if not s:
         return True
-    if s in ("交叉颜色", "color", "颜色", "ruby", "ps"):
+    if s in ("交叉颜色", "color", "颜色", "ruby", "ps", "|", "-{", "}-", "-{", "}-"):
+        return True
+    # 行内的 '|'(如 "A1|") 属于模板分段残留, 去掉竖线后若只剩样式也丢弃
+    if "|" in s and not re.search(r"[\u4e00-\u9fff]", s.replace("|", "")):
         return True
     if re.match(r"^[#\w;:,.()\- ]+$", s) and len(s) <= 60 and not re.search(r"[\u4e00-\u9fff]", s):
         return True
@@ -568,7 +572,9 @@ def _template_tail(tpl: str) -> str:
         start += 1
     if start >= len(parts):
         return ""
-    return "|".join(parts[start:]).strip(" \n|")
+    # 正文可能有多段(如 {{交叉颜色|...|段落A|段落B|段落C}} 的段落分隔 '|'),
+    # 段与段之间应为换行, 而不是字面 '|'。
+    return "\n".join(parts[start:]).strip(" \n|")
 
 
 def _parse_introduction_from_source(source: str) -> str:
