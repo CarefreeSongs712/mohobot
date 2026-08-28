@@ -327,10 +327,6 @@ class MohobotApplication:
             self._web_panel_task = None
             self._web_panel = None
 
-        # Stop agent runtimes before closing their shared callbacks/resources.
-        if self._agent_manager:
-            await self._agent_manager.stop_all()
-
         # Stop plugin lifecycle before core transports are closed so hooks can release resources.
         if self._plugin_system:
             await self._plugin_system.shutdown_plugins()
