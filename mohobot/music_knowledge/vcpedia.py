@@ -213,6 +213,11 @@ class AnubisClient:
         timeout = kwargs.pop("timeout", self.timeout)
         if not self._load_cookie() and not self.auth_cookie:
             self._fetch_cookie()
+            if not self.auth_cookie:
+                logger.warning(
+                    "VCPedia: 无法取得 Anubis auth cookie, 将按无 cookie 请求"
+                    "(若站点反爬未关闭, 请求会 403)"
+                )
         for attempt in range(2):
             resp = requests.get(
                 url, headers={"User-Agent": USER_AGENT, **kwargs.pop("headers", {})},
