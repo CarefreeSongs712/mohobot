@@ -32,16 +32,23 @@ def safe_name_of(name: str) -> str:
 
 
 def _query_by_name(db: Session, song_name: str) -> Optional[Song]:
-    """精确匹配优先, 兜底 ilike 模糊(名字可能带特殊字符/全角差异)。"""
+    """精确匹配优先(含 safe_name), 兜底包含匹配。
+
+    顺序: 1) 全等(name/safe_name) 2) 包含(like)。SQLite 的 OR 顺序不保证走
+    左侧精确分支, 因此把"全等"与"包含"分成两次查询, 确保精确优先。
+    """
     safe = safe_name_of(song_name)
+    exact = (
+        db.query(Song)
+        .filter((Song.name == song_name) | (Song.safe_name == safe) | (Song.name == safe))
+        .first()
+    )
+    if exact is not None:
+        return exact
     return (
         db.query(Song)
-        .filter(
-            (Song.name == song_name) |
-            (Song.safe_name == safe) |
-            (Song.name == safe) |
-            (Song.name.ilike(f"%{_escape_like(song_name)}%", escape="\\"))
-        )
+        .filter(Song.name.like(f"%{_escape_like(song_name)}%"))
+        .order_by(Song.name == song_name, Song.name)
         .first()
     )
 

@@ -23,6 +23,7 @@ from loguru import logger
 
 from mohobot.music_knowledge.knowledge_service import (
     CREDIT_KEYS,
+    _escape_like,
     get_song_detail,
 )
 from mohobot.music_knowledge.pool import ensure_init, get_session
@@ -30,7 +31,7 @@ from mohobot.music_knowledge.song_database import Song
 
 # 歌曲语境词(裸文本歌名匹配时要求命中其一, 防日常对话误伤)
 _SONG_CONTEXT_WORDS = (
-    "歌", "唱", "听", "点", "循环", "安利", "写", "作曲", "编曲", "调教", "歌词", "在放", "好喜欢",
+    "歌", "唱", "听", "点", "循环", "安利", "写", "作曲", "编曲", "调教", "歌词", "在放", "好喜欢", "来", "首",
 )
 
 
@@ -47,7 +48,7 @@ def _strip_play_prefix(text: str) -> str:
     若无前缀则原样返回。
     """
     s = text.strip()
-    for prefix in ("唱一首", "点一首", "唱个", "来一首", "点个", "唱首"):
+    for prefix in ("帮我唱一首", "给我唱一首", "帮我唱个", "帮我唱", "唱一首", "点一首", "唱个", "来一首", "点个", "唱首", "来首"):
         if s.startswith(prefix):
             s = s[len(prefix):].strip()
             break
@@ -210,23 +211,27 @@ class SongInfoMatcher:
         return None
 
     def _find_by_name(self, text: str) -> Optional[str]:
-        """在库内按歌名包含匹配(先精确后包含, 过滤过短歌名)。"""
+        """在库内按歌名包含匹配(先精确后包含, 过滤过短歌名)。
+
+        注意: 歌名里含 '.' / '·' / ':' 等符号时, 消息文本可能以不同写法出现,
+        因此这里同时用 safe_name(去符号)做匹配; 但 SQL LIKE 的 ESCAPE 语义
+        与部分站点字符需谨慎, 因此先做不区分大小写的全等, 再做包含。
+        """
         try:
             with get_session() as db:
                 from mohobot.music_knowledge.song_database import Song
-                from sqlalchemy import or_
+                # 先精确(全等), 再包含; 分开查保证精确优先, 避免长名抢先
+                exact = (
+                    db.query(Song.name)
+                    .filter((Song.name == text) | (Song.safe_name == text))
+                    .first()
+                )
+                if exact is not None and len(exact[0]) >= self._min_song_name_len:
+                    return exact[0]
                 matched = (
                     db.query(Song.name)
-                    .filter(
-                        or_(
-                            Song.name.in_([text]),
-                            Song.safe_name.in_([text]),
-                        )
-                        | (
-                            (Song.name.ilike(f"%{text}%")) &
-                            (Song.name != text)
-                        )
-                    )
+                    .filter(Song.name.like(f"%{_escape_like(text)}%"))
+                    .order_by(Song.name != text, Song.name)
                     .limit(5)
                     .all()
                 )
@@ -247,11 +252,22 @@ class SongInfoMatcher:
         if not self._index:
             return None
         for snippet in _sample_substrings(text, min_len=self._lyric_min_len):
-            # 按空白切段: 命中任一段即可(行内歌词可能被换行/空白隔开)
-            parts = [p for p in re.split(r"\s+", snippet) if p]
+            # 按空白切段: 对每个片段统计命中歌词的累计票数(片段越多越可信)
+            parts = sorted(
+                {p for p in re.split(r"\s+", snippet) if p},
+                key=len, reverse=True,
+            )
+            if not parts:
+                continue
+            best: Optional[Tuple[str, int]] = None
             for name, lyrics in self._index:
-                if any(p and p in lyrics for p in parts):
-                    return name
+                votes = sum(
+                    1 for p in parts if len(p) >= 3 and p in lyrics
+                )
+                if votes and (best is None or votes > best[1]):
+                    best = (name, votes)
+            if best is not None and best[1] >= 2:
+                return best[0]
         return None
 
     def _query_detail(self, name: str) -> Dict[str, str]:

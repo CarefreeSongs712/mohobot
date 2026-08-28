@@ -723,7 +723,12 @@ class VCPediaFetcher:
         )
 
     def fetch_entity(self, entity_name: str) -> Optional[Dict[str, Any]]:
-        """抓取并解析词条: 返回 {name, credits, introduction, lyrics, source}。"""
+        """抓取并解析词条: 返回 {name, credits, introduction, lyrics, source}。
+
+        该站 wikitext(api.php revisions)是唯一可靠来源(rest.php 与渲染 HTML
+        均不可用); wikitext 缺失即视为失败, 不做 HTML 兜底。
+        """
+        data = self._fetch_wikitext(entity_name)
         if not data or not (data.get("source") or ""):
             return None
         return self._parse_wikitext_entity(entity_name, data.get("source") or "")
