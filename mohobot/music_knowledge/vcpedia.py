@@ -424,8 +424,12 @@ def _extract_lyricskai(tail: str) -> str:
     lines = body[oi + len("|original="):].split("\n")
     out: List[str] = []
     for ln in lines:
-        # 遇到后续命名参数(如 |translated=)且已有歌词时截断
-        if out and re.match(r"^\s*\|[a-zA-Z]+\s*=", ln):
+        # 后续命名参数(如 |translated=)可能与歌词最后一行同行(如
+        # "Resonance|translated=苏生"), 行内截断比整行判断更稳。
+        cut = re.search(r"\|[a-zA-Z]+\s*=", ln)
+        if cut:
+            ln = ln[: cut.start()]
+        if out and not ln.strip():
             break
         out.append(ln)
     text = "\n".join(out)
@@ -467,6 +471,23 @@ def _expand_inline_templates(text: str) -> str:
     return "".join(out)
 
 
+def _fully_expand_templates(text: str) -> str:
+    """迭代展开 text 中的全部行内模板({{color|...}} / {{Font|...}} 等)。
+
+    _expand_inline_templates 单次只展开一层(嵌套模板保留原样返回);
+    这里循环调用直到不再出现 '{{', 把 Font 块内嵌的 {{color|正文}} 等
+    逐层剥成纯歌词。最多 10 轮防止异常输入死循环。
+    """
+    for _ in range(10):
+        if "{{" not in text:
+            break
+        next_text = _expand_inline_templates(text)
+        if next_text == text:
+            break
+        text = next_text
+    return text
+
+
 def _unwrap_poem(inner: str) -> str:
     """展开 <poem> 内部内容: 处理 {{color|样式|正文}} / {{交叉颜色|a|b|正文}} 等。
 
@@ -479,6 +500,12 @@ def _unwrap_poem(inner: str) -> str:
     i = 0
     while i < len(inner):
         if inner.startswith("{{", i):
+            # 模板开始: 先把模板前已累积的正文(歌词)独立成段,
+            # 避免 {{LyricsKai...}} 这类块级模板与前面的歌词混在同一 buf
+            # (否则 _template_tail 会把整段歌词当参数拆掉)。
+            if depth == 0 and buf.strip():
+                out.append(buf)
+                buf = ""
             depth += 1
             buf += "{{"
             i += 2
@@ -502,13 +529,14 @@ def _unwrap_poem(inner: str) -> str:
         i += 1
     if buf.strip():
         out.append(buf)
-    # 拼接: 每个缓冲为一段; 丢弃样式残留
+    # 拼接: 每个缓冲为一段; 先递归展开残余模板(如 Font 块内的 {{color|...}}),
+    # 再丢弃样式残留
     merged: List[str] = []
     for piece in out:
         if not piece:
             continue
         for seg in piece.split("\n"):
-            seg = seg.strip()
+            seg = _fully_expand_templates(seg).strip()
             if not seg:
                 continue
             if _is_template_junk(seg):
@@ -543,15 +571,46 @@ def _is_template_junk(seg: str) -> bool:
 def _template_tail(tpl: str) -> str:
     """把 {{color|样式|正文}} / {{交叉颜色|c1=..|c2=..|正文}} 里的正文取出。
 
+    用深度扫描代替 split("|"): 只把**模板外层**的 '|' 当参数/正文分段,
+    正文内部嵌套的 {{color|...}} 等模板(内含 '|')保持原样返回,
+    由调用方(_expand_inline_templates)递归展开。
+
     策略(针对实际 VCPedia 形态):
     - {{color|样式|正文}}           → 正文 = 第 3 段(样式在第 2 段)
     - {{交叉颜色|c1=|c2=|正文...}} → 正文 = 第 4 段及之后(前 3 段是参数)
+    - {{LyricsKai|...|original=歌词|translated=译文}} → 真歌词在 original 参数,
+      块级模板(可嵌在 <poem> 里), 直接转交 _extract_lyricskai。
     模板名称本身(第 1 段)总是跳过; 被跳过的参数段为纯样式/含 '='/空。
     """
     body = tpl[2:-2]  # 去掉 {{ }}
+    if body.lstrip().startswith("LyricsKai"):
+        return _extract_lyricskai(tpl)
     if "|" not in body:
         return ""
-    parts = body.split("|")
+    # 深度扫描找出外层段(跳过嵌套模板内部)
+    parts: List[str] = []
+    depth = 0
+    cur = ""
+    i = 0
+    while i < len(body):
+        if body.startswith("{{", i):
+            depth += 1
+            cur += "{{"
+            i += 2
+            continue
+        if body.startswith("}}", i):
+            depth -= 1
+            cur += "}}"
+            i += 2
+            continue
+        if body[i] == "|" and depth == 0:
+            parts.append(cur)
+            cur = ""
+            i += 1
+            continue
+        cur += body[i]
+        i += 1
+    parts.append(cur)
 
     def is_param(p: str) -> bool:
         p = p.strip()
