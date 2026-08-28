@@ -256,6 +256,13 @@ class LLMService:
             },
         ]
 
+        # 插件声明的只读歌曲工具
+        try:
+            from mohobot.services.llm_tools import registry
+            self._tools_schemas.extend(registry.schemas())
+        except Exception as e:
+            logger.warning(f"歌曲工具注册失败: {e}")
+
         # Anysearch 实时联网搜索(未配置 key 时工具自动移除)
         from mohobot.anysearch import AnySearchClient
         self._anysearch_client: AnySearchClient | None = None
@@ -268,6 +275,18 @@ class LLMService:
         else:
             self._tools_schemas = [t for t in self._tools_schemas
                                    if t["function"]["name"] != "anysearch_search"]
+
+    def _current_tools_schemas(self) -> list[dict]:
+        """Return built-in plus schemas registered by loaded plugins."""
+        try:
+            from mohobot.services.llm_tools import registry
+            names = {tool["function"]["name"] for tool in self._tools_schemas}
+            return self._tools_schemas + [
+                tool for tool in registry.schemas()
+                if tool["function"]["name"] not in names
+            ]
+        except Exception:
+            return self._tools_schemas
 
     async def chat(
         self,
@@ -312,7 +331,7 @@ class LLMService:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=self._tools_schemas,
+                tools=self._current_tools_schemas(),
                 tool_choice="auto",
             )
         except Exception as e:
@@ -363,7 +382,7 @@ class LLMService:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    tools=self._tools_schemas,
+                    tools=self._current_tools_schemas(),
                     tool_choice="auto",
                 )
                 choice2 = response2.choices[0] if response2.choices else None
@@ -423,7 +442,7 @@ class LLMService:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=self._tools_schemas,
+                tools=self._current_tools_schemas(),
                 tool_choice="auto",
                 stream=True,
                 stream_options={"include_usage": True},
@@ -506,7 +525,7 @@ class LLMService:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    tools=self._tools_schemas,
+                    tools=self._current_tools_schemas(),
                     tool_choice="auto",
                     stream=True,
                     stream_options={"include_usage": True},
@@ -885,6 +904,12 @@ class LLMService:
         except json.JSONDecodeError:
             args = {}
 
+        if func_name.startswith("song_"):
+            from mohobot.services.llm_tools import registry
+            return await registry.execute(func_name, args)
+        if func_name.startswith("song_"):
+            from mohobot.services.llm_tools import registry
+            return await registry.execute(func_name, args_json)
         if func_name == "get_current_time":
             from mohobot.utils.time_utils import format_utc8
             return format_utc8("%Y-%m-%d %H:%M:%S")

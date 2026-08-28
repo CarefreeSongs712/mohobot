@@ -64,6 +64,15 @@ class LLMModule:
             or ""
         )
 
+        self._tools_schemas: list[dict[str, Any]] = []
+        self._tool_registry = None
+        try:
+            from mohobot.services.llm_tools import registry
+            self._tool_registry = registry
+            self._tools_schemas = registry.schemas()
+        except Exception as e:
+            logger.warning(f"插件工具加载失败: {e}")
+
         if self.template is None and self.prompt_name:
             self.template = PROMPT_TEMPLATES.get(self.prompt_name, "")
 
@@ -99,6 +108,9 @@ class LLMModule:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self._tools_schemas:
+            params["tools"] = self._tools_schemas
+            params["tool_choice"] = "auto"
         use_json = kwargs.pop("use_json", self.use_json)
         if use_json:
             params["response_format"] = {"type": "json_object"}
@@ -106,6 +118,26 @@ class LLMModule:
         start = time.perf_counter()
         try:
             resp = await self._client.chat.completions.create(**params)
+            choice = resp.choices[0] if resp.choices else None
+            if choice and getattr(choice.message, "tool_calls", None) and self._tool_registry is not None:
+                messages = list(params["messages"])
+                messages.append({
+                    "role": "assistant",
+                    "content": choice.message.content or "",
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                        for tc in choice.message.tool_calls
+                    ],
+                })
+                for tc in choice.message.tool_calls:
+                    result = await self._tool_registry.execute(
+                        tc.function.name, tc.function.arguments
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                follow_params = dict(params)
+                follow_params["messages"] = messages
+                resp = await self._client.chat.completions.create(**follow_params)
             content = resp.choices[0].message.content or ""
             duration_ms = (time.perf_counter() - start) * 1000
             logger.debug(
