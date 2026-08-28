@@ -241,13 +241,13 @@ class AnubisClient:
 _CREDIT_ALIASES: Dict[str, List[str]] = {
     "uploader": ["UP主", "投稿者", "发布者", "UP"],
     "singers": ["演唱", "歌手", "演唱者"],
-    "lyricist": ["作词", "词作", "作詞"],
+    "lyricist": ["作词", "词作", "作詞", "填词", "填詞"],
     "composer": ["作曲", "曲作", "作曲者"],
     "arranger": ["编曲", "编曲者", "編曲"],
     "mixer": ["混音", "混合", "remix", "混音后期"],
     "tuner": ["调教", "调校", "调声", "調教", "VOCALOID调教"],
     "mastering": ["母带", "母带处理"],
-    "pv": ["PV", "视频制作", "映像", "影片"],
+    "pv": ["PV", "视频制作", "映像", "影片", "MV编导", "MV制作"],
     "illustrator": ["曲绘", "绘", "插画", "绘图", "曲繪"],
 }
 
