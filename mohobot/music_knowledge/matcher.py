@@ -42,12 +42,21 @@ def _strip_cq_codes(text: str) -> str:
 def _strip_play_prefix(text: str) -> str:
     """去掉"唱一首/点一首/来一首"等点歌前缀(便于裸歌名包含匹配)。
 
-    仅去除走势明显的动词语气前缀, 保留正文。无前缀则原样返回。
+    仅去除走势明显的动词语气前缀, 保留正文; 同时处理前缀与歌名之间的
+    "唱一首达拉崩吧、唱首xxx" 等(前缀本身有停用词, 去掉后剩余即歌名)。
+    若无前缀则原样返回。
     """
-    for prefix in ("唱一首", "点一首", "唱个", "来一首", "点个"):
-        if text.startswith(prefix):
-            return text[len(prefix):].strip()
-    return text.strip()
+    s = text.strip()
+    for prefix in ("唱一首", "点一首", "唱个", "来一首", "点个", "唱首"):
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
+            break
+    # 去掉"这首歌/再来首"等尾部停用词("唱一首这首歌啥啥" → 歌名前还有"这首歌")
+    for trailing in ("这首歌", "这首歌名", "这个歌曲"):
+        if s.endswith(trailing):
+            s = s[:-len(trailing)].strip()
+            break
+    return s
 
 
 def _sample_substrings(text: str, min_len: int = 8, max_len: int = 20, count: int = 3) -> List[str]:
