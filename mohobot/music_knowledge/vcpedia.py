@@ -535,13 +535,16 @@ def _unwrap_poem(inner: str) -> str:
     for piece in out:
         if not piece:
             continue
-        for seg in piece.split("\n"):
-            seg = _fully_expand_templates(seg).strip()
-            if not seg:
-                continue
-            if _is_template_junk(seg):
-                continue
-            merged.append(seg)
+        for raw_seg in piece.split("\n"):
+            # 先递归展开嵌套模板, 再还原展开结果中用于分隔歌词段落的 '|'
+            expanded = _fully_expand_templates(raw_seg).strip()
+            for seg in expanded.replace("|", "\n").split("\n"):
+                seg = seg.strip()
+                if not seg:
+                    continue
+                if _is_template_junk(seg):
+                    continue
+                merged.append(seg)
     text = "\n".join(merged)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -616,6 +619,10 @@ def _template_tail(tpl: str) -> str:
         p = p.strip()
         if not p:
             return True
+        # 含嵌套模板的段是正文容器(如 columns-list 内的 {{交叉颜色...}}),
+        # 即使其中含 c1= / c2= 也不能按命名参数跳过。
+        if "{{" in p:
+            return False
         if "=" in p:
             return True
         # 纯色值/样式/数字(不含中文与非样式符号)
