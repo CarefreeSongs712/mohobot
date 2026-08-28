@@ -315,6 +315,8 @@ class SongInfoMatcher:
             if best is not None and best[1] >= 2:
                 return best[0]
         return None
+
+    def _query_detail(self, name: str) -> Dict[str, str]:
         try:
             with get_session() as db:
                 return get_song_detail(db, name)
