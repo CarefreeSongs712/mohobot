@@ -83,7 +83,7 @@ class Plugin:
         task_coro = self._run_sync(bot_id, event, cfg)
         if self._task_supervisor is not None:
             self._task_supervisor.create_task(
-                task_coro, name=f"song-sync:{bot_id}", owner="plugins:song_sync"
+                task_coro, name=f"song-sync:{bot_id}", owner="plugins"
             )
         else:
             asyncio.create_task(task_coro)
