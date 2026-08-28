@@ -31,7 +31,7 @@ from mohobot.music_knowledge.song_database import Song
 
 # 歌曲语境词(裸文本歌名匹配时要求命中其一, 防日常对话误伤)
 _SONG_CONTEXT_WORDS = (
-    "歌", "唱", "听", "点", "循环", "安利", "写", "作曲", "编曲", "调教", "歌词", "在放", "好喜欢", "来", "首",
+    "歌", "唱", "听", "点", "循环", "安利", "写", "作曲", "编曲", "调教", "歌词", "在放", "好喜欢", "来", "首", "知道", "哪首",
 )
 
 
@@ -200,6 +200,13 @@ class SongInfoMatcher:
                 detail = self._query_detail(name)
                 if detail:
                     return SongMatch(detail["name"], detail)
+            # 自然句中歌名可能夹在疑问/助词之间(如"你知道白鸟过河滩吗"),
+            # 对库内歌名做最长优先的包含扫描, 避免把整句当成歌名查询。
+            name = self._find_name_inside(clean)
+            if name:
+                detail = self._query_detail(name)
+                if detail:
+                    return SongMatch(detail["name"], detail)
 
         # 3. 歌词片段匹配
         hit = self._find_by_lyrics(clean)
@@ -242,7 +249,22 @@ class SongInfoMatcher:
             logger.debug(f"歌名匹配失败: {e}")
         return None
 
-    def _find_by_lyrics(self, text: str) -> Optional[str]:
+    def _find_name_inside(self, text: str) -> Optional[str]:
+        """在自然语言消息中找库内歌名, 按歌名长度倒序避免短名抢先。"""
+        try:
+            with get_session() as db:
+                from mohobot.music_knowledge.song_database import Song
+                rows = (
+                    db.query(Song.name)
+                    .filter(Song.name.length() >= self._min_song_name_len)
+                    .all()
+                )
+                hits = [name for (name,) in rows if name and name in text]
+                return max(hits, key=len) if hits else None
+        except Exception as e:
+            logger.debug(f"消息内歌名匹配失败: {e}")
+            return None
+
         """歌词片段匹配: 内存索引 substring 检测(直接和爬取库比对)。
 
         歌词库中可能夹杂换行/空白(如 "刚擒住了几个妖\\n又降住了几个魔"),
