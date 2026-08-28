@@ -267,11 +267,11 @@ class SongInfoMatcher:
             return None
 
     def _find_by_lyrics(self, text: str) -> Optional[str]:
-        “””按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。”””
+        """按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。"""
         self._ensure_index()
         if not self._index:
             return None
-        message = re.sub(r”[\s！？!?。，、；;：:,.，？]+”, “”, text or “”)
+        message = re.sub(r"[\s！？!?。，、；;：:,.，？]+", "", text or "")
         if len(message) < 10:
             return None
         for size in (20, 16, 12, 10):
@@ -279,7 +279,7 @@ class SongInfoMatcher:
                 continue
             snippets = {message[i:i + size] for i in range(len(message) - size + 1)}
             for name, lyrics in self._index:
-                normalized = re.sub(r”\s+”, “”, lyrics or “”)
+                normalized = re.sub(r"\s+", "", lyrics or "")
                 if any(snippet in normalized for snippet in snippets):
                     return name
         return None
