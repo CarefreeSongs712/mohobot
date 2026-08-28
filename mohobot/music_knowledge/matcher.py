@@ -274,21 +274,38 @@ class SongInfoMatcher:
             return None
 
     def _find_by_lyrics(self, text: str) -> Optional[str]:
-        """按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。"""
+        """按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。
+
+        只接受一段较长的连续歌词(至少 16 字), 或两段独立的短歌词同时命中,
+        避免普通聊天中的十字短语在数千首歌词中偶然撞中。
+        """
         self._ensure_index()
         with self._lock:
             index = tuple(self._index)
+        if not index:
+            return None
         message = re.sub(r"[\s！？!?。，、；;：:,.，？]+", "", text or "")
+        # 歌词识别常带“这是哪首/出自哪首歌”等尾部问题, 先剥离问句再比对。
+        message = re.sub(r"(?:这|这句|这段)?是(?:哪一?首|什么)的?(?:歌|歌曲)?$", "", message)
+        message = re.sub(r"(?:出自|来自)(?:哪一?首|什么)(?:歌|歌曲)?$", "", message)
         if len(message) < 10:
             return None
-        for size in (20, 16, 12, 10):
-            if len(message) < size:
-                continue
-            snippets = {message[i:i + size] for i in range(len(message) - size + 1)}
+        # 较长连续片段优先; 允许用户在歌词后追加问题。
+        long_size = 10
+        if len(message) >= long_size:
+            snippets = {message[i:i + long_size] for i in range(len(message) - long_size + 1)}
             for name, lyrics in index:
                 normalized = re.sub(r"\s+", "", lyrics or "")
                 if any(snippet in normalized for snippet in snippets):
                     return name
+        # 只有两段不同的 10 字片段都命中同一首歌时才放宽阈值。
+        short_size = 10
+        snippets = {message[i:i + short_size] for i in range(len(message) - short_size + 1)}
+        for name, lyrics in index:
+            normalized = re.sub(r"\s+", "", lyrics or "")
+            hits = sum(1 for snippet in snippets if snippet in normalized)
+            if hits >= 2:
+                return name
         return None
 
     def _query_detail(self, name: str) -> Dict[str, str]:
