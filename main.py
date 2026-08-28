@@ -96,6 +96,8 @@ class MohobotApplication:
                     db_folder=db_folder, db_file=db_file,
                 )
                 self._song_info_service: SongInfoService | None = SongInfoService(music_cfg)
+                if not self._song_matcher._index:
+                    logger.warning("歌曲知识库为空, 歌曲识别将在 VCPedia 同步完成前不可用")
                 logger.info("全局歌曲知识库已加载(SongInfoMatcher + SongInfoService)")
             except Exception as e:
                 self._song_matcher = None
