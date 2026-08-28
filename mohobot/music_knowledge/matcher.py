@@ -263,64 +263,25 @@ class SongInfoMatcher:
                 hits = [name for (name,) in rows if name and name in text]
                 return max(hits, key=len) if hits else None
         except Exception as e:
-            logger.debug(f"消息内歌名匹配失败: {e}")
+            logger.debug(f”消息内歌名匹配失败: {e}”)
             return None
-
-        """歌词片段匹配: 内存索引 substring 检测(直接和爬取库比对)。
-
-        歌词库中可能夹杂换行/空白(如 "刚擒住了几个妖\\n又降住了几个魔"),
-        因此采样片段先按空白切词后, 逐段做包含检测(连续短句也能命中)。
-        """
-        self._ensure_index()
-        if not self._index:
-            return None
-        for snippet in _sample_substrings(text, min_len=self._lyric_min_len):
-            # 按空白切段: 对每个片段统计命中歌词的累计票数(片段越多越可信)
-            parts = sorted(
-                {p for p in re.split(r"\s+", snippet) if p},
-                key=len, reverse=True,
-            )
-            if not parts:
-                continue
-            best: Optional[Tuple[str, int]] = None
-            for name, lyrics in self._index:
-                votes = sum(
-                    1 for p in parts if len(p) >= 3 and p in lyrics
-                )
-                if votes and (best is None or votes > best[1]):
-                    best = (name, votes)
-            if best is not None and best[1] >= 2:
-                return best[0]
-        return None
 
     def _find_by_lyrics(self, text: str) -> Optional[str]:
-        """歌词片段匹配: 内存索引 substring 检测(直接和爬取库比对)。
-
-        歌词库中可能夹杂换行/空白, 因此采样片段先按空白切词后逐段做包含检测。
-        """
+        “””按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。”””
         self._ensure_index()
         if not self._index:
             return None
-        for snippet in _sample_substrings(text, min_len=self._lyric_min_len):
-            parts = sorted(
-                {p for p in re.split(r"\s+", snippet) if p},
-                key=len, reverse=True,
-            )
-            if not parts:
+        message = re.sub(r”[\s！？!?。，、；;：:,.，？]+”, “”, text or “”)
+        if len(message) < 10:
+            return None
+        for size in (20, 16, 12, 10):
+            if len(message) < size:
                 continue
-            best: Optional[Tuple[str, int, int]] = None
+            snippets = {message[i:i + size] for i in range(len(message) - size + 1)}
             for name, lyrics in self._index:
-                matched_parts = [p for p in parts if len(p) >= 3 and p in lyrics]
-                votes = len(matched_parts)
-                longest = max((len(p) for p in matched_parts), default=0)
-                # 一段足够长且连续的歌词也足以识别(用户常会省略标点/空格);
-                # 短段仍要求至少两票, 防止“很久很久以前”等常见词误报。
-                if (votes >= 2 or longest >= max(8, self._lyric_min_len)) and (
-                    best is None or (votes, longest) > (best[1], best[2])
-                ):
-                    best = (name, votes, longest)
-            if best is not None:
-                return best[0]
+                normalized = re.sub(r”\s+”, “”, lyrics or “”)
+                if any(snippet in normalized for snippet in snippets):
+                    return name
         return None
 
     def _query_detail(self, name: str) -> Dict[str, str]:
