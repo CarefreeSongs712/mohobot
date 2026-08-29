@@ -877,6 +877,15 @@ class MessageHandler:
     # Soft break punctuation (clause end)
     _PUNCT_SOFT = "；;，,、"
 
+    # ── 长引文保护(歌词/台词引用) ──────────────────────────────
+    # 引号内的内容是完整语段(如歌词), 按标点+长度切分会把一句歌词切碎;
+    # 引文长度 ≥ _QUOTE_MIN_LEN 时整体单独成一段。
+    _QUOTE_OPEN = "\u201c"    # “
+    _QUOTE_CLOSE = "\u201d"   # ”
+    _QUOTE_MIN_LEN = 16       # 短引语(如 说"你好呀")不单独成段
+    # 引文前文字的合法边界(比普通分段多允许 冒号/破折号, 如 "那就唱副歌吧：")
+    _QUOTE_PREFIX_BOUNDARY = "。！？!?…；;，,、：:—\n"
+
     async def _stream_llm_reply(self, bot_id, event, context, raw) -> str:
         """Generate and send the LLM reply per the configured behavior.
 
@@ -1008,6 +1017,8 @@ class MessageHandler:
         """Split buffered text into ready-to-send segments.
 
         Rules (标点符号+长度分隔法):
+          0. 长引文保护: 引号(“”)内长度 ≥ _QUOTE_MIN_LEN 的引文(歌词/台词)
+             整体单独成段, 引文未闭合(流式中途)时绝不在引文中间切分
           1. Double newline (\n\n) — paragraph break, ALWAYS splits (no min length)
           2. Hard cap: force-flush at _SEG_MAX_LEN, cutting at last punctuation
           3. Segment ≥ _SEG_MIN_LEN may flush at last strong/soft punctuation
@@ -1015,6 +1026,33 @@ class MessageHandler:
         segments: list[str] = []
 
         while True:
+            # 0. 长引文保护(优先于其它规则)
+            quote = self._find_long_quote(buffer)
+            if quote is not None:
+                kind, open_idx, close_idx = quote
+                before = buffer[:open_idx]
+                cut = self._quote_prefix_cut(before) if before else None
+                if kind == "unclosed":
+                    # 引文未闭合(流式中途): 引号前的文字按边界先发,
+                    # 引文部分留在缓冲等待闭合, 绝不在引文中间切分
+                    if cut:
+                        segments.append(buffer[:cut])
+                        buffer = buffer[cut:]
+                    break
+                # 引文已闭合且足够长 → 引文整体单独成段
+                if cut is not None and 0 < cut <= open_idx:
+                    segments.append(buffer[:cut])
+                    buffer = buffer[cut:]
+                    continue
+                if not before.strip():
+                    segments.append(buffer[open_idx : close_idx + 1])
+                    buffer = buffer[close_idx + 1 :]
+                    continue
+                # 引号前有文字但无边界 → 与引文黏在一起成段(不在句中硬切)
+                segments.append(buffer[: close_idx + 1])
+                buffer = buffer[close_idx + 1 :]
+                continue
+
             # 1. Double newline paragraph break — split regardless of length
             idx = buffer.find("\n\n")
             if idx != -1:
@@ -1043,6 +1081,33 @@ class MessageHandler:
             break
 
         return {"segments": segments, "rest": buffer}
+
+    def _find_long_quote(self, text: str) -> tuple[str, int, int] | None:
+        """找第一对长度 ≥ _QUOTE_MIN_LEN 的引号。
+
+        返回 ("closed", 引号起, 引号止) / ("unclosed", 引号起, 占位);
+        引号未闭合(流式中途)时即使后面还有成对引号也视为未闭合。
+        没有长引文返回 None(短引语走普通分段规则)。
+        """
+        open_idx = text.find(self._QUOTE_OPEN)
+        while open_idx != -1:
+            close_idx = text.find(self._QUOTE_CLOSE, open_idx + 1)
+            if close_idx == -1:
+                return ("unclosed", open_idx, -1)
+            if close_idx - open_idx - 1 >= self._QUOTE_MIN_LEN:
+                return ("closed", open_idx, close_idx)
+            open_idx = text.find(self._QUOTE_OPEN, close_idx + 1)
+        return None
+
+    def _quote_prefix_cut(self, before: str) -> int | None:
+        """引文前文字的边界切点(双换行/强标点/冒号/软标点, 取最后一个)。"""
+        idx = before.rfind("\n\n")
+        if idx != -1:
+            return idx + 2
+        for i in range(len(before) - 1, -1, -1):
+            if before[i] in self._QUOTE_PREFIX_BOUNDARY and before[i] != "\n":
+                return i + 1
+        return None
 
     def _find_cut(self, text: str) -> int | None:
         """Find the cut position: last \\n\\n, else last strong, else last soft punct."""
