@@ -1304,23 +1304,44 @@ class WebPanel:
         )
         server = uvicorn.Server(config)
         self._server_instance = server
+        # 记录承载 serve() 的任务, 供 stop() 优雅等待排空在途请求
+        self._serve_task = asyncio.current_task()
         await server.serve()
 
     async def stop(self) -> None:
         """Stop the uvicorn server + remove the loguru sink (防重启堆积).
 
-        注意: uvicorn 在启动阶段被置 should_exit 时,serve() 会"绑定后直接
-        return"而跳过 shutdown() → 监听 socket 泄漏、端口无法重新绑定。
-        因此这里直接关闭已创建的 server sockets。
+        两阶段关闭:
+        1. 优雅阶段: should_exit=True 后等待 serve 任务自行退出——uvicorn
+           会先排空(drain)在途请求再关监听, 避免硬杀浏览器在途请求
+           (面板重启时曾导致 audit 中间件抛 "No response returned" 噪音);
+        2. 兜底阶段: serve 任务已结束但 sockets 仍在(启动竞态: serve()
+           "绑定后直接 return" 跳过 shutdown → 端口泄漏), 或优雅等待
+           超时(卡死), 才强制关闭 server sockets 保证端口可重绑。
         """
         server = getattr(self, "_server_instance", None)
         if server is not None:
             server.should_exit = True
-            for s in list(getattr(server, "servers", None) or []):
+            serve_task = getattr(self, "_serve_task", None)
+            drained = False
+            if serve_task is not None and not serve_task.done():
                 try:
-                    s.close()
-                except Exception:
+                    await asyncio.wait_for(
+                        asyncio.shield(serve_task), timeout=8.0,
+                    )
+                    drained = True
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Web panel graceful shutdown timed out, forcing socket close"
+                    )
+                except (asyncio.CancelledError, Exception):
                     pass
+            if not drained:
+                for s in list(getattr(server, "servers", None) or []):
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
             logger.info("Web panel stopped")
         # 移除本面板安装的 loguru sink,避免重启后重复收到日志
         sink_id = getattr(self, "_sink_id", None)
