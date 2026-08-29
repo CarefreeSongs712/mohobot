@@ -908,7 +908,7 @@ class LLMService:
                 return ""
         return _cb
 
-    async def describe_image(self, url: str, max_tokens: int = 512) -> str:
+    async def describe_image(self, url: str, max_tokens: int = 2048) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
 
         提示词取全局配置 llm.vision_prompt(默认含中V人物特征参照);
@@ -942,7 +942,7 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
-    async def describe_image_file(self, local_path: str, max_tokens: int = 512) -> str:
+    async def describe_image_file(self, local_path: str, max_tokens: int = 2048) -> str:
         """用视觉模型描述本地图片文件。
 
         图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网

@@ -139,21 +139,24 @@ class ImageCache:
             description = "[图片]"
 
         # Update cache map (原子合并: 6 bot 并发描述不同图时不丢彼此的条目)
-        entry = {
-            "path": str(local_path),
-            "phash": phash_val,
-            "description": description or "[图片]",
-            "cached_at": time.time(),
-            "size": await self._file_size(local_path),
-        }
-        cache_map = await json_update(
-            self._map_path,
-            lambda cur: {**(cur if isinstance(cur, dict) else {}), image_url: entry},
-            default={},
-        )
+        # 视觉返回空 = 瞬时失败(如推理模型 token 预算不足): 不写入缓存,
+        # 否则该图会被 "[图片]" 占位永久遮挡, 无法重试。
+        if description and description.strip():
+            entry = {
+                "path": str(local_path),
+                "phash": phash_val,
+                "description": description,
+                "cached_at": time.time(),
+                "size": await self._file_size(local_path),
+            }
+            cache_map = await json_update(
+                self._map_path,
+                lambda cur: {**(cur if isinstance(cur, dict) else {}), image_url: entry},
+                default={},
+            )
 
-        # Enforce LRU eviction
-        await self._evict_if_needed(cache_map)
+            # Enforce LRU eviction
+            await self._evict_if_needed(cache_map)
 
         return str(local_path), description or "[图片]"
 

@@ -77,7 +77,8 @@ async def test_describe_image_uses_configured_prompt():
     assert out == "这是一只猫"
     last = FakeVisionClient.last
     assert "洛天依" in last["prompt"], "应使用配置的人物特征提示词"
-    assert last["max_tokens"] == 512
+    # 推理型视觉模型思考会烧 token, 512 导致正文为空(finish=length) → 2048
+    assert last["max_tokens"] == 2048
     # 空配置提示词 → 回退旧默认
     svc._cfg.llm.vision_prompt = ""
     out2 = await svc.describe_image(DATA_URI)
