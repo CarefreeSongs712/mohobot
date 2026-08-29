@@ -28,6 +28,12 @@ from loguru import logger
 
 from mohobot.music_knowledge.pool import ensure_init, get_session
 from mohobot.music_knowledge.song_database import Song, update_song_stats
+from mohobot.music_knowledge.text_clean import (
+    clean_credit,
+    clean_display_name,
+    clean_introduction,
+    clean_lyrics,
+)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -762,23 +768,31 @@ def _song_exists(db, song_name: str) -> bool:
 
 def build_song_record(name: str, credits: Dict[str, str],
                       introduction: str, lyrics: str) -> Song:
-    """按新 schema 构造 Song(缺失的 credits 字段留空)。"""
+    """按新 schema 构造 Song(缺失的 credits 字段留空)。
+
+    入库前对全部文本字段做 wiki 标记清洗(与一次性清洗脚本共用同一套规则),
+    避免粗体引号/模板/链接残留/HTML 标签随新数据再次进入库中。
+    """
+    cleaned_credits = {
+        k: clean_credit(v) if isinstance(v, str) else v
+        for k, v in credits.items()
+    }
     return Song(
-        name=name,
+        name=clean_display_name(name),
         safe_name=_safe_song_name(name),
-        uploader=credits.get("uploader") or "",
-        singers=credits.get("singers") or "",
-        lyricist=credits.get("lyricist") or "",
-        composer=credits.get("composer") or "",
-        arranger=credits.get("arranger") or "",
-        mixer=credits.get("mixer") or "",
-        tuner=credits.get("tuner") or "",
-        mastering=credits.get("mastering") or "",
-        pv=credits.get("pv") or "",
-        illustrator=credits.get("illustrator") or "",
-        year=int(credits["year"]) if credits.get("year", "").isdigit() else None,
-        introduction=introduction,
-        lyrics=lyrics,
+        uploader=cleaned_credits.get("uploader") or "",
+        singers=cleaned_credits.get("singers") or "",
+        lyricist=cleaned_credits.get("lyricist") or "",
+        composer=cleaned_credits.get("composer") or "",
+        arranger=cleaned_credits.get("arranger") or "",
+        mixer=cleaned_credits.get("mixer") or "",
+        tuner=cleaned_credits.get("tuner") or "",
+        mastering=cleaned_credits.get("mastering") or "",
+        pv=cleaned_credits.get("pv") or "",
+        illustrator=cleaned_credits.get("illustrator") or "",
+        year=int(cleaned_credits["year"]) if cleaned_credits.get("year", "").isdigit() else None,
+        introduction=clean_introduction(introduction),
+        lyrics=clean_lyrics(lyrics),
     )
 
 
