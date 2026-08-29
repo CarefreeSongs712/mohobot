@@ -301,9 +301,20 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div id="model-vision-form"></div>
       </div>
     </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">🧹 上下文 AI 总结</div>
+        <div id="model-summarize-form"></div>
+        <div class="small" style="color:var(--text-dim);margin-top:6px">压缩早期对话用，模型复用 Chat 模型</div>
+      </div>
+      <div class="card">
+        <div class="card-title">📋 可用模型列表</div>
+        <div id="model-list-form"></div>
+      </div>
+    </div>
     <div class="card">
-      <div class="card-title">📋 可用模型列表</div>
-      <div id="model-list-form"></div>
+      <div class="card-title">🤖 Agent 模块 (beta) — 留空继承全局 Chat 配置</div>
+      <div class="grid cols-2" id="agent-modules-grid"></div>
     </div>
     <button class="btn" onclick="saveModels()">保存模型配置</button>
   </div>
@@ -894,8 +905,35 @@ async function loadModels() {
       formField('vision_model', '模型名称', v.model) +
       formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
       formField('vision_api_key', 'API Key (留空保持原值)', '', { type: 'password', hint: '当前 Key 不会回填；只有输入新值才会更新' }) +
+      formField('vision_max_tokens', '最大 Token (上下文窗口)', v.max_tokens,
+        '推理型视觉模型思考会消耗 token, 预算太小会导致描述为空') +
+      formField('vision_temperature', '温度 (0-2)', v.temperature) +
       textareaField('vision_prompt', '识图提示词(VLM)', v.prompt,
         '发送给视觉模型的图片转述指令(默认含中V人物特征参照); 留空恢复默认') ;
+    const sum = modelCache.summarize || {};
+    document.getElementById('model-summarize-form').innerHTML =
+      formField('summarize_temperature', '温度 (0-2)', sum.temperature) +
+      formField('summarize_max_tokens', '最大 Token', sum.max_tokens) ;
+    const am = modelCache.agent_modules || {};
+    const moduleNames = {
+      main_chat: '💬 主回复 (main_chat)',
+      topic_extractor: '🔎 话题提取 (topic_extractor)',
+      memory_writer: '🧠 记忆写入 (memory_writer)',
+      user_profile_updater: '👤 画像更新 (user_profile_updater)',
+    };
+    document.getElementById('agent-modules-grid').innerHTML = Object.keys(moduleNames)
+      .filter(name => am[name])
+      .map(name => {
+        const m = am[name];
+        const id = name.replace(/_/g, '-');
+        return `<div class="card" style="margin:0"><div class="card-title">${moduleNames[name]}</div>` +
+          formField('am_' + id + '_model', '模型名称 (留空继承全局)', m.model) +
+          formField('am_' + id + '_base_url', 'API 地址 (留空继承全局)', m.base_url) +
+          formField('am_' + id + '_api_key', 'API Key (留空保持原值)', '', { type: 'password' }) +
+          formField('am_' + id + '_max_tokens', '最大 Token (留空用默认)', m.max_tokens) +
+          formField('am_' + id + '_temperature', '温度 (留空用默认)', m.temperature) +
+          '</div>';
+      }).join('');
     // 可用模型列表(每行一个) — beta 各 LLM 模块下拉的选项来源
     document.getElementById('model-list-form').innerHTML =
       textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
@@ -917,8 +955,26 @@ async function saveModels() {
       model: document.getElementById('cfg-vision_model').value,
       base_url: document.getElementById('cfg-vision_base_url').value,
       ...(document.getElementById('cfg-vision_api_key').value ? { api_key: document.getElementById('cfg-vision_api_key').value } : {}),
+      max_tokens: parseInt(document.getElementById('cfg-vision_max_tokens').value) || 2048,
+      temperature: parseFloat(document.getElementById('cfg-vision_temperature').value) || 0.3,
       prompt: document.getElementById('cfg-vision_prompt')?.value ?? '',
     },
+    summarize: {
+      temperature: parseFloat(document.getElementById('cfg-summarize_temperature').value) || 0.3,
+      max_tokens: parseInt(document.getElementById('cfg-summarize_max_tokens').value) || 4096,
+    },
+    agent_modules: Object.fromEntries(Object.entries(modelCache.agent_modules || {}).map(([name]) => {
+      const id = name.replace(/_/g, '-');
+      const spec = {
+        model: document.getElementById('cfg-am_' + id + '_model')?.value ?? '',
+        base_url: document.getElementById('cfg-am_' + id + '_base_url')?.value ?? '',
+        max_tokens: document.getElementById('cfg-am_' + id + '_max_tokens')?.value ?? '',
+        temperature: document.getElementById('cfg-am_' + id + '_temperature')?.value ?? '',
+      };
+      const key = document.getElementById('cfg-am_' + id + '_api_key')?.value;
+      if (key) spec.api_key = key;
+      return [name, spec];
+    })),
     models: (document.getElementById('cfg-models')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),
   };

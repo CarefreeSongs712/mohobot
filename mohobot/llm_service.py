@@ -691,8 +691,8 @@ class LLMService:
                     {"role": "system", "content": "你是对话压缩助手。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.3,
-                max_tokens=4096,
+                temperature=float(getattr(self._cfg.llm, "summarize_temperature", 0.3)),
+                max_tokens=int(getattr(self._cfg.llm, "summarize_max_tokens", 4096)),
             )
             await self._record_usage(
                 self._cfg.llm.chat_model, getattr(resp, "usage", None),
@@ -908,7 +908,7 @@ class LLMService:
                 return ""
         return _cb
 
-    async def describe_image(self, url: str, max_tokens: int = 2048) -> str:
+    async def describe_image(self, url: str, max_tokens: int | None = None) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
 
         提示词取全局配置 llm.vision_prompt(默认含中V人物特征参照);
@@ -916,6 +916,11 @@ class LLMService:
         """
         if not self._vision_available or self._vision_client is None:
             return ""
+        # 参数可在 WebUI 配置(llm.vision_max_tokens / vision_temperature);
+        # 推理型视觉模型思考会烧 token, 预算太小会导致正文为空。
+        if max_tokens is None:
+            max_tokens = int(getattr(self._cfg.llm, "vision_max_tokens", 2048))
+        vision_temperature = float(getattr(self._cfg.llm, "vision_temperature", 0.3))
         try:
             prompt = (self._cfg.llm.vision_prompt or "").strip() or "请用一句简短、客观的话描述这张图片的内容。"
             response = await self._vision_client.chat.completions.create(
@@ -928,7 +933,7 @@ class LLMService:
                     ],
                 }],
                 max_tokens=max_tokens,
-                temperature=0.3,
+                temperature=vision_temperature,
             )
             await self._record_usage(
                 self._cfg.llm.vision_model, getattr(response, "usage", None),
@@ -942,7 +947,7 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
-    async def describe_image_file(self, local_path: str, max_tokens: int = 2048) -> str:
+    async def describe_image_file(self, local_path: str, max_tokens: int | None = None) -> str:
         """用视觉模型描述本地图片文件。
 
         图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网

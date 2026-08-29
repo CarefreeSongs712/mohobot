@@ -272,10 +272,17 @@ async def test_forward_chunk_by_chars():
 
 async def test_summarize_max_tokens():
     import inspect
+    from mohobot.models.config import GlobalConfig
     from mohobot.llm_service import LLMService
+    # 总结参数现在可配置(llm.summarize_max_tokens/summarize_temperature),
+    # 调用点应从配置读取而非硬编码
     src = inspect.getsource(LLMService.summarize_context)
-    assert "max_tokens=4096" in src, "总结调用应为 4096"
-    print("[+] summarize max_tokens OK")
+    assert "summarize_max_tokens" in src, "总结应读取可配置的 summarize_max_tokens"
+    assert "summarize_temperature" in src
+    cfg = GlobalConfig()
+    svc = LLMService(global_config=cfg, usage_recorder=None)
+    assert cfg.llm.summarize_max_tokens == svc._cfg.llm.summarize_max_tokens
+    print("[+] summarize max_tokens 可配置 OK")
 
 
 # ── 6. 用量统计 ─────────────────────────────────────────────

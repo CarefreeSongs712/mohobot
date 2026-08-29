@@ -546,6 +546,22 @@ class WebPanel:
                     "base_url": cfg.llm.vision_base_url,
                     "api_key": self._mask_secret(cfg.llm.vision_api_key),
                     "prompt": cfg.llm.vision_prompt,
+                    "max_tokens": cfg.llm.vision_max_tokens,
+                    "temperature": cfg.llm.vision_temperature,
+                },
+                "summarize": {
+                    "temperature": cfg.llm.summarize_temperature,
+                    "max_tokens": cfg.llm.summarize_max_tokens,
+                },
+                "agent_modules": {
+                    name: {
+                        "model": (spec or {}).get("model", ""),
+                        "base_url": (spec or {}).get("base_url", ""),
+                        "api_key": self._mask_secret((spec or {}).get("api_key", "")),
+                        "max_tokens": (spec or {}).get("max_tokens", ""),
+                        "temperature": (spec or {}).get("temperature", ""),
+                    }
+                    for name, spec in (cfg.agent.llm_modules or {}).items()
                 },
                 "models": list(cfg.llm.models),
             }
@@ -573,6 +589,26 @@ class WebPanel:
                         cfg.llm.vision_prompt = str(v or "")
                 if "api_key" in data["vision"] and data["vision"]["api_key"] not in ("", self._MASK):
                     cfg.llm.vision_api_key = str(data["vision"]["api_key"])
+            if "summarize" in data and isinstance(data["summarize"], dict):
+                for k, v in data["summarize"].items():
+                    if hasattr(cfg.llm, f"summarize_{k}"):
+                        setattr(cfg.llm, f"summarize_{k}", v)
+            if "agent_modules" in data and isinstance(data["agent_modules"], dict):
+                # 深合并进 agent.llm_modules, 保留 prompt_name 等未暴露字段;
+                # api_key 掩码/留空表示保持原值
+                merged = dict(cfg.agent.llm_modules or {})
+                for name, spec in data["agent_modules"].items():
+                    if not isinstance(spec, dict) or name not in merged:
+                        continue
+                    old = merged[name] or {}
+                    for k, v in spec.items():
+                        if k == "api_key":
+                            if v not in ("", self._MASK):
+                                old["api_key"] = str(v)
+                        elif v not in ("", None):
+                            old[k] = v
+                    merged[name] = old
+                cfg.agent.llm_modules = merged
             if "models" in data and isinstance(data["models"], list):
                 cfg.llm.models = [str(m).strip() for m in data["models"] if str(m).strip()]
 

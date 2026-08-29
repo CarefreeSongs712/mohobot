@@ -32,6 +32,10 @@ class LLMConfig:
     chat_max_tokens: int = 4096
     chat_temperature: float = 0.7
 
+    # 上下文 AI 总结(压缩早期对话, 默认复用 chat 模型)
+    summarize_temperature: float = 0.3
+    summarize_max_tokens: int = 4096
+
     # Vision model
     vision_model: str = "qwen-vl-plus"
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -71,6 +75,10 @@ class LLMConfig:
         "没有命中上面的特征人物正常描述图像的内容。如果出现人物且有其它物品/背景则都描述。"
         "如果只是猜测（部分特征相似）则注明。"
     )
+
+    # 识图调用参数(推理型视觉模型思考会烧 token, 预算太小正文为空)
+    vision_max_tokens: int = 2048
+    vision_temperature: float = 0.3
 
     # 全局备用模型: beta 各 LLM 模块主模型遇到连接类错误(连接失败/超时)时
     # 自动换用此模型重试一次(仅连接类错误; 空 = 不回退)
@@ -274,6 +282,10 @@ class GlobalConfig:
                 vision_api_key=llm_raw.get("vision_api_key", ""),
                 # 空/缺失时保留默认人物特征提示词
                 vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
+                vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
+                vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
+                summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
+                summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 fallback_model=llm_raw.get("fallback_model", "DeepSeek-V4-Flash"),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -358,6 +370,10 @@ class GlobalConfig:
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
                 "vision_prompt": self.llm.vision_prompt,
+                "vision_max_tokens": self.llm.vision_max_tokens,
+                "vision_temperature": self.llm.vision_temperature,
+                "summarize_temperature": self.llm.summarize_temperature,
+                "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },
@@ -431,6 +447,10 @@ class GlobalConfig:
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
                 "vision_prompt": self.llm.vision_prompt,
+                "vision_max_tokens": self.llm.vision_max_tokens,
+                "vision_temperature": self.llm.vision_temperature,
+                "summarize_temperature": self.llm.summarize_temperature,
+                "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "fallback_model": self.llm.fallback_model,
                 "models": list(self.llm.models),
             },
