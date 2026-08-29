@@ -47,6 +47,10 @@ def seed_songs(tmp: str) -> None:
         name="九九八十一", safe_name="九九八十一", uploader="康师傅の海鲜面", singers="洛天依",
         introduction="洛天依名曲。", lyrics="刚擒住了几个妖\n又降住了几个魔",
     ))
+    db.add(Song(
+        name="赤伶", safe_name="赤伶", uploader="HITA", singers="洛天依",
+        introduction="戏腔名曲。", lyrics="戏一折 水袖起落\n唱悲欢唱离合",
+    ))
     db.commit()
     db.close()
 
@@ -103,6 +107,12 @@ async def test_matcher() -> None:
     # 裸文本 + 语境词
     r2 = m.match("唱一首九九八十一")
     assert r2 and r2.name == "九九八十一"
+
+    # 2 字歌名精确匹配(点歌前缀剥离后)允许; 1 字歌名仍拦截
+    r2b = m.match("唱一首赤伶")
+    assert r2b and r2b.name == "赤伶", r2b
+    assert m.match("唱一首歌") is None  # 库里无 1 字歌命中, 且防"唱一首歌"误报
+    assert m.match("晚上唱首歌吧") is None
 
     # lyrics 子串(换行在歌词库中, 消息空格)
     r3 = m.match("刚擒住了几个妖 又降住了几个魔")

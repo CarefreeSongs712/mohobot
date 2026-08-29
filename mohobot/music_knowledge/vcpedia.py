@@ -822,7 +822,7 @@ class VCPediaFetcher:
 
     def _fetch_wikitext(self, entity_name: str) -> Optional[Dict[str, Any]]:
         """优先走 api.php prop=revisions 取 wikitext(rest.php 在该站被禁)。"""
-        from urllib.parse import quote, urlparse as _q
+        from urllib.parse import quote as _q
         url = (
             f"{self.base_url}/api.php?action=query&prop=revisions&rvprop=content"
             f"&rvslots=main&format=json&titles={_q(entity_name, safe='')}"
@@ -974,7 +974,29 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
     return {"added": added, "failed": failed, "skipped": skipped}
 
 
+def _normalize_categories(crawler_cfg: Dict[str, Any]) -> List[str]:
+    """读取爬虫分类配置, 兼容单个 category 字符串与 categories 列表。"""
+    cfg = crawler_cfg or {}
+    default = "Category:洛天依歌曲"
+    raw = cfg.get("categories")
+    if raw is None:
+        raw = cfg.get("category", default)
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else [default]
+    cats = [str(c).strip() for c in raw if str(c).strip()]
+    return cats or [default]
+
+
 def fetcher_song_titles(fetcher: VCPediaFetcher, crawler_cfg: Dict[str, Any]) -> List[str]:
-    """从分类页拉全量歌曲标题(可被测试/直接调用)。"""
-    category = crawler_cfg.get("category", "Category:洛天依歌曲")
-    return fetch_song_title_list(fetcher.anubis, fetcher.base_url, category=category)
+    """从分类页拉全量歌曲标题(可被测试/直接调用)。
+
+    支持多分类(categories 列表或单个 category), 各分类标题合并去重。
+    """
+    titles: List[str] = []
+    seen: Set[str] = set()
+    for category in _normalize_categories(crawler_cfg):
+        for title in fetch_song_title_list(fetcher.anubis, fetcher.base_url, category=category):
+            if title not in seen:
+                seen.add(title)
+                titles.append(title)
+    return titles

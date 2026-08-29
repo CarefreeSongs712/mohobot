@@ -241,7 +241,10 @@ class SongInfoMatcher:
                     .filter((Song.name == text) | (Song.safe_name == text))
                     .first()
                 )
-                if exact is not None and len(exact[0]) >= self._min_song_name_len:
+                # 精确命中允许 2 字歌名(如 赤伶/卷!/逃!, 常见于传说曲),
+                # 1 字歌名(如《歌》)仍拦截以防"唱一首歌"类误报;
+                # 模糊包含保持 min_song_name_len 阈值。
+                if exact is not None and len(exact[0]) >= 2:
                     return exact[0]
                 matched = (
                     db.query(Song.name)
