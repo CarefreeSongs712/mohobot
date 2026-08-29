@@ -871,8 +871,14 @@ class VCPediaFetcher:
 
 def fetch_song_title_list(client: AnubisClient, base_url: str,
                           category: str = "Category:洛天依歌曲",
-                          max_pages: int = 50) -> List[str]:
-    """用 MediaWiki api.php list=categorymembers 全量分页拉歌曲标题。"""
+                          max_pages: int = 50,
+                          subcats: bool = False) -> List[str]:
+    """用 MediaWiki api.php list=categorymembers 分页拉分类成员标题。
+
+    subcats=True 时枚举分类的**子分类**(cmtype=subcat, 如"殿堂曲"下的
+    "VOCALOID中文殿堂曲"), 返回形如 "Category:xxx" 的标题; 此时不再限定
+    cmnamespace=0(子分类在 ns=14, 与其冲突会得到空结果)。
+    """
     titles: List[str] = []
     seen: Set[str] = set()
     cmcontinue = ""
@@ -882,10 +888,13 @@ def fetch_song_title_list(client: AnubisClient, base_url: str,
             "action": "query",
             "list": "categorymembers",
             "cmtitle": category,
-            "cmnamespace": "0",
             "cmlimit": "500",
             "format": "json",
         }
+        if subcats:
+            params["cmtype"] = "subcat"
+        else:
+            params["cmnamespace"] = "0"
         if cmcontinue:
             params["cmcontinue"] = cmcontinue
         resp = client.get(api_url, params=params)
@@ -974,6 +983,35 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
     return {"added": added, "failed": failed, "skipped": skipped}
 
 
+def fetch_category_tree_titles(client: AnubisClient, base_url: str,
+                               category: str, max_depth: int = 2) -> List[str]:
+    """BFS 枚举分类及其子分类(至多 max_depth 层)下的全部页面标题。
+
+    用于"殿堂曲/传说曲"这类父分类——它们本身只含按引擎/语言划分的子分类
+    (如 VOCALOID中文殿堂曲), 歌词页面在叶子分类里。带环防护与标题去重。
+    """
+    from collections import deque
+
+    titles: List[str] = []
+    seen_titles: Set[str] = set()
+    seen_cats: Set[str] = set()
+    queue = deque([(category, 0)])
+    while queue:
+        cat, depth = queue.popleft()
+        if cat in seen_cats or depth > max_depth:
+            continue
+        seen_cats.add(cat)
+        for title in fetch_song_title_list(client, base_url, category=cat):
+            if title not in seen_titles:
+                seen_titles.add(title)
+                titles.append(title)
+        if depth < max_depth:
+            for sub in fetch_song_title_list(client, base_url, category=cat, subcats=True):
+                if sub not in seen_cats:
+                    queue.append((sub, depth + 1))
+    return titles
+
+
 def _normalize_categories(crawler_cfg: Dict[str, Any]) -> List[str]:
     """读取爬虫分类配置, 兼容单个 category 字符串与 categories 列表。"""
     cfg = crawler_cfg or {}
@@ -990,12 +1028,16 @@ def _normalize_categories(crawler_cfg: Dict[str, Any]) -> List[str]:
 def fetcher_song_titles(fetcher: VCPediaFetcher, crawler_cfg: Dict[str, Any]) -> List[str]:
     """从分类页拉全量歌曲标题(可被测试/直接调用)。
 
-    支持多分类(categories 列表或单个 category), 各分类标题合并去重。
+    支持多分类(categories 列表或单个 category), 各分类标题合并去重;
+    每个分类递归枚举其子分类(如 殿堂曲/传说曲 这类父分类), 深度可配。
     """
+    max_depth = int((crawler_cfg or {}).get("category_depth", 2))
     titles: List[str] = []
     seen: Set[str] = set()
     for category in _normalize_categories(crawler_cfg):
-        for title in fetch_song_title_list(fetcher.anubis, fetcher.base_url, category=category):
+        for title in fetch_category_tree_titles(
+            fetcher.anubis, fetcher.base_url, category, max_depth=max_depth,
+        ):
             if title not in seen:
                 seen.add(title)
                 titles.append(title)

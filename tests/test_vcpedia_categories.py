@@ -20,20 +20,27 @@ from mohobot.music_knowledge.vcpedia import (
 
 
 class FakeClient:
-    """按 cmtitle 返回预置分页结果的 fake AnubisClient。"""
+    """按 cmtitle/cmtype 返回预置分页结果的 fake AnubisClient。
 
-    def __init__(self, pages: Dict[str, List[List[str]]]):
-        # pages: category -> [第一页标题, 续页标题...]
+    pages: category -> {"pages": [第一页, 续页...], "subcats": [子分类...]}
+    """
+
+    def __init__(self, pages: Dict[str, Dict[str, Any]]):
         self.pages = pages
+        self.calls: List[Dict[str, Any]] = []
 
     def get(self, url: str, params: Dict[str, Any] | None = None, **kwargs):
         params = params or {}
+        self.calls.append(dict(params))
         category = params.get("cmtitle", "")
-        chunks = self.pages.get(category, [])
+        spec = self.pages.get(category, {})
+        want_subcats = params.get("cmtype") == "subcat"
+        chunks = (spec.get("subcats") if want_subcats else spec.get("pages")) or []
         page_idx = 0
         if params.get("cmcontinue"):
             page_idx = int(params["cmcontinue"])
-        members = [{"title": t} for t in (chunks[page_idx] if page_idx < len(chunks) else [])]
+        chunk = chunks[page_idx] if page_idx < len(chunks) else []
+        members = [{"title": t} for t in chunk]
         has_next = page_idx + 1 < len(chunks)
         payload = {"query": {"categorymembers": members}}
         if has_next:
@@ -60,17 +67,43 @@ def test_normalize_categories() -> None:
 
 def test_multi_category_merge_dedup() -> None:
     client = FakeClient({
-        "Category:A": [["歌1", "歌2", "歌3"]],
-        "Category:B": [["歌2", "歌4"], ["歌5"]],
+        "Category:A": {"pages": [["歌1", "歌2", "歌3"]]},
+        "Category:B": {"pages": [["歌2", "歌4"], ["歌5"]]},
     })
     titles = fetcher_song_titles(_fetcher(client), {"categories": ["Category:A", "Category:B"]})
     assert titles == ["歌1", "歌2", "歌3", "歌4", "歌5"], titles
     print("[2] 多分类合并去重 OK")
 
 
+def test_recursive_subcategories() -> None:
+    """父分类只含子分类(殿堂曲/传说曲形态) → 递归枚举叶子分类页面, 去重防环。"""
+    client = FakeClient({
+        "Category:殿堂曲": {
+            "pages": [],
+            "subcats": [["Category:VOCALOID殿堂曲", "Category:SV殿堂曲"]],
+        },
+        "Category:VOCALOID殿堂曲": {
+            "pages": [["歌A", "歌B"]],
+            # 子分类反向指回父分类 → 必须被环防护拦下
+            "subcats": [["Category:殿堂曲"]],
+        },
+        "Category:SV殿堂曲": {
+            "pages": [["歌B", "歌C"]],
+        },
+    })
+    titles = fetcher_song_titles(_fetcher(client), {"categories": ["Category:殿堂曲"]})
+    assert titles == ["歌A", "歌B", "歌C"], titles
+    # 环防护: 每个分类最多访问"页面 + 子分类"两次(父分类反向引用被拦下)
+    visited = [p["cmtitle"] for p in client.calls]
+    assert all(visited.count(x) <= 2 for x in visited), visited
+    assert visited.count("Category:殿堂曲") == 2, visited
+    print("[3] 递归子分类枚举 + 环防护 OK")
+
+
 async def main() -> None:
     test_normalize_categories()
     test_multi_category_merge_dedup()
+    test_recursive_subcategories()
     print("\nALL MULTI-CATEGORY TESTS PASSED")
 
 
