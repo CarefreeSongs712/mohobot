@@ -119,9 +119,10 @@ class LLMModule:
         try:
             resp = await self._client.chat.completions.create(**params)
             # 多轮工具调用: 模型看完工具结果可能继续调用工具(如搜索为空换关键词),
-            # 循环执行直到给出文本或达到轮次上限。
+            # 循环执行直到给出文本或达到轮次上限; 上限后去掉工具强制文本回答。
             max_tool_rounds = 4
             tool_round = 0
+            messages: list[dict[str, Any]] | None = None
             while self._tool_registry is not None and tool_round < max_tool_rounds:
                 choice = resp.choices[0] if resp.choices else None
                 tool_calls = getattr(choice.message, "tool_calls", None) if choice else None
@@ -146,6 +147,31 @@ class LLMModule:
                 follow_params = dict(params)
                 follow_params["messages"] = messages
                 resp = await self._client.chat.completions.create(**follow_params)
+            # 轮次用尽后模型仍要求调用工具 → 去掉工具再请求一次, 强制文本回答
+            choice = resp.choices[0] if resp.choices else None
+            if (
+                self._tool_registry is not None
+                and choice is not None
+                and getattr(choice.message, "tool_calls", None)
+            ):
+                messages = list(params["messages"]) if messages is None else messages
+                messages.append({
+                    "role": "assistant",
+                    "content": choice.message.content or "",
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                        for tc in choice.message.tool_calls
+                    ],
+                })
+                for tc in choice.message.tool_calls:
+                    result = await self._tool_registry.execute(
+                        tc.function.name, tc.function.arguments
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                forced_params = {k: v for k, v in params.items() if k not in ("tools", "tool_choice")}
+                forced_params["messages"] = messages
+                resp = await self._client.chat.completions.create(**forced_params)
             content = resp.choices[0].message.content or ""
             duration_ms = (time.perf_counter() - start) * 1000
             logger.debug(

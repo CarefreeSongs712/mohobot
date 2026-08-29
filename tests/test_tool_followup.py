@@ -158,19 +158,48 @@ async def test_legacy_empty_stream_then_nonstream_toolcall() -> None:
     print("[2] Legacy 空流降级 + 非流式工具调用 OK")
 
 
-async def test_legacy_round_limit() -> None:
-    """模型无限要求调用工具 → 达到轮次上限后输出兜底并停止。"""
+async def test_legacy_round_limit_forced_answer() -> None:
+    """轮次用尽后模型仍要求调用工具 → 去掉工具强制文本回答。"""
     from mohobot.llm_service import LLMService
     from mohobot.models.config import GlobalConfig
 
     svc = LLMService(GlobalConfig(), usage_recorder=_FakeUsageRecorder())
     responses = [
-        _stream_response([_chunk(tool_calls=[_tool_call_delta(0, f"c{i}", "song_search", "{}")])])
-        for i in range(8)
+        # 初始 + 4 轮 follow-up 全部返回工具调用
+        *[
+            _stream_response([_chunk(tool_calls=[_tool_call_delta(0, f"c{i}", "song_search", "{}")])])
+            for i in range(5)
+        ],
+        # 最后一轮不带工具 → 模型给出文本
+        _stream_response([_chunk(content="没找到原曲，但找到几首相近的歌哦"), _chunk(content=None)]),
+    ]
+    reply, client = await _collect_legacy(svc, responses, ['{"songs": []}'] * 8)
+    assert "相近的歌" in reply, reply
+    calls = client.chat.completions.calls
+    assert len(calls) == 6, len(calls)
+    # 最后一轮不应携带 tools 参数(强制文本)
+    assert "tools" not in calls[-1], calls[-1].keys()
+    assert "tools" in calls[-2]
+    print("[3] Legacy 轮次上限后强制文本回答 OK")
+
+
+async def test_legacy_round_limit_total_failure() -> None:
+    """强制文本轮也返回空流且非流式为空 → 输出兜底文案。"""
+    from mohobot.llm_service import LLMService
+    from mohobot.models.config import GlobalConfig
+
+    svc = LLMService(GlobalConfig(), usage_recorder=_FakeUsageRecorder())
+    responses = [
+        *[
+            _stream_response([_chunk(tool_calls=[_tool_call_delta(0, f"c{i}", "song_search", "{}")])])
+            for i in range(5)
+        ],
+        _stream_response([]),           # 最后一轮流为空
+        _nonstream_response(content=""),  # 非流式重试也为空
     ]
     reply, _ = await _collect_legacy(svc, responses, ['{"songs": []}'] * 8)
-    assert "轮次过多" in reply, reply
-    print("[3] Legacy 工具轮次上限 OK")
+    assert "未返回文本" in reply, reply
+    print("[4] Legacy 强制文本轮总失败兜底 OK")
 
 
 async def test_agent_multiround() -> None:
@@ -197,14 +226,47 @@ async def test_agent_multiround() -> None:
     content = await module.generate_response(any_var="1")
     assert "相关歌曲" in content, content
     assert len(module._client.chat.completions.calls) == 3
-    print("[4] Agent 多轮工具调用 OK")
+    print("[5] Agent 多轮工具调用 OK")
+
+
+async def test_agent_round_limit_forced_answer() -> None:
+    """Agent LLMModule: 轮次用尽后去掉工具强制文本回答。"""
+    from mohobot.agent.llm_module import LLMModule
+
+    responses = [
+        *[
+            _nonstream_response(tool_calls=[_tool_call_delta(0, f"c{i}", "song_search", "{}")])
+            for i in range(5)
+        ],
+        _nonstream_response(content="基于已有结果直接回答"),
+    ]
+    module = LLMModule(
+        module_name="main_chat", config={}, model="m", base_url="http://x", api_key="k",
+        template="reply {{ any_var }}",
+        usage_recorder=_FakeUsageRecorder(),
+    )
+    module._client = FakeChatClient(responses)
+
+    class FakeRegistry:
+        async def execute(self, name, arguments):
+            return '{"songs": []}'
+
+    module._tool_registry = FakeRegistry()
+    content = await module.generate_response(any_var="1")
+    assert "基于已有结果" in content, content
+    calls = module._client.chat.completions.calls
+    assert len(calls) == 6, len(calls)
+    assert "tools" not in calls[-1]
+    print("[6] Agent 轮次上限后强制文本回答 OK")
 
 
 async def main() -> None:
     await test_legacy_chained_tool_calls()
     await test_legacy_empty_stream_then_nonstream_toolcall()
-    await test_legacy_round_limit()
+    await test_legacy_round_limit_forced_answer()
+    await test_legacy_round_limit_total_failure()
     await test_agent_multiround()
+    await test_agent_round_limit_forced_answer()
     print("\nALL TOOL FOLLOW-UP TESTS PASSED")
 
 

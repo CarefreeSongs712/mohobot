@@ -503,10 +503,12 @@ class LLMService:
         max_tool_rounds = 4
         tool_round = 0
         while tool_calls_buffer:
-            if tool_round >= max_tool_rounds:
-                logger.warning(f"LLM tool rounds exceeded {max_tool_rounds}, stopping")
-                yield ("[工具调用轮次过多，已停止处理]", True)
-                return
+            # 达到轮次上限后不再提供工具, 强制模型基于已有工具结果给出文本回答。
+            final_round = tool_round >= max_tool_rounds
+            if final_round:
+                logger.warning(
+                    f"LLM tool rounds hit {max_tool_rounds}, forcing text answer without tools"
+                )
             tool_round += 1
             messages.append({
                 "role": "assistant",
@@ -528,16 +530,18 @@ class LLMService:
                 })
             full_content = ""
             try:
-                stream2 = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=self._current_tools_schemas(),
-                    tool_choice="auto",
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
+                follow_params: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if not final_round:
+                    follow_params["tools"] = self._current_tools_schemas()
+                    follow_params["tool_choice"] = "auto"
+                stream2 = await client.chat.completions.create(**follow_params)
                 got_final = False
                 stream2_usage = None
                 tool_calls_buffer = {}
@@ -552,7 +556,7 @@ class LLMService:
                         got_final = True
                         full_content += delta.content
                         yield (delta.content, False)
-                    if delta.tool_calls:
+                    if delta.tool_calls and not final_round:
                         for tc in delta.tool_calls:
                             idx = tc.index
                             if idx not in tool_calls_buffer:
@@ -582,26 +586,29 @@ class LLMService:
                 # 流为空(无文本无工具调用) → 非流式重试一次
                 logger.warning("LLM tool-follow stream returned NO content; retrying non-stream")
                 try:
-                    response3 = await client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        tools=self._current_tools_schemas(),
-                        tool_choice="auto",
-                        stream=False,
-                    )
+                    retry_params: dict[str, Any] = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    }
+                    if not final_round:
+                        retry_params["tools"] = self._current_tools_schemas()
+                        retry_params["tool_choice"] = "auto"
+                    response3 = await client.chat.completions.create(**retry_params)
                     choice3 = response3.choices[0] if response3.choices else None
                     await self._record_usage(
                         model, getattr(response3, "usage", None), bot_id, event,
                         module="chat", kind="tool_follow_up_retry",
                     )
-                    if choice3 is not None and choice3.message.tool_calls:
+                    retry_tool_calls = getattr(choice3.message, "tool_calls", None) if choice3 else None
+                    if retry_tool_calls and not final_round:
                         # 模型在非流式重试中仍要求调用工具 → 交给下一轮循环
                         tool_calls_buffer = {
                             idx: {"id": tc.id or "", "function_name": tc.function.name,
                                   "arguments": tc.function.arguments or ""}
-                            for idx, tc in enumerate(choice3.message.tool_calls)
+                            for idx, tc in enumerate(retry_tool_calls)
                         }
                         continue
                     fallback_text = (choice3.message.content or "") if choice3 else ""
