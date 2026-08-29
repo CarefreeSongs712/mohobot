@@ -497,9 +497,17 @@ class LLMService:
             )
 
         # After stream ends, execute tool calls if any:
-        # 工具结果作为 tool 消息回传 LLM, 再次流式生成最终回复
-        # (不向用户输出原始搜索结果)
-        if tool_calls_buffer:
+        # 工具结果作为 tool 消息回传 LLM 后进入多轮 follow-up:
+        # 模型可能在看工具结果后继续调用工具(如搜索为空时换关键词再搜),
+        # 因此循环处理 tool_calls 直到模型给出文本或达到轮次上限。
+        max_tool_rounds = 4
+        tool_round = 0
+        while tool_calls_buffer:
+            if tool_round >= max_tool_rounds:
+                logger.warning(f"LLM tool rounds exceeded {max_tool_rounds}, stopping")
+                yield ("[工具调用轮次过多，已停止处理]", True)
+                return
+            tool_round += 1
             messages.append({
                 "role": "assistant",
                 "content": full_content or None,
@@ -518,7 +526,7 @@ class LLMService:
                     "tool_call_id": tc_data.get("id") or f"call_{idx}",
                     "content": result,
                 })
-            # 二次流式调用
+            full_content = ""
             try:
                 stream2 = await client.chat.completions.create(
                     model=model,
@@ -532,6 +540,7 @@ class LLMService:
                 )
                 got_final = False
                 stream2_usage = None
+                tool_calls_buffer = {}
                 async for chunk in stream2:
                     usage = getattr(chunk, "usage", None)
                     if usage is not None:
@@ -541,39 +550,68 @@ class LLMService:
                         continue
                     if delta.content:
                         got_final = True
+                        full_content += delta.content
                         yield (delta.content, False)
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_buffer:
+                                tool_calls_buffer[idx] = {
+                                    "id": tc.id or "",
+                                    "function_name": tc.function.name or "",
+                                    "arguments": tc.function.arguments or "",
+                                }
+                            else:
+                                if tc.id:
+                                    tool_calls_buffer[idx]["id"] = tc.id
+                                if tc.function and tc.function.name:
+                                    tool_calls_buffer[idx]["function_name"] = tc.function.name
+                                if tc.function and tc.function.arguments:
+                                    tool_calls_buffer[idx]["arguments"] += tc.function.arguments
                 if stream2_usage is not None:
                     await self._record_usage(
                         model, stream2_usage, bot_id, event,
                         module="chat", kind="tool_follow_up",
                     )
-                if not got_final:
-                    logger.warning("LLM tool-follow stream returned NO text content; retrying non-stream")
-                    try:
-                        response3 = await client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            tools=self._current_tools_schemas(),
-                            tool_choice="auto",
-                            stream=False,
-                        )
-                        choice3 = response3.choices[0] if response3.choices else None
-                        fallback_text = (choice3.message.content or "") if choice3 else ""
-                        await self._record_usage(
-                            model, getattr(response3, "usage", None), bot_id, event,
-                            module="chat", kind="tool_follow_up_retry",
-                        )
-                        if fallback_text:
-                            yield (fallback_text, False)
-                            yield ("", True)
-                            return
-                    except Exception as e:
-                        logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
-                    yield ("[工具调用完成，但模型未返回文本]", True)
+                if got_final and not tool_calls_buffer:
+                    yield ("", True)
                     return
-                yield ("", True)
+                if tool_calls_buffer:
+                    # 模型要求继续调用工具 → 进入下一轮
+                    continue
+                # 流为空(无文本无工具调用) → 非流式重试一次
+                logger.warning("LLM tool-follow stream returned NO content; retrying non-stream")
+                try:
+                    response3 = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tools=self._current_tools_schemas(),
+                        tool_choice="auto",
+                        stream=False,
+                    )
+                    choice3 = response3.choices[0] if response3.choices else None
+                    await self._record_usage(
+                        model, getattr(response3, "usage", None), bot_id, event,
+                        module="chat", kind="tool_follow_up_retry",
+                    )
+                    if choice3 is not None and choice3.message.tool_calls:
+                        # 模型在非流式重试中仍要求调用工具 → 交给下一轮循环
+                        tool_calls_buffer = {
+                            idx: {"id": tc.id or "", "function_name": tc.function.name,
+                                  "arguments": tc.function.arguments or ""}
+                            for idx, tc in enumerate(choice3.message.tool_calls)
+                        }
+                        continue
+                    fallback_text = (choice3.message.content or "") if choice3 else ""
+                    if fallback_text:
+                        yield (fallback_text, False)
+                        yield ("", True)
+                        return
+                except Exception as e:
+                    logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
+                yield ("[工具调用完成，但模型未返回文本]", True)
                 return
             except Exception as e:
                 logger.error(f"LLM stream call failed (after tools): {e}")

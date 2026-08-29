@@ -118,8 +118,16 @@ class LLMModule:
         start = time.perf_counter()
         try:
             resp = await self._client.chat.completions.create(**params)
-            choice = resp.choices[0] if resp.choices else None
-            if choice and getattr(choice.message, "tool_calls", None) and self._tool_registry is not None:
+            # 多轮工具调用: 模型看完工具结果可能继续调用工具(如搜索为空换关键词),
+            # 循环执行直到给出文本或达到轮次上限。
+            max_tool_rounds = 4
+            tool_round = 0
+            while self._tool_registry is not None and tool_round < max_tool_rounds:
+                choice = resp.choices[0] if resp.choices else None
+                tool_calls = getattr(choice.message, "tool_calls", None) if choice else None
+                if not tool_calls:
+                    break
+                tool_round += 1
                 messages = list(params["messages"])
                 messages.append({
                     "role": "assistant",
@@ -127,10 +135,10 @@ class LLMModule:
                     "tool_calls": [
                         {"id": tc.id, "type": "function",
                          "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                        for tc in choice.message.tool_calls
+                        for tc in tool_calls
                     ],
                 })
-                for tc in choice.message.tool_calls:
+                for tc in tool_calls:
                     result = await self._tool_registry.execute(
                         tc.function.name, tc.function.arguments
                     )
