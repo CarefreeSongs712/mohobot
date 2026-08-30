@@ -809,9 +809,6 @@ async function loadBotConfig() {
 
 async function saveGlobalConfig() {
   const g = document.getElementById('cfg-global-config') ? {} : {};
-  // WebSocket 端口/监听地址不在 WebUI 暴露(改配置文件需重启且影响连接), 保存时原样保留
-  const port = globalConfigCache.server?.port ?? 8081;
-  const host = globalConfigCache.server?.host ?? '0.0.0.0';
   const num = (id, def) => {
     const el = document.getElementById(id);
     if (!el) return def;
@@ -820,7 +817,6 @@ async function saveGlobalConfig() {
   };
   const data = {
     beta_mode: document.getElementById('cfg-beta_mode')?.checked ?? true,
-    server: { port, host },
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     context_summary_enabled: document.getElementById('cfg-context_summary_enabled')?.checked ?? true,
     context_trim_at_rounds: parseInt(document.getElementById('cfg-context_trim_at_rounds').value) || 40,

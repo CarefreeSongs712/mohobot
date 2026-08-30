@@ -335,6 +335,9 @@ class WebPanel:
             from mohobot.models.config import GlobalConfig
             cfg = GlobalConfig.load(self._config_path)
             result = cfg.to_dict()
+            # server 段(WS 端口/监听地址/发送队列)为本机连接配置,
+            # 不下发给 WebUI —— 只在本地 config 文件里读写。
+            result.pop("server", None)
             result["web_panel"]["password_hash"] = self._mask_secret(cfg.web_panel.password_hash)
             for section in ("llm", "anysearch"):
                 for key, value in list(result.get(section, {}).items()):
@@ -352,10 +355,10 @@ class WebPanel:
             # Apply nested updates safely
             # 注意: database / log_dir / data_dir / plugins_dir 属于
             # 服务端运行路径配置, 不允许在 WebUI 修改(改错会导致服务异常)。
+            # server 段(WS 端口/监听地址/发送队列)同样只允许在本地 config
+            # 文件里读写, WebUI 提交的任何 server 内容一律忽略。
             if "server" in data:
-                for k, v in data["server"].items():
-                    if hasattr(cfg.server, k):
-                        setattr(cfg.server, k, v)
+                logger.info("Web panel: ignored server section in config update (local-only)")
             if "web_panel" in data:
                 for k, v in data["web_panel"].items():
                     if hasattr(cfg.web_panel, k) and k != "password_hash":
