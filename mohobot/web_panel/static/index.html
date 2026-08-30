@@ -312,10 +312,6 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div id="model-list-form"></div>
       </div>
     </div>
-    <div class="card">
-      <div class="card-title">🤖 Agent 模块 (beta) — 留空继承全局 Chat 配置</div>
-      <div class="grid cols-2" id="agent-modules-grid"></div>
-    </div>
     <button class="btn" onclick="saveModels()">保存模型配置</button>
   </div>
 
@@ -685,7 +681,6 @@ async function loadConfigPage() {
     botListCache = await apiJSON('/api/bots');
 
     document.getElementById('config-global-form').innerHTML =
-      checkField('beta_mode', 'Beta 模式(Agent 流水线)', globalConfigCache.beta_mode, '开启=话题规划/记忆/反思流水线; 关闭=旧版直接流式回复(需重启生效)') +
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">📜 上下文压缩(历史对话裁剪)</div>' +
@@ -702,16 +697,6 @@ async function loadConfigPage() {
       formField('reply.segment_max_len', '分段硬上限', globalConfigCache.reply?.segment_max_len, { hint: '字符数,超过即使无标点也强制切' }) +
       formField('reply.segment_delay_min', '分段延迟下限(秒)', globalConfigCache.reply?.segment_delay_min) +
       formField('reply.segment_delay_max', '分段延迟上限(秒)', globalConfigCache.reply?.segment_delay_max) +
-      '<hr style="border-color:var(--border);margin:14px 0">' +
-      '<div class="card-title">🤖 Agent 子系统</div>' +
-      checkField('agent.enabled', '全局启用 Agent 流水线', globalConfigCache.agent?.enabled, '各 bot 是否使用流水线由 bot 私有配置的"启用 Agent 子系统"单独控制') +
-      selectField('agent.llm_modules.main_chat.model', '主回复模型 (main_chat)', globalConfigCache.agent?.llm_modules?.main_chat?.model, globalConfigCache.llm?.models, '群聊/私聊回复的主模型') +
-      selectField('agent.llm_modules.topic_extractor.model', '话题提取模型', globalConfigCache.agent?.llm_modules?.topic_extractor?.model, globalConfigCache.llm?.models, '从群消息中提取话题(可换轻量模型)') +
-      selectField('agent.llm_modules.memory_writer.model', '记忆写入模型', globalConfigCache.agent?.llm_modules?.memory_writer?.model, globalConfigCache.llm?.models, '把对话写入长期记忆') +
-      selectField('agent.llm_modules.user_profile_updater.model', '用户画像模型', globalConfigCache.agent?.llm_modules?.user_profile_updater?.model, globalConfigCache.llm?.models, '更新用户画像标签') +
-      '<div class="hint" style="margin-top:-6px">4 个模块共用模型配置页的 API 地址与 Key; 选项来自"可用模型列表"(模型配置页可增删)</div>' +
-      textareaField('agent.reflex.touch_replies', '戳一戳回复(每行一条)', (globalConfigCache.agent?.reflex?.touch_replies || []).join('\n'), 'bot 私有配置留空时使用这里; 都留空则用内置默认') +
-      '<div class="hint" style="margin-top:-6px">角色名/人设/说话风格无需在此配置 —— 每个 bot 自动使用自己的昵称与人设(BotConfig.persona)</div>' +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🛡 管理员</div>' +
       formField('admins', '管理员 QQ(逗号分隔)', (globalConfigCache.admins || []).join(','), { hint: '可执行 /ban、插件管理命令(如 /群列表 /退群)的管理员 QQ 号' }) +
@@ -793,11 +778,8 @@ async function loadBotConfig() {
         ? `<div class="form-row"><label>绑定 QQ</label><input type="text" value="${b.qq}" readonly style="background:var(--bg2)">
              <button class="btn btn-sm" onclick="unbindBotPrompt()" style="margin-left:8px">解绑</button></div>`
         : '<div class="hint" style="margin:6px 0">⚠️ 未绑定 QQ — 点击上方"🔗 绑定 QQ"</div>') +
-      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为(Agent 子系统的角色名/人设自动取自此处与昵称)') +
-      `<div class="form-row"><label>启用 Agent 子系统</label>
-        <label class="switch"><input type="checkbox" id="cfg-agent_enabled" ${b.agent_enabled !== false ? 'checked' : ''}><span class="slider"></span></label>
-        <div class="hint">开启=本 bot 走话题规划/记忆/反思流水线; 关闭=本 bot 用旧版直接流式回复(其他 bot 不受影响)</div></div>` +
-      textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(agent.reflex.touch_replies)') +
+      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为') +
+      textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(touch_replies)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
       formField('command_prefix', '指令前缀', b.command_prefix) +
@@ -816,7 +798,6 @@ async function saveGlobalConfig() {
     return isNaN(v) ? def : v;
   };
   const data = {
-    beta_mode: document.getElementById('cfg-beta_mode')?.checked ?? true,
     context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     context_summary_enabled: document.getElementById('cfg-context_summary_enabled')?.checked ?? true,
     context_trim_at_rounds: parseInt(document.getElementById('cfg-context_trim_at_rounds').value) || 40,
@@ -830,19 +811,6 @@ async function saveGlobalConfig() {
       segment_max_len: num('cfg-reply.segment_max_len', 60),
       segment_delay_min: num('cfg-reply.segment_delay_min', 0.2),
       segment_delay_max: num('cfg-reply.segment_delay_max', 0.5),
-    },
-    agent: {
-      enabled: document.getElementById('cfg-agent.enabled')?.checked ?? true,
-      llm_modules: {
-        main_chat: { model: document.getElementById('cfg-agent.llm_modules.main_chat.model')?.value ?? '' },
-        topic_extractor: { model: document.getElementById('cfg-agent.llm_modules.topic_extractor.model')?.value ?? '' },
-        memory_writer: { model: document.getElementById('cfg-agent.llm_modules.memory_writer.model')?.value ?? '' },
-        user_profile_updater: { model: document.getElementById('cfg-agent.llm_modules.user_profile_updater.model')?.value ?? '' },
-      },
-      reflex: {
-        touch_replies: (document.getElementById('cfg-agent.reflex.touch_replies')?.value || '')
-          .split('\n').map(s => s.trim()).filter(Boolean),
-      },
     },
     ban: {
       enabled: document.getElementById('cfg-ban.enabled')?.checked ?? true,
@@ -863,7 +831,6 @@ async function saveBotConfig() {
   const data = {
     nickname: document.getElementById('cfg-nickname').value,
     persona: document.getElementById('cfg-persona').value,
-    agent_enabled: document.getElementById('cfg-agent_enabled')?.checked ?? true,
     touch_replies: (document.getElementById('cfg-touch_replies')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
@@ -892,10 +859,7 @@ async function loadModels() {
       formField('chat_base_url', 'API 地址 (Base URL)', c.base_url) +
       formField('chat_api_key', 'API Key (留空保持原值)', '', { type: 'password', hint: '当前 Key 不会回填；只有输入新值才会更新' }) +
       formField('chat_max_tokens', '最大 Token', c.max_tokens) +
-      formField('chat_temperature', '温度 (0-2)', c.temperature) +
-      selectField('chat_fallback_model', '备用模型(连接失败回退)', c.fallback_model,
-        ['(不使用)'].concat(modelCache.models || []),
-        'beta 各模块主模型遇到连接类错误(连接失败/超时)时自动换用此模型重试一次') ;
+      formField('chat_temperature', '温度 (0-2)', c.temperature) ;
     document.getElementById('model-vision-form').innerHTML =
       formField('vision_model', '模型名称', v.model) +
       formField('vision_base_url', 'API 地址 (Base URL)', v.base_url) +
@@ -909,30 +873,10 @@ async function loadModels() {
     document.getElementById('model-summarize-form').innerHTML =
       formField('summarize_temperature', '温度 (0-2)', sum.temperature) +
       formField('summarize_max_tokens', '最大 Token', sum.max_tokens) ;
-    const am = modelCache.agent_modules || {};
-    const moduleNames = {
-      main_chat: '💬 主回复 (main_chat)',
-      topic_extractor: '🔎 话题提取 (topic_extractor)',
-      memory_writer: '🧠 记忆写入 (memory_writer)',
-      user_profile_updater: '👤 画像更新 (user_profile_updater)',
-    };
-    document.getElementById('agent-modules-grid').innerHTML = Object.keys(moduleNames)
-      .filter(name => am[name])
-      .map(name => {
-        const m = am[name];
-        const id = name.replace(/_/g, '-');
-        return `<div class="card" style="margin:0"><div class="card-title">${moduleNames[name]}</div>` +
-          formField('am_' + id + '_model', '模型名称 (留空继承全局)', m.model) +
-          formField('am_' + id + '_base_url', 'API 地址 (留空继承全局)', m.base_url) +
-          formField('am_' + id + '_api_key', 'API Key (留空保持原值)', '', { type: 'password' }) +
-          formField('am_' + id + '_max_tokens', '最大 Token (留空用默认)', m.max_tokens) +
-          formField('am_' + id + '_temperature', '温度 (留空用默认)', m.temperature) +
-          '</div>';
-      }).join('');
-    // 可用模型列表(每行一个) — beta 各 LLM 模块下拉的选项来源
+    // 可用模型列表(每行一个) — 识图模型等下拉的选项来源
     document.getElementById('model-list-form').innerHTML =
       textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
-        'beta 模式下各 LLM 模块从此列表下拉选择; 增删后保存, 与全局同一 API 地址/Key') ;
+        '可用模型统一列表; 增删后保存') ;
   } catch (e) { showToast('加载模型配置失败: ' + e.message, false); }
 }
 
@@ -944,7 +888,6 @@ async function saveModels() {
       ...(document.getElementById('cfg-chat_api_key').value ? { api_key: document.getElementById('cfg-chat_api_key').value } : {}),
       max_tokens: parseInt(document.getElementById('cfg-chat_max_tokens').value) || 4096,
       temperature: parseFloat(document.getElementById('cfg-chat_temperature').value) || 0.7,
-      fallback_model: document.getElementById('cfg-chat_fallback_model')?.value ?? '',
     },
     vision: {
       model: document.getElementById('cfg-vision_model').value,
@@ -958,18 +901,6 @@ async function saveModels() {
       temperature: parseFloat(document.getElementById('cfg-summarize_temperature').value) || 0.3,
       max_tokens: parseInt(document.getElementById('cfg-summarize_max_tokens').value) || 4096,
     },
-    agent_modules: Object.fromEntries(Object.entries(modelCache.agent_modules || {}).map(([name]) => {
-      const id = name.replace(/_/g, '-');
-      const spec = {
-        model: document.getElementById('cfg-am_' + id + '_model')?.value ?? '',
-        base_url: document.getElementById('cfg-am_' + id + '_base_url')?.value ?? '',
-        max_tokens: document.getElementById('cfg-am_' + id + '_max_tokens')?.value ?? '',
-        temperature: document.getElementById('cfg-am_' + id + '_temperature')?.value ?? '',
-      };
-      const key = document.getElementById('cfg-am_' + id + '_api_key')?.value;
-      if (key) spec.api_key = key;
-      return [name, spec];
-    })),
     models: (document.getElementById('cfg-models')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),
   };
