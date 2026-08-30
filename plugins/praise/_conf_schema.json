@@ -28,5 +28,40 @@
     "default": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
     "description": "当日已达上限提示",
     "hint": "同一好友当天达到点赞上限后, 回复此消息且不再调用 API"
+  },
+  "daily_like_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用每日定时点赞",
+    "hint": "每天到点后自动给管理员与其它 bot 点赞"
+  },
+  "daily_like_time": {
+    "type": "string",
+    "default": "08:00",
+    "description": "每日点赞触发时间",
+    "hint": "24 小时制 HH:MM"
+  },
+  "daily_admin_qq": {
+    "type": "int",
+    "default": 3831097597,
+    "description": "每日点赞的管理员 QQ",
+    "hint": "全体 bot 都会给该用户点赞"
+  },
+  "daily_like_times": {
+    "type": "int",
+    "default": 10,
+    "description": "每日点赞每次点数",
+    "hint": "QQ 单次上限 10"
+  },
+  "daily_min_delay": {
+    "type": "int",
+    "default": 10,
+    "description": "点赞间隔最小延时(秒)"
+  },
+  "daily_max_delay": {
+    "type": "int",
+    "default": 30,
+    "description": "点赞间隔最大延时(秒)",
+    "hint": "每组点赞之间随机延时 [min, max] 秒防风控"
   }
 }

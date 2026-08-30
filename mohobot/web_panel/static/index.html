@@ -686,8 +686,6 @@ async function loadConfigPage() {
 
     document.getElementById('config-global-form').innerHTML =
       checkField('beta_mode', 'Beta 模式(Agent 流水线)', globalConfigCache.beta_mode, '开启=话题规划/记忆/反思流水线; 关闭=旧版直接流式回复(需重启生效)') +
-      formField('server.port', 'WebSocket 端口', globalConfigCache.server?.port, { hint: 'OneBot 客户端连接的端口' }) +
-      formField('server.host', '监听地址', globalConfigCache.server?.host) +
       formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">📜 上下文压缩(历史对话裁剪)</div>' +
@@ -811,8 +809,9 @@ async function loadBotConfig() {
 
 async function saveGlobalConfig() {
   const g = document.getElementById('cfg-global-config') ? {} : {};
-  const port = parseInt(document.getElementById('cfg-server.port').value) || 8081;
-  const host = document.getElementById('cfg-server.host').value;
+  // WebSocket 端口/监听地址不在 WebUI 暴露(改配置文件需重启且影响连接), 保存时原样保留
+  const port = globalConfigCache.server?.port ?? 8081;
+  const host = globalConfigCache.server?.host ?? '0.0.0.0';
   const num = (id, def) => {
     const el = document.getElementById(id);
     if (!el) return def;
