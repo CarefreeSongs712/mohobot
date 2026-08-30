@@ -168,6 +168,9 @@ class LLMService:
         self._cfg = global_config
         self._usage_recorder = usage_recorder or UsageRecorder(self._cfg.data_dir)
         self._owns_usage_recorder = usage_recorder is None
+        # 用量记录缓存: (到期时间, 记录列表)。文件有几万行, 全量解析较慢,
+        # dashboard 与用量页 60s 内复用同一份解析结果。
+        self._usage_records_cache: tuple[float, list[dict]] | None = None
         # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
         self._image_cache = image_cache
         # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
@@ -682,6 +685,27 @@ class LLMService:
             chat_id=chat_id,
         )
 
+    async def _load_usage_records(self, ttl: float = 60.0) -> list[dict]:
+        """全量读取 llm_usage.jsonl 并解析, 带 TTL 缓存(默认 60s)。"""
+        import aiofiles
+        now = time.monotonic()
+        if self._usage_records_cache is not None and now < self._usage_records_cache[0]:
+            return self._usage_records_cache[1]
+        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
+        records: list[dict] = []
+        if usage_file.exists():
+            async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
+                async for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        self._usage_records_cache = (now + ttl, records)
+        return records
+
     async def get_session_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
         """按聊天会话聚合 token 用量, 供 WebUI 与 /用量 会话 命令共用。
 
@@ -689,7 +713,6 @@ class LLMService:
         旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
         """
         import datetime
-        import aiofiles
         from mohobot.utils.time_utils import TZ_UTC8
 
         now = datetime.datetime.now(TZ_UTC8)
@@ -701,43 +724,33 @@ class LLMService:
         else:
             since = day_start.timestamp()
 
-        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
         sessions: dict[tuple[str, str, str], dict] = {}
-        if usage_file.exists():
-            async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
-                async for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("time", 0) < since:
-                        continue
-                    pt = int(rec.get("prompt_tokens", 0) or 0)
-                    ct = int(rec.get("completion_tokens", 0) or 0)
-                    tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
-                    key = (
-                        str(rec.get("bot_id", "") or "?"),
-                        str(rec.get("chat_type", "") or ""),
-                        str(rec.get("chat_id", "") or ""),
-                    )
-                    s = sessions.setdefault(key, {
-                        "calls": 0, "prompt_tokens": 0,
-                        "completion_tokens": 0, "total_tokens": 0,
-                        "cached_tokens": 0,
-                        "modules": {},
-                    })
-                    s["calls"] += 1
-                    s["prompt_tokens"] += pt
-                    s["completion_tokens"] += ct
-                    s["total_tokens"] += tt
-                    s["cached_tokens"] += int(rec.get("cached_tokens", 0) or 0)
-                    mod = str(rec.get("module", "") or "其他")
-                    m = s["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
-                    m["calls"] += 1
-                    m["total_tokens"] += tt
+        for rec in await self._load_usage_records():
+            if rec.get("time", 0) < since:
+                continue
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+            key = (
+                str(rec.get("bot_id", "") or "?"),
+                str(rec.get("chat_type", "") or ""),
+                str(rec.get("chat_id", "") or ""),
+            )
+            s = sessions.setdefault(key, {
+                "calls": 0, "prompt_tokens": 0,
+                "completion_tokens": 0, "total_tokens": 0,
+                "cached_tokens": 0,
+                "modules": {},
+            })
+            s["calls"] += 1
+            s["prompt_tokens"] += pt
+            s["completion_tokens"] += ct
+            s["total_tokens"] += tt
+            s["cached_tokens"] += int(rec.get("cached_tokens", 0) or 0)
+            mod = str(rec.get("module", "") or "其他")
+            m = s["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
+            m["calls"] += 1
+            m["total_tokens"] += tt
 
         items = [
             {"bot_id": bid, "chat_type": ctype, "chat_id": cid, **stats}
@@ -833,12 +846,6 @@ class LLMService:
 
         Returns totals + per-model breakdown + today's usage.
         """
-        import aiofiles
-        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
-        per_model: dict[str, dict] = {}
-        today = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
-
         import datetime
         from mohobot.utils.time_utils import TZ_UTC8
         today_start = (
@@ -847,36 +854,29 @@ class LLMService:
             .timestamp()
         )
 
-        if not usage_file.exists():
-            return {"totals": totals, "per_model": per_model, "today": today}
+        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+        per_model: dict[str, dict] = {}
+        today = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
 
-        async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
-            async for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                pt = rec.get("prompt_tokens", 0)
-                ct = rec.get("completion_tokens", 0)
-                tt = rec.get("total_tokens", 0)
-                totals["prompt_tokens"] += pt
-                totals["completion_tokens"] += ct
-                totals["total_tokens"] += tt
-                totals["calls"] += 1
-                model = rec.get("model", "unknown")
-                pm = per_model.setdefault(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-                pm["calls"] += 1
-                pm["prompt_tokens"] += pt
-                pm["completion_tokens"] += ct
-                pm["total_tokens"] += tt
-                if rec.get("time", 0) >= today_start:
-                    today["prompt_tokens"] += pt
-                    today["completion_tokens"] += ct
-                    today["total_tokens"] += tt
-                    today["calls"] += 1
+        for rec in await self._load_usage_records():
+            pt = rec.get("prompt_tokens", 0)
+            ct = rec.get("completion_tokens", 0)
+            tt = rec.get("total_tokens", 0)
+            totals["prompt_tokens"] += pt
+            totals["completion_tokens"] += ct
+            totals["total_tokens"] += tt
+            totals["calls"] += 1
+            model = rec.get("model", "unknown")
+            pm = per_model.setdefault(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            pm["calls"] += 1
+            pm["prompt_tokens"] += pt
+            pm["completion_tokens"] += ct
+            pm["total_tokens"] += tt
+            if rec.get("time", 0) >= today_start:
+                today["prompt_tokens"] += pt
+                today["completion_tokens"] += ct
+                today["total_tokens"] += tt
+                today["calls"] += 1
 
         return {"totals": totals, "per_model": per_model, "today": today}
 

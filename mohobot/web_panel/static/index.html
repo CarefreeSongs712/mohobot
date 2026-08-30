@@ -596,6 +596,10 @@ function init() {
 
 // ═══════════════ 1. Dashboard ═══════════════
 async function loadDashboard() {
+  // 先渲染占位提示, 统计聚合较慢时用户有感知
+  document.getElementById('dash-system').innerHTML = '<div class="card"><div class="card-title">⏳ 正在加载系统与框架统计…</div><div class="stat-label">首次加载需要扫描历史消息与用量记录</div></div>';
+  document.querySelector('#dash-bots-table tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-dim)">⏳ 加载中…</td></tr>';
+  document.getElementById('dash-llm').innerHTML = '<div class="stat-label">⏳ 正在统计 LLM 用量…</div>';
   try {
     const d = await apiJSON('/api/dashboard');
 
@@ -706,6 +710,8 @@ const USAGE_MODULE_NAMES = {
 };
 
 async function loadUsageSessions() {
+  document.querySelector('#usage-table tbody').innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">⏳ 正在统计用量…</td></tr>';
+  document.getElementById('usage-totals').textContent = '统计中…';
   try {
     usageData = await apiJSON('/api/usage/sessions?range=' + usageRange);
     renderUsageTable();
