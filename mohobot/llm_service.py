@@ -726,12 +726,14 @@ class LLMService:
                     s = sessions.setdefault(key, {
                         "calls": 0, "prompt_tokens": 0,
                         "completion_tokens": 0, "total_tokens": 0,
+                        "cached_tokens": 0,
                         "modules": {},
                     })
                     s["calls"] += 1
                     s["prompt_tokens"] += pt
                     s["completion_tokens"] += ct
                     s["total_tokens"] += tt
+                    s["cached_tokens"] += int(rec.get("cached_tokens", 0) or 0)
                     mod = str(rec.get("module", "") or "其他")
                     m = s["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
                     m["calls"] += 1
@@ -747,6 +749,7 @@ class LLMService:
             "prompt_tokens": sum(s["prompt_tokens"] for s in sessions.values()),
             "completion_tokens": sum(s["completion_tokens"] for s in sessions.values()),
             "total_tokens": sum(s["total_tokens"] for s in sessions.values()),
+            "cached_tokens": sum(s["cached_tokens"] for s in sessions.values()),
         }
         return {"range": range_key, "totals": totals, "sessions": items}
 

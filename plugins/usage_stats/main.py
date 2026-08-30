@@ -117,7 +117,7 @@ class Plugin:
 
         records = self._load_records(since)
         sessions: dict[tuple[str, str, str], dict] = {}
-        totals = {"total": 0, "calls": 0}
+        totals = {"total": 0, "calls": 0, "prompt": 0, "cached": 0}
         for rec in records:
             pt = int(rec.get("prompt_tokens", 0) or 0)
             ct = int(rec.get("completion_tokens", 0) or 0)
@@ -127,22 +127,28 @@ class Plugin:
                 str(rec.get("chat_type", "") or ""),
                 str(rec.get("chat_id", "") or ""),
             )
-            s = sessions.setdefault(key, {"total": 0, "calls": 0, "modules": {}})
+            s = sessions.setdefault(key, {"total": 0, "calls": 0, "prompt": 0, "cached": 0, "modules": {}})
             s["total"] += total
             s["calls"] += 1
+            s["prompt"] += pt
+            s["cached"] += int(rec.get("cached_tokens", 0) or 0)
             mod = str(rec.get("module", "") or "其他")
             s["modules"][mod] = s["modules"].get(mod, 0) + total
             totals["total"] += total
             totals["calls"] += 1
+            totals["prompt"] += pt
+            totals["cached"] += int(rec.get("cached_tokens", 0) or 0)
 
         if not sessions:
             return f"📊 {title}没有用量记录。"
 
         top = sorted(sessions.items(), key=lambda kv: -kv[1]["total"])[:10]
+        cache_pct = totals["prompt"] and round(totals["cached"] / totals["prompt"] * 100)
         lines = [f"📊 {title} 会话用量 Top {min(10, len(top))}"]
         lines.append(
             f"合计: {totals['total']:,} token, {totals['calls']} 次调用, "
-            f"共 {len(sessions)} 个会话 (完整列表见 WebUI 用量统计页)"
+            f"缓存命中 {cache_pct or 0}%, 共 {len(sessions)} 个会话 "
+            f"(完整列表见 WebUI 用量统计页)"
         )
         lines.append("")
         for rank, ((bid, ctype, cid), s) in enumerate(top, 1):
@@ -151,9 +157,10 @@ class Plugin:
             else:
                 name = ("群 " if ctype == "group" else "私聊 ") + cid
             avg = s["total"] // max(1, s["calls"])
+            s_pct = s["prompt"] and round(s["cached"] / s["prompt"] * 100)
             lines.append(
                 f"{rank}. [{bid}] {name}: {s['total']:,} token, "
-                f"{s['calls']} 次, 平均 {avg:,}"
+                f"{s['calls']} 次, 平均 {avg:,}, 缓存 {s_pct or 0}%"
             )
             mods = sorted(s["modules"].items(), key=lambda kv: -kv[1])[:3]
             detail = ", ".join(

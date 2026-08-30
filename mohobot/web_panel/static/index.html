@@ -281,6 +281,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
           <th class="sortable" onclick="usageSortBy('total_tokens')">总 Token <span id="usage-arrow-total_tokens"></span></th>
           <th class="sortable" onclick="usageSortBy('calls')">调用次数 <span id="usage-arrow-calls"></span></th>
           <th class="sortable" onclick="usageSortBy('avg')">平均每次 <span id="usage-arrow-avg"></span></th>
+          <th class="sortable" onclick="usageSortBy('cache')">缓存命中 <span id="usage-arrow-cache"></span></th>
           <th>输入 / 输出</th>
         </tr></thead>
         <tbody></tbody>
@@ -717,18 +718,21 @@ function renderUsageTable() {
   const key = usageSortKey;
   if (key === 'calls') sessions.sort((a, b) => b.calls - a.calls);
   else if (key === 'avg') sessions.sort((a, b) => (b.total_tokens / Math.max(1, b.calls)) - (a.total_tokens / Math.max(1, a.calls)));
+  else if (key === 'cache') sessions.sort((a, b) => (b.cached_tokens / Math.max(1, b.prompt_tokens)) - (a.cached_tokens / Math.max(1, a.prompt_tokens)));
   else sessions.sort((a, b) => b.total_tokens - a.total_tokens);
 
-  for (const k of ['total_tokens', 'calls', 'avg']) {
+  for (const k of ['total_tokens', 'calls', 'avg', 'cache']) {
     const el = document.getElementById('usage-arrow-' + k);
     if (el) el.textContent = (key === k) ? '▼' : '';
   }
   const t = usageData.totals || {};
+  const cachePct = t.prompt_tokens ? Math.round((t.cached_tokens || 0) / t.prompt_tokens * 100) : 0;
   document.getElementById('usage-totals').textContent =
-    `合计 ${t.total_tokens || 0} token（输入 ${t.prompt_tokens || 0} / 输出 ${t.completion_tokens || 0}），${t.calls || 0} 次调用，${sessions.length} 个会话`;
+    `合计 ${t.total_tokens || 0} token（输入 ${t.prompt_tokens || 0} / 输出 ${t.completion_tokens || 0}，缓存命中 ${t.cached_tokens || 0}，占输入 ${cachePct}%），${t.calls || 0} 次调用，${sessions.length} 个会话`;
 
   const rows = sessions.map((s, i) => {
     const avg = Math.floor(s.total_tokens / Math.max(1, s.calls));
+    const sCachePct = s.prompt_tokens ? Math.round((s.cached_tokens || 0) / s.prompt_tokens * 100) : 0;
     const mods = Object.entries(s.modules || {})
       .sort((a, b) => b[1].total_tokens - a[1].total_tokens)
       .map(([m, st]) => `<div>${USAGE_MODULE_NAMES[m] || m}: ${st.total_tokens} token × ${st.calls} 次</div>`)
@@ -736,12 +740,13 @@ function renderUsageTable() {
     return `<tr class="usage-row" onclick="usageToggle(${i})">
         <td>${s.bot_id || '?'}</td><td>${usageSessionName(s)}</td>
         <td>${s.total_tokens}</td><td>${s.calls}</td><td>${avg}</td>
+        <td>${sCachePct}%</td>
         <td>${s.prompt_tokens} / ${s.completion_tokens}</td>
       </tr>
       <tr class="usage-detail" id="usage-detail-${i}" style="display:none">
-        <td colspan="6" style="padding-left:28px;color:var(--text-dim)">${mods}</td>
+        <td colspan="7" style="padding-left:28px;color:var(--text-dim)">${mods}</td>
       </tr>`;
-  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
   document.querySelector('#usage-table tbody').innerHTML = rows;
 }
 

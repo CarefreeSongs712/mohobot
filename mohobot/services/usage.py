@@ -34,6 +34,12 @@ class UsageRecorder:
         if usage is None:
             return
         try:
+            # 缓存命中 token: OpenAI 风格 prompt_tokens_details.cached_tokens,
+            # DeepSeek 风格 prompt_cache_hit_tokens; 两者都没有则记 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            cached = int(getattr(details, "cached_tokens", 0) or 0)
+            if not cached:
+                cached = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
             record = {
                 "time": time.time(),
                 "request_id": request_id or uuid.uuid4().hex,
@@ -47,6 +53,7 @@ class UsageRecorder:
                 "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                "cached_tokens": cached,
             }
             await self._writer.append(record)
         except Exception as exc:

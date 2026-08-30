@@ -18,6 +18,11 @@ async def test_usage_recorder_writes_chat_fields() -> None:
         prompt_tokens = 11
         completion_tokens = 7
         total_tokens = 18
+        prompt_tokens_details = type("D", (), {"cached_tokens": 8})()
+
+    class _UsageDeepSeek(_Usage):
+        prompt_tokens_details = None
+        prompt_cache_hit_tokens = 6
 
     with tempfile.TemporaryDirectory() as td:
         rec = UsageRecorder(td)
@@ -26,12 +31,18 @@ async def test_usage_recorder_writes_chat_fields() -> None:
             module="chat", kind="chat",
             chat_type="group", chat_id="123456",
         )
+        await rec.record(
+            _UsageDeepSeek(), model="test-model", bot_id="bot_001",
+            module="chat", kind="chat",
+            chat_type="group", chat_id="123456",
+        )
         await rec.close()
-        path = Path(td) / "stats" / "llm_usage.jsonl"
-        data = json.loads(path.read_text(encoding="utf-8").strip())
-        assert data["chat_type"] == "group", data
-        assert data["chat_id"] == "123456", data
-        assert data["total_tokens"] == 18, data
+        lines = (Path(td) / "stats" / "llm_usage.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        d1, d2 = json.loads(lines[0]), json.loads(lines[1])
+        assert d1["chat_type"] == "group" and d1["chat_id"] == "123456"
+        assert d1["total_tokens"] == 18
+        assert d1["cached_tokens"] == 8, d1
+        assert d2["cached_tokens"] == 6, d2  # DeepSeek 风格回退
 
 
 def _make_plugin(tmp_data: str):
@@ -55,7 +66,8 @@ def test_session_reply_aggregates_and_ranks() -> None:
         # 群 A: 两次调用共 300 token → Top1
         {"time": now, "bot_id": "bot_001", "module": "chat",
          "chat_type": "group", "chat_id": "111",
-         "prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200},
+         "prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200,
+         "cached_tokens": 80},
         {"time": now, "bot_id": "bot_001", "module": "summarize",
          "chat_type": "group", "chat_id": "111",
          "prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 100},
@@ -85,6 +97,9 @@ def test_session_reply_aggregates_and_ranks() -> None:
     idx_priv = next(i for i, l in enumerate(lines) if "私聊 222" in l)
     assert idx_group < idx_priv
     assert "300" in lines[idx_group]  # 200 + 100
+    # 缓存占比: 群 111 缓存 80 / 输入 150 ≈ 53%
+    assert "缓存" in lines[idx_group]
+    assert "53%" in lines[idx_group] or "缓存 53%" in lines[idx_group]
     # module 细分: 群 111 明细行包含 上下文总结
     assert "上下文总结" in lines[idx_group + 1]
     # 90 天前的记录不计入 7d
