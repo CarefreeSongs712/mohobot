@@ -83,6 +83,9 @@ body {
 .stat-bar .fill.danger { background: var(--red); }
 /* ── Tables ── */
 table { width: 100%; border-collapse: collapse; }
+th.sortable { cursor: pointer; user-select: none; }
+tr.usage-row { cursor: pointer; }
+tr.usage-detail td { border-top: none; font-size: 13px; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
 th { color: var(--text-dim); font-weight: 500; font-size: 12px; }
 tbody tr:hover { background: rgba(255,255,255,.02); }
@@ -226,6 +229,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   <div class="logo"><span class="dot"></span> Mohobot</div>
   <nav id="nav">
     <div class="nav-item active" data-page="dashboard"><span class="icon">📊</span> 数据总览</div>
+    <div class="nav-item" data-page="usage"><span class="icon">📈</span> 用量统计</div>
     <div class="nav-item" data-page="config"><span class="icon">⚙️</span> 配置文件</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
@@ -260,7 +264,31 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     </div>
   </div>
 
-  <!-- 2. Config -->
+  <!-- 2. Usage -->
+  <div class="page" id="page-usage">
+    <h2>📈 用量统计</h2>
+    <div class="subtitle">每个聊天会话的 LLM Token 消耗（点击表头切换排序，点击行展开调用类型明细）</div>
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+      <button class="btn small" id="usage-range-today" onclick="usageSetRange('today')">今日</button>
+      <button class="btn small secondary" id="usage-range-7d" onclick="usageSetRange('7d')">近 7 天</button>
+      <button class="btn small secondary" id="usage-range-30d" onclick="usageSetRange('30d')">近 30 天</button>
+      <span class="hint" id="usage-totals" style="margin-left:12px"></span>
+    </div>
+    <div class="card">
+      <table id="usage-table">
+        <thead><tr>
+          <th>Bot</th><th>会话</th>
+          <th class="sortable" onclick="usageSortBy('total_tokens')">总 Token <span id="usage-arrow-total_tokens"></span></th>
+          <th class="sortable" onclick="usageSortBy('calls')">调用次数 <span id="usage-arrow-calls"></span></th>
+          <th class="sortable" onclick="usageSortBy('avg')">平均每次 <span id="usage-arrow-avg"></span></th>
+          <th>输入 / 输出</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 3. Config -->
   <div class="page" id="page-config">
     <h2>⚙️ 配置文件</h2>
     <div class="subtitle">可视化编辑全局配置与 Bot 配置</div>
@@ -548,6 +576,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
     document.getElementById('page-' + item.dataset.page).classList.add('active');
     switch (item.dataset.page) {
       case 'dashboard': loadDashboard(); break;
+      case 'usage': loadUsageSessions(); break;
       case 'config': loadConfigPage(); break;
       case 'models': loadModels(); break;
       case 'plugins': loadPlugins(); break;
@@ -644,7 +673,84 @@ async function loadDashboard() {
   } catch (e) { showToast('加载失败: ' + e.message, false); }
 }
 
-// ═══════════════ 2. Config ═══════════════
+// ═══════════════ 2. Usage sessions ═══════════════
+let usageRange = 'today';
+let usageSortKey = 'total_tokens';   // total_tokens | calls | avg
+let usageData = null;
+
+function usageSetRange(r) {
+  usageRange = r;
+  ['today', '7d', '30d'].forEach(k => {
+    const btn = document.getElementById('usage-range-' + k);
+    btn.className = 'btn small' + (k === r ? '' : ' secondary');
+  });
+  loadUsageSessions();
+}
+
+function usageSortBy(key) {
+  usageSortKey = (usageSortKey === key) ? '' : key;  // 再点一次恢复默认 token 降序
+  renderUsageTable();
+}
+
+function usageSessionName(s) {
+  if (!s.chat_id) return '未知会话';
+  return (s.chat_type === 'group' ? '群 ' : '私聊 ') + s.chat_id;
+}
+
+const USAGE_MODULE_NAMES = {
+  main_chat: '主回复', chat: '对话', topic_extractor: '话题提取',
+  memory_writer: '记忆写入', user_profile_updater: '用户画像',
+  vision: '视觉识别', summarize: '上下文总结', summary: '上下文总结',
+  emotion: '情感分析', 其他: '其他',
+};
+
+async function loadUsageSessions() {
+  try {
+    usageData = await apiJSON('/api/usage/sessions?range=' + usageRange);
+    renderUsageTable();
+  } catch (e) { showToast('加载失败: ' + e.message, false); }
+}
+
+function renderUsageTable() {
+  if (!usageData) return;
+  const sessions = (usageData.sessions || []).slice();
+  const key = usageSortKey;
+  if (key === 'calls') sessions.sort((a, b) => b.calls - a.calls);
+  else if (key === 'avg') sessions.sort((a, b) => (b.total_tokens / Math.max(1, b.calls)) - (a.total_tokens / Math.max(1, a.calls)));
+  else sessions.sort((a, b) => b.total_tokens - a.total_tokens);
+
+  for (const k of ['total_tokens', 'calls', 'avg']) {
+    const el = document.getElementById('usage-arrow-' + k);
+    if (el) el.textContent = (key === k) ? '▼' : '';
+  }
+  const t = usageData.totals || {};
+  document.getElementById('usage-totals').textContent =
+    `合计 ${t.total_tokens || 0} token（输入 ${t.prompt_tokens || 0} / 输出 ${t.completion_tokens || 0}），${t.calls || 0} 次调用，${sessions.length} 个会话`;
+
+  const rows = sessions.map((s, i) => {
+    const avg = Math.floor(s.total_tokens / Math.max(1, s.calls));
+    const mods = Object.entries(s.modules || {})
+      .sort((a, b) => b[1].total_tokens - a[1].total_tokens)
+      .map(([m, st]) => `<div>${USAGE_MODULE_NAMES[m] || m}: ${st.total_tokens} token × ${st.calls} 次</div>`)
+      .join('') || '<div>—</div>';
+    return `<tr class="usage-row" onclick="usageToggle(${i})">
+        <td>${s.bot_id || '?'}</td><td>${usageSessionName(s)}</td>
+        <td>${s.total_tokens}</td><td>${s.calls}</td><td>${avg}</td>
+        <td>${s.prompt_tokens} / ${s.completion_tokens}</td>
+      </tr>
+      <tr class="usage-detail" id="usage-detail-${i}" style="display:none">
+        <td colspan="6" style="padding-left:28px;color:var(--text-dim)">${mods}</td>
+      </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
+  document.querySelector('#usage-table tbody').innerHTML = rows;
+}
+
+function usageToggle(i) {
+  const el = document.getElementById('usage-detail-' + i);
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+// ═══════════════ 3. Config ═══════════════
 let globalConfigCache = null;
 let botConfigCache = null;
 let botListCache = [];

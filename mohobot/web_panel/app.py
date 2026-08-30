@@ -329,6 +329,20 @@ class WebPanel:
                 "llm_usage": usage,
             }
 
+        @app.get("/api/usage/sessions")
+        async def usage_sessions(request: Request, range: str = "today"):
+            """按聊天会话聚合的 token 用量(今日/近7天/近30天)。"""
+            await _require_auth(request)
+            if range not in {"today", "7d", "30d"}:
+                range = "today"
+            if self._llm_service is None:
+                return {"range": range, "totals": {}, "sessions": []}
+            try:
+                return await self._llm_service.get_session_usage_stats(range)
+            except Exception as e:
+                logger.error(f"Failed to get session usage: {e}")
+                return {"range": range, "totals": {}, "sessions": []}
+
         # ── 2. Configuration (配置文件) ───────────────────────
 
         @app.get("/api/config")

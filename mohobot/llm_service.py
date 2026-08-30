@@ -657,14 +657,98 @@ class LLMService:
         module: str = "chat",
         kind: str = "chat",
     ) -> None:
-        """Record one provider request through the shared async recorder."""
+        """Record one provider request through the shared async recorder.
+
+        会话维度(chat_type/chat_id)从消息事件提取, 供按会话统计用量;
+        无事件上下文的调用(总结/情感/识图)记为未知会话。
+        """
+        chat_type = ""
+        chat_id = ""
+        if event is not None:
+            mt = str(getattr(event, "message_type", "") or "")
+            if mt == "group":
+                chat_type = "group"
+                chat_id = str(getattr(event, "group_id", "") or "")
+            elif mt == "private":
+                chat_type = "private"
+                chat_id = str(getattr(event, "user_id", "") or "")
         await self._usage_recorder.record(
             usage,
             model=model,
             bot_id=bot_id,
             module=module,
             kind=kind,
+            chat_type=chat_type,
+            chat_id=chat_id,
         )
+
+    async def get_session_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
+        """按聊天会话聚合 token 用量, 供 WebUI 与 /用量 会话 命令共用。
+
+        range_key: today(今日) / 7d(近7天) / 30d(近30天)。
+        旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
+        """
+        import datetime
+        import aiofiles
+        from mohobot.utils.time_utils import TZ_UTC8
+
+        now = datetime.datetime.now(TZ_UTC8)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if range_key == "7d":
+            since = (day_start - datetime.timedelta(days=6)).timestamp()
+        elif range_key == "30d":
+            since = (day_start - datetime.timedelta(days=29)).timestamp()
+        else:
+            since = day_start.timestamp()
+
+        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
+        sessions: dict[tuple[str, str, str], dict] = {}
+        if usage_file.exists():
+            async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
+                async for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("time", 0) < since:
+                        continue
+                    pt = int(rec.get("prompt_tokens", 0) or 0)
+                    ct = int(rec.get("completion_tokens", 0) or 0)
+                    tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+                    key = (
+                        str(rec.get("bot_id", "") or "?"),
+                        str(rec.get("chat_type", "") or ""),
+                        str(rec.get("chat_id", "") or ""),
+                    )
+                    s = sessions.setdefault(key, {
+                        "calls": 0, "prompt_tokens": 0,
+                        "completion_tokens": 0, "total_tokens": 0,
+                        "modules": {},
+                    })
+                    s["calls"] += 1
+                    s["prompt_tokens"] += pt
+                    s["completion_tokens"] += ct
+                    s["total_tokens"] += tt
+                    mod = str(rec.get("module", "") or "其他")
+                    m = s["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
+                    m["calls"] += 1
+                    m["total_tokens"] += tt
+
+        items = [
+            {"bot_id": bid, "chat_type": ctype, "chat_id": cid, **stats}
+            for (bid, ctype, cid), stats in sessions.items()
+        ]
+        items.sort(key=lambda x: -x["total_tokens"])
+        totals = {
+            "calls": sum(s["calls"] for s in sessions.values()),
+            "prompt_tokens": sum(s["prompt_tokens"] for s in sessions.values()),
+            "completion_tokens": sum(s["completion_tokens"] for s in sessions.values()),
+            "total_tokens": sum(s["total_tokens"] for s in sessions.values()),
+        }
+        return {"range": range_key, "totals": totals, "sessions": items}
 
     async def summarize_context(self, entries: list[dict]) -> str | None:
         """总结一段较早的对话(上下文压缩用, 复用全局 chat_model)。

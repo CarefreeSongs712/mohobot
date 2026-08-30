@@ -3,6 +3,9 @@
 用法(管理员):
   /用量            今日用量(各 bot 消耗 + 调用次数 + 平均每条 token + 按调用类型分类)
   /用量 7d         近 7 天用量
+  /用量 会话 [今日|7d|30d]
+                   按聊天会话(群/私聊)统计用量, 默认今日, 只显示 Top 10
+                   (完整列表与排序请用 WebUI「用量统计」页)
 
 数据源: data/stats/llm_usage.jsonl(LLMModule 与 LLMService 统一写入)。
 调用类型(module): main_chat(主回复) / topic_extractor(话题提取) /
@@ -40,7 +43,7 @@ class Plugin:
 
     info = {
         "commands": [
-            {"name": "用量", "desc": "用量 [7d] — 查看今日/近7天 token 消耗统计(管理员)"},
+            {"name": "用量", "desc": "用量 [7d|会话 [今日|7d|30d]] — token 消耗统计, 支持按会话(管理员)"},
         ],
     }
 
@@ -95,6 +98,71 @@ class Plugin:
             logger.warning(f"读取用量记录失败: {e}")
         return records
 
+    def _session_reply(self, args: list[str]) -> str:
+        """/用量 会话 [今日|7d|30d] — 按聊天会话聚合 Top 10。"""
+        from mohobot.utils.time_utils import TZ_UTC8
+        from datetime import datetime as _dt, timedelta as _td
+
+        now = _dt.now(TZ_UTC8)
+        day_start = _dt(now.year, now.month, now.day, tzinfo=TZ_UTC8)
+        if args and args[0] in ("7d", "7天", "近7天"):
+            since = (day_start - _td(days=6)).timestamp()
+            title = "近 7 天"
+        elif args and args[0] in ("30d", "30天", "近30天"):
+            since = (day_start - _td(days=29)).timestamp()
+            title = "近 30 天"
+        else:
+            since = day_start.timestamp()
+            title = "今日"
+
+        records = self._load_records(since)
+        sessions: dict[tuple[str, str, str], dict] = {}
+        totals = {"total": 0, "calls": 0}
+        for rec in records:
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            total = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+            key = (
+                str(rec.get("bot_id", "?") or "?"),
+                str(rec.get("chat_type", "") or ""),
+                str(rec.get("chat_id", "") or ""),
+            )
+            s = sessions.setdefault(key, {"total": 0, "calls": 0, "modules": {}})
+            s["total"] += total
+            s["calls"] += 1
+            mod = str(rec.get("module", "") or "其他")
+            s["modules"][mod] = s["modules"].get(mod, 0) + total
+            totals["total"] += total
+            totals["calls"] += 1
+
+        if not sessions:
+            return f"📊 {title}没有用量记录。"
+
+        top = sorted(sessions.items(), key=lambda kv: -kv[1]["total"])[:10]
+        lines = [f"📊 {title} 会话用量 Top {min(10, len(top))}"]
+        lines.append(
+            f"合计: {totals['total']:,} token, {totals['calls']} 次调用, "
+            f"共 {len(sessions)} 个会话 (完整列表见 WebUI 用量统计页)"
+        )
+        lines.append("")
+        for rank, ((bid, ctype, cid), s) in enumerate(top, 1):
+            if not cid:
+                name = "未知会话"
+            else:
+                name = ("群 " if ctype == "group" else "私聊 ") + cid
+            avg = s["total"] // max(1, s["calls"])
+            lines.append(
+                f"{rank}. [{bid}] {name}: {s['total']:,} token, "
+                f"{s['calls']} 次, 平均 {avg:,}"
+            )
+            mods = sorted(s["modules"].items(), key=lambda kv: -kv[1])[:3]
+            detail = ", ".join(
+                f"{_MODULE_NAMES.get(m, m)} {v:,}" for m, v in mods
+            )
+            if detail:
+                lines.append(f"    · {detail}")
+        return "\n".join(lines)
+
     async def on_message(
         self,
         bot_id: str,
@@ -108,6 +176,9 @@ class Plugin:
             return (True, "❌ 你没有权限查看用量统计。")
 
         args = text[len("/用量"):].strip().split()
+        # 子命令: /用量 会话 [今日|7d|30d] — 按聊天会话统计 Top 10
+        if args and args[0] in ("会话", "sessions"):
+            return (True, self._session_reply(args[1:] if len(args) > 1 else []))
         days = 7 if args and args[0] in ("7d", "7天", "近7天") else 1
 
         from mohobot.utils.time_utils import TZ_UTC8
