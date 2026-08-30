@@ -72,61 +72,10 @@ async def test_future_cleanup() -> None:
     print("[3] future cleanup OK")
 
 
-async def test_chroma_where_and_embed_api() -> None:
-    """Chroma 兼容性: 多字段 where 需 $and 包装; embedding 函数需
-    embed_query/embed_documents 方法(chromadb >= 1.5)。"""
-    from mohobot.agent.vector_store import ChromaVectorStore, _OpenAICompatEmbedding
-
-    # 1. where 规范化
-    n = ChromaVectorStore._normalize_where
-    assert n(None) is None
-    assert n({"user_id": "1"}) == {"user_id": "1"}
-    assert n({"user_id": "1", "owner_character_id": "2"}) == {
-        "$and": [{"user_id": "1"}, {"owner_character_id": "2"}],
-    }
-
-    # 2. embedding 包装类必须实现 chromadb 1.5 协议方法
-    emb = _OpenAICompatEmbedding("m", "http://x", "k")
-    assert emb.name() == "openai_compat"
-    for method in ("embed_query", "embed_documents"):
-        assert callable(getattr(emb, method, None)), f"缺少 {method}()"
-
-    # 3. search 传入多字段 where 时被 $and 包装(用假 collection 验证)
-    class FakeCollection:
-        def __init__(self):
-            self.last_where = None
-
-        def query(self, **kwargs):
-            self.last_where = kwargs.get("where")
-            return {"ids": [], "documents": [], "metadatas": [], "distances": []}
-
-    fake = FakeCollection()
-    vs = ChromaVectorStore.__new__(ChromaVectorStore)  # 跳过真实初始化
-    vs._collection = fake
-    vs._executor = None
-
-    async def _fake_executor(fn):
-        return fn()
-
-    import mohobot.agent.vector_store as vs_mod
-    orig = vs_mod.asyncio.get_event_loop().run_in_executor
-    vs_mod.asyncio.get_event_loop().run_in_executor = lambda *a, **k: _fake_executor(a[1])
-
-    try:
-        await vs.search("u1", "q", where={"user_id": "u1", "owner_character_id": "b1"})
-        assert fake.last_where == {"$and": [{"user_id": "u1"}, {"owner_character_id": "b1"}]}, fake.last_where
-        await vs.search("u1", "q")
-        assert fake.last_where == {"user_id": "u1"}, fake.last_where
-    finally:
-        vs_mod.asyncio.get_event_loop().run_in_executor = orig
-    print("[4] chroma where $and + embed_query/embed_documents OK")
-
-
 async def main() -> None:
     await test_reconnect_race()
     await test_json_update_atomicity()
     await test_future_cleanup()
-    await test_chroma_where_and_embed_api()
     print("\nALL AUDIT FIX TESTS PASSED")
 
 

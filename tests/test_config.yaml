@@ -25,25 +25,6 @@ reply:
   segment_min_len: 12
   segment_reply: true
   stream: true
-agent:
-  enabled: true
-  persona:
-    character_name: Mohobot
-    character_persona: 测试人格
-    speaking_style: 简洁
-  llm_modules: {}
-  memory:
-    vector_store:
-      enabled: false
-  main_chat: {}
-  topic_planner:
-    listen_timer:
-      timeout: 0.5
-  topic_replier: {}
-  reflection_worker:
-    enabled: true
-  reflex:
-    enabled: true
 server:
   host: 127.0.0.1
   max_size: 10485760

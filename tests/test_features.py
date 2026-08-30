@@ -1,4 +1,4 @@
-"""新功能测试: send_image / get_nickname / status 图片渲染 / divination 插件 / beta_mode。"""
+"""新功能测试: send_image / get_nickname / status 图片渲染 / divination 插件。"""
 
 import asyncio
 import base64
@@ -138,29 +138,11 @@ async def test_divination_plugin() -> None:
     print("[4] divination 触发/每日一次/持久化 OK")
 
 
-async def test_beta_mode_config() -> None:
-    from mohobot.models.config import GlobalConfig
-    import tempfile as _tf, os, yaml
-
-    tmp = _tf.mkdtemp()
-    path = os.path.join(tmp, "g.yaml")
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump({"beta_mode": False}, f, allow_unicode=True)
-    cfg = GlobalConfig.load(path)
-    assert cfg.beta_mode is False
-    # 缺失时默认 true
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump({"server": {"port": 1}}, f, allow_unicode=True)
-    assert GlobalConfig.load(path).beta_mode is True
-    print("[5] beta_mode 配置解析 OK")
-
-
 async def main() -> None:
     await test_send_image()
     await test_get_nickname()
     await test_status_image_render()
     await test_divination_plugin()
-    await test_beta_mode_config()
     print("\nALL NEW FEATURE TESTS PASSED")
 
 

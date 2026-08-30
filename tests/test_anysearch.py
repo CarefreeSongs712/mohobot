@@ -83,39 +83,6 @@ async def test_client() -> None:
     print("[1] AnySearchClient JSON-RPC OK, calls:", len(calls))
 
 
-async def test_beta_fact_search() -> None:
-    """beta 模式: CharacterSubconscious 用 anysearch 搜 fact_constraints。"""
-    from mohobot.agent.character_mind import CharacterSubconscious
-
-    class FakeAnySearch:
-        async def safe_search(self, query, max_results=5):
-            return f"【结果】{query}的百科资料"
-
-    mind = CharacterSubconscious.__new__(CharacterSubconscious)
-    mind.anysearch = FakeAnySearch()
-    mind.song_knowledge = None  # 测试环境不加载歌曲知识库
-    mind.logger = __import__("loguru").logger
-
-    hits = await mind.search_fact_constraints_for_topic(["最新科技新闻", "洛天依出道日期"])
-    assert len(hits) == 2, hits
-    assert "【结果】最新科技新闻的百科资料" in hits[0]
-    assert "[搜索:" in hits[0]
-
-    # 超过 2 个查询只搜前 2 个
-    hits2 = await mind.search_fact_constraints_for_topic(["a", "b", "c", "d"])
-    assert len(hits2) == 2
-
-    # 歌曲类约束 → 走知识库(未配置 → 降级为空, 不报错)
-    hits3 = await mind.search_fact_constraints_for_topic(["《千年食谱颂》"])
-    assert hits3 == []
-
-    # 无 client / 空查询 → 空列表(降级)
-    mind.anysearch = None
-    assert await mind.search_fact_constraints_for_topic(["x"]) == []
-    assert await mind.search_fact_constraints_for_topic([]) == []
-    print("[2] beta 模式 fact 搜索注入 OK")
-
-
 async def test_llm_tool() -> None:
     """旧路径: LLMService._execute_tool 调 anysearch_search。"""
     from mohobot.llm_service import LLMService
@@ -197,7 +164,6 @@ async def test_search_plugin() -> None:
 
 async def main() -> None:
     await test_client()
-    await test_beta_fact_search()
     await test_llm_tool()
     await test_search_plugin()
     print("\nALL ANYSEARCH TESTS PASSED")

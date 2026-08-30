@@ -1,6 +1,6 @@
-"""Startup/shutdown smoke test for the full MohobotApplication (beta branch).
+"""Startup/shutdown smoke test for the full MohobotApplication.
 
-Boots the real app (WS server + web panel + agent subsystem), then shuts down.
+Boots the real app (WS server + web panel), then shuts down.
 No OneBot client connects; we only verify wiring doesn't crash.
 """
 
@@ -24,12 +24,9 @@ async def main() -> None:
     try:
         await app.startup()
         assert app._database_manager is not None, "DatabaseManager not initialized"
-        assert app._agent_manager is not None, "BotAgentManager not initialized"
         assert app._message_handler is not None
-        assert app._message_handler._agent_manager is app._agent_manager
         print("startup OK")
         print(f"  db: {app._config.database.folder}/{app._config.database.file}")
-        print(f"  agent enabled: {app._config.agent.enabled}")
     finally:
         await app.shutdown()
     print("shutdown OK")

@@ -59,7 +59,7 @@ def make_handler(ws):
     from mohobot.bot_manager import BotManager, BotInstance
     from mohobot.models.config import BotConfig
     bm = BotManager(data_dir=tempfile.mkdtemp())
-    bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000, nickname="测试", agent_enabled=False))
+    bm._bots["bot_001"] = BotInstance("bot_001", None, BotConfig(qq=1000, nickname="测试"))
     ws._bot_manager = bm
     handler = MessageHandler(
         ws_server=ws,
@@ -188,26 +188,6 @@ def test_webui_path_fields_removed():
     assert '"log_dir", "data_dir", "plugins_dir"' not in src, "后端不应接受路径字段"
     assert '"database" in data' not in src, "后端不应接受 database 段"
     print("[+] WebUI 路径字段移除 OK")
-
-
-# ── 4. beta 4 LLM 默认值 ────────────────────────────────────
-
-def test_beta_llm_defaults():
-    cfg = GlobalConfig()  # 默认配置
-    m = cfg.agent.llm_modules
-    assert m["main_chat"]["model"] == "DeepSeek-V4-Flash"
-    assert m["topic_extractor"]["model"] == "DeepSeek-V4-Flash"
-    assert m["memory_writer"]["model"] == "Qwen3-8B"
-    assert m["user_profile_updater"]["model"] == "Qwen3-8B"
-    assert "DeepSeek-V4-Flash" in cfg.llm.models and "Qwen3-8B" in cfg.llm.models
-    # 旧配置(空 model)自动填充
-    from mohobot.models.config import _fill_agent_llm_defaults
-    old = {"main_chat": {"model": ""}, "memory_writer": {"model": "  "}}
-    filled = _fill_agent_llm_defaults(old)
-    assert filled["main_chat"]["model"] == "DeepSeek-V4-Flash"
-    assert filled["memory_writer"]["model"] == "Qwen3-8B"
-    assert "topic_extractor" in filled, "缺失模块应补齐默认"
-    print("[+] beta LLM 默认值 OK")
 
 
 async def _main() -> int:

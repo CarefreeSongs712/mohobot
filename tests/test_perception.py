@@ -1,9 +1,7 @@
 """环境感知插件与框架注入测试:
 1. on_perception: 时间/节假日/农历/节气/群聊环境(含群名 API+缓存/消息类型)
 2. collect_perception: 多插件收集拼接
-3. message_handler: 感知缓存刷新 + legacy 注入(system 段, 不写 context)
-   + agent _agent_perception_provider
-4. runtime._attach_perception 拼接(仅回复生成路径)
+3. message_handler: 感知缓存刷新 + 注入(system 段, 不写 context)
 """
 
 import sys
@@ -145,48 +143,7 @@ async def test_message_handler_injection():
     on_disk = await handler._ctx_mgr.load_context("bot_001", "group", "888888")
     assert on_disk == [], "感知不应写入 context 文件"
 
-    # agent: _agent_perception_provider 返回缓存
-    perc = await handler._agent_perception_provider("bot_001", "group", "888888")
-    assert "发送时间" in perc
-    assert await handler._agent_perception_provider("bot_001", "private", "1") == ""
     print("[+] message_handler 注入 OK")
-
-
-# ── 4. runtime 拼接(仅回复生成) ────────────────────────────
-
-async def test_runtime_attach():
-    from mohobot.agent.runtime import SessionPipeline, BotAgentManager
-
-    # 静态拼接方法(定义于 SessionPipeline, 回复路径 _reply_one_topic 使用)
-    assert SessionPipeline._attach_perception("旧上下文", "感知1") == \
-        "旧上下文\n\n【环境感知】\n感知1"
-    assert SessionPipeline._attach_perception("", "感知1") == "【环境感知】\n感知1"
-    assert SessionPipeline._attach_perception("旧上下文", "") == "旧上下文"
-
-    # get_or_create 传递 perception_provider
-    mgr = BotAgentManager({"agent": {}}, None)
-    calls = []
-
-    async def fake_perc(bot_id, chat_type, chat_id):
-        calls.append((bot_id, chat_type, chat_id))
-        return "环境信息"
-
-    async def fake_ctx(bot_id, chat_type, chat_id):
-        return "对话历史"
-
-    rt = mgr.get_or_create(
-        "bot_001", bot_nickname="测试", persona="人设",
-        context_provider=fake_ctx, perception_provider=fake_perc,
-    )
-    assert rt.perception_provider is not None
-    # 通过 SessionPipeline 实例调用 _get_perception(感知缓存路径)
-    pipe = SessionPipeline.__new__(SessionPipeline)  # 仅测试方法绑定
-    pipe.runtime = rt
-    pipe.chat_type = "group"
-    pipe.chat_id = "888888"
-    text = await pipe._get_perception()
-    assert text == "环境信息", text
-    print("[+] runtime 拼接 OK")
 
 
 async def _main() -> int:

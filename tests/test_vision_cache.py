@@ -91,68 +91,6 @@ async def test_image_cache() -> None:
     print("[1] ImageCache URL/phash 缓存 + 降级 OK")
 
 
-async def test_llm_module_usage() -> None:
-    from mohobot.agent.llm_module import LLMModule
-
-    tmp = Path(tempfile.mkdtemp(prefix="usage_"))
-
-    class FakeUsage:
-        prompt_tokens = 100
-        completion_tokens = 50
-        total_tokens = 150
-
-    class FakeChoice:
-        class _Msg:
-            content = "ok"
-        message = _Msg()
-
-    class FakeResp:
-        choices = [FakeChoice()]
-        usage = FakeUsage()
-
-    class FakeClient:
-        async def chat(self, **kw):
-            return FakeResp()
-
-        class completions:
-            @staticmethod
-            async def create(**kw):
-                return FakeResp()
-
-    # 打桩: 替换 AsyncOpenAI 返回的 client
-    mod = sys.modules["mohobot.agent.llm_module"]
-
-    class FakeOpenAI:
-        def __init__(self, *a, **kw):
-            self.chat = FakeClient()
-            self.chat.completions = FakeClient.completions
-
-    orig = mod.AsyncOpenAI
-    mod.AsyncOpenAI = FakeOpenAI
-    try:
-        lm = LLMModule(
-            "main_chat", {}, prompt_name="topic_reply_prompt",
-            model="m", base_url="http://x", api_key="k",
-            data_dir=str(tmp), bot_id="bot_001",
-        )
-        out = await lm.generate_response(
-            character_name="A", character_persona="p", speaking_style="s",
-            user_persona="u", preference_context="", conversation_history="h",
-            current_time="t", reply_topic="r", sing_requirement="n",
-            extra_knowledge="无",
-        )
-        assert out == "ok"
-    finally:
-        mod.AsyncOpenAI = orig
-
-    usage_file = tmp / "stats" / "llm_usage.jsonl"
-    assert usage_file.exists(), "usage 文件应被写入"
-    rec = json.loads(usage_file.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert rec["bot_id"] == "bot_001" and rec["module"] == "main_chat"
-    assert rec["total_tokens"] == 150 and rec["model"] == "m"
-    print("[2] LLMModule usage 统计 OK:", rec)
-
-
 async def test_describe_image_file_uri() -> None:
     """describe_image_file 应生成 data URI 并传给 describe_image。"""
     import mohobot.llm_service as lsvc
@@ -180,12 +118,11 @@ async def test_describe_image_file_uri() -> None:
     assert out == "一只猫"
     assert captured["url"].startswith("data:image/png;base64,"), captured["url"][:40]
     assert b64.b64decode(captured["url"].split(",", 1)[1]) == png
-    print("[3] describe_image_file data URI OK")
+    print("[2] describe_image_file data URI OK")
 
 
 async def main() -> None:
     await test_image_cache()
-    await test_llm_module_usage()
     await test_describe_image_file_uri()
     print("\nALL VISION/USAGE TESTS PASSED")
 

@@ -1,9 +1,6 @@
 """戳一戳固定回复配置测试:
-1. 内置默认列表存在
-2. CharacterReflex: bot 私有 > 全局配置 > 内置默认
-3. set_touch_replies 运行时更新
-4. message_handler._resolve_touch_replies 优先级
-5. 非 agent bot poke 也能回复(所有 bot 生效)
+1. message_handler._resolve_touch_replies 优先级: bot 私有 > 全局配置 > 内置默认
+2. 所有 bot 的 poke 都能固定回复
 """
 
 import asyncio
@@ -23,33 +20,6 @@ def group_poke_event(user_id: int = 1001, group_id: int = 2001, target_id: int =
         notice_type="notify", sub_type="poke",
         user_id=user_id, group_id=group_id, target_id=target_id,
     )
-
-
-async def test_reflex_priority() -> None:
-    """CharacterReflex 优先级: bot 私有 > 全局 > 默认。"""
-    from mohobot.agent.character_reflex import (
-        DEFAULT_TOUCH_REPLIES, CharacterReflex,
-    )
-
-    # 默认
-    r = CharacterReflex(config={})
-    assert r.touch_replies == DEFAULT_TOUCH_REPLIES
-
-    # 全局配置(agent.reflex.touch_replies)
-    r = CharacterReflex(config={"touch_replies": ["全局回复1", "全局回复2"]})
-    assert r.touch_replies == ["全局回复1", "全局回复2"]
-
-    # bot 私有覆盖全局
-    r = CharacterReflex(
-        config={"touch_replies": ["全局回复1"]},
-        touch_replies=["bot回复1", "bot回复2"],
-    )
-    assert r.touch_replies == ["bot回复1", "bot回复2"]
-
-    # set_touch_replies: 清空 bot 私有后回退全局
-    r.set_touch_replies([])
-    assert r.touch_replies == ["全局回复1"]
-    print("[1] CharacterReflex 优先级 OK")
 
 
 async def test_resolve_touch_replies() -> None:
@@ -72,7 +42,7 @@ async def test_resolve_touch_replies() -> None:
 
     tmp = tempfile.mkdtemp(prefix="touch_")
     cfg = GlobalConfig()
-    cfg.agent.reflex["touch_replies"] = ["全局戳1", "全局戳2"]
+    cfg.touch_replies = ["全局戳1", "全局戳2"]
     bm = BotManager(data_dir=tmp)
 
     handler = MessageHandler(
@@ -109,13 +79,13 @@ async def test_resolve_touch_replies() -> None:
         reply_config=ReplyConfig(),
         global_config=cfg2,
     )
-    from mohobot.agent.character_reflex import DEFAULT_TOUCH_REPLIES
-    assert handler2._resolve_touch_replies("bot_a") == DEFAULT_TOUCH_REPLIES
-    print("[2] _resolve_touch_replies 优先级 OK")
+    from mohobot.message_handler import MessageHandler as _MH
+    assert handler2._resolve_touch_replies("bot_a") == _MH.DEFAULT_TOUCH_REPLIES
+    print("[1] _resolve_touch_replies 优先级 OK")
 
 
 async def test_poke_all_bots() -> None:
-    """agent_enabled=false 的 bot 戳一戳也会固定回复。"""
+    """所有 bot 的戳一戳都走固定回复。"""
     from mohobot.bot_manager import BotInstance, BotManager
     from mohobot.context_manager import ContextManager
     from mohobot.message_handler import MessageHandler
@@ -134,12 +104,11 @@ async def test_poke_all_bots() -> None:
 
     tmp = tempfile.mkdtemp(prefix="poke_")
     cfg = GlobalConfig()
-    cfg.agent.reflex["touch_replies"] = ["全局戳回复"]
+    cfg.touch_replies = ["全局戳回复"]
     bm = BotManager(data_dir=tmp)
-    # agent_enabled=false 的 bot(旧版路径)
     bm._bots["bot_003"] = BotInstance(
         "bot_003", None,
-        BotConfig(qq=1, nickname="墨清弦", persona="你是墨清弦。", agent_enabled=False),
+        BotConfig(qq=1, nickname="墨清弦", persona="你是墨清弦。"),
     )
     ws = FakeWS(bm)
     handler = MessageHandler(
@@ -150,7 +119,6 @@ async def test_poke_all_bots() -> None:
         data_dir=tmp,
         reply_config=ReplyConfig(),
         global_config=cfg,
-        agent_manager=None,
     )
 
     ev = group_poke_event(user_id=555, group_id=777, target_id=1)
@@ -159,7 +127,7 @@ async def test_poke_all_bots() -> None:
     bot_id, group_id, msg = ws.sent[0]
     assert bot_id == "bot_003" and group_id == 777
     assert msg == "全局戳回复", msg
-    print("[3] 非 agent bot 戳一戳固定回复 OK")
+    print("[2] 戳一戳固定回复 OK")
 
 
 async def test_poke_ignore_other_target() -> None:
@@ -184,7 +152,7 @@ async def test_poke_ignore_other_target() -> None:
     bm = BotManager(data_dir=tmp)
     bm._bots["bot_003"] = BotInstance(
         "bot_003", None,
-        BotConfig(qq=999, nickname="墨清弦", agent_enabled=False),
+        BotConfig(qq=999, nickname="墨清弦"),
     )
     ws = FakeWS(bm)
     handler = MessageHandler(
@@ -198,11 +166,10 @@ async def test_poke_ignore_other_target() -> None:
     # target_id=888 ≠ bot QQ 999 → 忽略
     await handler._handle_poke("bot_003", group_poke_event(user_id=555, group_id=777, target_id=888))
     assert len(ws.sent) == 0
-    print("[4] 戳别人忽略 OK")
+    print("[3] 戳别人忽略 OK")
 
 
 async def main() -> None:
-    await test_reflex_priority()
     await test_resolve_touch_replies()
     await test_poke_all_bots()
     await test_poke_ignore_other_target()

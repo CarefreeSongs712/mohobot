@@ -1,7 +1,6 @@
 """回归测试: 旧版直接流式回复路径必须使用 bot 私有配置的人设。
 
-bug 背景: bot_003 关闭 agent 子系统(agent_enabled=false)后走旧版路径,
-但 message_handler 调 LLMService.chat / chat_stream 时没有传 bot_config,
+bug 背景: message_handler 调 LLMService.chat / chat_stream 时没有传 bot_config,
 导致 _build_messages 里 persona 回退成默认 "你是 Mohobot..." —— 人设丢失。
 """
 
@@ -77,7 +76,7 @@ async def test_stream_reply_passes_bot_config() -> None:
     bot_manager = BotManager(data_dir=tmp)
     bot_manager._bots["bot_003"] = BotInstance(
         "bot_003", None,
-        BotConfig(qq=3616174427, nickname="墨清弦", persona="你是墨清弦。", agent_enabled=False),
+        BotConfig(qq=3616174427, nickname="墨清弦", persona="你是墨清弦。"),
     )
     spy = SpyLLMService()
     handler = MessageHandler(
@@ -88,7 +87,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         data_dir=tmp,
         context_max_rounds=30,
         reply_config=ReplyConfig(stream=True, segment_reply=True),
-        agent_manager=None,
         database_manager=None,
     )
 
@@ -107,7 +105,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         data_dir=tmp,
         context_max_rounds=30,
         reply_config=ReplyConfig(stream=True, segment_reply=False),
-        agent_manager=None,
         database_manager=None,
     )
     await handler2._stream_llm_reply("bot_003", ev, [], {})
@@ -123,7 +120,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         data_dir=tmp,
         context_max_rounds=30,
         reply_config=ReplyConfig(stream=False, segment_reply=True),
-        agent_manager=None,
         database_manager=None,
     )
     await handler3._stream_llm_reply("bot_003", ev, [], {})

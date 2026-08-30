@@ -1,7 +1,7 @@
 """四个新功能测试:
 1. praise 插件配置化: 自定义点赞总数/每次点数/成功/失败/上限消息模板
 2. 群聊最近消息: 缓冲记录 + 格式化 + 满 N 淘汰
-3. 注入: agent 路径(_agent_context_provider) 与 legacy 路径(context 附加 system 段)
+3. 注入: legacy 路径(context 附加 system 段)
 4. 配置关闭(0)时不记录/不注入
 """
 
@@ -115,18 +115,10 @@ async def test_group_recent_record_and_format():
     print("[+] 群聊最近消息缓冲 OK")
 
 
-async def test_group_recent_inject_agent_and_legacy():
+async def test_group_recent_inject_legacy():
     handler = make_handler(recent_count=10)
     await handler._note_group_recent("bot_001", make_group_event(2001, "今晚吃什么", time=1000000))
     await handler._note_group_recent("bot_001", make_group_event(2002, "火锅吧", time=1000001))
-
-    # agent 路径: _agent_context_provider 群聊追加最近消息
-    ctx_text = await handler._agent_context_provider("bot_001", "group", "888888")
-    assert "【群聊最近消息】" in ctx_text and "火锅吧" in ctx_text, ctx_text
-
-    # 私聊不注入
-    ctx_private = await handler._agent_context_provider("bot_001", "private", "2001")
-    assert "【群聊最近消息】" not in ctx_private
 
     # legacy 路径: context 附加 system 段(不写回文件)
     context = await handler._ctx_mgr.load_context("bot_001", "group", "888888")
@@ -136,16 +128,13 @@ async def test_group_recent_inject_agent_and_legacy():
     # 文件未被污染
     on_disk = await handler._ctx_mgr.load_context("bot_001", "group", "888888")
     assert on_disk == context == []
-    print("[+] agent/legacy 注入 OK")
+    print("[+] legacy 注入 OK")
 
 
 async def test_group_recent_disabled():
     handler = make_handler(recent_count=0)
     await handler._note_group_recent("bot_001", make_group_event(2001, "你好"))
     assert await handler._format_group_recent("bot_001", 888888) == ""
-    # 关闭时注入为空
-    ctx_text = await handler._agent_context_provider("bot_001", "group", "888888")
-    assert "【群聊最近消息】" not in ctx_text
     print("[+] 关闭开关 OK")
 
 

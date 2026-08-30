@@ -151,7 +151,7 @@ async def test_handler_concurrent_messages() -> None:
     async def worker(i: int) -> None:
         bot_id = f"bot_{i:03d}"
         bm._bots[bot_id] = BotInstance(
-            bot_id, None, BotConfig(qq=100 + i, nickname=f"B{i}", agent_enabled=False),
+            bot_id, None, BotConfig(qq=100 + i, nickname=f"B{i}"),
         )
         for n in range(5):
             ev = GroupMessageEvent(

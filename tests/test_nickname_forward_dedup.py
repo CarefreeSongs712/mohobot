@@ -54,7 +54,7 @@ async def test_nickname_ttl_and_strip() -> None:
     ws = WSServer(bot_manager=BotManager(data_dir=tempfile.mkdtemp(prefix="nk_")), port=0)
     fw = NickWS()
     ws._bot_manager._bots["bot_001"] = BotInstance(
-        "bot_001", None, BotConfig(qq=1000, nickname="B1", agent_enabled=False),
+        "bot_001", None, BotConfig(qq=1000, nickname="B1"),
     )
     ws.send_to_bot = fw.send_to_bot  # 替换为 mock
 
@@ -122,7 +122,7 @@ async def test_forward_long_reply() -> None:
 
     bm = BotManager(data_dir=tempfile.mkdtemp(prefix="fw_"))
     bm._bots["bot_001"] = BotInstance(
-        "bot_001", None, BotConfig(qq=1000, nickname="天依beta", agent_enabled=False),
+        "bot_001", None, BotConfig(qq=1000, nickname="天依beta"),
     )
     ws = ForwardWS(bm)
     handler = MessageHandler(
@@ -196,10 +196,10 @@ async def test_global_command_dedup() -> None:
 
     bm = BotManager(data_dir=tempfile.mkdtemp(prefix="dd_"))
     bm._bots["bot_002"] = BotInstance(
-        "bot_002", None, BotConfig(qq=1000, nickname="B2", agent_enabled=False),
+        "bot_002", None, BotConfig(qq=1000, nickname="B2"),
     )
     bm._bots["bot_003"] = BotInstance(
-        "bot_003", None, BotConfig(qq=1001, nickname="B3", agent_enabled=False),
+        "bot_003", None, BotConfig(qq=1001, nickname="B3"),
     )
     ws = ForwardWS(bm)
     handler = MessageHandler(
@@ -244,7 +244,7 @@ async def test_global_command_dedup() -> None:
     # 群内只有自己一个 bot → 不去重
     bm2 = BotManager(data_dir=tempfile.mkdtemp(prefix="dd2_"))
     bm2._bots["bot_002"] = BotInstance(
-        "bot_002", None, BotConfig(qq=1000, nickname="B2", agent_enabled=False),
+        "bot_002", None, BotConfig(qq=1000, nickname="B2"),
     )
     bm2.note_group_message("bot_002", 888888)
     ws2 = ForwardWS(bm2)

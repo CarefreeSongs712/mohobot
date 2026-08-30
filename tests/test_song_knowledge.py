@@ -210,64 +210,6 @@ async def test_legacy_injection() -> None:
     print("[4] Legacy 路径注入 OK")
 
 
-async def test_agent_annotation_flow() -> None:
-    """Agent 路径: 消息 → payload["song_annotation"] → UnreadMessage → 回复 prompt。"""
-    from mohobot.agent.domain import ChatInputEvent, UnreadMessage
-    from mohobot.music_knowledge import SongInfoMatcher
-
-    tmp = tempfile.mkdtemp(prefix="agentinj_")
-    _TMP_DIRS.append(tmp)
-    seed_songs(tmp)
-    cfg = make_config(tmp)
-    m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
-                        db_file=cfg["song_database"]["db_file"])
-
-    content = "你会唱《千年食谱颂》吗"
-    match = m.match(content)
-    assert match is not None
-    song_annotation = match.build_annotation()
-    terms = [f"《{match.name}》是一首歌"]
-
-    # 模拟 message_handler._handle_agent_path
-    ev = ChatInputEvent(
-        event_type="user_message",
-        user_id="123456",
-        character_id="bot_001",
-        content=content,
-        terms=terms,
-        payload={"speaker": "123456-测试", "song_annotation": song_annotation},
-    )
-    assert ev.payload["song_annotation"]
-
-    # UnreadMessage 传递
-    um = UnreadMessage(
-        message_id="m1", content=content, terms=terms, speaker="123456-测试",
-        song_annotation=song_annotation,
-    )
-    assert um.song_annotation == song_annotation
-    print("[5] Agent 注解流转 OK")
-
-
-async def test_no_sing_chain() -> None:
-    """删除唱歌: 解析器不再解析 [sing], 无 sing_plan 字段。"""
-    from mohobot.agent.main_chat import StructuredResponseParser
-    from mohobot.agent.domain import TopicAttentionPlan
-
-    parser = StructuredResponseParser()
-    items = parser.parse("[中性]好呀\n[sing]千年食谱颂")
-    # [sing] 行不产生回复对象(唱歌已移除)
-    contents = [it.get_content() for it in items]
-    assert contents == ["好呀"], contents
-
-    # TopicAttentionPlan 无 sing_plan 字段
-    import dataclasses
-    fields = {f.name for f in dataclasses.fields(TopicAttentionPlan)}
-    assert "sing_plan" not in fields
-    assert "sing_attempts" not in {f.name for f in dataclasses.fields(
-        __import__("mohobot.agent.domain", fromlist=["ExtractedTopic"]).ExtractedTopic)}
-    print("[6] 唱歌链路已删除 OK")
-
-
 async def test_legacy_schema_migration() -> None:
     """旧 songs 表缺 credits 列时, pool 初始化应原地补列并保留数据。"""
     import sqlite3
@@ -320,8 +262,6 @@ async def main() -> None:
     await test_matcher()
     await test_annotation_format()
     await test_legacy_injection()
-    await test_agent_annotation_flow()
-    await test_no_sing_chain()
     await test_legacy_schema_migration()
     await test_real_db_dialogue_cases()
     print("\nALL SONG KNOWLEDGE TESTS PASSED")
