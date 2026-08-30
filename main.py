@@ -16,7 +16,6 @@ from typing import Any
 from loguru import logger
 
 from mohobot import __version__
-from mohobot.agent.runtime import BotAgentManager
 from mohobot.bot_manager import BotManager
 from mohobot.context_manager import ContextManager
 from mohobot.db.database_manager import DatabaseManager
@@ -50,7 +49,6 @@ class MohobotApplication:
         self._plugin_system: PluginSystem | None = None
         self._web_panel: WebPanel | None = None
         self._database_manager: DatabaseManager | None = None
-        self._agent_manager: BotAgentManager | None = None
         self._usage_recorder: UsageRecorder | None = None
         self._song_matcher: Any | None = None
         self._song_info_service: Any | None = None
@@ -82,10 +80,10 @@ class MohobotApplication:
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
         self._usage_recorder = UsageRecorder(self._config.data_dir)
 
-        # 全局歌曲知识库(识别 + LLM 前注入; 供 legacy 与 agent 路径共用)。
+        # 全局歌曲知识库(识别 + LLM 前注入)。
         # music_knowledge 未启用/初始化失败 → 降级(正常聊天不受影响)。
         self._song_matcher: SongInfoMatcher | None = None
-        music_cfg = (self._config.agent.music_knowledge or {})
+        music_cfg = (self._config.music_knowledge or {})
         if music_cfg.get("enabled", True):
             try:
                 from mohobot.music_knowledge import SongInfoMatcher, SongInfoService
@@ -144,8 +142,7 @@ class MohobotApplication:
         plugin_count = await self._plugin_system.load_plugins()
         logger.info(f"Loaded {plugin_count} plugin(s)")
 
-        # 5. Database + Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
-        #    beta_mode=false: 保留数据库(面板备份/数据管理可用), 回复走旧版路径
+        # 5. Database (会话持久化 + 面板备份/数据管理)
         if self._config.database.enabled:
             db_folder = self._config.database.folder
             if db_folder.startswith("./"):
@@ -154,17 +151,6 @@ class MohobotApplication:
                 db_folder=db_folder,
                 db_file=self._config.database.file,
             )
-            if self._config.beta_mode and self._config.agent.enabled:
-                self._agent_manager = BotAgentManager(
-                    self._config.to_dict(),
-                    self._database_manager,
-                    usage_recorder=self._usage_recorder,
-                )
-                logger.info("Beta mode enabled — agent 流水线 per-bot runtimes")
-            else:
-                logger.info(
-                    "Beta mode disabled (or agent disabled) — using legacy LLM reply path"
-                )
 
         # 6. Initialize message handler
         self._message_handler = MessageHandler(
@@ -175,7 +161,6 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
             context_max_rounds=self._config.context_max_rounds,
             reply_config=self._config.reply,
-            agent_manager=self._agent_manager,
             database_manager=self._database_manager,
             image_cache=self._image_cache,
             global_config=self._config,
@@ -303,11 +288,6 @@ class MohobotApplication:
         logger.info("Shutting down Mohobot...")
         self._running = False
 
-        # Stop agent runtimes before closing their shared callbacks/resources.
-        if self._agent_manager:
-            await self._agent_manager.stop_all()
-        self._agent_manager = None
-
         # Stop web panel (await its server task so the port is freed
         # before a restart rebinds it — otherwise "Address already in use")
         if self._web_panel:
@@ -349,9 +329,6 @@ class MohobotApplication:
         # Close file writers
         if self._message_handler:
             await self._message_handler.close()
-
-        # Stop agent runtimes (already stopped before dependency teardown).
-        self._agent_manager = None
 
         if self._usage_recorder:
             await self._usage_recorder.close()

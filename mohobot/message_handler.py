@@ -41,9 +41,7 @@ class MessageHandler:
       3. Classify: notice/meta → plugin hooks; message → process
       4. Group gate: only respond if @mentioned, replied-to, or command
       5. Interceptors run (commands → keywords → plugins)
-      6a. Agent path (agent.enabled): 会话流水线(话题规划→回复→反思),
-          history 写入数据库(与 Agent-LuoTianyi 共享 SQLite)
-      6b. Legacy path: Context load → LLM streaming → reply-quote first chunk
+      6. Legacy path: Context load → LLM streaming → reply-quote first chunk
       7. Save context after reply completes
     """
 
@@ -56,7 +54,6 @@ class MessageHandler:
         data_dir: str = "./data",
         context_max_rounds: int = 30,
         reply_config=None,
-        agent_manager=None,
         database_manager=None,
         image_cache=None,
         global_config=None,
@@ -71,11 +68,9 @@ class MessageHandler:
         self._interceptors: list = []  # Ordered list of interceptors
         self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
         self._writer_registry: dict[str, JSONLWriter] = {}
-        # 全局歌曲匹配器(识别 + 注解, legacy/agent 共用; 未注入时降级)
+        # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
         self._song_matcher = song_matcher
 
-        # Agent subsystem (移植自 Agent-LuoTianyi, 按 bot 隔离)
-        self._agent_manager = agent_manager
         self._db = database_manager
         # 图片缓存(下载 + phash 去重 + 描述缓存)
         self._image_cache = image_cache
@@ -246,7 +241,7 @@ class MessageHandler:
             await self._note_group_recent(bot_id, event)
 
         # ── 环境感知: 每次消息刷新缓存(时间/节假日/农历/节气/群聊环境) ──
-        # 供 LLM 回复请求注入(agent 与 legacy 路径), 不写入 context
+        # 供 LLM 回复请求注入, 不写入 context
         if self._plugins is not None:
             try:
                 chat_type = self._get_chat_type(event)
@@ -314,14 +309,6 @@ class MessageHandler:
         chat_type = self._get_chat_type(event)
         chat_id = self._get_chat_id(event)
 
-        # Agent 子系统路径 (话题规划 → 回复 → 反思, history 写入数据库)
-        # 启用条件: 全局 beta_mode + 全局 agent.enabled + 该 bot 私有 agent_enabled
-        if self._agent_manager is not None and self._bot_agent_enabled(bot_id):
-            runtime = self._ensure_agent_runtime(bot_id)
-            if runtime is not None:
-                await self._handle_agent_path(bot_id, event, raw, chat_type, chat_id)
-                return
-
         # ── Legacy path: streaming with reply-quote ──
         # Load session context (+ 群聊最近消息临时注入, 不写回 context 文件)
         context = await self._build_legacy_context(bot_id, chat_type, chat_id)
@@ -346,130 +333,11 @@ class MessageHandler:
                 bot_id, chat_type, chat_id, [user_msg, ai_msg],
                 max_rounds=self._context_max_rounds,
             )
-            # history → 数据库 (与 Agent-LuoTianyi 共享 SQLite)
+            # history → 数据库 (SQLite)
             self._persist_legacy_turn(
                 bot_id, chat_type, chat_id, event,
                 user_msg["content"], full_reply,
             )
-
-    # ── Agent 子系统路径 ───────────────────────────────────────
-
-    def _bot_agent_enabled(self, bot_id: str) -> bool:
-        """该 bot 是否启用 Agent 子系统(读取 BotConfig.agent_enabled)。"""
-        if self._ws and self._ws._bot_manager:
-            instance = self._ws._bot_manager.get(bot_id)
-            if instance is not None:
-                return bool(getattr(instance.config, "agent_enabled", True))
-        return True
-
-    def _ensure_agent_runtime(self, bot_id: str):
-        """惰性创建 bot 的 agent runtime 并接线(按 bot 隔离)。
-
-        每次调用都同步 bot 的最新昵称/人设/戳回复(web 面板修改 config.json 后
-        立即生效), 各 bot 的子系统人设彼此独立。
-        """
-        instance = None
-        if self._ws and self._ws._bot_manager:
-            instance = self._ws._bot_manager.get(bot_id)
-        nickname = instance.nickname if instance else f"Bot-{bot_id}"
-        persona = instance.config.persona if instance else ""
-        touch_replies = instance.config.touch_replies if instance else []
-
-        runtime = self._agent_manager.get(bot_id)
-        if runtime is None:
-            runtime = self._agent_manager.get_or_create(
-                bot_id,
-                bot_nickname=nickname,
-                persona=persona,
-                touch_replies=touch_replies,
-                context_provider=self._agent_context_provider,
-                perception_provider=self._agent_perception_provider,
-            )
-            runtime.set_reply_handler(self._agent_reply_handler)
-            logger.info(f"Agent runtime wired for bot {bot_id}")
-        else:
-            runtime.sync_persona(nickname, persona)
-            runtime.sync_touch_replies(touch_replies)
-        return runtime
-
-    async def _handle_agent_path(
-        self, bot_id: str, event: MessageEvent, raw: dict,
-        chat_type: str, chat_id: str,
-    ) -> None:
-        """把消息交给 agent 流水线 (话题规划 → 回复 → 反思)。
-
-        会话上下文(contexts)仍由 ContextManager 管理(不变):
-        用户消息立即入上下文, agent 回复在发送时入上下文。
-        图片消息: 调用视觉模型描述首张图片,描述作为消息内容。
-        """
-        from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
-        from mohobot.utils.cq_code import extract_image_urls
-
-        text = extract_plain_text(event.message) or ""
-        image_urls = extract_image_urls(event.message)
-
-        # VLM: 描述首张图片(限流已剔除图片时此处为空,不会重复描述)
-        vision_desc = ""
-        if image_urls:
-            vision_desc = await self._describe_first_image(bot_id, image_urls[0])
-
-        if text and vision_desc:
-            content = f"{text}（图片内容：{vision_desc}）"
-        elif vision_desc:
-            content = f"[图片]（{vision_desc}）"
-        elif image_urls:
-            content = text or "[图片]"
-        else:
-            content = text
-
-        speaker = self._speaker_role(event)
-
-        # 确保 runtime 已创建(首条消息时惰性创建), 再取歌曲链接器
-        runtime = self._ensure_agent_runtime(bot_id)
-
-        # 歌曲实体检出 + 注解(全局识别, 私聊+群聊, legacy/agent 共用):
-        # 识别结果:
-        #   - 注解文案存入 payload["song_annotation"], 由 agent 在回复生成时
-        #     紧跟用户消息下方注入(不写入 context);
-        #   - 识别出的歌名继续作为 terms(话题提取 prompt 的实体提示)。
-        terms: list[str] = []
-        song_annotation = ""
-        try:
-            if self._song_matcher is not None:
-                text_for_match = content or extract_plain_text(event.message) or ""
-                match = self._song_matcher.match(text_for_match)
-                if match is not None:
-                    song_annotation = match.build_annotation()
-                    terms.append(f"《{match.name}》是一首歌")
-        except Exception as e:
-            logger.debug(f"Song entity extraction failed: {e}")
-
-        chat_event = ChatInputEvent(
-            event_type=ChatInputEventType.USER_MESSAGE,
-            user_id=chat_id,          # 会话即"用户"(私聊=QQ号, 群聊=群号)
-            character_id=bot_id,
-            content=content,
-            message_id=str(event.message_id),
-            message_type="image" if image_urls else "text",
-            timestamp=float(event.time or 0),
-            terms=terms,
-            payload={
-                "speaker": speaker,
-                "chat_type": chat_type,
-                "chat_id": chat_id,
-                "qq": str(event.user_id),
-                "song_annotation": song_annotation,
-            },
-        )
-
-        # 用户消息写入会话上下文(context 不变, 仍由 ContextManager 管理)
-        await self._ctx_mgr.append_context(
-            bot_id, chat_type, chat_id,
-            [{"role": speaker, "content": content or "[图片]", "timestamp": event.time}],
-            max_rounds=self._context_max_rounds,
-        )
-
-        await runtime.handle_event(chat_type, chat_id, chat_event)
 
     # ── 图片引用归一化 ─────────────────────────────────────────
 
@@ -570,7 +438,7 @@ class MessageHandler:
     async def _song_annotation_for_event(self, event: MessageEvent) -> str:
         """识别消息中的歌曲并返回【歌曲信息】注解段(无命中返回 "")。
 
-        供 legacy 路径(LLMService 注入)与 agent 路径共用。
+        供 LLMService 注入。
         消息原文(含图片描述)做识别; 库为空/失败 → 空串, 正常走 LLM。
         """
         if self._song_matcher is None:
@@ -704,104 +572,6 @@ class MessageHandler:
             })
         return context
 
-    async def _describe_first_image(self, bot_id: str, url: str) -> str:
-        """识别图片并返回描述。
-
-        走 ImageCache: 下载到本地 → phash 去重 → 描述缓存(全局共享, 单飞去重);
-        未命中时调视觉模型(本地文件 base64, 不依赖网关访问外网)。
-        下载失败/无缓存时降级为占位符。
-        """
-        if self._image_cache is None or self._llm is None:
-            return ""
-        try:
-            _, description = await self._image_cache.get_or_describe(
-                url, vision_callback=self._vision_callback(bot_id),
-            )
-        except Exception as e:
-            logger.warning(f"Image cache failed for bot {bot_id}: {e}")
-            return ""
-        return description or ""
-
-    async def _agent_perception_provider(
-        self, bot_id: str, chat_type: str, chat_id: str,
-    ) -> str:
-        """环境感知提供者(agent 回复生成路径): 返回最近一次收集的感知文本。"""
-        return self._perception_text.get((bot_id, chat_type, chat_id), "")
-
-    async def _agent_context_provider(
-        self, bot_id: str, chat_type: str, chat_id: str,
-    ) -> str:
-        """把 ContextManager 的会话上下文格式化为纯文本(供话题提取/回复使用)。"""
-        try:
-            context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
-        except Exception as e:
-            logger.debug(f"Load agent context failed: {e}")
-            return ""
-        if not isinstance(context, list):
-            return ""
-        lines = []
-        for entry in context[-30:]:
-            role = entry.get("role", "?")
-            content = entry.get("content", "")
-            if not content:
-                continue
-            if role == "assistant":
-                lines.append(f"bot: {content}")
-            elif role == "summary":
-                lines.append(f"【较早对话总结】\n{content}")
-            else:
-                lines.append(f"{role}: {content}")
-        # 群聊: 临时追加最近消息(仅注入, 不写入 context)
-        if chat_type == "group":
-            recent = await self._format_group_recent(bot_id, chat_id)
-            if recent:
-                lines.append(recent)
-        return "\n".join(lines)
-
-    async def _agent_reply_handler(
-        self, bot_id: str, chat_type: str, chat_id: str,
-        reply_items, trigger_message_id: str = "",
-    ) -> None:
-        """agent 回复的发送回调: 每条回复行 = 一段, 首段引用触发消息。
-
-        复用原有回复行为配置 (reply_quote / segment_delay_*)。
-        """
-        from mohobot.agent.domain import ContextType
-
-        texts = [
-            item.get_content()
-            for item in reply_items
-            if item.type == ContextType.TEXT
-            and item.get_content().strip()
-        ]
-        if not texts:
-            logger.debug(f"No text reply for {bot_id}/{chat_type}/{chat_id}")
-            return
-
-        first_sent = False
-        for text in texts:
-            if first_sent:
-                await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
-                message: str | list[dict] = text
-            else:
-                if self._reply_quote and trigger_message_id:
-                    message = [
-                        {"type": "reply", "data": {"id": str(trigger_message_id)}},
-                        {"type": "text", "data": {"text": text}},
-                    ]
-                else:
-                    message = text
-                first_sent = True
-            await self._send_agent_message(bot_id, chat_type, chat_id, message)
-
-        # agent 回复写入会话上下文 (context 不变)
-        await self._ctx_mgr.append_context(
-            bot_id, chat_type, chat_id,
-            [{"role": "assistant", "content": "\n".join(texts),
-              "timestamp": int(time_module.time())}],
-            max_rounds=self._context_max_rounds,
-        )
-
     # ── 工具结果泄漏防御(双保险) ─────────────────────────────
 
     @staticmethod
@@ -818,19 +588,6 @@ class MessageHandler:
             logger.warning("截断工具结果泄漏后缀")
             return text[:idx]
         return text
-
-    async def _send_agent_message(
-        self, bot_id: str, chat_type: str, chat_id: str,
-        message: str | list[dict],
-    ) -> None:
-        if isinstance(message, str):
-            message = self._sanitize_tool_leak(message)
-            if not message:
-                return
-        if chat_type == "private":
-            await self._ws.send_private_msg(bot_id, chat_id, message)
-        else:
-            await self._ws.send_group_msg(bot_id, chat_id, message)
 
     def _persist_legacy_turn(
         self, bot_id: str, chat_type: str, chat_id: str,
@@ -1131,13 +888,18 @@ class MessageHandler:
         logger.debug(f"Notice from bot {bot_id}: {event.notice_type}")
         await self._plugins.dispatch_notice(bot_id, event, raw)
 
+    # 戳一戳内置默认文案(bot 私有 / 全局配置都没有时兜底)
+    DEFAULT_TOUCH_REPLIES = [
+        "呜哇！吓我一跳～",
+        "嘿嘿，别戳啦～",
+        "唔……怎么了？",
+        "戳我干嘛呀～",
+    ]
+
     async def _handle_poke(self, bot_id: str, event: NoticeEvent) -> None:
         """戳一戳: 确认戳的是本 bot 后,回复固定文案。
 
-        所有 bot 都生效(不依赖 agent 开关):
-        agent 路径 → 反射通道 (USER_TOUCH);
-        非 agent 路径 → 直接随机一条固定回复。
-        文案优先级: bot 私有 touch_replies > 全局 agent.reflex.touch_replies > 内置默认。
+        文案优先级: bot 私有 touch_replies > 全局 touch_replies > 内置默认。
         """
 
         # 判断被戳对象是不是本 bot(target_id 可能缺省)
@@ -1150,36 +912,8 @@ class MessageHandler:
         if target and target not in ("0", "0.0") and target != bot_qq:
             return  # 戳的是别人,忽略
 
-        chat_type = "group" if event.group_id else "private"
-        chat_id = str(event.group_id) if event.group_id else str(event.user_id)
-
-        # Agent 路径: 反射通道(带记忆/上下文语义)
-        if self._agent_manager is not None and self._bot_agent_enabled(bot_id):
-            from mohobot.agent.domain import ChatInputEvent, ChatInputEventType
-            runtime = self._ensure_agent_runtime(bot_id)
-            if runtime is not None:
-                chat_event = ChatInputEvent(
-                    event_type=ChatInputEventType.USER_TOUCH,
-                    user_id=chat_id,
-                    character_id=bot_id,
-                    content="[用户戳了戳机器人]",
-                    message_id=f"poke-{event.user_id}-{event.time}",
-                    message_type="touch",
-                    timestamp=float(event.time or 0),
-                    payload={
-                        "speaker": f"{event.user_id}-用户",
-                        "chat_type": chat_type,
-                        "chat_id": chat_id,
-                        "qq": str(event.user_id),
-                    },
-                )
-                await runtime.handle_event(chat_type, chat_id, chat_event)
-                return
-
-        # 非 agent 路径: 直接固定回复
         replies = self._resolve_touch_replies(bot_id)
         if replies and self._ws:
-            import random
             text = random.choice(replies)
             if event.group_id:
                 await self._ws.send_group_msg(bot_id, event.group_id, text)
@@ -1188,17 +922,16 @@ class MessageHandler:
 
     def _resolve_touch_replies(self, bot_id: str) -> list[str]:
         """解析戳一戳固定回复列表: bot 私有 > 全局配置 > 内置默认。"""
-        from mohobot.agent.character_reflex import DEFAULT_TOUCH_REPLIES
         instance = None
         if self._ws and self._ws._bot_manager:
             instance = self._ws._bot_manager.get(bot_id)
         if instance is not None and getattr(instance.config, "touch_replies", []):
             return list(instance.config.touch_replies)
         if self._global_config is not None:
-            global_replies = (self._global_config.agent.reflex or {}).get("touch_replies") or []
+            global_replies = getattr(self._global_config, "touch_replies", None) or []
             if global_replies:
                 return list(global_replies)
-        return list(DEFAULT_TOUCH_REPLIES)
+        return list(self.DEFAULT_TOUCH_REPLIES)
 
     async def _handle_request(self, bot_id: str, event: RequestEvent, raw: dict) -> None:
         """Handle request events (friend add, group add/invite).

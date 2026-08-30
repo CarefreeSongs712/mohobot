@@ -109,7 +109,7 @@ class Plugin:
             async with _sync_lock:
                 from mohobot.music_knowledge.vcpedia import sync_vcpedia_new_songs
 
-                music_cfg = cfg.agent.music_knowledge or {}
+                music_cfg = cfg.music_knowledge or {}
                 result = await asyncio.to_thread(sync_vcpedia_new_songs, music_cfg)
                 if self._matcher is not None:
                     self._matcher.reload_index()

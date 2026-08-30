@@ -16,11 +16,11 @@ from mohobot.music_knowledge.vcpedia import sync_vcpedia_new_songs
 
 
 def load_music_knowledge_config() -> dict:
-    """从 config/global.yaml 读 agent.music_knowledge 配置。"""
+    """从 config/global.yaml 读顶层 music_knowledge 配置。"""
     from mohobot.models.config import GlobalConfig
 
     cfg = GlobalConfig.load("./config/global.yaml")
-    return cfg.agent.music_knowledge or {}
+    return cfg.music_knowledge or {}
 
 
 def main() -> None:
