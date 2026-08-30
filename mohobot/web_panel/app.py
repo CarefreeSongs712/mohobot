@@ -331,9 +331,10 @@ class WebPanel:
 
         @app.get("/api/usage/sessions")
         async def usage_sessions(request: Request, range: str = "today"):
-            """按聊天会话聚合的 token 用量(今日/近7天/近30天)。"""
+            """按聊天会话聚合的 token 用量(今日/近7天/近30天/自定义 Nd=近N天)。"""
             await _require_auth(request)
-            if range not in {"today", "7d", "30d"}:
+            import re as _re
+            if range not in {"today", "7d", "30d"} and not _re.fullmatch(r"\d{1,4}d", range):
                 range = "today"
             if self._llm_service is None:
                 return {"range": range, "totals": {}, "sessions": []}

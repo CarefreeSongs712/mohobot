@@ -709,20 +709,24 @@ class LLMService:
     async def get_session_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
         """按聊天会话聚合 token 用量, 供 WebUI 与 /用量 会话 命令共用。
 
-        range_key: today(今日) / 7d(近7天) / 30d(近30天)。
+        range_key: today(今日) / 7d(近7天) / 30d(近30天) / 自定义 "Nd"(近N天, 含今日)。
         旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
         """
         import datetime
+        import re
         from mohobot.utils.time_utils import TZ_UTC8
 
         now = datetime.datetime.now(TZ_UTC8)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if range_key == "7d":
-            since = (day_start - datetime.timedelta(days=6)).timestamp()
+            days = 7
         elif range_key == "30d":
-            since = (day_start - datetime.timedelta(days=29)).timestamp()
+            days = 30
+        elif re.fullmatch(r"\d{1,4}d", range_key):
+            days = max(1, min(3650, int(range_key[:-1])))
         else:
-            since = day_start.timestamp()
+            days = 1
+        since = (day_start - datetime.timedelta(days=days - 1)).timestamp()
 
         sessions: dict[tuple[str, str, str], dict] = {}
         for rec in await self._load_usage_records():
