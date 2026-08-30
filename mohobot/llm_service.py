@@ -177,6 +177,8 @@ class LLMService:
 
         api_key = self._cfg.llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
         vision_key = self._cfg.llm.vision_api_key or os.environ.get("MOHOBOT_VISION_API_KEY", "") or api_key
+        # 情感分析(二次 LLM): 独立密钥可配, 留空回退 chat 客户端
+        emotion_key = self._cfg.llm.emotion_api_key or os.environ.get("MOHOBOT_EMOTION_API_KEY", "")
 
         # Initialize chat client (lazy init — allow empty key for testing)
         if api_key:
@@ -205,6 +207,17 @@ class LLMService:
         self._vision_available = bool(
             vision_key and self._cfg.llm.vision_model and self._vision_client
         )
+
+        # 情感分析客户端(独立密钥/地址可配, 缺省复用 chat 客户端)
+        if emotion_key and emotion_key != api_key:
+            self._emotion_client = AsyncOpenAI(
+                api_key=emotion_key,
+                base_url=self._cfg.llm.emotion_base_url or self._cfg.llm.chat_base_url,
+            )
+        elif self._chat_client:
+            self._emotion_client = self._chat_client
+        else:
+            self._emotion_client = None
 
         # System prompt building blocks
         self._tools_schemas: list[dict] = [
@@ -704,6 +717,30 @@ class LLMService:
             logger.warning(f"上下文总结失败: {e}")
             return None
 
+    async def analyze_emotion(self, prompt: str) -> str | None:
+        """情感专家分析(二次 LLM; 独立 emotion 模型可配, 缺省回退 chat 模型)。
+
+        失败/未配置返回 None, 调用方(EmotionExpert)自行降级。
+        """
+        if self._emotion_client is None:
+            return None
+        model = self._cfg.llm.emotion_model or self._cfg.llm.chat_model
+        try:
+            resp = await self._emotion_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=float(getattr(self._cfg.llm, "emotion_temperature", 0.3)),
+                max_tokens=int(getattr(self._cfg.llm, "emotion_max_tokens", 512)),
+            )
+            await self._record_usage(
+                model, getattr(resp, "usage", None),
+                "", None, module="emotion", kind="emotion",
+            )
+            return (resp.choices[0].message.content or "").strip() or None
+        except Exception as e:
+            logger.warning(f"情感分析 LLM 调用失败: {e}")
+            return None
+
     async def get_usage_stats(self) -> dict[str, Any]:
         """Aggregate token usage from data/stats/llm_usage.jsonl.
 
@@ -1007,5 +1044,7 @@ class LLMService:
             await self._chat_client.close()
         if self._vision_client and self._vision_client is not self._chat_client:
             await self._vision_client.close()
+        if self._emotion_client and self._emotion_client is not self._chat_client:
+            await self._emotion_client.close()
         if self._owns_usage_recorder:
             await self._usage_recorder.close()

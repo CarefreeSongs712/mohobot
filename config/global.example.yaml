@@ -46,6 +46,13 @@ llm:
   vision_base_url: "https://api.openai.com/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 
+  # 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
+  emotion_model: ""
+  emotion_base_url: ""
+  emotion_api_key: ""        # 或设置环境变量 MOHOBOT_EMOTION_API_KEY
+  emotion_temperature: 0.3
+  emotion_max_tokens: 512
+
   # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
   models:
     - "DeepSeek-V4-Flash"
@@ -96,6 +103,19 @@ music_knowledge:
       - "Category:洛天依歌曲"
       - "Category:殿堂曲"
       - "Category:传说曲"
+
+# ── 情感系统(好感度/亲密度/关系阶段/长期记忆) ──────────────────
+# pre-LLM 注入情感状态与语气指导, 回复后按需调用情感分析 LLM 更新状态。
+# enabled 开关在启动时读取, 修改后需重启生效。
+emotion:
+  enabled: false             # 总开关
+  smart_update: true         # 智能按需分析(关键词/间隔/每N轮强制); false = 每轮都调 LLM
+  force_update_interval: 5   # 每 N 轮强制触发一次情感分析
+  significance_threshold: 5  # 情感变化总幅度达到该值才写入长期记忆
+  favour_min: -100
+  favour_max: 100
+  intimacy_min: 0
+  intimacy_max: 100
 
 # ── 戳一戳全局兜底文案 ─────────────────────────────────────────
 # bot 私有 touch_replies(data/bots/{bot_id}/config.json)优先;

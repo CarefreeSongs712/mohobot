@@ -145,6 +145,7 @@ class WebPanel:
         ban_store=None,
         ban_filter=None,
         restart_callback=None,
+        emotion_manager=None,
     ):
         self._host = host
         self._port = port
@@ -181,6 +182,7 @@ class WebPanel:
         self._ban_store = ban_store
         self._ban_filter = ban_filter
         self._restart_callback = restart_callback
+        self._emotion_manager = emotion_manager
 
         self._app = FastAPI(title="Mohobot Web Panel")
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
@@ -375,6 +377,11 @@ class WebPanel:
                 ban_data = data["ban"] or {}
                 if "enabled" in ban_data:
                     cfg.ban.enabled = bool(ban_data["enabled"])
+            if "emotion" in data:
+                emotion_data = data["emotion"] or {}
+                for k, v in emotion_data.items():
+                    if hasattr(cfg.emotion, k):
+                        setattr(cfg.emotion, k, v)
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]
@@ -410,6 +417,13 @@ class WebPanel:
             # 热同步插件管理员(关系插件等命令权限)
             if self._plugin_system is not None:
                 self._plugin_system.set_admin_ids(list(cfg.admins))
+            # 热同步情感系统阈值(启停开关在启动时读取, 需重启)
+            if self._emotion_manager is not None:
+                try:
+                    self._emotion_manager.sync_config(cfg.emotion)
+                    self._emotion_manager.set_admin_ids(list(cfg.admins))
+                except Exception as e:
+                    logger.debug(f"情感配置热同步失败: {e}")
             logger.info(f"Web panel: global config updated ({list(data.keys())})")
             return {"status": "ok"}
 
@@ -537,6 +551,13 @@ class WebPanel:
                     "temperature": cfg.llm.summarize_temperature,
                     "max_tokens": cfg.llm.summarize_max_tokens,
                 },
+                "emotion": {
+                    "model": cfg.llm.emotion_model,
+                    "base_url": cfg.llm.emotion_base_url,
+                    "api_key": self._mask_secret(cfg.llm.emotion_api_key),
+                    "temperature": cfg.llm.emotion_temperature,
+                    "max_tokens": cfg.llm.emotion_max_tokens,
+                },
                 "models": list(cfg.llm.models),
             }
 
@@ -565,6 +586,12 @@ class WebPanel:
                 for k, v in data["summarize"].items():
                     if hasattr(cfg.llm, f"summarize_{k}"):
                         setattr(cfg.llm, f"summarize_{k}", v)
+            if "emotion" in data and isinstance(data["emotion"], dict):
+                for k, v in data["emotion"].items():
+                    if hasattr(cfg.llm, f"emotion_{k}") and k != "api_key":
+                        setattr(cfg.llm, f"emotion_{k}", v)
+                if "api_key" in data["emotion"] and data["emotion"]["api_key"] not in ("", self._MASK):
+                    cfg.llm.emotion_api_key = str(data["emotion"]["api_key"])
             if "models" in data and isinstance(data["models"], list):
                 cfg.llm.models = [str(m).strip() for m in data["models"] if str(m).strip()]
 

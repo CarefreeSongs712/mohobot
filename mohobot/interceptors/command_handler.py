@@ -22,7 +22,8 @@ class CommandHandler(Interceptor):
     # 未知指令提醒冷却(秒): 同一会话内 60 分钟最多提醒一次
     UNKNOWN_CMD_COOLDOWN = 3600
 
-    def __init__(self, context_manager, llm_service, ws_server, plugin_system=None):
+    def __init__(self, context_manager, llm_service, ws_server, plugin_system=None,
+                 emotion_manager=None):
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._ws = ws_server
@@ -36,6 +37,13 @@ class CommandHandler(Interceptor):
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
         }
+        # 情感系统命令(未启用时 emotion_manager 为 None, 不注册)
+        if emotion_manager is not None:
+            try:
+                from mohobot.emotion.commands import build_command_registry
+                self._commands.update(build_command_registry(emotion_manager))
+            except Exception as e:
+                logger.warning(f"情感命令注册失败: {e}")
         # Plugin-provided commands appear in /help (name -> {desc, plugin, admin})
         self._plugin_commands: dict[str, dict] = {}
         # 未知指令提醒时间戳: {(bot_id, chat_type, chat_id): last_remind_ts}

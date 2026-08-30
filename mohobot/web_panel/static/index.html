@@ -308,6 +308,13 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div class="small" style="color:var(--text-dim);margin-top:6px">压缩早期对话用，模型复用 Chat 模型</div>
       </div>
       <div class="card">
+        <div class="card-title">💗 情感分析模型</div>
+        <div id="model-emotion-form"></div>
+        <div class="small" style="color:var(--text-dim);margin-top:6px">情感系统(全局配置 emotion 段)的二次分析模型；留空模型名则复用 Chat 模型。修改后需重启生效。</div>
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
         <div class="card-title">📋 可用模型列表</div>
         <div id="model-list-form"></div>
       </div>
@@ -702,7 +709,13 @@ async function loadConfigPage() {
       formField('admins', '管理员 QQ(逗号分隔)', (globalConfigCache.admins || []).join(','), { hint: '可执行 /ban、插件管理命令(如 /群列表 /退群)的管理员 QQ 号' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🚫 封禁系统</div>' +
-      checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略');
+      checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">💗 情感系统</div>' +
+      checkField('emotion.enabled', '启用情感系统', globalConfigCache.emotion?.enabled, '好感度/亲密度/关系阶段/长期记忆; 开关修改后需重启生效') +
+      checkField('emotion.smart_update', '智能按需分析', globalConfigCache.emotion?.smart_update, '按关键词/间隔/强制计数按需调用情感分析 LLM; 关闭则每轮都分析(token 消耗增加)') +
+      formField('emotion.force_update_interval', '强制分析间隔(轮)', globalConfigCache.emotion?.force_update_interval, { hint: '每 N 轮对话强制触发一次情感分析' }) +
+      formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' });
 
     const sel = document.getElementById('config-bot-select');
     const bots = (botListCache.bots || []).slice();
@@ -815,6 +828,12 @@ async function saveGlobalConfig() {
     ban: {
       enabled: document.getElementById('cfg-ban.enabled')?.checked ?? true,
     },
+    emotion: {
+      enabled: document.getElementById('cfg-emotion.enabled')?.checked ?? false,
+      smart_update: document.getElementById('cfg-emotion.smart_update')?.checked ?? true,
+      force_update_interval: num('cfg-emotion.force_update_interval', 5),
+      significance_threshold: num('cfg-emotion.significance_threshold', 5),
+    },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
     admins: (document.getElementById('cfg-admins')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
@@ -873,6 +892,13 @@ async function loadModels() {
     document.getElementById('model-summarize-form').innerHTML =
       formField('summarize_temperature', '温度 (0-2)', sum.temperature) +
       formField('summarize_max_tokens', '最大 Token', sum.max_tokens) ;
+    const emo = modelCache.emotion || {};
+    document.getElementById('model-emotion-form').innerHTML =
+      formField('emotion_model', '模型名称(留空用 Chat 模型)', emo.model) +
+      formField('emotion_base_url', 'API 地址 (Base URL)', emo.base_url) +
+      formField('emotion_api_key', 'API Key (留空保持原值)', '', { type: 'password', hint: '当前 Key 不会回填；只有输入新值才会更新' }) +
+      formField('emotion_temperature', '温度 (0-2)', emo.temperature) +
+      formField('emotion_max_tokens', '最大 Token', emo.max_tokens) ;
     // 可用模型列表(每行一个) — 识图模型等下拉的选项来源
     document.getElementById('model-list-form').innerHTML =
       textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
@@ -900,6 +926,13 @@ async function saveModels() {
     summarize: {
       temperature: parseFloat(document.getElementById('cfg-summarize_temperature').value) || 0.3,
       max_tokens: parseInt(document.getElementById('cfg-summarize_max_tokens').value) || 4096,
+    },
+    emotion: {
+      model: document.getElementById('cfg-emotion_model')?.value ?? '',
+      base_url: document.getElementById('cfg-emotion_base_url')?.value ?? '',
+      ...(document.getElementById('cfg-emotion_api_key')?.value ? { api_key: document.getElementById('cfg-emotion_api_key').value } : {}),
+      temperature: parseFloat(document.getElementById('cfg-emotion_temperature')?.value) || 0.3,
+      max_tokens: parseInt(document.getElementById('cfg-emotion_max_tokens')?.value) || 512,
     },
     models: (document.getElementById('cfg-models')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),

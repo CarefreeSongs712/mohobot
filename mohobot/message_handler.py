@@ -58,6 +58,7 @@ class MessageHandler:
         image_cache=None,
         global_config=None,
         song_matcher=None,
+        emotion_manager=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -70,6 +71,8 @@ class MessageHandler:
         self._writer_registry: dict[str, JSONLWriter] = {}
         # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
         self._song_matcher = song_matcher
+        # 情感系统(注入 + 后台分析; 未启用时为 None)
+        self._emotion = emotion_manager
 
         self._db = database_manager
         # 图片缓存(下载 + phash 去重 + 描述缓存)
@@ -338,6 +341,14 @@ class MessageHandler:
                 bot_id, chat_type, chat_id, event,
                 user_msg["content"], full_reply,
             )
+            # 情感系统: 后台分析本轮对话(不阻塞, 失败不影响回复)
+            if self._emotion is not None:
+                try:
+                    self._emotion.schedule_turn(
+                        bot_id, event, user_msg["content"], full_reply,
+                    )
+                except Exception as e:
+                    logger.debug(f"情感分析调度失败: {e}")
 
     # ── 图片引用归一化 ─────────────────────────────────────────
 
@@ -603,6 +614,14 @@ class MessageHandler:
                 "role": "system",
                 "content": f"【环境感知】\n{perception}",
             })
+        # 情感系统(仅 LLM 请求, 不写入 context): 对该用户的情感状态 + 语气指导
+        if self._emotion is not None:
+            try:
+                emotion_block = await self._emotion.build_context_block(bot_id, event)
+                if emotion_block:
+                    context.append({"role": "system", "content": emotion_block})
+            except Exception as e:
+                logger.debug(f"情感上下文注入失败: {e}")
         return context
 
     # ── 工具结果泄漏防御(双保险) ─────────────────────────────

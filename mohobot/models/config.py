@@ -36,6 +36,13 @@ class LLMConfig:
     summarize_temperature: float = 0.3
     summarize_max_tokens: int = 4096
 
+    # 情感分析(二次 LLM, 留空则回退 chat 模型/密钥/地址)
+    emotion_model: str = ""
+    emotion_base_url: str = ""
+    emotion_api_key: str = ""
+    emotion_temperature: float = 0.3
+    emotion_max_tokens: int = 512
+
     # Vision model
     vision_model: str = "qwen-vl-plus"
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -141,6 +148,23 @@ class BanConfig:
     enabled: bool = True
 
 
+@dataclass
+class EmotionConfig:
+    """情感系统配置(移植自 astrbot-plugin-emotionai_pro 核心子集)。
+
+    enabled 开关在启动时读取, 修改后需重启生效;
+    其余阈值可通过 WebUI 保存热同步(EmotionManager.sync_config)。
+    """
+    enabled: bool = False            # 总开关(重启生效)
+    smart_update: bool = True        # 智能按需调用情感分析 LLM(关闭则每轮都分析)
+    force_update_interval: int = 5   # 每 N 轮强制触发一次情感分析
+    significance_threshold: int = 5  # 情感变化达到该值才写入长期记忆
+    favour_min: int = -100
+    favour_max: int = 100
+    intimacy_min: int = 0
+    intimacy_max: int = 100
+
+
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
 
 
@@ -156,6 +180,8 @@ class GlobalConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
     ban: BanConfig = field(default_factory=BanConfig)
+    # 情感系统(好感度/亲密度/关系阶段/长期记忆; emotion.enabled 开关)
+    emotion: EmotionConfig = field(default_factory=EmotionConfig)
     # 歌曲知识库(识别 + LLM 前注入; song_database/crawler/关键词文件)
     music_knowledge: dict = field(default_factory=dict)
     # 戳一戳全局兜底文案(bot 私有 touch_replies 优先, 都为空时用内置默认)
@@ -192,6 +218,7 @@ class GlobalConfig:
         db_raw = raw.get("database", {})
         anysearch_raw = raw.get("anysearch", {})
         ban_raw = raw.get("ban", {})
+        emotion_raw = raw.get("emotion", {})
 
         # 旧配置迁移: agent.music_knowledge / agent.reflex.touch_replies
         # 曾嵌在已删除的 agent: 段下, 读到旧键时搬到顶层并重写配置文件
@@ -242,6 +269,11 @@ class GlobalConfig:
                 vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
+                emotion_model=str(llm_raw.get("emotion_model", "") or ""),
+                emotion_base_url=str(llm_raw.get("emotion_base_url", "") or ""),
+                emotion_api_key=str(llm_raw.get("emotion_api_key", "") or ""),
+                emotion_temperature=float(llm_raw.get("emotion_temperature", 0.3)),
+                emotion_max_tokens=int(llm_raw.get("emotion_max_tokens", 512)),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
                 ])],
@@ -278,6 +310,16 @@ class GlobalConfig:
             ),
             ban=BanConfig(
                 enabled=ban_raw.get("enabled", True),
+            ),
+            emotion=EmotionConfig(
+                enabled=bool(emotion_raw.get("enabled", False)),
+                smart_update=bool(emotion_raw.get("smart_update", True)),
+                force_update_interval=int(emotion_raw.get("force_update_interval", 5)),
+                significance_threshold=int(emotion_raw.get("significance_threshold", 5)),
+                favour_min=int(emotion_raw.get("favour_min", -100)),
+                favour_max=int(emotion_raw.get("favour_max", 100)),
+                intimacy_min=int(emotion_raw.get("intimacy_min", 0)),
+                intimacy_max=int(emotion_raw.get("intimacy_max", 100)),
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -322,6 +364,11 @@ class GlobalConfig:
                 "vision_temperature": self.llm.vision_temperature,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
+                "emotion_model": self.llm.emotion_model,
+                "emotion_base_url": self.llm.emotion_base_url,
+                "emotion_api_key": self.llm.emotion_api_key,
+                "emotion_temperature": self.llm.emotion_temperature,
+                "emotion_max_tokens": self.llm.emotion_max_tokens,
                 "models": list(self.llm.models),
             },
             "web_panel": {
@@ -357,6 +404,16 @@ class GlobalConfig:
             "admins": list(self.admins),
             "ban": {
                 "enabled": self.ban.enabled,
+            },
+            "emotion": {
+                "enabled": self.emotion.enabled,
+                "smart_update": self.emotion.smart_update,
+                "force_update_interval": self.emotion.force_update_interval,
+                "significance_threshold": self.emotion.significance_threshold,
+                "favour_min": self.emotion.favour_min,
+                "favour_max": self.emotion.favour_max,
+                "intimacy_min": self.emotion.intimacy_min,
+                "intimacy_max": self.emotion.intimacy_max,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
@@ -398,6 +455,11 @@ class GlobalConfig:
                 "vision_temperature": self.llm.vision_temperature,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
+                "emotion_model": self.llm.emotion_model,
+                "emotion_base_url": self.llm.emotion_base_url,
+                "emotion_api_key": self.llm.emotion_api_key,
+                "emotion_temperature": self.llm.emotion_temperature,
+                "emotion_max_tokens": self.llm.emotion_max_tokens,
                 "models": list(self.llm.models),
             },
             "web_panel": {
@@ -433,6 +495,16 @@ class GlobalConfig:
             "admins": list(self.admins),
             "ban": {
                 "enabled": self.ban.enabled,
+            },
+            "emotion": {
+                "enabled": self.emotion.enabled,
+                "smart_update": self.emotion.smart_update,
+                "force_update_interval": self.emotion.force_update_interval,
+                "significance_threshold": self.emotion.significance_threshold,
+                "favour_min": self.emotion.favour_min,
+                "favour_max": self.emotion.favour_max,
+                "intimacy_min": self.emotion.intimacy_min,
+                "intimacy_max": self.emotion.intimacy_max,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),

@@ -117,6 +117,26 @@ class MohobotApplication:
             at_rounds=self._config.context_trim_at_rounds,
             remove_rounds=self._config.context_trim_remove_rounds,
         )
+        # 全局情感系统(好感度/亲密度/关系阶段/长期记忆; 移植自 emotionai_pro)。
+        # emotion.enabled 开关在启动时读取, 修改后重启生效; 失败降级(正常聊天不受影响)。
+        self._emotion_manager = None
+        if self._config.emotion.enabled:
+            try:
+                from mohobot.emotion import EmotionManager
+                self._emotion_manager = EmotionManager(
+                    data_dir=self._config.data_dir,
+                    config=self._config.emotion,
+                    llm_service=self._llm_service,
+                    task_supervisor=self._task_supervisor,
+                    admins=list(self._config.admins),
+                    bot_name_provider=self._emotion_bot_name,
+                )
+                await self._emotion_manager.startup()
+                logger.info("全局情感系统已加载(EmotionManager)")
+            except Exception as e:
+                self._emotion_manager = None
+                logger.warning(f"情感系统初始化失败, 已降级: {e}")
+
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
@@ -165,6 +185,7 @@ class MohobotApplication:
             image_cache=self._image_cache,
             global_config=self._config,
             song_matcher=self._song_matcher,
+            emotion_manager=self._emotion_manager,
         )
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
@@ -181,6 +202,7 @@ class MohobotApplication:
             llm_service=self._llm_service,
             ws_server=None,  # Will be set after WS server creation
             plugin_system=self._plugin_system,
+            emotion_manager=self._emotion_manager,
         )
         keyword_filter = KeywordFilter()
         # 拦截链: 封禁 → 插件 → 内置命令 → 关键词
@@ -231,6 +253,7 @@ class MohobotApplication:
                 ban_store=self._ban_store,
                 ban_filter=ban_filter,
                 restart_callback=self.restart,
+                emotion_manager=self._emotion_manager,
             )
             # Start web panel in background
             self._web_panel_task = self._task_supervisor.create_task(
@@ -273,6 +296,14 @@ class MohobotApplication:
 
         return annotator
 
+    def _emotion_bot_name(self, bot_id: str) -> str:
+        """情感系统用的 bot 昵称(专家 prompt / 文本净化), 兜底 "AI"。"""
+        if self._bot_manager:
+            instance = self._bot_manager.get(bot_id)
+            if instance is not None and instance.config:
+                return (instance.config.nickname or "").strip() or "AI"
+        return "AI"
+
     async def _run_web_panel(self) -> None:
         """Run the web panel (wraps uvicorn)."""
         try:
@@ -313,6 +344,10 @@ class MohobotApplication:
         if self._plugin_system:
             await self._plugin_system.shutdown_plugins()
         await self._task_supervisor.cancel_owner("plugins")
+
+        # 情感系统: 取消周期落盘任务并 flush 数据
+        if self._emotion_manager:
+            await self._emotion_manager.shutdown()
 
         # Stop WS server
         if self._ws_server:
