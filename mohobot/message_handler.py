@@ -321,7 +321,7 @@ class MessageHandler:
             user_msg = {
                 # Role = "QQ号-昵称" so the LLM knows WHO said it
                 "role": self._speaker_role(event),
-                "content": extract_plain_text(event.message) or str(event.message),
+                "content": self._context_content(event.message),
                 "timestamp": event.time,
             }
             ai_msg = {
@@ -340,6 +340,39 @@ class MessageHandler:
             )
 
     # ── 图片引用归一化 ─────────────────────────────────────────
+
+    @staticmethod
+    def _context_content(message) -> str:
+        """上下文/数据库存储用的消息文本。
+
+        有纯文本时直接用(带图时补 [图片] 标记); 无文本(纯图/语音/表情等)
+        时按段类型给占位符, 避免把整个段列表的 repr(含归一化后的
+        base64 data URI)写进上下文并被送进 LLM。
+        """
+        text = extract_plain_text(message)
+        if text:
+            if isinstance(message, list) and any(
+                isinstance(seg, dict) and seg.get("type") == "image"
+                for seg in message
+            ):
+                return f"{text} [图片]"
+            return text
+        placeholders = {
+            "image": "[图片]",
+            "record": "[语音]",
+            "video": "[视频]",
+            "face": "[表情]",
+            "forward": "[合并转发]",
+            "json": "[卡片消息]",
+            "file": "[文件]",
+        }
+        if isinstance(message, list):
+            for seg in message:
+                if isinstance(seg, dict):
+                    hit = placeholders.get(seg.get("type"))
+                    if hit:
+                        return hit
+        return "[消息]"
 
     async def _resolve_image_data_uri(self, bot_id: str, file_ref: str) -> str:
         """file 文件名/路径 → OneBot get_image → data URI(失败返回 "")。
