@@ -310,6 +310,13 @@ class BotManager:
         ]
         return min(candidates) if candidates else None
 
+    def bots_in_group(self, group_id: int | str) -> list[str]:
+        """该群在线 bot 的 bot_id 列表(排序, 供合并回复按序收集)。"""
+        return sorted(
+            b for b in self._group_bots.get(str(group_id), set())
+            if b in self._bots
+        )
+
     def forget_bot_groups(self, bot_id: str) -> None:
         """bot 断开连接时从所有群记录移除。"""
         for gid in list(self._group_bots):

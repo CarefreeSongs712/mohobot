@@ -67,6 +67,7 @@ class MessageHandler:
         self._data_dir = data_dir
         self._context_max_rounds = context_max_rounds
         self._interceptors: list = []  # Ordered list of interceptors
+        self._command_handler = None  # CommandHandler 引用(set_interceptors 时捕获)
         self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
         self._writer_registry: dict[str, JSONLWriter] = {}
         # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
@@ -110,6 +111,11 @@ class MessageHandler:
     def set_interceptors(self, interceptors: list) -> None:
         """Set the ordered interceptor chain."""
         self._interceptors = interceptors
+        # 保留 CommandHandler 引用(合并回复按 bot 逐个执行内置命令用)
+        from mohobot.interceptors.command_handler import CommandHandler
+        self._command_handler = next(
+            (i for i in interceptors if isinstance(i, CommandHandler)), None
+        )
         logger.info(f"MessageHandler: {len(interceptors)} interceptor(s) registered")
 
     async def handle_event(self, bot_id: str, event: Event, raw: dict[str, Any]) -> None:
@@ -254,6 +260,15 @@ class MessageHandler:
                     self._perception_text[(bot_id, chat_type, chat_id)] = perception
             except Exception as e:
                 logger.debug(f"Collect perception failed: {e}")
+
+        # ── 群聊多 bot 合并回复指令: 群内多 bot 时只由最小 bot 发一条合并转发 ──
+        # (节点发送者署名为各 bot, 内容为各 bot 对该指令的回复, 避免逐条刷屏)
+        if isinstance(event, GroupMessageEvent):
+            try:
+                if await self._try_merged_group_reply(bot_id, event, raw):
+                    return
+            except Exception as e:
+                logger.warning(f"合并回复处理失败: {e}")
 
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
@@ -1054,6 +1069,14 @@ class MessageHandler:
     # 前缀匹配的全局指令(带参数的命令): 封禁系统 /ban /pass /dec-* 系列
     _GLOBAL_COMMAND_PREFIXES = ("/ban", "/pass", "/dec-")
 
+    # 群聊多 bot 合并回复指令: 各 bot 对这些指令的回复数据相互独立,
+    # 多 bot 群里会各答一条造成刷屏 → 只由最小 bot 发一条合并转发,
+    # 节点署名为各 bot(内容 = 各 bot 的回复)。私聊/单 bot 群不受影响。
+    _MERGED_GROUP_TRIGGERS = (
+        "赞我", "/赞我", "zanwo", "/zanwo",
+        "/好感度", "/关系阶段", "/好感排行", "/负好感排行",
+    )
+
     def _should_defer_global_command(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """全局指令去重: 命中全局指令且群内有多个 bot 时,
         非 bot_id 最小者静默跳过(不回复, 也不交给 LLM)。
@@ -1090,6 +1113,112 @@ class MessageHandler:
             return False
         logger.debug(f"全局指令 {text!r} 由 {min_bot} 回复, {bot_id} 跳过")
         return True
+
+    # ── 群聊多 bot 合并回复 ───────────────────────────────────
+
+    @classmethod
+    def _match_merged_trigger(cls, text: str) -> str | None:
+        """命中合并回复指令则返回命中的触发词(精确 / 命令+空格参数), 否则 None。"""
+        for t in cls._MERGED_GROUP_TRIGGERS:
+            if text == t or text.startswith(t + " "):
+                return t
+        return None
+
+    async def _try_merged_group_reply(
+        self, bot_id: str, event: GroupMessageEvent, raw: dict
+    ) -> bool:
+        """群聊多 bot 合并回复: 命中触发词且群内有多 bot 时,
+        由 bot_id 最小者收集所有 bot 的回复, 以合并转发送出(节点署名各 bot)。
+
+        返回 True 表示消息已被消费(其余 bot 静默跳过, 不再走原流程)。
+        """
+        if not (self._ws and self._ws._bot_manager):
+            return False
+        text = extract_plain_text(event.message).strip()
+        if not text or self._match_merged_trigger(text) is None:
+            return False
+
+        bm = self._ws._bot_manager
+        group_id = str(event.group_id)
+        bots = bm.bots_in_group(group_id)
+        if len(bots) <= 1:
+            return False  # 单 bot 群: 走原流程即可
+        min_bot = bm.min_bot_for_group(group_id) or bots[0]
+        if bot_id != min_bot:
+            logger.debug(f"合并回复指令 {text!r} 由 {min_bot} 发送, {bot_id} 跳过")
+            return True
+
+        # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串)
+        replies: dict[str, str] = {}
+        for b in bots:
+            reply = await self._collect_merged_reply(b, event, raw, text)
+            if reply:
+                replies[b] = reply
+
+        nodes = []
+        for b in bots:
+            bot_qq, bot_nick = self._bot_identity(b)
+            content = replies.get(b) or "(无响应)"
+            nodes.append({
+                "type": "node",
+                "data": {
+                    "user_id": str(bot_qq),
+                    "nickname": bot_nick,
+                    "content": [{"type": "text", "data": {"text": content}}],
+                },
+            })
+
+        try:
+            await self._ws.send_group_forward_msg(min_bot, event.group_id, nodes)
+            logger.info(
+                f"合并回复 {text!r}: {len(nodes)} 个 bot 的回复已合并发送(群 {group_id})"
+            )
+        except Exception as e:
+            # 合并转发失败 → 退化为发送者自己的那条普通回复
+            logger.warning(f"合并转发发送失败, 退化为普通回复: {e}")
+            own = replies.get(min_bot)
+            if own:
+                await self._send_reply(min_bot, event, own)
+        return True
+
+    async def _collect_merged_reply(
+        self, bot_id: str, event: GroupMessageEvent, raw: dict, text: str
+    ) -> str | None:
+        """以指定 bot 的身份执行该指令, 返回它会回复的文本(无响应返回 None)。
+
+        依次尝试: 插件 on_message(赞我等) → 插件观察钩子 → 内置命令拦截器。
+        各处理器的回复都是"返回文本"而非直接发送, 因此可安全收集。
+        """
+        try:
+            if self._plugins is not None:
+                handled, reply = await self._plugins.intercept(bot_id, event, raw)
+                if not handled:
+                    handled, reply = await self._plugins.dispatch_observed(
+                        bot_id, event, raw
+                    )
+                if handled:
+                    return self._reply_to_text(reply)
+            if self._command_handler is not None:
+                handled, reply = await self._command_handler.intercept(
+                    bot_id, event, raw
+                )
+                if handled:
+                    return self._reply_to_text(reply)
+        except Exception as e:
+            logger.warning(f"合并回复收集失败(bot={bot_id}): {e}")
+        return None
+
+    @staticmethod
+    def _reply_to_text(reply) -> str | None:
+        """处理器回复 → 纯文本(str 或消息段列表均支持)。"""
+        if reply is None:
+            return None
+        if isinstance(reply, str):
+            return reply.strip() or None
+        if isinstance(reply, list):
+            text = extract_plain_text(reply).strip()
+            return text or None
+        return str(reply).strip() or None
 
     async def _try_send_forward(self, bot_id: str, event: GroupMessageEvent, text: str) -> bool:
         """把长文本按字数切块(每块 _forward_chunk_chars 字)作为合并转发节点发送。
