@@ -153,9 +153,12 @@ class Plugin:
         lines.append("")
         for rank, ((bid, ctype, cid), s) in enumerate(top, 1):
             if not cid:
-                name = "未知会话"
+                mods = sorted(s["modules"].items(), key=lambda kv: -kv[1])[:2]
+                mod_label = "、".join(_MODULE_NAMES.get(m, m) for m, _ in mods) if mods else ""
+                name = f"未知会话 · {mod_label}" if mod_label else "未知会话"
             else:
                 name = ("群 " if ctype == "group" else "私聊 ") + cid
+            bid = "系统" if bid == "?" else bid
             avg = s["total"] // max(1, s["calls"])
             s_pct = s["prompt"] and round(s["cached"] / s["prompt"] * 100)
             lines.append(

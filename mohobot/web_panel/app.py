@@ -30,6 +30,13 @@ import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+
+def _valid_usage_range(range_key: str) -> bool:
+    """用量统计范围校验: today / 7d / 30d / 自定义 Nd(近N天, 1-3650)。"""
+    if range_key in ("today", "7d", "30d"):
+        return True
+    return bool(re.fullmatch(r"\d{1,4}d", str(range_key)))
+
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
@@ -333,8 +340,7 @@ class WebPanel:
         async def usage_sessions(request: Request, range: str = "today"):
             """按聊天会话聚合的 token 用量(今日/近7天/近30天/自定义 Nd=近N天)。"""
             await _require_auth(request)
-            import re as _re
-            if range not in {"today", "7d", "30d"} and not _re.fullmatch(r"\d{1,4}d", range):
+            if not _valid_usage_range(range):
                 range = "today"
             if self._llm_service is None:
                 return {"range": range, "totals": {}, "sessions": []}
@@ -343,6 +349,34 @@ class WebPanel:
             except Exception as e:
                 logger.error(f"Failed to get session usage: {e}")
                 return {"range": range, "totals": {}, "sessions": []}
+
+        @app.get("/api/usage/users")
+        async def usage_users(request: Request, range: str = "today"):
+            """按发起对话的用户聚合(群/私聊、跨 bot 合并; 无用户身份归未知用户)。"""
+            await _require_auth(request)
+            if not _valid_usage_range(range):
+                range = "today"
+            if self._llm_service is None:
+                return {"range": range, "totals": {}, "users": []}
+            try:
+                return await self._llm_service.get_user_usage_stats(range)
+            except Exception as e:
+                logger.error(f"Failed to get user usage: {e}")
+                return {"range": range, "totals": {}, "users": []}
+
+        @app.get("/api/usage/modules")
+        async def usage_modules(request: Request, range: str = "today"):
+            """按用途(module)聚合: 每个 bot 在哪些地方调用多少。"""
+            await _require_auth(request)
+            if not _valid_usage_range(range):
+                range = "today"
+            if self._llm_service is None:
+                return {"range": range, "totals": {}, "bots": []}
+            try:
+                return await self._llm_service.get_module_usage_stats(range)
+            except Exception as e:
+                logger.error(f"Failed to get module usage: {e}")
+                return {"range": range, "totals": {}, "bots": []}
 
         # ── 2. Configuration (配置文件) ───────────────────────
 

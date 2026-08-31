@@ -30,6 +30,7 @@ class UsageRecorder:
         provider: str = "openai-compatible",
         chat_type: str = "",
         chat_id: str = "",
+        user_id: str = "",
     ) -> None:
         if usage is None:
             return
@@ -50,6 +51,7 @@ class UsageRecorder:
                 "model": model,
                 "chat_type": chat_type,
                 "chat_id": chat_id,
+                "user_id": user_id,
                 "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),

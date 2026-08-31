@@ -667,14 +667,16 @@ class LLMService:
         """
         chat_type = ""
         chat_id = ""
+        user_id = ""
         if event is not None:
+            user_id = str(getattr(event, "user_id", "") or "")
             mt = str(getattr(event, "message_type", "") or "")
             if mt == "group":
                 chat_type = "group"
                 chat_id = str(getattr(event, "group_id", "") or "")
             elif mt == "private":
                 chat_type = "private"
-                chat_id = str(getattr(event, "user_id", "") or "")
+                chat_id = user_id
         await self._usage_recorder.record(
             usage,
             model=model,
@@ -683,6 +685,7 @@ class LLMService:
             kind=kind,
             chat_type=chat_type,
             chat_id=chat_id,
+            user_id=user_id,
         )
 
     async def _load_usage_records(self, ttl: float = 60.0) -> list[dict]:
@@ -706,12 +709,9 @@ class LLMService:
         self._usage_records_cache = (now + ttl, records)
         return records
 
-    async def get_session_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
-        """按聊天会话聚合 token 用量, 供 WebUI 与 /用量 会话 命令共用。
-
-        range_key: today(今日) / 7d(近7天) / 30d(近30天) / 自定义 "Nd"(近N天, 含今日)。
-        旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
-        """
+    @staticmethod
+    def _range_since(range_key: str) -> float:
+        """range_key → 起始时间戳(UTC+8 当日 00:00 起往前数 N 天)。"""
         import datetime
         import re
         from mohobot.utils.time_utils import TZ_UTC8
@@ -726,7 +726,15 @@ class LLMService:
             days = max(1, min(3650, int(range_key[:-1])))
         else:
             days = 1
-        since = (day_start - datetime.timedelta(days=days - 1)).timestamp()
+        return (day_start - datetime.timedelta(days=days - 1)).timestamp()
+
+    async def get_session_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
+        """按聊天会话聚合 token 用量, 供 WebUI 与 /用量 会话 命令共用。
+
+        range_key: today(今日) / 7d(近7天) / 30d(近30天) / 自定义 "Nd"(近N天, 含今日)。
+        旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
+        """
+        since = self._range_since(range_key)
 
         sessions: dict[tuple[str, str, str], dict] = {}
         for rec in await self._load_usage_records():
@@ -769,6 +777,88 @@ class LLMService:
             "cached_tokens": sum(s["cached_tokens"] for s in sessions.values()),
         }
         return {"range": range_key, "totals": totals, "sessions": items}
+
+    async def get_user_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
+        """按发起对话的用户聚合 token 用量(群/私聊合并, 跨 bot 合并)。
+
+        无用户身份的记录(总结/情感/识图等系统内部调用, 以及旧记录)归"未知用户"。
+        返回 users: [{user_id, calls, tokens..., bots: {bot_id: {calls, total_tokens, modules}}}]。
+        """
+        since = self._range_since(range_key)
+        users: dict[str, dict] = {}
+        for rec in await self._load_usage_records():
+            if rec.get("time", 0) < since:
+                continue
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+            uid = str(rec.get("user_id", "") or "")
+            bot = str(rec.get("bot_id", "") or "?")
+            mod = str(rec.get("module", "") or "其他")
+
+            u = users.setdefault(uid, {
+                "user_id": uid, "calls": 0,
+                "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "cached_tokens": 0, "bots": {},
+            })
+            u["calls"] += 1
+            u["prompt_tokens"] += pt
+            u["completion_tokens"] += ct
+            u["total_tokens"] += tt
+            u["cached_tokens"] += int(rec.get("cached_tokens", 0) or 0)
+
+            b = u["bots"].setdefault(bot, {"calls": 0, "total_tokens": 0, "modules": {}})
+            b["calls"] += 1
+            b["total_tokens"] += tt
+            m = b["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
+            m["calls"] += 1
+            m["total_tokens"] += tt
+
+        items = list(users.values())
+        # 未知用户排最后, 其余按 token 降序
+        items.sort(key=lambda x: (x["user_id"] == "", -x["total_tokens"]))
+        totals = {
+            "calls": sum(u["calls"] for u in items),
+            "prompt_tokens": sum(u["prompt_tokens"] for u in items),
+            "completion_tokens": sum(u["completion_tokens"] for u in items),
+            "total_tokens": sum(u["total_tokens"] for u in items),
+            "cached_tokens": sum(u["cached_tokens"] for u in items),
+        }
+        return {"range": range_key, "totals": totals, "users": items}
+
+    async def get_module_usage_stats(self, range_key: str = "today") -> dict[str, Any]:
+        """按用途(module)聚合: 每个 bot 在哪些地方调用多少 token/次数。
+
+        返回 bots: [{bot_id, calls, total_tokens, modules: {module: {calls, total_tokens}}}],
+        bot_id 为空的系统内部调用归"系统"行。
+        """
+        since = self._range_since(range_key)
+        bots: dict[str, dict] = {}
+        for rec in await self._load_usage_records():
+            if rec.get("time", 0) < since:
+                continue
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+            bot = str(rec.get("bot_id", "") or "")
+            bot = bot or "系统"
+            mod = str(rec.get("module", "") or "其他")
+
+            b = bots.setdefault(bot, {"bot_id": bot, "calls": 0, "total_tokens": 0, "modules": {}})
+            b["calls"] += 1
+            b["total_tokens"] += tt
+            m = b["modules"].setdefault(mod, {"calls": 0, "total_tokens": 0})
+            m["calls"] += 1
+            m["total_tokens"] += tt
+
+        items = list(bots.values())
+        # 系统行排最后, 其余按 bot_id 排序
+        items.sort(key=lambda x: (x["bot_id"] == "系统", x["bot_id"]))
+        totals = {
+            "calls": sum(b["calls"] for b in items),
+            "total_tokens": sum(b["total_tokens"] for b in items),
+        }
+        return {"range": range_key, "totals": totals, "bots": items}
 
     async def summarize_context(self, entries: list[dict]) -> str | None:
         """总结一段较早的对话(上下文压缩用, 复用全局 chat_model)。

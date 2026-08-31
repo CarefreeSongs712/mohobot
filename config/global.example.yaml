@@ -110,7 +110,7 @@ music_knowledge:
 emotion:
   enabled: false             # 总开关
   smart_update: true         # 智能按需分析(关键词/间隔/每N轮强制); false = 每轮都调 LLM
-  force_update_interval: 5   # 每 N 轮强制触发一次情感分析
+  force_update_interval: 10  # 每 N 轮强制触发一次情感分析
   significance_threshold: 5  # 情感变化总幅度达到该值才写入长期记忆
   favour_min: -100
   favour_max: 100

@@ -267,8 +267,12 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   <!-- 2. Usage -->
   <div class="page" id="page-usage">
     <h2>📈 用量统计</h2>
-    <div class="subtitle">每个聊天会话的 LLM Token 消耗（点击表头切换排序，点击行展开调用类型明细）</div>
-    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+    <div class="subtitle">LLM Token 消耗 — 按会话 / 按发起用户 / 按用途三种视角（点击表头切换排序，点击行展开明细）</div>
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn small" id="usage-mode-session" onclick="usageSetMode('session')">按会话</button>
+      <button class="btn small secondary" id="usage-mode-user" onclick="usageSetMode('user')">按用户</button>
+      <button class="btn small secondary" id="usage-mode-module" onclick="usageSetMode('module')">按用途</button>
+      <span style="width:1px;height:22px;background:var(--border);margin:0 4px"></span>
       <button class="btn small" id="usage-range-today" onclick="usageSetRange('today')">今日</button>
       <button class="btn small secondary" id="usage-range-7d" onclick="usageSetRange('7d')">近 7 天</button>
       <button class="btn small secondary" id="usage-range-30d" onclick="usageSetRange('30d')">近 30 天</button>
@@ -280,7 +284,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     </div>
     <div class="card">
       <table id="usage-table">
-        <thead><tr>
+        <thead id="usage-thead"><tr>
           <th>Bot</th><th>会话</th>
           <th class="sortable" onclick="usageSortBy('total_tokens')">总 Token <span id="usage-arrow-total_tokens"></span></th>
           <th class="sortable" onclick="usageSortBy('calls')">调用次数 <span id="usage-arrow-calls"></span></th>
@@ -581,7 +585,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
     document.getElementById('page-' + item.dataset.page).classList.add('active');
     switch (item.dataset.page) {
       case 'dashboard': loadDashboard(); break;
-      case 'usage': loadUsageSessions(); break;
+      case 'usage': loadUsageStats(); break;
       case 'config': loadConfigPage(); break;
       case 'models': loadModels(); break;
       case 'plugins': loadPlugins(); break;
@@ -682,10 +686,36 @@ async function loadDashboard() {
   } catch (e) { showToast('加载失败: ' + e.message, false); }
 }
 
-// ═══════════════ 2. Usage sessions ═══════════════
+// ═══════════════ 2. Usage statistics ═══════════════
 let usageRange = 'today';
+let usageMode = 'session';   // session | user | module
 let usageSortKey = 'total_tokens';   // total_tokens | calls | avg
 let usageData = null;
+
+const USAGE_MODULE_NAMES = {
+  main_chat: '主回复', chat: '对话', topic_extractor: '话题提取',
+  memory_writer: '记忆写入', user_profile_updater: '用户画像',
+  vision: '视觉识别', summarize: '上下文总结', summary: '上下文总结',
+  emotion: '情感分析', 其他: '其他',
+};
+
+// 用途归并(模式三的列): 模块名 → 展示列
+const USAGE_MODULE_GROUPS = [
+  { label: '对话', keys: ['chat', 'main_chat'] },
+  { label: '识图', keys: ['vision'] },
+  { label: '上下文总结', keys: ['summarize', 'summary'] },
+  { label: '情感分析', keys: ['emotion'] },
+];
+const USAGE_KNOWN_MODULES = ['chat', 'main_chat', 'vision', 'summarize', 'summary', 'emotion'];
+
+function usageSetMode(mode) {
+  usageMode = mode;
+  ['session', 'user', 'module'].forEach(k => {
+    const btn = document.getElementById('usage-mode-' + k);
+    if (btn) btn.className = 'btn small' + (k === mode ? '' : ' secondary');
+  });
+  loadUsageStats();
+}
 
 function usageSetRange(r) {
   usageRange = r;
@@ -693,7 +723,7 @@ function usageSetRange(r) {
     const btn = document.getElementById('usage-range-' + k);
     btn.className = 'btn small' + (k === r ? '' : ' secondary');
   });
-  loadUsageSessions();
+  loadUsageStats();
 }
 
 function usageSetCustomDays() {
@@ -705,36 +735,47 @@ function usageSetCustomDays() {
   ['today', '7d', '30d'].forEach(k => {
     document.getElementById('usage-range-' + k).className = 'btn small secondary';
   });
-  loadUsageSessions();
+  loadUsageStats();
 }
 
 function usageSortBy(key) {
   usageSortKey = (usageSortKey === key) ? '' : key;  // 再点一次恢复默认 token 降序
-  renderUsageTable();
+  renderUsageSessions();
 }
 
-function usageSessionName(s) {
-  if (!s.chat_id) return '未知会话';
-  return (s.chat_type === 'group' ? '群 ' : '私聊 ') + s.chat_id;
-}
-
-const USAGE_MODULE_NAMES = {
-  main_chat: '主回复', chat: '对话', topic_extractor: '话题提取',
-  memory_writer: '记忆写入', user_profile_updater: '用户画像',
-  vision: '视觉识别', summarize: '上下文总结', summary: '上下文总结',
-  emotion: '情感分析', 其他: '其他',
-};
-
-async function loadUsageSessions() {
-  document.querySelector('#usage-table tbody').innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">⏳ 正在统计用量…</td></tr>';
+async function loadUsageStats() {
+  const tbody = document.querySelector('#usage-table tbody');
+  tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-dim)">⏳ 正在统计用量…</td></tr>';
   document.getElementById('usage-totals').textContent = '统计中…';
+  const ep = usageMode === 'user' ? '/api/usage/users'
+    : usageMode === 'module' ? '/api/usage/modules' : '/api/usage/sessions';
   try {
-    usageData = await apiJSON('/api/usage/sessions?range=' + usageRange);
-    renderUsageTable();
+    usageData = await apiJSON(ep + '?range=' + usageRange);
+    if (usageMode === 'user') renderUsageUsers();
+    else if (usageMode === 'module') renderUsageModules();
+    else renderUsageSessions();
   } catch (e) { showToast('加载失败: ' + e.message, false); }
 }
 
-function renderUsageTable() {
+// ── 模式一: 按会话 ─────────────────────────────────────────
+
+function usageSessionName(s) {
+  if (!s.chat_id) {
+    // 未知会话: 指出主要是哪种用途(summary/识图/情感分析)
+    const mods = Object.entries(s.modules || {})
+      .sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+    if (!mods.length) return '未知会话';
+    const names = mods.slice(0, 2).map(([m]) => USAGE_MODULE_NAMES[m] || m);
+    return '未知会话 · ' + names.join('+');
+  }
+  return (s.chat_type === 'group' ? '群 ' : '私聊 ') + s.chat_id;
+}
+
+function usageBotLabel(bid) {
+  return (bid && bid !== '?') ? bid : '系统';
+}
+
+function renderUsageSessions() {
   if (!usageData) return;
   const sessions = (usageData.sessions || []).slice();
   const key = usageSortKey;
@@ -742,6 +783,14 @@ function renderUsageTable() {
   else if (key === 'avg') sessions.sort((a, b) => (b.total_tokens / Math.max(1, b.calls)) - (a.total_tokens / Math.max(1, a.calls)));
   else if (key === 'cache') sessions.sort((a, b) => (b.cached_tokens / Math.max(1, b.prompt_tokens)) - (a.cached_tokens / Math.max(1, a.prompt_tokens)));
   else sessions.sort((a, b) => b.total_tokens - a.total_tokens);
+
+  document.getElementById('usage-thead').innerHTML =
+    '<tr><th>Bot</th><th>会话</th>' +
+    '<th class="sortable" onclick="usageSortBy(\'total_tokens\')">总 Token <span id="usage-arrow-total_tokens"></span></th>' +
+    '<th class="sortable" onclick="usageSortBy(\'calls\')">调用次数 <span id="usage-arrow-calls"></span></th>' +
+    '<th class="sortable" onclick="usageSortBy(\'avg\')">平均每次 <span id="usage-arrow-avg"></span></th>' +
+    '<th class="sortable" onclick="usageSortBy(\'cache\')">缓存命中 <span id="usage-arrow-cache"></span></th>' +
+    '<th>输入 / 输出</th></tr>';
 
   for (const k of ['total_tokens', 'calls', 'avg', 'cache']) {
     const el = document.getElementById('usage-arrow-' + k);
@@ -760,7 +809,7 @@ function renderUsageTable() {
       .map(([m, st]) => `<div>${USAGE_MODULE_NAMES[m] || m}: ${st.total_tokens} token × ${st.calls} 次</div>`)
       .join('') || '<div>—</div>';
     return `<tr class="usage-row" onclick="usageToggle(${i})">
-        <td>${s.bot_id || '?'}</td><td>${usageSessionName(s)}</td>
+        <td>${usageBotLabel(s.bot_id)}</td><td>${usageSessionName(s)}</td>
         <td>${s.total_tokens}</td><td>${s.calls}</td><td>${avg}</td>
         <td>${sCachePct}%</td>
         <td>${s.prompt_tokens} / ${s.completion_tokens}</td>
@@ -768,6 +817,75 @@ function renderUsageTable() {
       <tr class="usage-detail" id="usage-detail-${i}" style="display:none">
         <td colspan="7" style="padding-left:28px;color:var(--text-dim)">${mods}</td>
       </tr>`;
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
+  document.querySelector('#usage-table tbody').innerHTML = rows;
+}
+
+// ── 模式二: 按用户(群/私聊、跨 bot 合并; 展开显示各 bot 明细) ──
+
+function renderUsageUsers() {
+  if (!usageData) return;
+  const users = usageData.users || [];
+  document.getElementById('usage-thead').innerHTML =
+    '<tr><th>用户 QQ</th><th>总 Token</th><th>调用次数</th><th>平均每次</th><th>缓存命中</th><th>输入 / 输出</th></tr>';
+  const t = usageData.totals || {};
+  const cachePct = t.prompt_tokens ? Math.round((t.cached_tokens || 0) / t.prompt_tokens * 100) : 0;
+  document.getElementById('usage-totals').textContent =
+    `合计 ${t.total_tokens || 0} token（输入 ${t.prompt_tokens || 0} / 输出 ${t.completion_tokens || 0}，缓存命中 ${t.cached_tokens || 0}，占输入 ${cachePct}%），${t.calls || 0} 次调用，${users.length} 位用户`;
+
+  const rows = users.map((u, i) => {
+    const avg = Math.floor(u.total_tokens / Math.max(1, u.calls));
+    const uCachePct = u.prompt_tokens ? Math.round((u.cached_tokens || 0) / u.prompt_tokens * 100) : 0;
+    const botsDetail = Object.entries(u.bots || {})
+      .sort((a, b) => b[1].total_tokens - a[1].total_tokens)
+      .map(([bid, b]) => {
+        const mods = Object.entries(b.modules || {})
+          .sort((x, y) => y[1].total_tokens - x[1].total_tokens)
+          .map(([m, st]) => `${USAGE_MODULE_NAMES[m] || m} ${st.total_tokens}×${st.calls}`)
+          .join('，');
+        return `<div>${usageBotLabel(bid)}: ${b.total_tokens} token × ${b.calls} 次${mods ? ' · ' + mods : ''}</div>`;
+      }).join('') || '<div>—</div>';
+    const label = u.user_id ? u.user_id : '未知用户';
+    return `<tr class="usage-row" onclick="usageToggle(${i})">
+        <td>${label}</td><td>${u.total_tokens}</td><td>${u.calls}</td><td>${avg}</td>
+        <td>${uCachePct}%</td><td>${u.prompt_tokens} / ${u.completion_tokens}</td>
+      </tr>
+      <tr class="usage-detail" id="usage-detail-${i}" style="display:none">
+        <td colspan="6" style="padding-left:28px;color:var(--text-dim)">${botsDetail}</td>
+      </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
+  document.querySelector('#usage-table tbody').innerHTML = rows;
+}
+
+// ── 模式三: 按用途(bot × 用途) ─────────────────────────────
+
+function renderUsageModules() {
+  if (!usageData) return;
+  const bots = usageData.bots || [];
+  document.getElementById('usage-thead').innerHTML =
+    '<tr><th>Bot</th>' + USAGE_MODULE_GROUPS.map(g => `<th>${g.label}</th>`).join('') +
+    '<th>其他</th><th>合计</th></tr>';
+  const t = usageData.totals || {};
+  document.getElementById('usage-totals').textContent =
+    `合计 ${t.total_tokens || 0} token，${t.calls || 0} 次调用，${bots.length} 行(bot × 用途)`;
+
+  const rows = bots.map(b => {
+    const m = b.modules || {};
+    const sum = keys => keys.reduce((a, k) => a + ((m[k] && m[k].total_tokens) || 0), 0);
+    const calls = keys => keys.reduce((a, k) => a + ((m[k] && m[k].calls) || 0), 0);
+    const cell = keys => {
+      const tt = sum(keys);
+      if (!tt) return '<td style="color:var(--text-dim)">—</td>';
+      return `<td>${tt}<div class="small" style="color:var(--text-dim)">${calls(keys)} 次</div></td>`;
+    };
+    const knownTotal = sum(USAGE_KNOWN_MODULES);
+    const otherTotal = Math.max(0, b.total_tokens - knownTotal);
+    const otherCalls = b.calls - calls(USAGE_KNOWN_MODULES);
+    const otherCell = otherTotal ? `<td>${otherTotal}<div class="small" style="color:var(--text-dim)">${otherCalls} 次</div></td>`
+      : '<td style="color:var(--text-dim)">—</td>';
+    return `<tr><td>${usageBotLabel(b.bot_id)}</td>` +
+      USAGE_MODULE_GROUPS.map(g => cell(g.keys)).join('') + otherCell +
+      `<td><b>${b.total_tokens}</b> <div class="small" style="color:var(--text-dim)">${b.calls} 次</div></td></tr>`;
   }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">该时间段暂无用量记录</td></tr>';
   document.querySelector('#usage-table tbody').innerHTML = rows;
 }

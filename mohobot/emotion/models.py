@@ -226,10 +226,10 @@ class EmotionalState:
             )
 
     def should_force_update(self, force_interval: int) -> bool:
-        """强制更新检查: 计数器满 N 轮, 或距上次强制更新超过 30 分钟。"""
+        """强制更新检查: 计数器满 N 轮, 或距上次强制更新超过 60 分钟。"""
         if self.force_update_counter >= max(1, int(force_interval)):
             return True
-        return time.time() - self.last_force_update > THIRTY_MINUTES
+        return time.time() - self.last_force_update > ONE_HOUR
 
     def reset_force_update_counter(self) -> None:
         self.force_update_counter = 0
