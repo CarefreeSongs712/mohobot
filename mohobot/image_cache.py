@@ -91,6 +91,27 @@ class ImageCache:
         finally:
             self._in_flight.pop(image_url, None)
 
+    async def peek_description(self, image_url: str) -> str | None:
+        """只读探测图片描述缓存: 不下载、不调视觉, 命中返回描述文本。
+
+        用于"当轮已识别才带概要"的上下文存储: 同一图片若本轮已走
+        get_or_describe(如 LLM 请求内的图片描述), 这里即可取到缓存值。
+        """
+        if not image_url:
+            return None
+        try:
+            cache_map = await self._load_cache_map()
+            entry = cache_map.get(image_url)
+        except Exception:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        desc = str(entry.get("description", "") or "").strip()
+        # 占位/失败文本不算有效描述
+        if not desc or desc in ("[图片]", "[图片下载失败]"):
+            return None
+        return desc
+
     async def _get_or_describe_impl(
         self, image_url: str, vision_callback=None
     ) -> tuple[str, str]:

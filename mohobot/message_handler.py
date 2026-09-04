@@ -329,17 +329,34 @@ class MessageHandler:
 
         # ── Legacy path: streaming with reply-quote ──
         # Load session context (+ 群聊最近消息临时注入, 不写回 context 文件)
+        # 引用消息解析: 用户引用了前一条消息时, 把被引用内容取出来(发送者 +
+        # 文本/图片概要), 当轮以 system 块注入 LLM, 并并入该条 user 消息持久化。
+        quote_display = ""
+        if self._ws is not None:
+            try:
+                quote_display = await self._resolve_quoted_display(bot_id, event)
+            except Exception as e:
+                logger.debug(f"引用消息解析失败: {e}")
+                quote_display = ""
         context = await self._build_legacy_context(bot_id, chat_type, chat_id)
+        if quote_display:
+            context.append({
+                "role": "system",
+                "content": f"【引用消息】\n{quote_display}",
+            })
 
         # Stream response — split by punctuation + length (标点符号+长度分隔法)
         full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
 
         # Save context after streaming completes
         if full_reply.strip():
+            user_content = await self._build_user_store_content(
+                bot_id, event, quote_display,
+            )
             user_msg = {
                 # Role = "QQ号-昵称" so the LLM knows WHO said it
                 "role": self._speaker_role(event),
-                "content": self._context_content(event.message),
+                "content": user_content,
                 "timestamp": event.time,
             }
             ai_msg = {
@@ -365,40 +382,266 @@ class MessageHandler:
                 except Exception as e:
                     logger.debug(f"情感分析调度失败: {e}")
 
-    # ── 图片引用归一化 ─────────────────────────────────────────
+    # ── 消息内容渲染(上下文存储 / 引用消息 / 图片概要) ──────────
+
+    # 非文本段的占位符(无 summary 时的兜底显示)
+    _SEG_PLACEHOLDERS = {
+        "image": "[图片]",
+        "record": "[语音]",
+        "video": "[视频]",
+        "face": "[表情]",
+        "forward": "[合并转发]",
+        "json": "[卡片消息]",
+        "file": "[文件]",
+    }
 
     @staticmethod
-    def _context_content(message) -> str:
-        """上下文/数据库存储用的消息文本。
+    def _normalize_seg_summary(summary: str) -> str:
+        """规整 NapCat 给非文本段的 summary(如 "[动画表情]"): 未带 [] 时补上。"""
+        s = (summary or "").strip()
+        if not s:
+            return ""
+        return s if s.startswith("[") else f"[{s}]"
 
-        有纯文本时直接用(带图时补 [图片] 标记); 无文本(纯图/语音/表情等)
-        时按段类型给占位符, 避免把整个段列表的 repr(含归一化后的
-        base64 data URI)写进上下文并被送进 LLM。
+    async def _render_message_content(
+        self, bot_id: str, message, *, describe_missing: bool = False,
+    ) -> str:
+        """把消息段渲染成给 LLM/上下文看的文本。
+
+        - 纯文本: 原文
+        - 文本 + 非文本段: 文本 + 段显示标记(空格连接)
+        - 图片段: summary(NapCat 表情包/动画表情等, 如 "[动画表情]")直接用;
+          无 summary 的照片 → 有缓存描述则 "[图片]（概要：…）", 否则 "[图片]"。
+          describe_missing=True(引用消息场景)时缓存未命中会下载+现调视觉识别;
+          False(上下文存储)只读缓存, 当轮已识别才带概要。
+        - 无文本时只保留有意义的非文本段: 绝不把段列表的 repr(含归一化后的
+          base64 data URI)存进上下文或送进 LLM。
         """
-        text = extract_plain_text(message)
-        if text:
-            if isinstance(message, list) and any(
-                isinstance(seg, dict) and seg.get("type") == "image"
-                for seg in message
-            ):
-                return f"{text} [图片]"
-            return text
-        placeholders = {
-            "image": "[图片]",
-            "record": "[语音]",
-            "video": "[视频]",
-            "face": "[表情]",
-            "forward": "[合并转发]",
-            "json": "[卡片消息]",
-            "file": "[文件]",
-        }
-        if isinstance(message, list):
-            for seg in message:
-                if isinstance(seg, dict):
-                    hit = placeholders.get(seg.get("type"))
-                    if hit:
-                        return hit
-        return "[消息]"
+        from mohobot.utils.cq_code import parse_cq_code
+
+        if isinstance(message, str):
+            segs = parse_cq_code(message) if message else []
+        elif isinstance(message, list):
+            segs = message
+        else:
+            segs = []
+
+        text = ""
+        markers: list[str] = []
+        first_photo: dict | None = None  # 需要识别概要的第一张照片(其余照片只留占位)
+        for seg in segs:
+            if not isinstance(seg, dict):
+                continue
+            stype = seg.get("type")
+            data = seg.get("data") or {}
+            if stype == "text":
+                text += str(data.get("text", "") or "")
+                continue
+            if stype in ("reply", "at"):
+                continue  # 引用段只用于取 id, 不进入内容; @ 不入内容
+            if stype == "image":
+                summary = self._normalize_seg_summary(
+                    str(data.get("summary", "") or "")
+                )
+                if summary:
+                    markers.append(summary)
+                else:
+                    markers.append("[图片]")
+                    if first_photo is None:
+                        first_photo = seg
+                continue
+            markers.append(self._SEG_PLACEHOLDERS.get(stype, "[消息]"))
+
+        if first_photo is not None:
+            desc = await self._describe_seg_image(
+                bot_id, first_photo, describe_missing=describe_missing,
+            )
+            if desc:
+                # 替换第一张照片的 "[图片]" 占位为 带概要 形式
+                for i in range(len(markers) - 1, -1, -1):
+                    if markers[i] == "[图片]":
+                        markers[i] = f"[图片]（概要：{desc}）"
+                        break
+
+        body = " ".join(m for m in markers if m)
+        if text or body:
+            return (text + (" " + body if body else "")).strip()
+        # 仅 reply/at 段或空消息: 无内容可表示, 返回空(不存占位噪音)
+        return ""
+
+    async def _describe_seg_image(
+        self, bot_id: str, seg: dict, *, describe_missing: bool = False,
+    ) -> str:
+        """识别图片段内容(仅照片, 非 summary 表情图)。
+
+        先取可用引用(url / data URI, 仅文件名时经 get_image 换取)。
+        describe_missing=True: 缓存未命中会下载 + 现调视觉(引用消息场景);
+        False: 只读缓存, 未命中返回 ""(照片"当轮已识别"才带概要)。
+        失败返回 ""。
+        """
+        from mohobot.utils.cq_code import extract_image_urls
+
+        ref = ""
+        try:
+            urls = extract_image_urls([seg])
+            if urls:
+                ref = urls[0]
+        except Exception:
+            pass
+        if not ref:
+            file_ref = str((seg.get("data") or {}).get("file", "") or "")
+            if file_ref and not file_ref.startswith("base64://"):
+                if describe_missing:
+                    try:
+                        ref = await self._resolve_image_data_uri(bot_id, file_ref)
+                    except Exception:
+                        ref = ""
+                # 非 describe_missing 且无 url: 不可用(不现调)
+        if not ref or self._image_cache is None:
+            return ""
+        try:
+            if describe_missing:
+                _, desc = await asyncio.wait_for(
+                    self._image_cache.get_or_describe(
+                        ref, vision_callback=self._vision_callback(bot_id),
+                    ),
+                    timeout=15.0,
+                )
+            else:
+                desc = await self._image_cache.peek_description(ref) or ""
+        except Exception:
+            desc = ""
+        desc = str(desc or "").strip()
+        if desc in ("[图片]", "[图片下载失败]"):
+            return ""
+        return desc
+
+    # ── 引用消息内容解析(用户引用前一条消息) ────────────────────
+
+    # 引用消息解析缓存: {message_id: (过期时间, 展示文本 | None)}
+    # None 为负缓存(get_msg 查不到时短缓存, 防同一 id 反复打接口)
+    _quote_cache: dict[str, tuple[float, str | None]] = {}
+    _QUOTE_CACHE_TTL = 600.0    # 解析成功缓存 10 分钟
+    _QUOTE_FAIL_TTL = 60.0      # 解析失败缓存 60 秒
+    _QUOTE_CACHE_MAX = 500
+    _QUOTE_MAX_LEN = 500        # 引用内容展示上限(防 prompt 膨胀)
+
+    def _extract_reply_id(self, event: MessageEvent) -> str:
+        """取消息里引用(reply)段的消息 id(无/非法返回 "")。"""
+        message = getattr(event, "message", None)
+        if not isinstance(message, list):
+            return ""
+        for seg in message:
+            if isinstance(seg, dict) and seg.get("type") == "reply":
+                rid = str((seg.get("data") or {}).get("id", "") or "").strip()
+                if rid.isdigit():
+                    return rid
+        return ""
+
+    def _cache_quote(
+        self, reply_id: str, display: str | None, *, fail: bool = False,
+    ) -> None:
+        ttl = self._QUOTE_FAIL_TTL if fail else self._QUOTE_CACHE_TTL
+        self._quote_cache[reply_id] = (time_module.time() + ttl, display)
+
+    def _prune_quote_cache(self) -> None:
+        """清理过期引用缓存; 超上限时按到期先后丢弃最旧条目。"""
+        now = time_module.time()
+        stale = [k for k, (exp, _) in self._quote_cache.items() if exp <= now]
+        for k in stale:
+            del self._quote_cache[k]
+        if len(self._quote_cache) > self._QUOTE_CACHE_MAX:
+            ordered = sorted(
+                self._quote_cache, key=lambda k: self._quote_cache[k][0],
+            )
+            for k in ordered[: len(self._quote_cache) - self._QUOTE_CACHE_MAX]:
+                del self._quote_cache[k]
+
+    async def _resolve_quoted_display(self, bot_id: str, event: MessageEvent) -> str:
+        """解析被引用消息 → 展示文本(发送者 + 文本/图片概要), 失败返回 ""。
+
+        走 OneBot get_msg 接口(与 relationship 插件一致, NapCat 支持);
+        带 TTL 缓存。引用图片时识别概要(describe_missing=True, 未命中现调视觉)。
+        """
+        reply_id = self._extract_reply_id(event)
+        if not reply_id:
+            return ""
+        self._prune_quote_cache()
+        cached = self._quote_cache.get(reply_id)
+        if cached is not None:
+            return cached[1] or ""
+        ws = self._ws
+        if ws is None:
+            return ""
+
+        resp = None
+        try:
+            resp = await ws.send_to_bot(
+                bot_id, "get_msg", {"message_id": int(reply_id)},
+                wait_response=True, timeout=5.0,
+            )
+        except Exception as e:
+            logger.debug(f"get_msg 解析引用消息失败({reply_id}): {e}")
+        data = None
+        if isinstance(resp, dict):
+            status = str(resp.get("status", "") or "").lower()
+            try:
+                retcode = int(resp.get("retcode", 0) or 0)
+            except (TypeError, ValueError):
+                retcode = 0
+            if status in ("", "ok") and retcode == 0:
+                data = resp.get("data")
+        if not isinstance(data, dict) or not data.get("message"):
+            self._cache_quote(reply_id, None, fail=True)
+            return ""
+
+        sender = data.get("sender") or {}
+        uid = sender.get("user_id") or reply_id
+        name = str(sender.get("card") or sender.get("nickname") or "").strip()
+        if uid:
+            try:
+                name = await ws.get_nickname(bot_id, int(uid), getattr(event, "group_id", None)) or name
+            except Exception:
+                pass
+            if not name:
+                name = str(uid)
+        try:
+            content = await self._render_message_content(
+                bot_id, data.get("message"), describe_missing=True,
+            )
+        except Exception as e:
+            logger.debug(f"引用消息内容渲染失败({reply_id}): {e}")
+            content = ""
+        content = (content or "").strip()
+        if not content:
+            self._cache_quote(reply_id, None, fail=True)
+            return ""
+        if len(content) > self._QUOTE_MAX_LEN:
+            content = content[: self._QUOTE_MAX_LEN] + "…"
+        if name and name != str(uid):
+            display = f"{name}({uid}): {content}"
+        else:
+            display = f"{uid}: {content}"
+        self._cache_quote(reply_id, display)
+        return display
+
+    async def _build_user_store_content(
+        self, bot_id: str, event: MessageEvent, quote_display: str,
+    ) -> str:
+        """构建该条 user 消息的持久化内容(写 context 文件/数据库)。
+
+        自身消息经 _render_message_content(图片存 summary/概要占位而非段列表);
+        有已解析的引用消息时, 引用内容以「【引用消息】」块并入本条消息,
+        后续轮次也能追溯用户当时引用了什么。
+        """
+        own = await self._render_message_content(
+            bot_id, getattr(event, "message", ""), describe_missing=False,
+        )
+        if not quote_display:
+            return own
+        if own:
+            return f"【引用消息】\n{quote_display}\n\n{own}"
+        return f"【引用消息】\n{quote_display}"
 
     async def _resolve_image_data_uri(self, bot_id: str, file_ref: str) -> str:
         """file 文件名/路径 → OneBot get_image → data URI(失败返回 "")。
