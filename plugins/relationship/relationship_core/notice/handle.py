@@ -55,6 +55,7 @@ class NoticeHandle:
                 forward_group_id=int(self.cfg.manage_group) if self.cfg.manage_group else None,
                 forward_user_id=int(self.cfg.admin_id) if self.cfg.admin_id else None,
                 batch_size=self.cfg.check.batch_size,
+                data_dir=self.cfg.data_dir,
             )
 
         # 拉黑群聊/用户

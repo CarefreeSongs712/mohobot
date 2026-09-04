@@ -28,6 +28,11 @@ class PluginConfig:
         self._admin_ids = [str(a) for a in (admins or [])]
         self._rebuild()
 
+    @property
+    def data_dir(self) -> str:
+        """框架数据目录(抽查读 data/history 用)。"""
+        return self._data_dir
+
     def _rebuild(self) -> None:
         """从 self._data 重建全部派生字段(init 与磁盘重读共用)。"""
         # 1. 管理员(全局配置 admins 注入)
