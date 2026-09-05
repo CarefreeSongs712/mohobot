@@ -103,8 +103,14 @@ class DatabaseManager:
         content: str,
         msg_type: str = "text",
         meta_data: dict | None = None,
+        speaker_id: str | None = None,
+        speaker_nickname: str | None = None,
     ) -> str:
-        """写一条消息到 conversations 表(取代 JSONL history)。"""
+        """写一条消息到 conversations 表(取代 JSONL history)。
+
+        speaker_* 为实际发言人归属: 群聊时 qq 传群号、speaker_id 传发言人 QQ;
+        私聊两者一致; agent 消息不传(character_id 已标识 bot)。
+        """
         user = self.get_or_create_user(qq)
         db = sqldb.new_session()
         try:
@@ -114,6 +120,8 @@ class DatabaseManager:
                 source=source,
                 type=msg_type,
                 content=content,
+                speaker_id=speaker_id,
+                speaker_nickname=speaker_nickname,
                 meta_data=json.dumps(meta_data, ensure_ascii=False) if meta_data else None,
             )
             db.add(row)
@@ -149,6 +157,8 @@ class DatabaseManager:
                     "source": r.source,
                     "type": r.type,
                     "content": r.content,
+                    "speaker_id": r.speaker_id,
+                    "speaker_nickname": r.speaker_nickname,
                     "timestamp": r.timestamp,
                 }
                 for r in rows

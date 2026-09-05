@@ -905,9 +905,15 @@ class MessageHandler:
             return
         try:
             user_id = str(event.user_id) if chat_type == "private" else chat_id
+            if isinstance(event, GroupMessageEvent):
+                speaker_nickname = event.sender.card or event.sender.nickname
+            else:
+                speaker_nickname = event.sender.nickname
             self._db.add_conversation(
                 user_id, bot_id, "user", user_text,
                 msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
+                speaker_id=str(event.user_id),
+                speaker_nickname=speaker_nickname or None,
             )
             self._db.add_conversation(
                 user_id, bot_id, "agent", ai_text,

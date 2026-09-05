@@ -55,6 +55,8 @@ class Conversation(Base):
     source = Column(String, nullable=False)  # user / agent
     type = Column(String, nullable=False)    # text / image / sing
     content = Column(Text, nullable=False)
+    speaker_id = Column(String, nullable=True, index=True)   # 发言人 QQ(群聊与 user_id 群号区分开)
+    speaker_nickname = Column(String, nullable=True)         # 发言人昵称/群名片
     meta_data = Column(Text, nullable=True)
 
 
@@ -159,6 +161,14 @@ def _migrate_sqlite_schema(db_engine: Engine) -> None:
         # conversations 表可能缺少 meta_data(旧库)
         if "meta_data" not in conversation_columns:
             connection.exec_driver_sql("ALTER TABLE conversations ADD COLUMN meta_data TEXT")
+        # conversations 表可能缺少说话人归属(旧库)
+        if "speaker_id" not in conversation_columns:
+            connection.exec_driver_sql("ALTER TABLE conversations ADD COLUMN speaker_id VARCHAR")
+        if "speaker_nickname" not in conversation_columns:
+            connection.exec_driver_sql("ALTER TABLE conversations ADD COLUMN speaker_nickname VARCHAR")
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_conversations_speaker_id ON conversations (speaker_id)"
+        )
 
 
 def get_engine() -> Engine:
