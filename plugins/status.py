@@ -205,7 +205,7 @@ _EMOJI_CHARS = set("📦💻⚙️🔒⚠️✅❌🔁🗄️🤖💬🧠🖥️
 
 
 def _find_cjk_font() -> str | None:
-    """复用共享字体查找(data/ 下得意黑优先, 系统字体兜底)。"""
+    """复用共享字体查找(data/ 下宋体优先, 系统字体兜底)。"""
     from mohobot.utils.image_card import find_cjk_font
     return find_cjk_font()
 
