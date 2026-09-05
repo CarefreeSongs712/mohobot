@@ -236,3 +236,9 @@ _test_*.py
 onebot-11-doc/
 data_test_llm/
 .zcode/
+
+# ── Review panel (semi-independent, local config & state) ──
+review/config.yaml
+review/data/
+review/panel.log
+review/__pycache__/

@@ -276,6 +276,69 @@ class MohobotApplication:
             f"Panel: http://{self._config.web_panel.host}:{self._config.web_panel.port}"
         )
 
+        # 12. 审核面板(半独立): 未运行则拉起独立进程; mohobot 关闭不随机关闭它
+        self._maybe_start_review_panel()
+
+    def _maybe_start_review_panel(self) -> None:
+        """拉起聊天记录审核面板(review/, 独立进程独立端口)。
+
+        - review/config.yaml 不存在或 enabled=false 时不拉起
+        - 端口已被监听(面板已在运行)时跳过
+        - 脱离进程组启动, mohobot 退出不影响审核面板
+        """
+        import socket
+        import subprocess
+
+        review_dir = Path(__file__).resolve().parent / "review"
+        entry = review_dir / "main.py"
+        cfg_path = review_dir / "config.yaml"
+        if not entry.exists():
+            return
+
+        port = 9091
+        try:
+            import yaml
+            if not cfg_path.exists():
+                logger.info("审核面板未配置(review/config.yaml 不存在), 跳过拉起")
+                return
+            rcfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            if rcfg.get("enabled") is False:
+                logger.info("审核面板 enabled=false, 跳过拉起")
+                return
+            port = int((rcfg.get("server") or {}).get("port", 9091))
+        except Exception as e:
+            logger.warning(f"审核面板配置读取失败, 跳过拉起: {e}")
+            return
+
+        probe = socket.socket()
+        probe.settimeout(0.5)
+        try:
+            already_running = probe.connect_ex(("127.0.0.1", port)) == 0
+        finally:
+            probe.close()
+        if already_running:
+            logger.info(f"审核面板已在运行(端口 {port}), 跳过拉起")
+            return
+
+        kwargs: dict[str, Any] = dict(
+            cwd=str(review_dir.parent),
+            stdin=subprocess.DEVNULL,
+        )
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            log_fh = open(review_dir / "panel.log", "ab")
+            kwargs["stdout"] = log_fh
+            kwargs["stderr"] = log_fh
+            subprocess.Popen([sys.executable, str(entry)], **kwargs)
+            logger.info(f"审核面板已拉起: 端口 {port} (独立进程, 日志 review/panel.log)")
+        except Exception as e:
+            logger.warning(f"审核面板拉起失败: {e}")
+
     async def restart(self) -> None:
         """Restart the service in-process: shutdown then re-startup."""
         logger.info("Restarting Mohobot...")

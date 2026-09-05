@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>聊天记录审核 · Mohobot</title>
+<style>
+:root{
+  --bg:#14171c; --bg2:#1b1f26; --bg3:#222733; --border:#2c3340;
+  --fg:#d6dbe4; --dim:#8b93a3; --accent:#66ccff; --ok:#4cc38a;
+  --bad:#e5684f; --warn:#e0a24c;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+body{background:var(--bg); color:var(--fg); font:14px/1.55 "Segoe UI","Microsoft YaHei",sans-serif; height:100vh; overflow:hidden}
+button{cursor:pointer; font:inherit; border:1px solid var(--border); background:var(--bg3); color:var(--fg); border-radius:6px; padding:6px 14px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent); color:#10222e; border-color:var(--accent); font-weight:600}
+button.danger{background:var(--bad); color:#fff; border-color:var(--bad); font-weight:600}
+button.ghost{background:transparent}
+input,select,textarea{font:inherit; background:var(--bg2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:6px 10px}
+textarea{width:100%; resize:vertical}
+::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:#333c4c;border-radius:5px}
+
+/* ── 登录 ── */
+#loginView{position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:100}
+.login-card{background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:34px 38px; width:330px}
+.login-card h1{font-size:18px; margin-bottom:4px}
+.login-card .sub{color:var(--dim); font-size:12px; margin-bottom:20px}
+.login-card input{width:100%; margin-bottom:12px}
+.login-card button{width:100%}
+.login-err{color:var(--bad); font-size:12px; min-height:18px; margin-top:8px}
+
+/* ── 布局 ── */
+#app{display:none; height:100vh; flex-direction:column}
+header{display:flex; align-items:center; gap:6px; padding:8px 14px; background:var(--bg2); border-bottom:1px solid var(--border); flex:none}
+header .logo{font-weight:700; margin-right:14px; color:var(--accent)}
+header nav{display:flex; gap:4px}
+header nav button{border:none; background:transparent; color:var(--dim); padding:6px 12px; border-radius:6px}
+header nav button.active{background:var(--bg3); color:var(--fg)}
+header .spacer{flex:1}
+header .user{color:var(--dim); font-size:12px; margin-right:6px}
+main{flex:1; overflow:hidden; position:relative}
+.view{display:none; height:100%}
+.view.active{display:flex}
+
+/* ── 审核视图 ── */
+#reviewView{flex-direction:row}
+.sidebar{width:280px; flex:none; background:var(--bg2); border-right:1px solid var(--border); display:flex; flex-direction:column}
+.filters{padding:10px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:8px}
+.filters .row{display:flex; gap:6px}
+.filters select{flex:1; min-width:0; font-size:13px}
+.filters .row2{display:flex; gap:6px; align-items:center}
+.filters .row2 .hint{color:var(--dim); font-size:12px; flex:1}
+.session-list{flex:1; overflow-y:auto; padding:8px}
+.sess{padding:9px 11px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer}
+.sess:hover{border-color:var(--accent)}
+.sess.active{border-color:var(--accent); background:var(--bg3)}
+.sess .t{display:flex; justify-content:space-between; align-items:baseline; gap:6px}
+.sess .name{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sess .meta{color:var(--dim); font-size:11px; margin-top:3px; display:flex; gap:8px; flex-wrap:wrap}
+.badge{font-size:11px; padding:1px 7px; border-radius:9px; white-space:nowrap}
+.badge.pending{background:#3a3320; color:var(--warn)}
+.badge.ok{background:#173326; color:var(--ok)}
+.badge.bad{background:#3a221c; color:var(--bad)}
+.badge.dim{background:var(--bg3); color:var(--dim)}
+
+.chat{flex:1; display:flex; flex-direction:column; min-width:0}
+.chat-head{padding:10px 16px; border-bottom:1px solid var(--border); background:var(--bg2); flex:none}
+.chat-head .t{font-weight:700; font-size:15px}
+.chat-head .meta{color:var(--dim); font-size:12px; margin-top:2px}
+.chat-body{flex:1; overflow-y:auto; padding:16px 20px}
+.entry{margin-bottom:12px; padding:9px 13px; border-radius:9px; background:var(--bg2); border-left:3px solid transparent}
+.entry .head{display:flex; align-items:baseline; gap:8px; margin-bottom:3px; flex-wrap:wrap}
+.entry .who{font-weight:600}
+.entry .who.bot{color:var(--accent)}
+.entry .time{color:var(--dim); font-size:11px}
+.entry .mid{color:#5b6474; font-size:10px}
+.entry .content{white-space:pre-wrap; word-break:break-word}
+.entry .status-line{margin-top:5px; font-size:11px; color:var(--dim); display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+.entry.ctx{opacity:.42}
+.entry.ctx:hover{opacity:.85}
+.entry.pending{border-left-color:var(--warn)}
+.entry.is-abn{border-left-color:var(--bad)}
+.entry.exempt{opacity:.35; font-style:italic}
+.entry img.msg-img{max-width:260px; max-height:200px; border-radius:8px; margin-top:6px; display:block; border:1px solid var(--border)}
+.vlm{margin-top:5px; font-size:12px; color:#9fb8cc; background:#1a2430; border:1px solid #24384a; padding:5px 9px; border-radius:6px}
+.vlm::before{content:"🖼 VLM: "; color:#5b8bab}
+.img-fallback{margin-top:6px; color:var(--dim); font-size:12px}
+.tag{display:inline-block; font-size:11px; background:#3a221c; color:var(--bad); border-radius:8px; padding:0 8px}
+.summary-note{color:var(--dim); font-size:12px; background:var(--bg2); border:1px dashed var(--border); border-radius:8px; padding:7px 12px; margin-bottom:12px}
+.show-older{margin:4px 0 14px; font-size:12px}
+.chat-foot{flex:none; border-top:1px solid var(--border); background:var(--bg2); padding:10px 16px; display:flex; gap:10px; align-items:center}
+.chat-foot .remind{color:var(--dim); font-size:12px; flex:1}
+
+/* ── 通用面板视图 ── */
+.panel-view{flex-direction:column; overflow:hidden}
+.panel-toolbar{padding:10px 16px; border-bottom:1px solid var(--border); background:var(--bg2); display:flex; gap:8px; align-items:center; flex-wrap:none}
+.panel-body{flex:1; overflow-y:auto; padding:16px}
+table.data{width:100%; border-collapse:collapse; font-size:13px}
+table.data th,table.data td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:top}
+table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; background:var(--bg)}
+.content-cell{max-width:420px; white-space:pre-wrap; word-break:break-word}
+.cards{display:flex; gap:14px; margin-bottom:18px; flex-wrap:wrap}
+.card{background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px 22px; min-width:130px}
+.card .n{font-size:24px; font-weight:700}
+.card .l{color:var(--dim); font-size:12px; margin-top:2px}
+.card.ok .n{color:var(--ok)} .card.bad .n{color:var(--bad)} .card.warn .n{color:var(--warn)}
+
+/* ── 弹窗 ── */
+.modal-mask{position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:50}
+.modal-mask.show{display:flex}
+.modal{background:var(--bg2); border:1px solid var(--border); border-radius:12px; width:560px; max-width:92vw; max-height:86vh; display:flex; flex-direction:column}
+.modal .m-head{padding:14px 18px; font-weight:700; border-bottom:1px solid var(--border)}
+.modal .m-body{padding:14px 18px; overflow-y:auto}
+.modal .m-foot{padding:12px 18px; border-top:1px solid var(--border); display:flex; gap:10px; justify-content:flex-end}
+.tagcheck{display:flex; gap:10px; margin:10px 0; flex-wrap:wrap}
+.tagcheck label{display:flex; align-items:center; gap:5px; cursor:pointer}
+.fp-item{border:1px solid var(--border); border-radius:8px; padding:7px 10px; margin-bottom:7px; font-size:12px}
+.fp-item .c{color:var(--dim); white-space:pre-wrap; word-break:break-word; max-height:60px; overflow:hidden}
+.fp-item label{display:flex; gap:8px; align-items:flex-start; cursor:pointer}
+.field-label{color:var(--dim); font-size:12px; margin:10px 0 5px}
+.toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--bg3); border:1px solid var(--accent); color:var(--fg); padding:9px 20px; border-radius:8px; z-index:200; display:none}
+.empty{color:var(--dim); text-align:center; padding:60px 0}
+</style>
+</head>
+<body>
+
+<div id="loginView">
+  <div class="login-card">
+    <h1>聊天记录审核</h1>
+    <div class="sub">Mohobot Review Panel</div>
+    <input id="loginUser" placeholder="用户名" autocomplete="username">
+    <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
+    <button class="primary" id="loginBtn">登 录</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <span class="logo">📋 审核面板</span>
+    <nav>
+      <button data-nav="review" class="active">审核</button>
+      <button data-nav="abnormal">异常记录</button>
+      <button data-nav="stats">统计</button>
+    </nav>
+    <span class="spacer"></span>
+    <span class="user" id="whoami"></span>
+    <button class="ghost" id="logoutBtn">退出</button>
+  </header>
+  <main>
+
+    <!-- ── 审核视图 ── -->
+    <section class="view active" id="reviewView">
+      <aside class="sidebar">
+        <div class="filters">
+          <div class="row">
+            <select id="fBot"><option value="">全部 Bot</option></select>
+            <select id="fType">
+              <option value="">全部类型</option>
+              <option value="private">私聊</option>
+              <option value="group">群聊</option>
+            </select>
+          </div>
+          <div class="row">
+            <select id="fStatus">
+              <option value="all">全部状态</option>
+              <option value="unreviewed" selected>仅未审核</option>
+              <option value="abnormal">含异常</option>
+            </select>
+          </div>
+          <div class="row2">
+            <button class="ghost" id="sortBtn" title="切换排序">⏳ 最旧优先</button>
+            <span class="hint" id="listHint"></span>
+            <button class="ghost" id="refreshBtn" title="刷新">⟳</button>
+          </div>
+        </div>
+        <div class="session-list" id="sessionList"><div class="empty">加载中…</div></div>
+      </aside>
+      <div class="chat">
+        <div class="chat-head" id="chatHead">选择左侧会话开始审核</div>
+        <div class="chat-body" id="chatBody"><div class="empty">未选择会话</div></div>
+        <div class="chat-foot" id="chatFoot" style="display:none">
+          <button class="primary" id="btnNormal">✓ 对话正常</button>
+          <button class="danger" id="btnAbnormal">✗ 对话异常</button>
+          <button id="btnSkip">跳过 →</button>
+          <span class="remind" id="footHint"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 异常记录视图 ── -->
+    <section class="view panel-view" id="abnormalView">
+      <div class="panel-toolbar">
+        <select id="abBot" style="width:160px"><option value="">全部 Bot</option></select>
+        <select id="abTag" style="width:140px"><option value="">全部标签</option></select>
+        <span class="spacer" style="flex:1"></span>
+        <button id="abExport">⬇ 导出 CSV</button>
+        <button class="ghost" id="abRefresh">⟳ 刷新</button>
+      </div>
+      <div class="panel-body" id="abnormalBody"><div class="empty">加载中…</div></div>
+    </section>
+
+    <!-- ── 统计视图 ── -->
+    <section class="view panel-view" id="statsView">
+      <div class="panel-toolbar">
+        <span style="color:var(--dim)">审核进度与工作量</span>
+        <span style="flex:1"></span>
+        <button class="ghost" id="stRefresh">⟳ 刷新</button>
+      </div>
+      <div class="panel-body" id="statsBody"><div class="empty">加载中…</div></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 异常处理弹窗 -->
+<div class="modal-mask" id="abModal">
+  <div class="modal">
+    <div class="m-head">标记对话异常</div>
+    <div class="m-body">
+      <div class="field-label">异常消息(默认全选当前待审消息, 可取消勾选)</div>
+      <div id="abFps"></div>
+      <div class="field-label">异常标签</div>
+      <div class="tagcheck" id="abTags"></div>
+      <div class="field-label">异常原因 / 备注</div>
+      <textarea id="abNote" rows="3" placeholder="填写异常原因或备注…"></textarea>
+    </div>
+    <div class="m-foot">
+      <button id="abCancel">取消</button>
+      <button class="danger" id="abSave">保存异常</button>
+    </div>
+  </div>
+</div>
+
+<!-- 异常记录编辑弹窗 -->
+<div class="modal-mask" id="editModal">
+  <div class="modal">
+    <div class="m-head">编辑异常记录 <span id="editId" style="color:var(--dim)"></span></div>
+    <div class="m-body">
+      <div class="content-cell" id="editContent" style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:6px"></div>
+      <div class="field-label">异常标签</div>
+      <div class="tagcheck" id="editTags"></div>
+      <div class="field-label">异常原因 / 备注</div>
+      <textarea id="editNote" rows="3"></textarea>
+    </div>
+    <div class="m-foot">
+      <button id="editCancel">取消</button>
+      <button class="primary" id="editSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+/* ================= 基础 ================= */
+let TOKEN = localStorage.getItem('review_token') || '';
+let ME = localStorage.getItem('review_user') || '';
+let curSession = null;          // 当前会话明细
+let sessionItems = [];          // 当前列表(服务端排序后)
+let sortMode = 'oldest';
+let TAGS = ['色情','政治','辱骂','其他'];
+
+const $ = id => document.getElementById(id);
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+function toast(msg,ms=2200){const t=$('toast');t.textContent=msg;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms)}
+function fmtTime(ts){ if(!ts) return ''; const d=new Date(ts*1000); return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) }
+function fmtDay(ts){ if(!ts) return ''; const d=new Date(ts*1000); return d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) }
+
+async function api(path, opts={}){
+  opts.headers = Object.assign({}, opts.headers, TOKEN?{'Authorization':'Bearer '+TOKEN}:{});
+  if(opts.body && typeof opts.body==='object'){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(opts.body) }
+  const r = await fetch(path, opts);
+  if(r.status===401){ showLogin(); throw new Error('未登录') }
+  if(!r.ok){ let msg='请求失败 '+r.status; try{ msg=(await r.json()).detail||msg }catch(e){} throw new Error(msg) }
+  return r.json();
+}
+async function downloadCsv(path){
+  const r = await fetch(path, {headers:{'Authorization':'Bearer '+TOKEN}});
+  if(!r.ok){ toast('导出失败'); return }
+  const blob = await r.blob();
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(r.headers.get('Content-Disposition')||'attachment; filename=export.csv').split('filename=')[1].replace(/"/g,'');
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+/* ================= 登录 ================= */
+function showLogin(){ $('loginView').style.display='flex'; $('app').style.display='none'; TOKEN=''; localStorage.removeItem('review_token') }
+function showApp(){ $('loginView').style.display='none'; $('app').style.display='flex'; $('whoami').textContent=ME; initBoot(); }
+$('loginBtn').onclick = async ()=>{
+  $('loginErr').textContent='';
+  try{
+    const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:$('loginUser').value.trim(),password:$('loginPass').value})});
+    if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error(e.detail||'登录失败') }
+    const d = await r.json();
+    TOKEN=d.token; ME=d.username;
+    localStorage.setItem('review_token',TOKEN); localStorage.setItem('review_user',ME);
+    showApp();
+  }catch(e){ $('loginErr').textContent=e.message }
+};
+$('loginPass').addEventListener('keydown',e=>{ if(e.key==='Enter') $('loginBtn').click() });
+$('logoutBtn').onclick = ()=>{ api('/api/logout',{method:'POST'}).catch(()=>{}); showLogin() };
+
+/* ================= 导航 ================= */
+document.querySelectorAll('header nav button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('active',x===b));
+    ['review','abnormal','stats'].forEach(v=>$('reviewView').classList.toggle('active',v==='review'));
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    $(b.dataset.nav+'View').classList.add('active');
+    if(b.dataset.nav==='abnormal') loadAbnormal();
+    if(b.dataset.nav==='stats') loadStats();
+  };
+});
+
+let bootDone=false;
+async function initBoot(){
+  if(bootDone){ refreshSessions(); return }
+  const d = await api('/api/bootstrap');
+  TAGS = d.tags||TAGS;
+  const fb=$('fBot'), ab=$('abBot');
+  d.bots.forEach(b=>{
+    fb.insertAdjacentHTML('beforeend',`<option value="${esc(b.bot_id)}">${esc(b.nickname)} (${esc(b.bot_id)})</option>`);
+    ab.insertAdjacentHTML('beforeend',`<option value="${esc(b.bot_id)}">${esc(b.nickname)} (${esc(b.bot_id)})</option>`);
+  });
+  const at=$('abTag'); TAGS.forEach(t=>at.insertAdjacentHTML('beforeend',`<option value="${esc(t)}">${esc(t)}</option>`));
+  bootDone=true;
+  refreshSessions();
+}
+
+/* ================= 会话列表 ================= */
+async function refreshSessions(){
+  $('listHint').textContent='…';
+  const q = new URLSearchParams({bot:$('fBot').value, chat_type:$('fType').value, status:$('fStatus').value, sort:sortMode});
+  const d = await api('/api/sessions?'+q);
+  sessionItems = d.sessions;
+  const pending = sessionItems.filter(s=>s.unreviewed>0).length;
+  $('listHint').textContent = `${sessionItems.length} 会话 / ${pending} 待审`;
+  const el=$('sessionList');
+  if(!sessionItems.length){ el.innerHTML='<div class="empty">没有符合条件的会话</div>'; return }
+  el.innerHTML = sessionItems.map(s=>{
+    const badges = [
+      s.unreviewed>0?`<span class="badge pending">未审 ${s.unreviewed}</span>`:'',
+      s.abnormal>0?`<span class="badge bad">异常 ${s.abnormal}</span>`:'',
+      s.unreviewed===0&&s.abnormal===0?`<span class="badge ok">已审 ${s.total}</span>`:'',
+    ].join('');
+    return `<div class="sess${curSession&&curSession.session_key===s.session_key?' active':''}" data-sk="${esc(s.session_key)}">
+      <div class="t"><span class="name">${esc(s.display_name)}</span>${badges}</div>
+      <div class="meta"><span>${esc(s.bot_id)}</span><span>${s.chat_type==='group'?'群聊':'私聊'}</span>
+        <span>${fmtDay(s.mtime)}</span></div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.sess').forEach(n=>n.onclick=()=>openSession(n.dataset.sk));
+}
+$('fBot').onchange=refreshSessions; $('fType').onchange=refreshSessions; $('fStatus').onchange=refreshSessions;
+$('refreshBtn').onclick=refreshSessions;
+$('sortBtn').onclick=()=>{ sortMode = sortMode==='oldest'?'recent':'oldest';
+  $('sortBtn').textContent = sortMode==='oldest'?'⏳ 最旧优先':'🕒 最近优先'; refreshSessions() };
+
+/* ================= 会话明细 ================= */
+async function openSession(sk){
+  try{
+    curSession = await api('/api/session/'+sk);
+  }catch(e){ toast(e.message); return }
+  document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.sk===sk));
+  renderSession();
+}
+function renderSession(showAllCtx=false){
+  const s=curSession;
+  $('chatHead').innerHTML = `<div class="t">${esc(s.display_name)} <span style="color:var(--dim);font-size:12px">${esc(s.bot_nickname)} · ${s.chat_type==='group'?'群聊':'私聊'} · ${esc(s.chat_id)}</span></div>
+    <div class="meta">共 ${s.total} 条 · 待审 ${s.unreviewed} · 最后更新 ${fmtTime(s.mtime)}</div>`;
+  $('chatFoot').style.display='flex';
+  updateFoot();
+  const entries=s.entries;
+  // 第一条待审之前的已审消息是"上下文": 默认最多展示 8 条淡显, 更早的折叠
+  const firstPending = entries.findIndex(e=>e.status==='unreviewed');
+  let startIdx = 0;
+  let html='';
+  if(!showAllCtx && firstPending>8){
+    startIdx = firstPending-8;
+    html+=`<button class="ghost show-older" id="showOlder">▸ 展开更早的 ${firstPending-8} 条已审消息</button>`;
+  }
+  const body=entries.map((e,i)=>({e,i})).filter(({i})=>i>=startIdx);
+  html+=body.map(({e,i})=>renderEntry(e,i)).join('');
+  const cb=$('chatBody'); cb.innerHTML=html;
+  const so=$('showOlder');
+  if(so) so.onclick=()=>renderSession(true);
+  // 滚动到第一条待审消息
+  const first = cb.querySelector('.entry.pending');
+  if(first) setTimeout(()=>first.scrollIntoView({block:'center'}), 0);
+}
+function renderEntry(e,i){
+  if(e.kind==='summary'){
+    return `<div class="summary-note ${e.status==='exempt'?'':''}" data-i="${i}">【较早对话总结(系统生成, 免审)】${esc(e.content)}</div>`;
+  }
+  const cls = e.status==='unreviewed'?'pending': e.status==='abnormal'?'is-abn ctx':'ctx';
+  const who = e.kind==='assistant'
+    ? `<span class="who bot">🤖 ${esc(curSession.bot_nickname)}</span>`
+    : `<span class="who">${esc(e.speaker||e.role)}</span>`;
+  let body='';
+  if(e.content) body+=`<div class="content">${esc(e.content)}</div>`;
+  if(e.image_url){
+    body+=`<img class="msg-img" loading="lazy" referrerpolicy="no-referrer" src="${esc(e.image_url)}"
+      onerror="this.outerHTML='<div class=img-fallback>[图片] (无法加载原图)</div>'">`;
+  }
+  if(!e.image_url && e.content==='[图片]') body+=`<div class="img-fallback">[图片]</div>`;
+  if(e.vlm) body+=`<div class="vlm">${esc(e.vlm)}</div>`;
+  let st='';
+  if(e.status==='unreviewed') st=`<span class="badge pending">未审核</span>`;
+  else if(e.status==='normal') st=`<span class="badge ok">正常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`;
+  else if(e.status==='abnormal') st=`<span class="badge bad">异常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`
+    + (e.abnormal?` ${e.abnormal.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}${e.abnormal.note?` <span>📝 ${esc(e.abnormal.note)}</span>`:''}`:'');
+  else st=`<span class="badge dim">免审</span>`;
+  const mid = e.message_id?`<span class="mid">id:${esc(e.message_id)}</span>`:'';
+  return `<div class="entry ${cls}" data-i="${i}" data-fp="${esc(e.fingerprint)}">
+    <div class="head">${who}<span class="time">${esc(e.time_str)}</span>${mid}</div>
+    ${body}<div class="status-line">${st}</div></div>`;
+}
+function updateFoot(){
+  const n = curSession? curSession.entries.filter(e=>e.status==='unreviewed').length : 0;
+  $('footHint').textContent = n>0?`当前待审 ${n} 条, 三个按钮都作用于这些消息`:'当前会话没有待审消息';
+  $('btnNormal').disabled = n===0; $('btnAbnormal').disabled = n===0;
+}
+
+/* ================= 审核操作 ================= */
+$('btnSkip').onclick = async ()=>{
+  if(!curSession) return;
+  await api('/api/review',{method:'POST',body:{session_key:curSession.session_key,action:'skip'}});
+  toast('已跳过(保持未审核)');
+  gotoNext();
+};
+$('btnNormal').onclick = async ()=>{
+  if(!curSession) return;
+  const d = await api('/api/review',{method:'POST',body:{session_key:curSession.session_key,action:'normal'}});
+  toast(`已标记 ${d.changed} 条正常`);
+  afterJudge(d);
+};
+$('btnAbnormal').onclick = ()=>{ if(curSession) openAbModal() };
+
+function afterJudge(d){
+  const sk=curSession.session_key;
+  refreshSessions();
+  if(d.remaining_unreviewed===0){ toast('本会话已审完, 切换下一个'); gotoNext(); }
+  else openSession(sk);
+}
+function gotoNext(){
+  // 在当前过滤列表中找下一个待审会话(从当前位置向后环形)
+  if(!sessionItems.length){ $('chatBody').innerHTML='<div class="empty">队列为空</div>'; return }
+  const idx = sessionItems.findIndex(s=>curSession&&s.session_key===curSession.session_key);
+  const n = sessionItems.length;
+  for(let k=1;k<=n;k++){
+    const s = sessionItems[(idx+k+n)%n];
+    if(s.unreviewed>0){ openSession(s.session_key); return }
+  }
+  toast('全部会话已审核完毕 🎉');
+  $('chatHead').textContent='全部会话已审核完毕';
+  $('chatBody').innerHTML='<div class="empty">没有待审内容了</div>';
+  $('chatFoot').style.display='none';
+  curSession=null;
+}
+
+/* ── 异常弹窗 ── */
+function openAbModal(){
+  const pend = curSession.entries.filter(e=>e.status==='unreviewed');
+  if(!pend.length) return;
+  $('abFps').innerHTML = pend.map(e=>`<div class="fp-item"><label>
+    <input type="checkbox" checked value="${esc(e.fingerprint)}">
+    <span><b>${e.kind==='assistant'?'🤖 bot':esc(e.speaker||e.role)}</b> <span class="time">${esc(e.time_str)}</span>
+    <div class="c">${esc((e.content||'').slice(0,200))}</div></span></label></div>`).join('');
+  $('abTags').innerHTML = TAGS.map(t=>`<label><input type="checkbox" value="${esc(t)}">${esc(t)}</label>`).join('');
+  $('abNote').value='';
+  $('abModal').classList.add('show');
+}
+$('abCancel').onclick=()=>$('abModal').classList.remove('show');
+$('abSave').onclick = async ()=>{
+  const fps=[...$('abFps').querySelectorAll('input:checked')].map(x=>x.value);
+  if(!fps.length){ toast('请至少勾选一条异常消息'); return }
+  const tags=[...$('abTags').querySelectorAll('input:checked')].map(x=>x.value);
+  const note=$('abNote').value.trim();
+  const d=await api('/api/review',{method:'POST',body:{
+    session_key:curSession.session_key, action:'abnormal', fingerprints:fps, tags, note}});
+  $('abModal').classList.remove('show');
+  toast(`已标记 ${d.changed} 条异常`);
+  afterJudge(d);
+};
+
+/* ================= 异常记录 ================= */
+async function loadAbnormal(){
+  const q=new URLSearchParams({bot:$('abBot').value, tag:$('abTag').value});
+  const d=await api('/api/abnormal?'+q);
+  const el=$('abnormalBody');
+  if(!d.records.length){ el.innerHTML='<div class="empty">暂无异常记录</div>'; return }
+  el.innerHTML=`<table class="data"><thead><tr>
+    <th>时间</th><th>Bot</th><th>会话</th><th>发言人</th><th>内容</th><th>标签</th><th>备注</th><th>审核人</th><th></th>
+  </tr></thead><tbody>${d.records.map(r=>`<tr>
+    <td>${esc(r.time_str)}</td>
+    <td>${esc(r.bot_nickname)}</td>
+    <td style="white-space:nowrap">${esc(r.display_name||r.session_key)}</td>
+    <td>${esc(r.speaker||r.role)}</td>
+    <td class="content-cell">${esc((r.content||'').slice(0,300))}</td>
+    <td>${r.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join(' ')}</td>
+    <td class="content-cell">${esc(r.note)}</td>
+    <td>${esc(r.reviewer)}</td>
+    <td><button class="ghost" data-edit="${r.id}">编辑</button></td>
+  </tr>`).join('')}</tbody></table>`;
+  el.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditModal(parseInt(b.dataset.edit)));
+}
+$('abBot').onchange=loadAbnormal; $('abTag').onchange=loadAbnormal; $('abRefresh').onclick=loadAbnormal;
+$('abExport').onclick=()=>downloadCsv('/api/export?'+new URLSearchParams({bot:$('abBot').value,tag:$('abTag').value}));
+
+let editRecord=null;
+async function openEditModal(id){
+  const d=await api('/api/abnormal?');
+  editRecord = d.records.find(r=>r.id===id);
+  if(!editRecord) return;
+  $('editId').textContent='#'+id;
+  $('editContent').textContent=editRecord.content;
+  $('editTags').innerHTML=TAGS.map(t=>`<label><input type="checkbox" value="${esc(t)}" ${editRecord.tags.includes(t)?'checked':''}>${esc(t)}</label>`).join('');
+  $('editNote').value=editRecord.note||'';
+  $('editModal').classList.add('show');
+}
+$('editCancel').onclick=()=>$('editModal').classList.remove('show');
+$('editSave').onclick=async ()=>{
+  const tags=[...$('editTags').querySelectorAll('input:checked')].map(x=>x.value);
+  await api('/api/abnormal/'+editRecord.id,{method:'PUT',body:{tags,note:$('editNote').value.trim()}});
+  $('editModal').classList.remove('show');
+  toast('已保存'); loadAbnormal();
+};
+
+/* ================= 统计 ================= */
+async function loadStats(){
+  const d=await api('/api/stats');
+  const o=d.overall;
+  const pct = o.total? Math.round((o.normal+o.abnormal)/o.total*100) : 100;
+  $('statsBody').innerHTML=`
+    <div class="cards">
+      <div class="card"><div class="n">${o.total}</div><div class="l">消息总数</div></div>
+      <div class="card ok"><div class="n">${o.normal}</div><div class="l">判定正常</div></div>
+      <div class="card bad"><div class="n">${o.abnormal}</div><div class="l">判定异常</div></div>
+      <div class="card warn"><div class="n">${o.unreviewed}</div><div class="l">未审核</div></div>
+      <div class="card"><div class="n">${pct}%</div><div class="l">审核进度</div></div>
+      <div class="card"><div class="n">${d.session_count}</div><div class="l">会话数</div></div>
+    </div>
+    <h3 style="margin:14px 0 8px">按 Bot</h3>
+    <table class="data"><thead><tr><th>Bot</th><th>总数</th><th>正常</th><th>异常</th><th>未审</th></tr></thead>
+    <tbody>${d.per_bot.map(b=>`<tr><td>${esc(b.nickname)} <span style="color:var(--dim)">${esc(b.bot_id)}</span></td>
+      <td>${b.total}</td><td>${b.normal}</td><td>${b.abnormal}</td><td>${b.unreviewed}</td></tr>`).join('')}</tbody></table>
+    <h3 style="margin:18px 0 8px">各审核员</h3>
+    ${d.per_reviewer.length?`<table class="data"><thead><tr><th>审核员</th><th>判定条数</th><th>其中异常</th><th>最近活跃</th></tr></thead>
+    <tbody>${d.per_reviewer.map(r=>`<tr><td>${esc(r.reviewer)}</td><td>${r.judged}</td><td>${r.abnormal}</td>
+      <td>${fmtTime(r.last_active)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">暂无审核记录</div>'}
+    <h3 style="margin:18px 0 8px">最近操作 <span style="color:var(--dim);font-size:12px">(共 ${d.log_count} 条)</span></h3>
+    <table class="data"><thead><tr><th>时间</th><th>审核员</th><th>操作</th><th>会话</th><th>详情</th></tr></thead>
+    <tbody>${d.recent_log.map(l=>`<tr><td>${fmtTime(l.time)}</td><td>${esc(l.reviewer)}</td>
+      <td>${esc(l.action)}</td><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.session_key)}</td>
+      <td>${esc(l.fingerprint?l.fingerprint.slice(0,10)+' ':'' )}${esc(l.detail)}</td></tr>`).join('')}</tbody></table>`;
+}
+$('stRefresh').onclick=loadStats;
+
+/* ================= 启动 ================= */
+if(TOKEN){ showApp(); } else { showLogin(); }
+</script>
+</body>
+</html>
