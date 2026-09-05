@@ -190,7 +190,7 @@ class Plugin:
             lines.append(f"  WS 服务: ws://{cfg.server.host}:{cfg.server.port}")
             lines.append(f"  LLM 模型: {cfg.llm.chat_model}")
             lines.append(f"  Vision 模型: {cfg.llm.vision_model}")
-            lines.append(f"  最大上下文轮数: {cfg.context_max_rounds}")
+            lines.append(f"  压缩触发轮数: {cfg.context_trim_at_rounds}")
         except Exception:
             lines.append("  配置读取失败")
 

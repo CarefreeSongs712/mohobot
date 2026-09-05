@@ -52,7 +52,6 @@ class MessageHandler:
         llm_service,
         plugin_system,
         data_dir: str = "./data",
-        context_max_rounds: int = 30,
         reply_config=None,
         database_manager=None,
         image_cache=None,
@@ -65,7 +64,6 @@ class MessageHandler:
         self._llm = llm_service
         self._plugins = plugin_system
         self._data_dir = data_dir
-        self._context_max_rounds = context_max_rounds
         self._interceptors: list = []  # Ordered list of interceptors
         self._command_handler = None  # CommandHandler 引用(set_interceptors 时捕获)
         self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
@@ -366,7 +364,6 @@ class MessageHandler:
             }
             await self._ctx_mgr.append_context(
                 bot_id, chat_type, chat_id, [user_msg, ai_msg],
-                max_rounds=self._context_max_rounds,
             )
             # history → 数据库 (SQLite)
             self._persist_legacy_turn(

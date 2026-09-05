@@ -125,4 +125,10 @@ touch_replies: []
 log_dir: "./logs"
 data_dir: "./data"
 plugins_dir: "./plugins"
-context_max_rounds: 30
+# ── 上下文 AI 总结压缩(时间维度) ──────────────────────────────
+# 满轮压缩(默认满 40 轮)时会把超过 age_hours 的旧对话一并收走;
+# 另有后台周期任务按 sweep_interval_minutes 扫描, 压缩超龄旧对话。
+context_summary_age_hours: 3                # 旧对话判定年龄(小时)
+context_summary_sweep_enabled: true         # 启用周期时间压缩
+context_summary_sweep_interval_minutes: 30  # 周期扫描间隔(分钟)
+context_summary_min_interval_hours: 24      # 已压缩会话再次周期压缩的最小间隔(小时)

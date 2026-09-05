@@ -939,12 +939,15 @@ async function loadConfigPage() {
     botListCache = await apiJSON('/api/bots');
 
     document.getElementById('config-global-form').innerHTML =
-      formField('context_max_rounds', '上下文最大轮数', globalConfigCache.context_max_rounds) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">📜 上下文压缩(历史对话裁剪)</div>' +
       checkField('context_summary_enabled', '启用 AI 总结压缩', globalConfigCache.context_summary_enabled, '上下文满阈值轮数时,用 AI 总结最早的若干轮并插入对话最前; 关闭则只裁剪不总结') +
       formField('context_trim_at_rounds', '压缩触发轮数', globalConfigCache.context_trim_at_rounds, { hint: '上下文满多少轮触发一次压缩' }) +
       formField('context_trim_remove_rounds', '每次压缩轮数', globalConfigCache.context_trim_remove_rounds, { hint: '每次把最早的多少轮交给 AI 总结' }) +
+      formField('context_summary_age_hours', '时间压缩年龄(小时)', globalConfigCache.context_summary_age_hours, { hint: '对话超过该时长即视为旧对话: 满轮压缩会顺带收走, 周期任务也会将其压缩(默认3)' }) +
+      checkField('context_summary_sweep_enabled', '启用周期时间压缩', globalConfigCache.context_summary_sweep_enabled, '后台按间隔周期扫描, 把超龄旧对话交给 AI 总结(需先开启 AI 总结压缩)') +
+      formField('context_summary_sweep_interval_minutes', '周期扫描间隔(分钟)', globalConfigCache.context_summary_sweep_interval_minutes, { hint: '后台多久扫描一次旧对话(默认30)' }) +
+      formField('context_summary_min_interval_hours', '重复压缩最小间隔(小时)', globalConfigCache.context_summary_min_interval_hours, { hint: '已压缩过的会话再次周期压缩的最小间隔(默认24=一天); 超过触发轮数不受此限' }) +
       formField('group_recent_msgs_count', '群聊最近消息条数', globalConfigCache.group_recent_msgs_count, { hint: '回复时临时注入群内最近 N 条消息(不写入上下文,不参与总结); 0=关闭' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">💬 回复行为</div>' +
@@ -1062,10 +1065,13 @@ async function saveGlobalConfig() {
     return isNaN(v) ? def : v;
   };
   const data = {
-    context_max_rounds: parseInt(document.getElementById('cfg-context_max_rounds').value) || 30,
     context_summary_enabled: document.getElementById('cfg-context_summary_enabled')?.checked ?? true,
     context_trim_at_rounds: parseInt(document.getElementById('cfg-context_trim_at_rounds').value) || 40,
     context_trim_remove_rounds: parseInt(document.getElementById('cfg-context_trim_remove_rounds').value) || 15,
+    context_summary_age_hours: parseInt(document.getElementById('cfg-context_summary_age_hours').value) || 3,
+    context_summary_sweep_enabled: document.getElementById('cfg-context_summary_sweep_enabled')?.checked ?? true,
+    context_summary_sweep_interval_minutes: parseInt(document.getElementById('cfg-context_summary_sweep_interval_minutes').value) || 30,
+    context_summary_min_interval_hours: parseInt(document.getElementById('cfg-context_summary_min_interval_hours').value) || 24,
     group_recent_msgs_count: parseInt(document.getElementById('cfg-group_recent_msgs_count').value) || 0,
     reply: {
       stream: document.getElementById('cfg-reply.stream')?.checked ?? true,

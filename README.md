@@ -200,14 +200,18 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 ### 上下文压缩与群聊最近消息
 
 ```yaml
-context_max_rounds: 30                 # 上下文最大轮数(旧版直接裁剪阈值, 保留)
-context_summary_enabled: true          # 启用 AI 总结压缩
-context_trim_at_rounds: 40             # 满多少轮触发一次压缩
-context_trim_remove_rounds: 15         # 每次把最早的多少轮交给 AI 总结
-group_recent_msgs_count: 10            # 群聊最近消息条数(回复时临时注入, 0=关闭)
+context_summary_enabled: true                 # 启用 AI 总结压缩
+context_trim_at_rounds: 40                    # 满多少轮触发一次压缩
+context_trim_remove_rounds: 15                # 每次把最早的多少轮交给 AI 总结
+context_summary_age_hours: 3                  # 旧对话判定年龄(小时)
+context_summary_sweep_enabled: true           # 启用周期时间压缩
+context_summary_sweep_interval_minutes: 30    # 周期扫描间隔(分钟)
+context_summary_min_interval_hours: 24        # 已压缩会话再次周期压缩的最小间隔
+group_recent_msgs_count: 10                   # 群聊最近消息条数(回复时临时注入, 0=关闭)
 ```
 
 - **AI 总结压缩**：上下文满 `context_trim_at_rounds` 轮时，把最早的 `context_trim_remove_rounds` 轮交给 LLM 总结（复用全局 chat 模型，prompt 要求"全局概要 + 重点轮次浓缩"），总结作为 `role="summary"` 的块插入对话最前；总结块视为 1 轮参与后续再总结；总结失败（API 不可用）自动降级为直接裁剪
+- **时间压缩**：满轮压缩时会**顺带**把超过 `context_summary_age_hours`（默认 3h）的旧对话一并收走（两个前缀取更长者）；另有后台周期任务按 `context_summary_sweep_interval_minutes`（默认 30 分钟）扫描群聊 main 与私聊当前活动会话，把超龄旧对话交给 AI 总结；已压缩过的会话距上次压缩不足 `context_summary_min_interval_hours`（默认 24h）且未超触发轮数时不重复压缩；周期压缩总结失败会保留数据待下次重试（不裁剪）
 - **群聊最近消息**：MessageHandler 内存缓冲每群最近 N 条消息（含未 @bot 的，单条截断 80 字），生成回复时临时注入 prompt，**不写入上下文文件、不参与总结压缩**
 
 ### 数据库配置

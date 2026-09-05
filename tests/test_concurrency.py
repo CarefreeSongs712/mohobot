@@ -142,7 +142,6 @@ async def test_handler_concurrent_messages() -> None:
         llm_service=FakeLLM(),
         plugin_system=FakePlugins(),
         data_dir=tmp,
-        context_max_rounds=30,
         reply_config=ReplyConfig(stream=True, segment_reply=False),
         global_config=GlobalConfig(),
     )

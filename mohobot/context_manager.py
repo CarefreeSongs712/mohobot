@@ -37,6 +37,10 @@ class ContextManager:
         summary_enabled: bool = True,
         trim_at_rounds: int = 40,
         trim_remove_rounds: int = 15,
+        summary_age_hours: int = 3,
+        sweep_enabled: bool = True,
+        sweep_interval_minutes: int = 30,
+        min_interval_hours: int = 24,
     ):
         self._data_dir = data_dir
         # 异步总结回调: async (entries: list[dict]) -> str | None
@@ -44,6 +48,12 @@ class ContextManager:
         self._summary_enabled = summary_enabled
         self._trim_at_rounds = max(2, trim_at_rounds)
         self._trim_remove_rounds = max(1, trim_remove_rounds)
+        # 时间压缩(满轮顺带 + 周期任务): 旧对话年龄 / 周期扫描开关与间隔 /
+        # 已压缩会话再次周期压缩的最小间隔("间隔一天", 防反复压)
+        self._summary_age_hours = max(1, int(summary_age_hours))
+        self._sweep_enabled = bool(sweep_enabled)
+        self._sweep_interval_minutes = max(1, int(sweep_interval_minutes))
+        self._min_interval_hours = max(1, int(min_interval_hours))
 
     def set_summarizer(self, summarizer) -> None:
         """注入总结回调(LLMService.summarize_context)。"""
@@ -52,6 +62,9 @@ class ContextManager:
     def set_trim_config(
         self, *, enabled: bool | None = None,
         at_rounds: int | None = None, remove_rounds: int | None = None,
+        age_hours: int | None = None, sweep_enabled: bool | None = None,
+        sweep_interval_minutes: int | None = None,
+        min_interval_hours: int | None = None,
     ) -> None:
         """热更新压缩配置(web 面板保存全局配置后调用)。"""
         if enabled is not None:
@@ -60,6 +73,24 @@ class ContextManager:
             self._trim_at_rounds = max(2, at_rounds)
         if remove_rounds is not None:
             self._trim_remove_rounds = max(1, remove_rounds)
+        if age_hours is not None:
+            self._summary_age_hours = max(1, int(age_hours))
+        if sweep_enabled is not None:
+            self._sweep_enabled = bool(sweep_enabled)
+        if sweep_interval_minutes is not None:
+            self._sweep_interval_minutes = max(1, int(sweep_interval_minutes))
+        if min_interval_hours is not None:
+            self._min_interval_hours = max(1, int(min_interval_hours))
+
+    @property
+    def sweep_enabled(self) -> bool:
+        """周期时间压缩总开关(后台任务每周期读取)。"""
+        return self._sweep_enabled
+
+    @property
+    def sweep_interval_minutes(self) -> int:
+        """周期时间压缩间隔(分钟, 后台任务每周期读取, 热生效)。"""
+        return self._sweep_interval_minutes
 
     def _context_base(self, bot_id: str, chat_type: str) -> Path:
         return Path(self._data_dir) / "contexts" / bot_id / chat_type
@@ -124,13 +155,13 @@ class ContextManager:
         chat_type: str,
         chat_id: str,
         entries: list[dict[str, Any]],
-        max_rounds: int = 30,
     ) -> None:
         """Append entries to the active session context.
 
         使用 json_update 原子读改写,避免并发 append 丢失更新。
-        追加后检查轮数: 满 trim_at_rounds 轮时触发 AI 总结压缩
-        (最早的 trim_remove_rounds 轮 → 总结块插入最前)。
+        追加后检查轮数: 满 trim_at_rounds 轮时触发压缩 —— 待总结头部 = 最早的
+        trim_remove_rounds 轮 ∪ 超过 summary_age_hours 的旧对话(取更长前缀),
+        即"满轮时顺带把 3h 前的旧对话一并压缩"。
         """
         if chat_type == "group":
             session_id = "main"
@@ -153,7 +184,48 @@ class ContextManager:
             if isinstance(context, list) and context:
                 rounds = self._count_rounds(context)
                 if rounds >= self._trim_at_rounds:
-                    await self._compact(path, context)
+                    await self._compact(
+                        path, context, head=self._head_for_compaction(context)
+                    )
+
+    # ── 时间压缩(旧对话判定) ────────────────────────────────
+
+    def _old_prefix_len(self, context: list[dict], now: float | None = None) -> int:
+        """旧前缀长度: 前导 summary 块 + 时间戳早于 cutoff 的消息。
+
+        cutoff = now - summary_age_hours。要求旧部分至少含 1 条非 summary 消息,
+        否则返回 0 —— 防止对孤立旧总结块反复再总结(无意义轮换)。
+        缺时间戳的条目视为足够旧(旧版遗留数据, 会被时间压缩收走)。
+        """
+        cutoff = (now if now is not None else time.time()) - self._summary_age_hours * 3600
+        end = 0
+        saw_old_content = False
+        for i, entry in enumerate(context):
+            if entry.get("role") == "summary":
+                if i == 0:
+                    end = 1  # 前导总结块计入前缀(可随本次一并再总结)
+                    continue
+                break  # 中段 summary 理论不发生, 防御性停下
+            ts = entry.get("timestamp")
+            old = True
+            if ts is not None:
+                try:
+                    old = float(ts) < cutoff
+                except (TypeError, ValueError):
+                    old = True
+            if not old:
+                break
+            saw_old_content = True
+            end = i + 1
+        return end if saw_old_content else 0
+
+    def _head_for_compaction(self, context: list[dict]) -> list[dict]:
+        """满轮触发时待总结的头部 = 最早的 trim_remove_rounds 轮 ∪ 超龄旧对话(取更长前缀)。"""
+        head, _tail = self._split_first_rounds(context, self._trim_remove_rounds)
+        old_len = self._old_prefix_len(context)
+        if old_len > len(head):
+            head = context[:old_len]
+        return head
 
     # ── AI 总结压缩 ──────────────────────────────────────────
 
@@ -193,11 +265,20 @@ class ContextManager:
             return [json.dumps(e, ensure_ascii=False, sort_keys=True) for e in lst]
         return _dump(a) == _dump(b)
 
-    async def _compact(self, path: Path, context: list[dict]) -> None:
-        """压缩: 总结最早的 n 轮 → 总结块插入最前; 总结失败直接裁剪。"""
-        head, _tail = self._split_first_rounds(context, self._trim_remove_rounds)
+    async def _compact(
+        self, path: Path, context: list[dict],
+        head: list[dict] | None = None, trim_on_failure: bool = True,
+    ) -> bool:
+        """压缩: 总结 head(缺省为最早的 trim_remove_rounds 轮) → 总结块插入最前。
+
+        trim_on_failure=True(满轮触发路径): 总结失败/关闭时直接裁剪 head, 防上下文无限增长;
+        trim_on_failure=False(周期时间压缩路径): 总结失败保留原数据, 等下次周期重试。
+        返回是否实际改写了文件(并发守卫跳过合并时返回 False)。
+        """
+        if head is None:
+            head, _tail = self._split_first_rounds(context, self._trim_remove_rounds)
         if not head:
-            return
+            return False
 
         summary_text: str | None = None
         if self._summary_enabled and self._summarizer is not None:
@@ -214,6 +295,11 @@ class ContextManager:
                 "content": summary_text.strip(),
                 "timestamp": int(time.time()),
             }
+        if summary_entry is None and not trim_on_failure:
+            logger.info(f"周期时间压缩跳过(总结不可用), 保留 {len(head)} 条待下次重试")
+            return False
+
+        changed = [False]
 
         def _merge(cur):
             cur = cur if isinstance(cur, list) else []
@@ -222,14 +308,90 @@ class ContextManager:
                 return cur
             rest = cur[len(head):]
             if summary_entry is not None:
+                changed[0] = True
                 return [summary_entry] + rest
-            return rest  # 总结失败: 直接裁剪
+            changed[0] = True  # 总结失败/关闭: 直接裁剪(仅满轮路径)
+            return rest
 
         await json_update(path, _merge, default=[])
-        logger.info(
-            f"上下文压缩: 移除 {len(head)} 条, 保留 {len(_tail)} 条, "
-            f"总结块={'有' if summary_entry else '无'}"
-        )
+        if changed[0]:
+            logger.info(
+                f"上下文压缩: 移除 {len(head)} 条, "
+                f"总结块={'有' if summary_entry else '无'}"
+            )
+        return changed[0]
+
+    # ── 周期时间压缩(后台任务) ──────────────────────────────
+
+    async def sweep_context(
+        self, bot_id: str, chat_type: str, chat_id: str,
+    ) -> bool:
+        """周期时间压缩单个会话(群聊 main.json / 私聊当前活动会话)。
+
+        判定: 旧前缀(超过 summary_age_hours, 前导 summary 允许一并再总结)非空才处理;
+        - 总轮数 ≥ trim_at_rounds → 立即压缩(超限豁免);
+        - 否则: 从未压缩过(头部无 summary)→ 压缩;
+                已压缩过 → 距上次压缩 ≥ min_interval_hours 才压缩(否则跳过, 防反复压)。
+        总结失败不裁剪(保留数据下次重试)。返回是否实际触发压缩。
+        """
+        if not self._summary_enabled:
+            return False
+        if chat_type == "group":
+            session_id = "main"
+        else:
+            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            session_id = index.get("active", "sess_main")
+        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
+        context = await json_read(path)
+        if not isinstance(context, list) or not context:
+            return False
+
+        now = time.time()
+        old_len = self._old_prefix_len(context, now)
+        if old_len <= 0:
+            return False
+        head = context[:old_len]
+
+        # day-gate: 未超限且已压缩过 → 距上次压缩不足 min_interval_hours 则跳过
+        if self._count_rounds(context) < self._trim_at_rounds:
+            first = context[0]
+            if first.get("role") == "summary":
+                last_ts = first.get("timestamp")
+                try:
+                    last_ts_f = float(last_ts) if last_ts is not None else 0.0
+                except (TypeError, ValueError):
+                    last_ts_f = 0.0
+                if last_ts_f > 0 and (now - last_ts_f) < self._min_interval_hours * 3600:
+                    return False
+        return await self._compact(path, context, head=head, trim_on_failure=False)
+
+    async def sweep_all_sessions(self) -> int:
+        """扫描全部会话做时间压缩(群聊 main + 私聊当前活动会话), 返回触发数。"""
+        base = Path(self._data_dir) / "contexts"
+        if not base.exists():
+            return 0
+        done = 0
+        for bot_dir in sorted(base.iterdir()):
+            if not bot_dir.is_dir():
+                continue
+            bot_id = bot_dir.name
+            for chat_type in ("private", "group"):
+                type_dir = bot_dir / chat_type
+                if not type_dir.exists():
+                    continue
+                for chat_dir in sorted(type_dir.iterdir()):
+                    if not chat_dir.is_dir():
+                        continue
+                    try:
+                        if await self.sweep_context(bot_id, chat_type, chat_dir.name):
+                            done += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"会话时间压缩失败({bot_id} {chat_type}:{chat_dir.name}): {e}"
+                        )
+        if done:
+            logger.info(f"周期时间压缩完成: {done} 个会话")
+        return done
 
     async def clear_context(
         self, bot_id: str, chat_type: str, chat_id: str

@@ -110,12 +110,16 @@ class MohobotApplication:
             usage_recorder=self._usage_recorder,
             song_annotator=self._make_song_annotator(),
         )
-        # 上下文 AI 总结压缩: 注入总结回调 + trim 配置(WebUI 保存后可热同步)
+        # 上下文 AI 总结压缩: 注入总结回调 + trim/时间压缩配置(WebUI 保存后可热同步)
         self._context_manager.set_summarizer(self._llm_service.summarize_context)
         self._context_manager.set_trim_config(
             enabled=self._config.context_summary_enabled,
             at_rounds=self._config.context_trim_at_rounds,
             remove_rounds=self._config.context_trim_remove_rounds,
+            age_hours=self._config.context_summary_age_hours,
+            sweep_enabled=self._config.context_summary_sweep_enabled,
+            sweep_interval_minutes=self._config.context_summary_sweep_interval_minutes,
+            min_interval_hours=self._config.context_summary_min_interval_hours,
         )
         # 全局情感系统(好感度/亲密度/关系阶段/长期记忆; 移植自 emotionai_pro)。
         # emotion.enabled 开关在启动时读取, 修改后重启生效; 失败降级(正常聊天不受影响)。
@@ -179,7 +183,6 @@ class MohobotApplication:
             llm_service=self._llm_service,
             plugin_system=self._plugin_system,
             data_dir=self._config.data_dir,
-            context_max_rounds=self._config.context_max_rounds,
             reply_config=self._config.reply,
             database_manager=self._database_manager,
             image_cache=self._image_cache,
@@ -260,6 +263,12 @@ class MohobotApplication:
                 self._run_web_panel(), name="web-panel", owner="web-panel"
             )
 
+        # 11. 周期时间压缩(把超过 age_hours 的旧对话交给 AI 总结;
+        # 间隔/开关配置热生效, 每周期读取 ContextManager 最新值)
+        self._context_sweep_task = self._task_supervisor.create_task(
+            self._context_sweep_loop(), name="context-sweep", owner="context-sweep"
+        )
+
         self._running = True
         logger.info(
             f"Mohobot v{__version__} is running! "
@@ -311,6 +320,26 @@ class MohobotApplication:
         except Exception as e:
             logger.error(f"Web panel failed: {e}")
 
+    async def _context_sweep_loop(self) -> None:
+        """周期时间压缩后台任务: 按配置间隔扫描全部会话, 压缩超龄旧对话。
+
+        间隔与开关每周期从 ContextManager 读取(WebUI 保存后热生效);
+        压缩本身不阻塞新消息路径(与 append 并发时靠文件锁+头部比对守卫)。
+        """
+        while True:
+            cm = self._context_manager
+            interval = getattr(cm, "sweep_interval_minutes", 30) if cm is not None else 30
+            try:
+                await asyncio.sleep(max(1, int(interval)) * 60)
+            except asyncio.CancelledError:
+                break
+            if cm is None or not getattr(cm, "sweep_enabled", True):
+                continue
+            try:
+                await cm.sweep_all_sessions()
+            except Exception as e:
+                logger.warning(f"周期时间压缩扫描失败: {e}")
+
     async def shutdown(self) -> None:
         """Gracefully shut down all components."""
         if getattr(self, "_shutting_down", False):
@@ -344,6 +373,9 @@ class MohobotApplication:
         if self._plugin_system:
             await self._plugin_system.shutdown_plugins()
         await self._task_supervisor.cancel_owner("plugins")
+
+        # 停止上下文周期时间压缩任务
+        await self._task_supervisor.cancel_owner("context-sweep")
 
         # 情感系统: 取消周期落盘任务并 flush 数据
         if self._emotion_manager:

@@ -442,11 +442,16 @@ class WebPanel:
                 cfg.admins = [
                     int(a) for a in data["ban"]["admins"] if str(a).isdigit()
                 ]
-            for key in ("context_max_rounds", "touch_replies"):
+            for key in ("touch_replies",):
                 if key in data:
                     setattr(cfg, key, data[key])
             for key in ("context_summary_enabled", "context_trim_at_rounds",
-                        "context_trim_remove_rounds", "group_recent_msgs_count"):
+                        "context_trim_remove_rounds",
+                        "context_summary_age_hours",
+                        "context_summary_sweep_enabled",
+                        "context_summary_sweep_interval_minutes",
+                        "context_summary_min_interval_hours",
+                        "group_recent_msgs_count"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
@@ -457,6 +462,10 @@ class WebPanel:
                     enabled=cfg.context_summary_enabled,
                     at_rounds=cfg.context_trim_at_rounds,
                     remove_rounds=cfg.context_trim_remove_rounds,
+                    age_hours=cfg.context_summary_age_hours,
+                    sweep_enabled=cfg.context_summary_sweep_enabled,
+                    sweep_interval_minutes=cfg.context_summary_sweep_interval_minutes,
+                    min_interval_hours=cfg.context_summary_min_interval_hours,
                 )
             # 热同步封禁拦截器(启停/管理员即时生效, 无需重启)
             if self._ban_filter is not None:

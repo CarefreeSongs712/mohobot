@@ -189,12 +189,18 @@ class GlobalConfig:
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
-    context_max_rounds: int = 30
     # 上下文压缩: 满 trim_at_rounds 轮时, 用 AI 总结最早的 trim_remove_rounds 轮,
     # 总结作为新的块插入对话最前(旧内容直接裁剪)。enabled=False 时仅裁剪不总结。
     context_summary_enabled: bool = True
     context_trim_at_rounds: int = 40
     context_trim_remove_rounds: int = 15
+    # 时间压缩(满轮顺带 + 周期任务): 对话超过该时长即视为旧对话;
+    # 周期任务按间隔扫描, 把旧对话交给 AI 总结(已压缩会话距上次压缩不足
+    # min_interval_hours 则不重复压缩)。
+    context_summary_age_hours: int = 3
+    context_summary_sweep_enabled: bool = True
+    context_summary_sweep_interval_minutes: int = 30
+    context_summary_min_interval_hours: int = 24
     # 群聊最近消息: 生成回复时把群内最近 N 条消息临时注入 prompt(不写入 context,
     # 不参与 AI 总结压缩), 用于感知群聊氛围。0 = 关闭。
     group_recent_msgs_count: int = 10
@@ -324,10 +330,17 @@ class GlobalConfig:
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
-            context_max_rounds=raw.get("context_max_rounds", 30),
             context_summary_enabled=bool(raw.get("context_summary_enabled", True)),
             context_trim_at_rounds=int(raw.get("context_trim_at_rounds", 40)),
             context_trim_remove_rounds=int(raw.get("context_trim_remove_rounds", 15)),
+            context_summary_age_hours=max(1, int(raw.get("context_summary_age_hours", 3))),
+            context_summary_sweep_enabled=bool(raw.get("context_summary_sweep_enabled", True)),
+            context_summary_sweep_interval_minutes=max(
+                1, int(raw.get("context_summary_sweep_interval_minutes", 30))
+            ),
+            context_summary_min_interval_hours=max(
+                1, int(raw.get("context_summary_min_interval_hours", 24))
+            ),
             group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
             music_knowledge=dict(music_raw or {}),
             touch_replies=[str(t) for t in (touch_raw or [])],
@@ -420,10 +433,13 @@ class GlobalConfig:
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
-            "context_max_rounds": self.context_max_rounds,
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
+            "context_summary_age_hours": self.context_summary_age_hours,
+            "context_summary_sweep_enabled": self.context_summary_sweep_enabled,
+            "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
+            "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
         }
 
@@ -511,10 +527,13 @@ class GlobalConfig:
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
-            "context_max_rounds": self.context_max_rounds,
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
+            "context_summary_age_hours": self.context_summary_age_hours,
+            "context_summary_sweep_enabled": self.context_summary_sweep_enabled,
+            "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
+            "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
         }
 

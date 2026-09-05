@@ -85,7 +85,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         llm_service=spy,
         plugin_system=None,
         data_dir=tmp,
-        context_max_rounds=30,
         reply_config=ReplyConfig(stream=True, segment_reply=True),
         database_manager=None,
     )
@@ -103,7 +102,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         llm_service=spy,
         plugin_system=None,
         data_dir=tmp,
-        context_max_rounds=30,
         reply_config=ReplyConfig(stream=True, segment_reply=False),
         database_manager=None,
     )
@@ -118,7 +116,6 @@ async def test_stream_reply_passes_bot_config() -> None:
         llm_service=spy,
         plugin_system=None,
         data_dir=tmp,
-        context_max_rounds=30,
         reply_config=ReplyConfig(stream=False, segment_reply=True),
         database_manager=None,
     )
