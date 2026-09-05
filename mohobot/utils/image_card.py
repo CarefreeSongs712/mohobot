@@ -6,8 +6,13 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import tempfile
+
+# 自带字体: 得意黑 Smiley Sans(仅 PIL 渲染用), 放在 data/fonts/ 或 data/ 根目录。
+# 远程部署同样只需把字体文件放进 data/ 即可生效, 无需安装系统字体。
+_SMILEY_FONT_NAMES = ["SmileySans-Oblique.ttf", "SmileySans-Oblique.otf"]
 
 _CJK_FONT_CANDIDATES = [
     r"C:\Windows\Fonts\msyh.ttc",        # 微软雅黑
@@ -24,7 +29,24 @@ _CJK_FONT_CANDIDATES = [
 
 
 def find_cjk_font() -> str | None:
-    """查找可用的中文字体文件路径; 找不到返回 None。"""
+    """查找可用的中文字体文件路径; 找不到返回 None。
+
+    优先级: data/fonts/ 或 data/ 下的得意黑 → 系统候选字体 → fontconfig。
+    """
+    # 1. 项目自带得意黑(正式部署/远程都放 data/, 与系统环境无关)
+    data_dirs = ["./data/fonts", "./data"]
+    for d in data_dirs:
+        for name in _SMILEY_FONT_NAMES:
+            path = os.path.join(d, name)
+            if os.path.exists(path):
+                return path
+        # 目录里放了其他字体文件也接受(首个 ttf/otf)
+        for pattern in ("*.ttf", "*.otf"):
+            hits = sorted(glob.glob(os.path.join(d, pattern)))
+            if hits:
+                return hits[0]
+
+    # 2. 系统候选字体
     for candidate in _CJK_FONT_CANDIDATES:
         if os.path.exists(candidate):
             return candidate

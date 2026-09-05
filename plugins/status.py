@@ -201,40 +201,13 @@ class Plugin:
 
 # ── 图片渲染(模块级工具) ─────────────────────────────────────
 
-_CJK_FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\msyh.ttc",        # 微软雅黑
-    r"C:\Windows\Fonts\msyhbd.ttc",
-    r"C:\Windows\Fonts\simhei.ttf",      # 黑体
-    r"C:\Windows\Fonts\simsun.ttc",      # 宋体
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu/Debian
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",        # Fedora
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-]
-
 _EMOJI_CHARS = set("📦💻⚙️🔒⚠️✅❌🔁🗄️🤖💬🧠🖥️📊📋🛠️✨")
 
 
 def _find_cjk_font() -> str | None:
-    for candidate in _CJK_FONT_CANDIDATES:
-        if os.path.exists(candidate):
-            return candidate
-    # 兜底: 通过 fontconfig 查找任意支持中文的字体(不依赖固定路径)
-    try:
-        import subprocess
-        proc = subprocess.run(
-            ["fc-list", ":lang=zh", "file"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in (proc.stdout or "").splitlines():
-            path = line.split(":", 1)[0].strip()
-            if path and os.path.exists(path):
-                return path
-    except Exception:
-        pass
-    return None
+    """复用共享字体查找(data/ 下得意黑优先, 系统字体兜底)。"""
+    from mohobot.utils.image_card import find_cjk_font
+    return find_cjk_font()
 
 
 def _clean_status_text(text: str) -> list[str]:
