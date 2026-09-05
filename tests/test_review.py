@@ -262,12 +262,21 @@ def _make_client(root: Path):
 
     from review.app import create_app
 
+    # 写真实配置文件(修改密码功能要写回它)
+    cfg_path = root / "config.yaml"
+    users = [("admin", hash_password("pw123")), ("bob", hash_password("pw456"))]
+    lines = ["users:"]
+    for name, h in users:
+        lines.append(f"  - username: {name}")
+        lines.append(f'    password_hash: "{h}"')
+    cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     cfg = ReviewConfig(
-        users=[ReviewUser("admin", hash_password("pw123")), ReviewUser("bob", hash_password("pw456"))],
+        users=[ReviewUser(n, h) for n, h in users],
     )
     data = MohobotData(root)
     store = ReviewStore(root / "review.db")
-    app = create_app(cfg, data, store)
+    app = create_app(cfg, data, store, config_path=cfg_path)
     return TestClient(app), store
 
 
@@ -379,6 +388,47 @@ def test_api_incremental_via_api():
             detail = client.get("/api/session/" + sk, headers=_auth(tok)).json()
             pending = [e for e in detail["entries"] if e["status"] == "unreviewed"]
             assert len(pending) == 1 and pending[0]["content"] == "又来了新消息"
+        finally:
+            store.close()
+
+
+def test_api_change_password():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            tok_bob = _login(client, "bob", "pw456")
+            cfg_path = root / "config.yaml"
+
+            # 未登录 → 401; 旧密码错 → 400
+            assert client.post("/api/password", json={"old_password": "x", "new_password": "yyyyyy"}).status_code == 401
+            r = client.post("/api/password", headers=_auth(tok),
+                            json={"old_password": "wrong", "new_password": "newpass1"})
+            assert r.status_code == 400 and "旧密码" in r.json()["detail"]
+            # 新密码太短 / 与旧密码相同
+            assert client.post("/api/password", headers=_auth(tok),
+                               json={"old_password": "pw123", "new_password": "123"}).status_code == 400
+            assert client.post("/api/password", headers=_auth(tok),
+                               json={"old_password": "pw123", "new_password": "pw123"}).status_code == 400
+
+            # 正常修改 → 200; 配置文件已写回且保持注释/结构
+            r = client.post("/api/password", headers=_auth(tok),
+                            json={"old_password": "pw123", "new_password": "brand-new"})
+            assert r.status_code == 200, r.text
+            text = cfg_path.read_text(encoding="utf-8")
+            assert "brand-new" not in text  # 文件里只有哈希
+            import yaml as _yaml
+            raw = _yaml.safe_load(text)
+            hashes = {u["username"]: u["password_hash"] for u in raw["users"]}
+            assert verify_password("brand-new", hashes["admin"])
+            assert verify_password("pw456", hashes["bob"])  # 别人不受影响
+
+            # 旧密码立即失效, 新密码可登录; 其它用户 token 不受影响
+            assert client.post("/api/login", json={"username": "admin", "password": "pw123"}).status_code == 401
+            assert _login(client, "admin", "brand-new")
+            assert client.get("/api/sessions", headers=_auth(tok_bob)).status_code == 200
         finally:
             store.close()
 

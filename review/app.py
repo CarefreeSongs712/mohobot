@@ -19,13 +19,15 @@ from loguru import logger
 
 from review import loader as _loader
 from review.config import ReviewConfig, verify_password
+from review.hash_password import hash_password
 from review.loader import format_ts, parse_session_key
 from review.store import ReviewStore
 
 TAG_OPTIONS = ["色情", "政治", "辱骂", "其他"]
 
 
-def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore) -> FastAPI:
+def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
+               config_path: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="Mohobot Review Panel", docs_url=None, redoc_url=None)
     static_dir = Path(__file__).resolve().parent / "static"
 
@@ -112,6 +114,74 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore)
     @app.get("/api/me")
     async def me(request: Request):
         return {"user": _auth(request)}
+
+    # ── 修改密码(仅自己) ─────────────────────────────────────
+
+    def _write_user_password(username: str, new_hash: str) -> bool:
+        """把新哈希写回 config.yaml(优先按行替换, 保留注释与格式)。
+
+        返回 False 表示无配置路径/写入失败(调用方拒绝修改)。
+        """
+        import yaml as _yaml
+
+        if config_path is None:
+            return False
+        p = Path(config_path)
+        if not p.exists():
+            return False
+        text = p.read_text(encoding="utf-8")
+        lines = text.splitlines(keepends=True)
+        in_target = False
+        replaced = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("- username:"):
+                in_target = stripped.split(":", 1)[1].strip().strip("\"'") == username
+            elif in_target and stripped.startswith("password_hash:"):
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = f'{indent}password_hash: "{new_hash}"\n'
+                replaced = True
+                in_target = False
+        if replaced:
+            p.write_text("".join(lines), encoding="utf-8")
+            return True
+        # 兜底: 结构与预期不符 → 整体重写(注释会丢失)
+        try:
+            raw = _yaml.safe_load(text) or {}
+            for item in raw.get("users") or []:
+                if isinstance(item, dict) and item.get("username") == username:
+                    item["password_hash"] = new_hash
+            p.write_text(_yaml.dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            return True
+        except Exception as e:
+            logger.error(f"审核面板密码写入失败({username}): {e}")
+            return False
+
+    @app.post("/api/password")
+    async def change_password(request: Request):
+        user = _auth(request)
+        body = await request.json()
+        old_pw = str(body.get("old_password", ""))
+        new_pw = str(body.get("new_password", ""))
+        account = next((x for x in cfg.users if x.username == user), None)
+        if account is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        if not verify_password(old_pw, account.password_hash):
+            raise HTTPException(status_code=400, detail="旧密码错误")
+        if len(new_pw) < 6:
+            raise HTTPException(status_code=400, detail="新密码至少 6 位")
+        if new_pw == old_pw:
+            raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
+        new_hash = hash_password(new_pw)
+        if not _write_user_password(user, new_hash):
+            raise HTTPException(status_code=500, detail="配置写入失败, 密码未修改")
+        account.password_hash = new_hash  # 内存热生效
+        # 吊销该用户其它会话(保留当前)
+        current_token = request.headers.get("authorization", "")[7:].strip()
+        for tk in [tk for tk, v in tokens.items() if v["user"] == user and tk != current_token]:
+            tokens.pop(tk, None)
+        logger.info(f"审核面板密码已修改: {user}")
+        return {"ok": True}
 
     # ── 会话列表 / 明细 ──────────────────────────────────────
 

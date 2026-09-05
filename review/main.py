@@ -48,7 +48,7 @@ def main() -> None:
 
     data = MohobotData(data_dir)
     store = ReviewStore(REVIEW_DIR / "data" / "review.db")
-    app = create_app(cfg, data, store)
+    app = create_app(cfg, data, store, config_path=config_path)
 
     logger.info(
         f"审核面板启动: http://{cfg.host}:{cfg.port} | 数据目录: {data_dir} | "

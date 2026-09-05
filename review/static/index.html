@@ -146,6 +146,7 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
     </nav>
     <span class="spacer"></span>
     <span class="user" id="whoami"></span>
+    <button class="ghost" id="chpwBtn">修改密码</button>
     <button class="ghost" id="logoutBtn">退出</button>
   </header>
   <main>
@@ -251,6 +252,26 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
   </div>
 </div>
 
+<!-- 修改密码弹窗 -->
+<div class="modal-mask" id="pwModal">
+  <div class="modal" style="width:380px">
+    <div class="m-head">修改密码 <span style="color:var(--dim);font-size:12px" id="pwUser"></span></div>
+    <div class="m-body">
+      <div class="field-label">旧密码</div>
+      <input type="password" id="pwOld" style="width:100%" autocomplete="current-password">
+      <div class="field-label">新密码(至少 6 位)</div>
+      <input type="password" id="pwNew1" style="width:100%" autocomplete="new-password">
+      <div class="field-label">确认新密码</div>
+      <input type="password" id="pwNew2" style="width:100%" autocomplete="new-password">
+      <div class="login-err" id="pwErr"></div>
+    </div>
+    <div class="m-foot">
+      <button id="pwCancel">取消</button>
+      <button class="primary" id="pwSave">保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -304,6 +325,23 @@ $('loginBtn').onclick = async ()=>{
 };
 $('loginPass').addEventListener('keydown',e=>{ if(e.key==='Enter') $('loginBtn').click() });
 $('logoutBtn').onclick = ()=>{ api('/api/logout',{method:'POST'}).catch(()=>{}); showLogin() };
+
+/* ================= 修改密码 ================= */
+$('chpwBtn').onclick = ()=>{ $('pwErr').textContent=''; $('pwOld').value=$('pwNew1').value=$('pwNew2').value=''; $('pwUser').textContent='('+ME+')'; $('pwModal').classList.add('show'); setTimeout(()=>$('pwOld').focus(),0) };
+$('pwCancel').onclick=()=>$('pwModal').classList.remove('show');
+$('pwSave').onclick = async ()=>{
+  $('pwErr').textContent='';
+  const o=$('pwOld').value, n1=$('pwNew1').value, n2=$('pwNew2').value;
+  if(!o){ $('pwErr').textContent='请输入旧密码'; return }
+  if(n1.length<6){ $('pwErr').textContent='新密码至少 6 位'; return }
+  if(n1!==n2){ $('pwErr').textContent='两次输入的新密码不一致'; return }
+  try{
+    await api('/api/password',{method:'POST',body:{old_password:o,new_password:n1}});
+    $('pwModal').classList.remove('show');
+    toast('密码已修改, 其它设备的登录已失效');
+  }catch(e){ $('pwErr').textContent=e.message }
+};
+$('pwNew2').addEventListener('keydown',e=>{ if(e.key==='Enter') $('pwSave').click() });
 
 /* ================= 导航 ================= */
 document.querySelectorAll('header nav button').forEach(b=>{
