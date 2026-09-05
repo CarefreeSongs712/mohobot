@@ -47,6 +47,12 @@
     "description": "每日点赞的管理员 QQ",
     "hint": "全体 bot 都会给该用户点赞"
   },
+  "daily_like_users": {
+    "type": "list",
+    "default": [3831097597, 2011372693, 858120206, 1341586492, 1489388902, 2640535972],
+    "description": "每日点赞额外名单",
+    "hint": "除管理员和其它 bot 外, 全体 bot 还会给这些 QQ 点赞(每行/逗号分隔一个 QQ)"
+  },
   "daily_like_times": {
     "type": "int",
     "default": 10,

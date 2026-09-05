@@ -54,6 +54,8 @@ class Plugin:
         "daily_like_enabled": True,
         "daily_like_time": "08:00",
         "daily_admin_qq": 3831097597,
+        "daily_like_users": [3831097597, 2011372693, 858120206, 1341586492,
+                             1489388902, 2640535972],
         "daily_like_times": 10,
         "daily_min_delay": 10,
         "daily_max_delay": 30,
@@ -137,12 +139,23 @@ class Plugin:
         lo = max(0.0, float(self._cfg("daily_min_delay", 10)))
         hi = max(lo, float(self._cfg("daily_max_delay", 30)))
 
-        # 目标组合: 每个 bot 点管理员(非自己) + bot 互赞(自己不点自己)
+        # 目标组合: 每个 bot 点管理员(非自己) + 其它 bot(自己不点自己)
+        #           + 配置的额外名单(非自己; 存档经 schema 强转可能是字符串)
+        extra: list[tuple[int, str]] = []
+        for u in (self._cfg("daily_like_users", []) or []):
+            try:
+                u_qq = int(str(u).strip())
+            except (TypeError, ValueError):
+                continue
+            if u_qq:
+                extra.append((u_qq, f"名单:{u_qq}"))
+
         pairs: list[tuple[str, int, str]] = []
         seen: set[tuple[str, int]] = set()
         for bot_id, bot_qq in bots:
             targets = [(admin_qq, "管理员")] if admin_qq else []
             targets += [(q, f"bot:{oid}") for oid, q in bots if q != bot_qq]
+            targets += [(q, label) for q, label in extra if q != bot_qq]
             for target_qq, label in targets:
                 key = (bot_id, target_qq)
                 if target_qq and key not in seen:
