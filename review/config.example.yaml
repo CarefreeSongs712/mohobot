@@ -9,7 +9,7 @@ server:
   port: 9091
 
 # mohobot 数据目录(只读), 相对于仓库根; 部署在别处时填绝对路径
-data_dir: "../data"
+data_dir: "data"
 
 # 登录 token 有效期(秒, 活跃自动续期)
 token_expiry: 3600

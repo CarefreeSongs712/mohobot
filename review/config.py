@@ -3,7 +3,7 @@
 字段:
   enabled: true            # mohobot 拉起钩子据此决定是否启动
   server.host / server.port
-  data_dir: "../data"      # mohobot 数据目录(只读), 相对于仓库根(即本文件上级目录)
+  data_dir: "data"         # mohobot 数据目录(只读), 相对于仓库根(即本文件上级目录)
   users:                   # 手工维护, 密码存 PBKDF2 哈希(review/hash_password.py 生成)
     - username: admin
       password_hash: "pbkdf2_sha256$<salt>$<hex>"
@@ -32,7 +32,7 @@ class ReviewConfig:
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 9091
-    data_dir: str = "../data"
+    data_dir: str = "data"
     token_expiry: int = 3600
     users: list[ReviewUser] = field(default_factory=list)
 
@@ -88,7 +88,7 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(calc, digest)
 
 
-def make_config(data_dir: str = "../data") -> str:
+def make_config(data_dir: str = "data") -> str:
     """生成示例配置文本(hash_password.py 生成哈希后替换)。"""
     return yaml.dump(
         {
