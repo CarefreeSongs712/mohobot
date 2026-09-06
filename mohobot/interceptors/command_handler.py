@@ -46,8 +46,8 @@ class CommandHandler(Interceptor):
                 logger.warning(f"情感命令注册失败: {e}")
         # Plugin-provided commands appear in /help (name -> {desc, plugin, admin})
         self._plugin_commands: dict[str, dict] = {}
-        # 未知指令提醒时间戳: {(bot_id, chat_type, chat_id): last_remind_ts}
-        self._unknown_remind_at: dict[tuple[str, str, str], float] = {}
+        # 未知指令提醒时间戳: {(chat_type, chat_id): last_remind_ts} (会话级节流)
+        self._unknown_remind_at: dict[tuple[str, str], float] = {}
 
     def register_plugin_commands(self, commands: dict[str, str]) -> None:
         """Register commands provided by plugins, shown in /help output."""
@@ -147,9 +147,27 @@ class CommandHandler(Interceptor):
     async def _handle_unknown_command(
         self, bot_id: str, event: MessageEvent, cmd_name: str
     ) -> tuple[bool, str | None]:
-        """未知指令: 60 分钟冷却, 同一会话内只提醒一次。"""
+        """未知指令: 多 bot 群只由随机选中的一个 bot 提醒(其余静默);
+        60 分钟冷却, 同一会话内只提醒一次(冷却期内静默拦截, 不回复也不传 LLM)。
+        """
         chat_type, chat_id, _ = await self._get_target_info(event)
-        key = (bot_id, chat_type, str(chat_id))
+
+        # 多 bot 群去重: 同一条消息经每个 bot 连接各推送一次, 各协程都会
+        # 走到这里; 按 (群, message_id) 共享抽签, 只有选中 bot 回复提醒
+        if isinstance(event, GroupMessageEvent) and self._ws is not None:
+            bm = getattr(self._ws, "_bot_manager", None)
+            if bm is not None:
+                chosen = bm.pick_bot_for_group(
+                    str(event.group_id), str(getattr(event, "message_id", "") or ""),
+                )
+                if chosen is not None and chosen != bot_id:
+                    logger.debug(
+                        f"Unknown command '/{cmd_name}' reminder deferred to {chosen}"
+                    )
+                    return (True, None)
+
+        # 节流按会话(不含 bot): 多 bot 群里即使每次抽中的 bot 不同, 也只提醒一次
+        key = (chat_type, str(chat_id))
         now = _time.time()
 
         last = self._unknown_remind_at.get(key, 0.0)

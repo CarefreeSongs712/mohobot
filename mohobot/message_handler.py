@@ -336,7 +336,7 @@ class MessageHandler:
             except Exception as e:
                 logger.debug(f"引用消息解析失败: {e}")
                 quote_display = ""
-        context = await self._build_legacy_context(bot_id, chat_type, chat_id)
+        context = await self._build_legacy_context(bot_id, chat_type, chat_id, event)
         if quote_display:
             context.append({
                 "role": "system",
@@ -851,10 +851,13 @@ class MessageHandler:
             lines.append(f"{t} {entry['name']}: {content}")
         return "【群聊最近消息】\n" + "\n".join(lines)
 
-    async def _build_legacy_context(self, bot_id: str, chat_type: str, chat_id: str) -> list[dict]:
+    async def _build_legacy_context(
+        self, bot_id: str, chat_type: str, chat_id: str, event=None,
+    ) -> list[dict]:
         """加载会话上下文, 群聊时临时附加最近消息段 + 环境感知段。
 
         附加的 system 条目不写回 context 文件, 不参与上下文压缩总结。
+        event 供情感系统注入当前用户的好感度/态度块。
         """
         context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
         context = list(context)
@@ -870,7 +873,7 @@ class MessageHandler:
                 "content": f"【环境感知】\n{perception}",
             })
         # 情感系统(仅 LLM 请求, 不写入 context): 对该用户的情感状态 + 语气指导
-        if self._emotion is not None:
+        if self._emotion is not None and event is not None:
             try:
                 emotion_block = await self._emotion.build_context_block(bot_id, event)
                 if emotion_block:
