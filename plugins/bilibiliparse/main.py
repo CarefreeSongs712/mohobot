@@ -2,7 +2,7 @@
 
 自动检测消息中的 B 站视频链接(www.bilibili.com/video/BVxxx 或 av123):
 - 群聊不 @ 也解析(观察钩子, gate 前); 私聊直接解析
-- 多 bot 群内: 仅 bot_id 最小者解析回复, 其余 bot 静默消费含链接消息
+- 多 bot 群内: 仅随机选中的一个 bot 解析回复, 其余 bot 静默消费含链接消息
   (不回复也不落 LLM, 保证只有一个 bot 处理)
 - 回复: PIL 深色信息卡片图片(标题/链接/清晰度/大小), 渲染或发送失败降级为文本
 - 解析 API: 配置项 api_url(默认 http://114.134.188.188:3003), accept 清晰度可配
@@ -149,13 +149,13 @@ class Plugin:
         if not match:
             return (False, None)
 
-        # 群聊多 bot: 仅最小 bot 解析回复; 其余 bot 静默消费(不回复, 不落 LLM)
+        # 群聊多 bot: 仅随机选中的一个 bot 解析回复; 其余 bot 静默消费(不回复, 不落 LLM)
         from mohobot.models.onebot import GroupMessageEvent
         if isinstance(event, GroupMessageEvent):
             ws = self._ws_server
             if ws is not None and getattr(ws, "_bot_manager", None) is not None:
-                min_bot = ws._bot_manager.min_bot_for_group(str(event.group_id))
-                if min_bot is not None and min_bot != bot_id:
+                chosen = ws._bot_manager.pick_bot_for_group(str(event.group_id))
+                if chosen is not None and chosen != bot_id:
                     return (True, None)
 
         bvid = match.group(2)

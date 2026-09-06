@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -100,7 +101,7 @@ class BotManager:
         # Track sent messages awaiting message_id: echo -> (bot_id, chat_type, chat_id)
         self._pending_sent: dict[str, tuple[str, str, str]] = {}
         # 群内在线 bot 集合(消息驱动): group_id(str) -> set[bot_id]
-        # 用于全局指令去重: 群内多 bot 时只由 bot_id 最小者回复
+        # 用于全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复
         self._group_bots: dict[str, set[str]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
 
@@ -302,13 +303,13 @@ class BotManager:
         """记录 bot 在群内的存在(消息驱动: 收到群消息即在该群)。"""
         self._group_bots.setdefault(str(group_id), set()).add(bot_id)
 
-    def min_bot_for_group(self, group_id: int | str) -> str | None:
-        """该群在线 bot 中 bot_id 最小者(用于全局指令去重)。"""
+    def pick_bot_for_group(self, group_id: int | str) -> str | None:
+        """该群在线 bot 中随机选一个(用于全局指令去重, 每次消息独立抽取)。"""
         candidates = [
             b for b in self._group_bots.get(str(group_id), set())
             if b in self._bots
         ]
-        return min(candidates) if candidates else None
+        return random.choice(candidates) if candidates else None
 
     def bots_in_group(self, group_id: int | str) -> list[str]:
         """该群在线 bot 的 bot_id 列表(排序, 供合并回复按序收集)。"""

@@ -22,7 +22,7 @@ _FIELDS = ["财运", "事业", "姻缘", "健康", "出行", "学业", "运气"]
 class Plugin:
     """Responds to divination requests — once per day per user."""
 
-    # 全局指令: 群内多 bot 时只由 bot_id 最小者回复(框架去重)
+    # 全局指令: 群内多 bot 时只由随机选中的一个 bot 回复(框架去重)
     global_triggers = TRIGGERS
     # 无前缀触发: 群聊不 @ 直接发"占卜/今日占卜"也可触发(框架观察钩子精确匹配)
     no_prefix_triggers = {"占卜", "今日占卜"}

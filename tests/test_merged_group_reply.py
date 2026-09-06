@@ -1,7 +1,7 @@
 """群聊多 bot 合并回复测试:
 
 1. 触发匹配: 精确/带参数命中, 无关文本不命中
-2. 多 bot 群: 非最小 bot 静默跳过; 最小 bot 收集全部 bot 回复并发合并转发
+2. 多 bot 群: 非选中 bot 静默跳过; 被选中的 bot 收集全部 bot 回复并发合并转发
 3. 节点署名: user_id/nickname 为各 bot 自己, 顺序按 bot_id
 4. 单 bot 群 / 未命中: 走原流程(返回 False)
 5. 合并转发发送失败: 退化为发送者自己的普通回复
@@ -42,7 +42,8 @@ class _FakeBotManager:
             b for b in self._group_bots.get(str(group_id), set()) if b in self._bots
         )
 
-    def min_bot_for_group(self, group_id):
+    def pick_bot_for_group(self, group_id):
+        # 真实实现为 random.choice(随机); 测试固定选最小以保证确定性
         candidates = [
             b for b in self._group_bots.get(str(group_id), set()) if b in self._bots
         ]
@@ -123,12 +124,12 @@ async def test_merged_reply_multi_bot():
     h = _make_handler(ws, plugins)
 
     async def run():
-        # 非最小 bot: 静默跳过(返回 True, 不发送任何东西)
+        # 非选中 bot: 静默跳过(返回 True, 不发送任何东西)
         event = _make_event()
         assert await h._try_merged_group_reply("bot_002", event, {}) is True
         assert ws.forwards == [] and plugins.called == []
 
-        # 最小 bot: 收集全部 bot 回复, 发合并转发
+        # 选中 bot: 收集全部 bot 回复, 发合并转发
         assert await h._try_merged_group_reply("bot_001", event, {}) is True
         assert len(ws.forwards) == 1
         fwd_bot, gid, nodes = ws.forwards[0]

@@ -259,7 +259,7 @@ class MessageHandler:
             except Exception as e:
                 logger.debug(f"Collect perception failed: {e}")
 
-        # ── 群聊多 bot 合并回复指令: 群内多 bot 时只由最小 bot 发一条合并转发 ──
+        # ── 群聊多 bot 合并回复指令: 群内多 bot 时只由随机选中的一个 bot 发合并转发 ──
         # (节点发送者署名为各 bot, 内容为各 bot 对该指令的回复, 避免逐条刷屏)
         if isinstance(event, GroupMessageEvent):
             try:
@@ -288,7 +288,7 @@ class MessageHandler:
             if not await self._should_respond_to_group(bot_id, event):
                 logger.debug(f"Skipping group message (not mentioned): user={event.user_id}")
                 return
-            # ── 全局指令去重: 群内多 bot 时只由 bot_id 最小者回复 ──
+            # ── 全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复 ──
             # (如 /占卜 /help; 插件可通过类属性 global_triggers 声明)
             if self._should_defer_global_command(bot_id, event):
                 return
@@ -1310,13 +1310,13 @@ class MessageHandler:
     # (短内容直接发一条; /help 等较长指令式输出自动合并)
     _forward_min_len = 600
 
-    # 框架内置全局指令(/ 前缀, 群内多 bot 只由 bot_id 最小者回复)
+    # 框架内置全局指令(/ 前缀, 群内多 bot 只由随机选中的一个 bot 回复)
     _GLOBAL_COMMANDS = {"/help"}
     # 前缀匹配的全局指令(带参数的命令): 封禁系统 /ban /pass /dec-* 系列
     _GLOBAL_COMMAND_PREFIXES = ("/ban", "/pass", "/dec-")
 
     # 群聊多 bot 合并回复指令: 各 bot 对这些指令的回复数据相互独立,
-    # 多 bot 群里会各答一条造成刷屏 → 只由最小 bot 发一条合并转发,
+    # 多 bot 群里会各答一条造成刷屏 → 只由随机选中的一个 bot 发一条合并转发,
     # 节点署名为各 bot(内容 = 各 bot 的回复)。私聊/单 bot 群不受影响。
     _MERGED_GROUP_TRIGGERS = (
         "赞我", "/赞我", "zanwo", "/zanwo",
@@ -1325,7 +1325,7 @@ class MessageHandler:
 
     def _should_defer_global_command(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """全局指令去重: 命中全局指令且群内有多个 bot 时,
-        非 bot_id 最小者静默跳过(不回复, 也不交给 LLM)。
+        只有随机选中的一个 bot 回复, 其余静默跳过(不回复, 也不交给 LLM)。
 
         精确匹配(插件 global_triggers + 内置 /help) + 前缀匹配(封禁系统命令)。
         """
@@ -1353,11 +1353,11 @@ class MessageHandler:
                     break
         if not is_global:
             return False
-        # 群内最小 bot 才回复
-        min_bot = self._ws._bot_manager.min_bot_for_group(str(event.group_id))
-        if min_bot is None or min_bot == bot_id:
+        # 随机选中的 bot 才回复
+        chosen = self._ws._bot_manager.pick_bot_for_group(str(event.group_id))
+        if chosen is None or chosen == bot_id:
             return False
-        logger.debug(f"全局指令 {text!r} 由 {min_bot} 回复, {bot_id} 跳过")
+        logger.debug(f"全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")
         return True
 
     # ── 群聊多 bot 合并回复 ───────────────────────────────────
@@ -1374,7 +1374,7 @@ class MessageHandler:
         self, bot_id: str, event: GroupMessageEvent, raw: dict
     ) -> bool:
         """群聊多 bot 合并回复: 命中触发词且群内有多 bot 时,
-        由 bot_id 最小者收集所有 bot 的回复, 以合并转发送出(节点署名各 bot)。
+        由随机选中的一个 bot 收集所有 bot 的回复, 以合并转发送出(节点署名各 bot)。
 
         返回 True 表示消息已被消费(其余 bot 静默跳过, 不再走原流程)。
         """
@@ -1389,9 +1389,9 @@ class MessageHandler:
         bots = bm.bots_in_group(group_id)
         if len(bots) <= 1:
             return False  # 单 bot 群: 走原流程即可
-        min_bot = bm.min_bot_for_group(group_id) or bots[0]
-        if bot_id != min_bot:
-            logger.debug(f"合并回复指令 {text!r} 由 {min_bot} 发送, {bot_id} 跳过")
+        sender = bm.pick_bot_for_group(group_id) or bots[0]
+        if bot_id != sender:
+            logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")
             return True
 
         # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串)
@@ -1415,16 +1415,16 @@ class MessageHandler:
             })
 
         try:
-            await self._ws.send_group_forward_msg(min_bot, event.group_id, nodes)
+            await self._ws.send_group_forward_msg(sender, event.group_id, nodes)
             logger.info(
                 f"合并回复 {text!r}: {len(nodes)} 个 bot 的回复已合并发送(群 {group_id})"
             )
         except Exception as e:
             # 合并转发失败 → 退化为发送者自己的那条普通回复
             logger.warning(f"合并转发发送失败, 退化为普通回复: {e}")
-            own = replies.get(min_bot)
+            own = replies.get(sender)
             if own:
-                await self._send_reply(min_bot, event, own)
+                await self._send_reply(sender, event, own)
         return True
 
     async def _collect_merged_reply(

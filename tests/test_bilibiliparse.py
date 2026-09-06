@@ -1,7 +1,7 @@
 """哔哩哔哩解析插件测试:
 1. 正则匹配: BV/av 链接/带协议/带参数; 非 B 站链接不触发
 2. 群聊不 @ 触发(on_message_observed, gate 前)
-3. 多 bot: 非最小 bot 静默消费(handled=True, 无回复), 最小 bot 解析回复
+3. 多 bot: 非选中 bot 静默消费(handled=True, 无回复), 选中 bot 解析回复
 4. 解析 API: mock 成功/失败/异常
 5. 信息卡片图片发送 + 渲染失败降级文本
 6. 精简字段(无封面/弹幕链接)
@@ -121,7 +121,7 @@ class FakeWS:
 
 
 def make_bm():
-    """构造含 3 个 bot 的 BotManager(bot_001 最小)。"""
+    """构造含 3 个 bot 的 BotManager。"""
     import tempfile
     from mohobot.bot_manager import BotManager, BotInstance
     from mohobot.models.config import BotConfig
@@ -139,6 +139,9 @@ def make_plugin(ok=True, bm=None):
     mod = load_plugin()
     inst = mod.Plugin()
     ws = FakeWS(bot_manager=bm)
+    if bm is not None:
+        # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
+        ws._bot_manager.pick_bot_for_group = lambda gid: "bot_001"
     inst._ws_server = ws
     inst._http_session = FakeParseAPI(ok=ok)
     return mod, inst, ws
@@ -187,19 +190,19 @@ async def test_group_trigger_and_card():
     print("[+] 群聊触发 + 卡片 OK")
 
 
-# ── 3. 多 bot: 非最小 bot 静默消费 ─────────────────────────
+# ── 3. 多 bot: 非选中 bot 静默消费 ─────────────────────────
 
 async def test_multi_bot_silent():
     mod, inst, ws = make_plugin(bm=make_bm())
     ev = make_group_event(2001, "https://www.bilibili.com/video/BV1xG411x7fE")
-    # bot_002(非最小) → 静默消费(handled=True, 无回复, 不落 LLM)
+    # bot_002(非选中) → 静默消费(handled=True, 无回复, 不落 LLM)
     handled, reply = await inst.on_message_observed("bot_002", ev, {})
-    assert handled and reply is None, "非最小 bot 应静默消费"
-    assert not ws.images and not ws.texts, "非最小 bot 不应有任何回复"
-    # bot_001(最小) → 正常解析
+    assert handled and reply is None, "非选中 bot 应静默消费"
+    assert not ws.images and not ws.texts, "非选中 bot 不应有任何回复"
+    # bot_001(被选中) → 正常解析
     handled, reply = await inst.on_message_observed("bot_001", ev, {})
     assert handled and reply is None
-    assert ws.images, "最小 bot 应发送卡片"
+    assert ws.images, "选中 bot 应发送卡片"
     # 无 bot_manager(如未注入) → 直接解析
     mod2, inst2, ws2 = make_plugin(bm=None)
     handled, _ = await inst2.on_message_observed("bot_001", ev, {})

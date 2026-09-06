@@ -5,7 +5,7 @@
 - 群内任意成员回复数字即可选歌(无需 @ bot); 60 秒内有效
 - 选中后: 歌曲信息卡片(封面图 + 歌名/歌手/专辑/时长) + record 语音
   (NapCat 直接拉取 URL 转码; 发送失败降级为播放链接文本)
-- 多 bot 群内: 点歌命令只由 bot_id 最小者回复(global_triggers 去重),
+- 多 bot 群内: 点歌命令只由随机选中的一个 bot 回复(global_triggers 去重),
   数字选择由发起搜索的 bot 处理(会话状态按 bot 隔离)
 
 明确不支持自然语言模糊匹配(如"来一首xxx")。
@@ -32,7 +32,7 @@ TRIGGERS = {"/点歌", "/music", "/听歌", "/网易云"}
 class Plugin:
     """网易云点歌: /点歌 <关键词> → 列表 → 数字选择 → 播放。"""
 
-    # 全局指令: 群内多 bot 时只由 bot_id 最小者回复(框架去重)
+    # 全局指令: 群内多 bot 时只由随机选中的一个 bot 回复(框架去重)
     global_triggers = TRIGGERS
 
     info = {
@@ -223,7 +223,7 @@ class Plugin:
             logger.warning(f"发送语音失败, 降级为链接: {e}")
             return False
 
-    # ── 命令处理(拦截链, 群内去重后由最小 bot 执行) ─────────
+    # ── 命令处理(拦截链, 群内去重后由选中 bot 执行) ─────────
 
     async def on_message(
         self,

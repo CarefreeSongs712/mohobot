@@ -94,8 +94,8 @@ _KEYWORD_HANDLERS = {
 class Plugin:
     """活跃成员抽老婆 — 群聊互动插件。"""
 
-    # 全局指令: 群内多 bot 时 / 前缀命令(含全部别名)只由 bot_id 最小者回复
-    # (框架去重; 无前缀关键词触发在观察钩子里自行判断最小 bot)
+    # 全局指令: 群内多 bot 时 / 前缀命令(含全部别名)只由随机选中的一个 bot 回复
+    # (框架去重; 无前缀关键词触发在观察钩子里自行判断选中 bot)
     global_triggers = set(COMMANDS.keys())
     # per-bot 绑定: 本插件仅对 bot_001 生效, 其他 bot 不加载此插件
     # (框架在拦截/观察/通知/请求分发时跳过非绑定 bot)
@@ -205,8 +205,8 @@ class Plugin:
         text = get_text(event)
         if group_id and text and not text.startswith(("/", "!", "！")):
             if self.plugin_config.get("keyword_trigger_enabled", False):
-                # 多 bot 群内: 只由 bot_id 最小者触发关键词(与 / 命令去重一致)
-                if not self._is_min_bot_in_group(bot_id, group_id):
+                # 多 bot 群内: 只由随机选中的一个 bot 触发关键词(与 / 命令去重一致)
+                if not self._is_chosen_bot_in_group(bot_id, group_id):
                     return (False, None)
                 mode = self._get_keyword_mode()
                 route = self._keyword_router.match_route(text, mode=mode)
@@ -220,14 +220,14 @@ class Plugin:
                         return (True, result or None)
         return (False, None)
 
-    def _is_min_bot_in_group(self, bot_id: str, group_id) -> bool:
-        """群内最小 bot 判断(无 bot_manager 引用时视为单 bot, 不去重)。"""
+    def _is_chosen_bot_in_group(self, bot_id: str, group_id) -> bool:
+        """群内随机选中 bot 判断(无 bot_manager 引用时视为单 bot, 不去重)。"""
         ws = self._ws_server
         bm = getattr(ws, "_bot_manager", None) if ws is not None else None
         if bm is None:
             return True
-        min_bot = bm.min_bot_for_group(str(group_id))
-        return min_bot is None or min_bot == bot_id
+        chosen = bm.pick_bot_for_group(str(group_id))
+        return chosen is None or chosen == bot_id
 
     def _get_keyword_mode(self) -> MatchMode:
         raw = self.plugin_config.get("keyword_trigger_mode", "exact")

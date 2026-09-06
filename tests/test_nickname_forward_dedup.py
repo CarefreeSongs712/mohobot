@@ -1,7 +1,7 @@
 """三个修复的测试:
 1. get_nickname: TTL 缓存 + strip + 失败短缓存重试(昵称修复)
 2. 合并转发: _send_reply 超长文本自动改合并转发, 失败回退
-3. 全局指令去重: 群内多 bot 时 /占卜 /help 只由 bot_id 最小者回复
+3. 全局指令去重: 群内多 bot 时 /占卜 /help 只由随机选中的一个 bot 回复
 """
 
 import asyncio
@@ -189,7 +189,7 @@ class DedupPlugins:
 
 
 async def test_global_command_dedup() -> None:
-    """群内多 bot: /占卜 /help 只由 bot_id 最小者回复。"""
+    """群内多 bot: /占卜 /help 只由随机选中的一个 bot 回复(测试固定选中 bot_002)。"""
     from mohobot.message_handler import MessageHandler
     from mohobot.context_manager import ContextManager
     from mohobot.models.config import ReplyConfig
@@ -215,12 +215,13 @@ async def test_global_command_dedup() -> None:
     # 两个 bot 都在群 888888
     bm.note_group_message("bot_002", 888888)
     bm.note_group_message("bot_003", 888888)
-    assert bm.min_bot_for_group(888888) == "bot_002"
+    # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
+    bm.pick_bot_for_group = lambda gid: "bot_002"
 
     # bot_003 收到 /占卜 → 应被去重跳过(不进入拦截链/LLM)
     skipped = handler._should_defer_global_command("bot_003", make_group_event(2001, "/占卜"))
-    assert skipped is True, "非最小 bot 应跳过全局指令"
-    # bot_002 收到 /占卜 → 不应跳过
+    assert skipped is True, "非选中 bot 应跳过全局指令"
+    # bot_002(被选中)收到 /占卜 → 不应跳过
     skipped2 = handler._should_defer_global_command("bot_002", make_group_event(2001, "/占卜"))
     assert skipped2 is False
 
@@ -238,7 +239,7 @@ async def test_global_command_dedup() -> None:
     assert handler._should_defer_global_command("bot_003", make_group_event(2001, "/banlist")) is True
     assert handler._should_defer_global_command("bot_003", make_group_event(2001, "/pass-all 2001")) is True
     assert handler._should_defer_global_command("bot_003", make_group_event(2001, "/dec-ban 2001")) is True
-    # bot_002 是群内最小 bot → 不跳过
+    # bot_002 是被选中的 bot → 不跳过
     assert handler._should_defer_global_command("bot_002", make_group_event(2001, "/ban @2001 1h")) is False
 
     # 群内只有自己一个 bot → 不去重
@@ -258,9 +259,10 @@ async def test_global_command_dedup() -> None:
     )
     assert handler2._should_defer_global_command("bot_002", make_group_event(2001, "/占卜")) is False
 
-    # 断开清理: bot_003 断开后只剩 bot_002
+    # 断开清理: bot_003 断开后只剩 bot_002(恢复真实随机, 群内仅剩一个必中)
     bm.forget_bot_groups("bot_003")
-    assert bm.min_bot_for_group(888888) == "bot_002"
+    del bm.pick_bot_for_group
+    assert bm.pick_bot_for_group(888888) == "bot_002"
     print("[3] 全局指令多 bot 去重 OK")
 
 

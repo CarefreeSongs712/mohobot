@@ -102,7 +102,7 @@ async def test_probability():
     print("[+] 概率 OK")
 
 
-async def test_min_bot_dedup():
+async def test_chosen_bot_dedup():
     from mohobot.bot_manager import BotManager, BotInstance
     from mohobot.models.config import BotConfig
 
@@ -111,6 +111,8 @@ async def test_min_bot_dedup():
     bm._bots["bot_002"] = BotInstance("bot_002", None, BotConfig(qq=2000))
     bm.note_group_message("bot_001", 888888)
     bm.note_group_message("bot_002", 888888)
+    # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
+    bm.pick_bot_for_group = lambda gid: "bot_001"
 
     class WS:
         _bot_manager = bm
@@ -123,8 +125,8 @@ async def test_min_bot_dedup():
         handled_other, _ = await inst.on_message_observed(
             "bot_002", make_group_event(2001, "666"), {},
         )
-    assert handled_min, "最小 bot 应触发"
-    assert not handled_other, "非最小 bot 不应触发"
+    assert handled_min, "选中 bot 应触发"
+    assert not handled_other, "非选中 bot 不应触发"
     # 无 bot_manager 引用 → 不去重(单 bot 场景)
     inst2 = make_plugin()
     with mock.patch("plugins.six66.main.random.random", return_value=0.1):
@@ -132,7 +134,7 @@ async def test_min_bot_dedup():
             "bot_002", make_group_event(2001, "666"), {},
         )
     assert handled
-    print("[+] 最小 bot 去重 OK")
+    print("[+] 多 bot 随机去重 OK")
 
 
 async def test_group_only():

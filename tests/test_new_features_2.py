@@ -335,7 +335,7 @@ async def test_usage_stats():
 
 
 async def test_no_prefix_global_dedup():
-    """无前缀"占卜"在群内多 bot 时只由最小 bot 处理; "赞我"不去重(每 bot 都处理)。"""
+    """无前缀"占卜"在群内多 bot 时只由随机选中的一个 bot 处理; "赞我"不去重(每 bot 都处理)。"""
     from mohobot.interceptors.plugin_system import PluginSystem
     from mohobot.bot_manager import BotManager, BotInstance
     from mohobot.models.config import BotConfig
@@ -347,15 +347,17 @@ async def test_no_prefix_global_dedup():
     bm._bots["bot_002"] = BotInstance("bot_002", None, BotConfig(qq=2000))
     bm.note_group_message("bot_001", 888888)
     bm.note_group_message("bot_002", 888888)
+    # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
+    bm.pick_bot_for_group = lambda gid: "bot_001"
     ps.set_runtime_refs(bot_manager=bm)
     await ps.load_plugins()
 
-    # "占卜"(无 /, 命中 divination 的 global_triggers) → 群内只最小 bot 处理
+    # "占卜"(无 /, 命中 divination 的 global_triggers) → 群内只选中 bot 处理
     ev = make_group_event(2001, "占卜")
     handled_min, _ = await ps.dispatch_observed("bot_001", ev, {})
     handled_other, _ = await ps.dispatch_observed("bot_002", ev, {})
-    assert handled_min, "最小 bot 应处理占卜"
-    assert not handled_other, "非最小 bot 不应处理占卜"
+    assert handled_min, "选中 bot 应处理占卜"
+    assert not handled_other, "非选中 bot 不应处理占卜"
 
     # "赞我"(praise 无 global_triggers) → 不去重, 每个 bot 都处理
     ev2 = make_group_event(2002, "赞我")
