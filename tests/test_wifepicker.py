@@ -553,7 +553,7 @@ async def test_keyword_trigger_chosen_bot_only() -> None:
     bm.note_group_message("bot_001", GROUP)
     bm.note_group_message("bot_002", GROUP)
     inst._ws_server._bot_manager = bm
-    bm.pick_bot_for_group = lambda gid: "bot_001"
+    bm.pick_bot_for_group = lambda gid, mid=None: "bot_001"
 
     ev = make_group_event(2001, "抽老婆")
     # 先记录活跃成员(观察钩子; 需在 FakeWS 群成员 MEMBERS=1001-1003 内)

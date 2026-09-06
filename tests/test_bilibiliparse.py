@@ -141,7 +141,7 @@ def make_plugin(ok=True, bm=None):
     ws = FakeWS(bot_manager=bm)
     if bm is not None:
         # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
-        ws._bot_manager.pick_bot_for_group = lambda gid: "bot_001"
+        ws._bot_manager.pick_bot_for_group = lambda gid, mid=None: "bot_001"
     inst._ws_server = ws
     inst._http_session = FakeParseAPI(ok=ok)
     return mod, inst, ws

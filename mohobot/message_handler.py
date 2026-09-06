@@ -1353,8 +1353,10 @@ class MessageHandler:
                     break
         if not is_global:
             return False
-        # 随机选中的 bot 才回复
-        chosen = self._ws._bot_manager.pick_bot_for_group(str(event.group_id))
+        # 随机选中的 bot 才回复(同一条消息多 bot 协程共享同一抽签结果)
+        chosen = self._ws._bot_manager.pick_bot_for_group(
+            str(event.group_id), str(event.message_id),
+        )
         if chosen is None or chosen == bot_id:
             return False
         logger.debug(f"全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")
@@ -1389,7 +1391,7 @@ class MessageHandler:
         bots = bm.bots_in_group(group_id)
         if len(bots) <= 1:
             return False  # 单 bot 群: 走原流程即可
-        sender = bm.pick_bot_for_group(group_id) or bots[0]
+        sender = bm.pick_bot_for_group(group_id, str(event.message_id)) or bots[0]
         if bot_id != sender:
             logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")
             return True

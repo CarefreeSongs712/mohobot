@@ -42,7 +42,7 @@ class _FakeBotManager:
             b for b in self._group_bots.get(str(group_id), set()) if b in self._bots
         )
 
-    def pick_bot_for_group(self, group_id):
+    def pick_bot_for_group(self, group_id, message_id=None):
         # 真实实现为 random.choice(随机); 测试固定选最小以保证确定性
         candidates = [
             b for b in self._group_bots.get(str(group_id), set()) if b in self._bots

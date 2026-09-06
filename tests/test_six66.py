@@ -112,7 +112,7 @@ async def test_chosen_bot_dedup():
     bm.note_group_message("bot_001", 888888)
     bm.note_group_message("bot_002", 888888)
     # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
-    bm.pick_bot_for_group = lambda gid: "bot_001"
+    bm.pick_bot_for_group = lambda gid, mid=None: "bot_001"
 
     class WS:
         _bot_manager = bm

@@ -718,7 +718,9 @@ class PluginSystem(Interceptor):
         bm = self._bot_manager
         if bm is None:
             return True
-        chosen = bm.pick_bot_for_group(str(event.group_id))
+        chosen = bm.pick_bot_for_group(
+            str(event.group_id), str(getattr(event, "message_id", "") or ""),
+        )
         if chosen is None or chosen == bot_id:
             return True
         logger.debug(f"无前缀全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")

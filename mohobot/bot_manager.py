@@ -89,6 +89,9 @@ class BotInstance:
 class BotManager:
     """Manages all connected bot instances and bot↔QQ bindings."""
 
+    # 每条消息随机选中结果的缓存时长(秒): 消息处理在秒级完成, 60s 绰绰有余
+    _PICK_CACHE_TTL = 60.0
+
     def __init__(self, data_dir: str = "./data"):
         self._bots: dict[str, BotInstance] = {}   # bot_id -> instance (已绑定)
         self._unbound: dict[str, BotInstance] = {}  # qq(str) -> instance (未绑定连接)
@@ -103,6 +106,9 @@ class BotManager:
         # 群内在线 bot 集合(消息驱动): group_id(str) -> set[bot_id]
         # 用于全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复
         self._group_bots: dict[str, set[str]] = {}
+        # 每条消息的随机选中结果缓存: (group_id, message_id) -> (bot_id, 抽样时间)
+        # 同一条消息经多 bot 连接各推送一次, 所有协程共享同一抽签结果
+        self._group_pick_cache: dict[tuple[str, str], tuple[str, float]] = {}
         logger.info(f"BotManager initialized (data_dir={data_dir})")
 
     # ── Bot↔QQ 绑定与磁盘配置 ────────────────────────────────
@@ -303,13 +309,39 @@ class BotManager:
         """记录 bot 在群内的存在(消息驱动: 收到群消息即在该群)。"""
         self._group_bots.setdefault(str(group_id), set()).add(bot_id)
 
-    def pick_bot_for_group(self, group_id: int | str) -> str | None:
-        """该群在线 bot 中随机选一个(用于全局指令去重, 每次消息独立抽取)。"""
+    def pick_bot_for_group(
+        self, group_id: int | str, message_id: int | str | None = None,
+    ) -> str | None:
+        """该群在线 bot 中随机选一个(用于全局指令去重)。
+
+        同一条消息会经每个 bot 的连接各推送一次(多 bot 群内 N 个协程并发
+        调用本方法)。传 message_id 时按 (群号, message_id) 缓存抽样结果
+        (TTL 60s), 保证同一条消息的所有协程得到同一个选中 bot ——
+        恰好一个 bot 回复, 不会"没人回"或"多个 bot 都回"。
+        不传 message_id 则每次独立抽取(兼容无消息上下文的调用)。
+        """
         candidates = [
             b for b in self._group_bots.get(str(group_id), set())
             if b in self._bots
         ]
-        return random.choice(candidates) if candidates else None
+        if not candidates:
+            return None
+        if message_id is None or not str(message_id):
+            return random.choice(candidates)
+
+        key = (str(group_id), str(message_id))
+        now = time.time()
+        cached = self._group_pick_cache.get(key)
+        if cached and now - cached[1] < self._PICK_CACHE_TTL and cached[0] in candidates:
+            return cached[0]
+        chosen = random.choice(candidates)
+        # 惰性清理过期缓存, 防止无限增长
+        if len(self._group_pick_cache) > 2000:
+            for k in [k for k, (_, ts) in self._group_pick_cache.items()
+                      if now - ts >= self._PICK_CACHE_TTL]:
+                del self._group_pick_cache[k]
+        self._group_pick_cache[key] = (chosen, now)
+        return chosen
 
     def bots_in_group(self, group_id: int | str) -> list[str]:
         """该群在线 bot 的 bot_id 列表(排序, 供合并回复按序收集)。"""

@@ -1,8 +1,9 @@
 """Bot↔QQ 解耦单元测试:
 1. legacy 迁移 (qq 目录 → 自动编号 bot_id)
-2. register: 已绑定 QQ → bot 实例; 未绑定 QQ → 未绑定连接
+2. register: 已绑定 QQ → bot 实例; 未绑定连接
 3. create/bind/unbind: QQ 唯一绑定 + 连接升降级
 4. unregister 竞态防护 (bound / unbound)
+5. pick_bot_for_group: 同一条消息共享随机抽签结果
 """
 
 import asyncio
@@ -117,11 +118,43 @@ async def test_unregister_race() -> None:
     print("[4] unregister race protection OK")
 
 
+async def test_pick_bot_shared_per_message() -> None:
+    """随机选中 bot: 同一条消息(同 group_id+message_id)多次调用共享同一抽签;
+    不同消息独立抽取; 群内 bot 全部离线返回 None。"""
+    tmp = Path(tempfile.mkdtemp(prefix="pb_"))
+    bm = BotManager(data_dir=str(tmp))
+    group_bots = {"bot_001", "bot_002", "bot_003"}
+    for i in (1, 2, 3):
+        bid = f"bot_{i:03d}"
+        bm.create_bot(nickname=f"B{i}", qq=999100 + i)
+        cfg = bm.load_bot_config(bid)
+        bm._bots[bid] = BotInstance(bid, FakeWS(), cfg)
+        bm.note_group_message(bid, 555)
+
+    # 同一条消息: 多次调用(模拟多 bot 协程)结果一致, 且是群内 bot 之一
+    first = bm.pick_bot_for_group(555, "msg_1")
+    assert first in group_bots
+    for _ in range(10):
+        assert bm.pick_bot_for_group(555, "msg_1") == first
+    # 不同消息: 抽样分布覆盖多个 bot(30 次至少命中 2 个)
+    picks = {bm.pick_bot_for_group(555, f"msg_{n}") for n in range(2, 32)}
+    assert len(picks) >= 2, f"随机抽样应覆盖多个 bot: {picks}"
+    # 未传 message_id: 直接随机不缓存
+    for _ in range(5):
+        assert bm.pick_bot_for_group(555) in group_bots
+    # 群内 bot 全部离线 → None
+    for b in list(bm._bots):
+        bm.forget_bot_groups(b)
+    assert bm.pick_bot_for_group(555, "msg_1") is None
+    print("[5] pick_bot_for_group per-message 共享抽签 OK")
+
+
 async def main() -> None:
     await test_legacy_migration()
     await test_register_bound_and_unbound()
     await test_bind_unbind_lifecycle()
     await test_unregister_race()
+    await test_pick_bot_shared_per_message()
     print("\nALL BOT BINDING TESTS PASSED")
 
 

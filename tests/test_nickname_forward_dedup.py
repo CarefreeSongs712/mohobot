@@ -216,7 +216,7 @@ async def test_global_command_dedup() -> None:
     bm.note_group_message("bot_002", 888888)
     bm.note_group_message("bot_003", 888888)
     # 固定"随机"选择, 保证测试确定性(真实实现为 random.choice)
-    bm.pick_bot_for_group = lambda gid: "bot_002"
+    bm.pick_bot_for_group = lambda gid, mid=None: "bot_002"
 
     # bot_003 收到 /占卜 → 应被去重跳过(不进入拦截链/LLM)
     skipped = handler._should_defer_global_command("bot_003", make_group_event(2001, "/占卜"))

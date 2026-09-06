@@ -154,7 +154,9 @@ class Plugin:
         if isinstance(event, GroupMessageEvent):
             ws = self._ws_server
             if ws is not None and getattr(ws, "_bot_manager", None) is not None:
-                chosen = ws._bot_manager.pick_bot_for_group(str(event.group_id))
+                chosen = ws._bot_manager.pick_bot_for_group(
+                    str(event.group_id), str(getattr(event, "message_id", "") or ""),
+                )
                 if chosen is not None and chosen != bot_id:
                     return (True, None)
 

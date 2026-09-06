@@ -206,7 +206,7 @@ class Plugin:
         if group_id and text and not text.startswith(("/", "!", "！")):
             if self.plugin_config.get("keyword_trigger_enabled", False):
                 # 多 bot 群内: 只由随机选中的一个 bot 触发关键词(与 / 命令去重一致)
-                if not self._is_chosen_bot_in_group(bot_id, group_id):
+                if not self._is_chosen_bot_in_group(bot_id, event):
                     return (False, None)
                 mode = self._get_keyword_mode()
                 route = self._keyword_router.match_route(text, mode=mode)
@@ -220,13 +220,18 @@ class Plugin:
                         return (True, result or None)
         return (False, None)
 
-    def _is_chosen_bot_in_group(self, bot_id: str, group_id) -> bool:
-        """群内随机选中 bot 判断(无 bot_manager 引用时视为单 bot, 不去重)。"""
+    def _is_chosen_bot_in_group(self, bot_id: str, event) -> bool:
+        """群内随机选中 bot 判断(无 bot_manager 引用时视为单 bot, 不去重)。
+
+        传 event 以 message_id 共享抽签: 同一条消息多 bot 协程得到同一结果。
+        """
         ws = self._ws_server
         bm = getattr(ws, "_bot_manager", None) if ws is not None else None
         if bm is None:
             return True
-        chosen = bm.pick_bot_for_group(str(group_id))
+        chosen = bm.pick_bot_for_group(
+            str(event.group_id), str(getattr(event, "message_id", "") or ""),
+        )
         return chosen is None or chosen == bot_id
 
     def _get_keyword_mode(self) -> MatchMode:
