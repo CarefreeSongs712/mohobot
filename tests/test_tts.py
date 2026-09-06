@@ -240,6 +240,11 @@ def test_tts_config_roundtrip() -> None:
         enabled=True, base_url="http://10.0.0.5:9880", queue_maxsize=8,
         ref_audio_path="D:/refs/v.wav", prompt_text="原文内容",
         speed_factor=1.1, cmd_max_chars=50, cmd_cooldown=60,
+        top_k=10, top_p=0.9, temperature=0.8, fragment_interval=0.5,
+        text_split_method="cut3", timeout=300,
+        service_command="/x/bin/python api_v2.py -p 9880",
+        service_cwd="/opt/gsv", service_log_path="/tmp/gsv.log",
+        gsv_config_path="/opt/gsv/tts_infer.yaml", stop_wait_seconds=15,
     )
     with tempfile.TemporaryDirectory(prefix="tts_cfg_") as tmp:
         path = Path(tmp) / "global.yaml"
@@ -253,6 +258,17 @@ def test_tts_config_roundtrip() -> None:
     assert abs(loaded.tts.speed_factor - 1.1) < 1e-6
     assert loaded.tts.cmd_max_chars == 50
     assert loaded.tts.cmd_cooldown == 60
+    assert loaded.tts.top_k == 10
+    assert abs(loaded.tts.top_p - 0.9) < 1e-6
+    assert abs(loaded.tts.temperature - 0.8) < 1e-6
+    assert abs(loaded.tts.fragment_interval - 0.5) < 1e-6
+    assert loaded.tts.text_split_method == "cut3"
+    assert loaded.tts.timeout == 300
+    assert loaded.tts.service_command == "/x/bin/python api_v2.py -p 9880"
+    assert loaded.tts.service_cwd == "/opt/gsv"
+    assert loaded.tts.service_log_path == "/tmp/gsv.log"
+    assert loaded.tts.gsv_config_path == "/opt/gsv/tts_infer.yaml"
+    assert loaded.tts.stop_wait_seconds == 15
     # BotConfig tts_enabled
     bot = BotConfig(bot_id="bot_001", tts_enabled=True)
     assert bot.to_dict()["tts_enabled"] is True
@@ -261,3 +277,71 @@ def test_tts_config_roundtrip() -> None:
         bot.save(path)
         loaded_bot = BotConfig.load(path)
     assert loaded_bot.tts_enabled is True
+
+
+# ── 新增: sync_config 热同步 + 进程管理分支 ─────────────────────
+
+
+def test_sync_config_hot_update() -> None:
+    """TTSService.sync_config: 字段原位拷入运行对象 + 客户端 payload 热同步。"""
+    from mohobot.services.gsv_tts import TTSService
+
+    new_cfg = TTSConfig(
+        enabled=True, base_url="http://10.0.1.9:9880", timeout=300,
+        ref_audio_path="/new/ref.wav", prompt_text="新原文",
+        top_k=7, text_split_method="cut2",
+    )
+    svc = TTSService(TTSConfig())  # 旧 cfg(默认): 已构造 client
+    old_url = svc._client.tts_url
+    svc.sync_config(new_cfg)
+    assert svc.cfg.base_url == new_cfg.base_url
+    assert svc.cfg.ref_audio_path == "/new/ref.wav"
+    assert svc.cfg.top_k == 7
+    # 客户端 payload 已热同步
+    assert svc._client._payload["ref_audio_path"] == "/new/ref.wav"
+    assert svc._client._payload["top_k"] == 7
+    assert svc._client._payload["text_split_method"] == "cut2"
+    assert svc._client.tts_url.endswith(":9880/tts")
+    assert svc._client.tts_url != old_url
+
+
+async def test_gsc_client_payload_extended() -> None:
+    """新采样参数出现在 /tts 请求体内。"""
+    import httpx
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=b"RIFFx")
+
+    factory = lambda **kw: httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=kw.get("timeout", 5))
+    from mohobot.services.gsv_tts import GsvTTSClient
+
+    c = GsvTTSClient(
+        "http://127.0.0.1:9880", ref_audio_path="/r.wav", prompt_text="pp",
+        top_k=3, top_p=0.7, temperature=0.9, fragment_interval=0.6,
+        text_split_method="cut1", http_client_factory=factory,
+    )
+    await c.synthesize("你好")
+    await c.close()
+    b = captured["body"]
+    assert b["top_k"] == 3
+    assert abs(b["top_p"] - 0.7) < 1e-9
+    assert abs(b["temperature"] - 0.9) < 1e-9
+    assert abs(b["fragment_interval"] - 0.6) < 1e-9
+    assert b["text_split_method"] == "cut1"
+    assert b["streaming_mode"] is False
+
+
+async def test_service_management_branches() -> None:
+    """进程管理分支: 未配置命令/未运行停止。"""
+    from mohobot.services.gsv_tts import TTSService
+
+    svc = TTSService(TTSConfig())  # service_command 为空
+
+    ok, msg = await svc.start_service()
+    assert not ok and "未配置" in msg
+    ok, msg = await svc.stop_service()
+    assert not ok and "未在运行" in msg

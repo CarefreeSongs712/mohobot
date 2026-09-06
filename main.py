@@ -282,6 +282,7 @@ class MohobotApplication:
                 ban_filter=ban_filter,
                 restart_callback=self.restart,
                 emotion_manager=self._emotion_manager,
+                tts_service=self._tts_service,
             )
             # Start web panel in background
             self._web_panel_task = self._task_supervisor.create_task(

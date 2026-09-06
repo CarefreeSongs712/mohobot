@@ -153,6 +153,7 @@ class WebPanel:
         ban_filter=None,
         restart_callback=None,
         emotion_manager=None,
+        tts_service=None,
     ):
         self._host = host
         self._port = port
@@ -190,6 +191,7 @@ class WebPanel:
         self._ban_filter = ban_filter
         self._restart_callback = restart_callback
         self._emotion_manager = emotion_manager
+        self._tts_service = tts_service
 
         self._app = FastAPI(title="Mohobot Web Panel")
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
@@ -661,6 +663,148 @@ class WebPanel:
             cfg.save(self._config_path)
             logger.info("Web panel: LLM model config updated")
             return {"status": "ok"}
+
+        # ── 3.5 TTS 语音(GPT-SoVITS: 状态/进程管理/配置) ─────
+
+        @app.get("/api/tts/status")
+        async def tts_status(request: Request):
+            await _require_auth(request)
+            if self._tts_service is None:
+                return {
+                    "tts_enabled": False, "running": False,
+                    "service_configured": False, "current": None,
+                    "queued": 0, "queue_maxsize": 0, "stats": {},
+                }
+            return await self._tts_service.service_status()
+
+        @app.post("/api/tts/service")
+        async def tts_service_action(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            if self._tts_service is None:
+                raise HTTPException(status_code=400, detail="TTS 未启用(tts.enabled=false)")
+            action = str((body.data or {}).get("action", ""))
+            if action == "start":
+                ok, msg = await self._tts_service.start_service()
+            elif action == "stop":
+                ok, msg = await self._tts_service.stop_service()
+            elif action == "restart":
+                ok, msg = await self._tts_service.restart_service()
+            else:
+                raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+            return {"ok": ok, "message": msg}
+
+        @app.get("/api/tts/config")
+        async def get_tts_config(request: Request):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            return cfg.to_dict()["tts"]
+
+        @app.put("/api/tts/config")
+        async def update_tts_config(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig, TTSConfig
+            import dataclasses as _dc
+            cfg = GlobalConfig.load(self._config_path)
+            data = body.data or {}
+
+            def _coerce(value, f):
+                """按字段类型轻量强转(脏值保持原值, 下次 load 兜底强转)。"""
+                try:
+                    if f.type == "bool":
+                        return bool(value)
+                    if f.type == "int":
+                        return int(value)
+                    if f.type == "float":
+                        return float(value)
+                    return str(value)
+                except (TypeError, ValueError):
+                    return getattr(cfg.tts, f.name)
+
+            for f in _dc.fields(TTSConfig):
+                if f.name in data:
+                    setattr(cfg.tts, f.name, _coerce(data[f.name], f))
+            cfg.save(self._config_path)
+            note = ""
+            if self._tts_service is not None:
+                # 原位热同步(与 main 持有的 GlobalConfig.tts 同一对象):
+                # enabled/采样参数/timeout/指令限制立即生效; queue_maxsize 需重启
+                self._tts_service.sync_config(cfg.tts)
+                note = "已热同步(queue_maxsize 需重启生效)"
+            logger.info(f"Web panel: TTS config updated ({list(data.keys())})")
+            return {"status": "ok", "note": note}
+
+        @app.get("/api/tts/gsv_config")
+        async def get_gsv_config(request: Request):
+            await _require_auth(request)
+            if self._tts_service is None:
+                raise HTTPException(status_code=400, detail="TTS 未启用")
+            path = self._tts_service.cfg.gsv_config_path
+            if not path:
+                raise HTTPException(status_code=400, detail="未配置 gsv_config_path")
+            p = Path(path)
+            if not p.exists():
+                raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+            import yaml as _yaml
+            try:
+                raw = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"yaml 解析失败: {e}")
+            return {
+                "path": path,
+                "custom": raw.get("custom") or {},
+                "other_sections": sorted(k for k in raw if k != "custom"),
+            }
+
+        @app.put("/api/tts/gsv_config")
+        async def update_gsv_config(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            if self._tts_service is None:
+                raise HTTPException(status_code=400, detail="TTS 未启用")
+            path = self._tts_service.cfg.gsv_config_path
+            if not path:
+                raise HTTPException(status_code=400, detail="未配置 gsv_config_path")
+            custom = (body.data or {}).get("custom")
+            if not isinstance(custom, dict) or not custom:
+                raise HTTPException(status_code=400, detail="缺少 custom 段")
+            import yaml as _yaml
+            p = Path(path)
+            if not p.exists():
+                raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+            raw = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            # 时间戳备份(规范: 不覆盖旧备份)
+            bak = f"{path}.bak.{time.strftime('%Y%m%d-%H%M%S')}"
+            shutil.copy2(p, bak)
+            # 合并写入(未在表单中的 custom 键保留原值), 其余段(v1~v4 默认值)不动
+            merged = raw.get("custom") or {}
+            merged.update(custom)
+            raw["custom"] = merged
+            p.write_text(
+                _yaml.dump(raw, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            logger.info(f"Web panel: GSV config updated ({path}, backup={bak})")
+            return {"status": "ok", "backup": bak, "note": "重启 GSV 后生效"}
+
+        @app.get("/api/tts/log")
+        async def tts_log(request: Request, lines: int = 80):
+            await _require_auth(request)
+            path = self._tts_service.cfg.service_log_path if self._tts_service else ""
+            if not path:
+                return {"log": "", "error": "未配置 service_log_path"}
+            p = Path(path)
+            if not p.exists():
+                return {"log": "", "error": "日志文件不存在"}
+            try:
+                with open(p, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 128 * 1024))
+                    data = f.read().decode("utf-8", "ignore")
+                tail = data.splitlines()[-max(1, min(int(lines), 400)):]
+                return {"log": "\n".join(tail)}
+            except Exception as e:
+                return {"log": "", "error": f"读取失败: {e}"}
 
         # ── 4. Plugins (插件管理) ────────────────────────────
 

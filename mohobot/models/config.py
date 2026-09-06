@@ -172,12 +172,15 @@ class TTSConfig:
     GSV 相关全部全局: 所有 bot 共用同一套音色/模型/参考音频;
     每 bot 只有 tts_enabled 开关(BotConfig)。运行时不切权重,
     GSV 服务端启动时通过 tts_infer.yaml 自行加载模型。
+
+    除 queue_maxsize(队列构造固定, 重启生效)外, 其余字段经
+    TTSService.sync_config 原位热同步(WebUI 保存即生效)。
     """
     enabled: bool = False
     base_url: str = "http://127.0.0.1:9880"
     # 单飞行队列: GSV 一次只能合成一条, 队列满时丢最新(新请求直接放弃)
     queue_maxsize: int = 16
-    timeout: int = 60                # 单次合成超时(秒)
+    timeout: int = 300               # 单次合成超时(秒); CPU 推理一句约 40s, 300 起步
     media_type: str = "wav"          # wav / ogg / aac (ogg/aac 需 GSV 端 ffmpeg)
     text_lang: str = "zh"
     prompt_lang: str = "zh"
@@ -185,6 +188,12 @@ class TTSConfig:
     ref_audio_path: str = ""
     prompt_text: str = ""
     speed_factor: float = 1.0
+    # 采样/切分参数(透传 GSV /tts; 不配则 GSV 用服务端默认)
+    top_k: int = 15
+    top_p: float = 1.0
+    temperature: float = 1.0
+    fragment_interval: float = 0.3   # 句间停顿(秒)
+    text_split_method: str = "cut5"  # cut0 不切/cut1 每4句/cut2 凑50字/cut3 句号/cut4 句点/cut5 按标点
     # LLM 自动朗读的系统提示词模板(开启 TTS 的 bot 注入)
     tts_prompt_template: str = (
         "\n\n语音标注规则：如果你想说一句适合朗读出来的话（例如问候、感叹、俏皮话），"
@@ -195,6 +204,16 @@ class TTSConfig:
     # 指令 TTS(/tts) 限制(管理员不受限)
     cmd_max_chars: int = 30
     cmd_cooldown: int = 120          # 非管理员冷却(秒)
+
+    # ── GSV 后台进程管理(WebUI 手动启停, 不随 mohobot 生命周期) ──
+    # 启动命令(shlex 切分, 不经 shell), 相对路径基于 service_cwd:
+    #   "/root/QQBot/GSV/GPT-SoVITS/.venv/bin/python api_v2.py -a 127.0.0.1 -p 9880 \
+    #    -c GPT_SoVITS/configs/tts_infer_cpu.yaml"
+    service_command: str = ""
+    service_cwd: str = ""            # 工作目录, 如 /root/QQBot/GSV/GPT-SoVITS
+    service_log_path: str = ""       # GSV 输出日志(面板可看尾部); 空=丢弃
+    gsv_config_path: str = ""        # tts_infer yaml 路径(面板可编辑 custom 段)
+    stop_wait_seconds: int = 10      # control exit 后等待退出秒数, 超时 kill 监听进程
 
 
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
@@ -366,19 +385,29 @@ class GlobalConfig:
                 enabled=bool(tts_raw.get("enabled", False)),
                 base_url=str(tts_raw.get("base_url", "http://127.0.0.1:9880") or "http://127.0.0.1:9880"),
                 queue_maxsize=max(1, int(tts_raw.get("queue_maxsize", 16))),
-                timeout=max(5, int(tts_raw.get("timeout", 60))),
+                timeout=max(5, int(tts_raw.get("timeout", 300))),
                 media_type=str(tts_raw.get("media_type", "wav") or "wav"),
                 text_lang=str(tts_raw.get("text_lang", "zh") or "zh"),
                 prompt_lang=str(tts_raw.get("prompt_lang", "zh") or "zh"),
                 ref_audio_path=str(tts_raw.get("ref_audio_path", "") or ""),
                 prompt_text=str(tts_raw.get("prompt_text", "") or ""),
                 speed_factor=float(tts_raw.get("speed_factor", 1.0)),
+                top_k=max(1, int(tts_raw.get("top_k", 15))),
+                top_p=float(tts_raw.get("top_p", 1.0)),
+                temperature=float(tts_raw.get("temperature", 1.0)),
+                fragment_interval=max(0.0, float(tts_raw.get("fragment_interval", 0.3))),
+                text_split_method=str(tts_raw.get("text_split_method", "cut5") or "cut5"),
                 tts_prompt_template=(
                     str(tts_raw.get("tts_prompt_template", "") or "").strip()
                     or TTSConfig().tts_prompt_template
                 ),
                 cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),
                 cmd_cooldown=max(0, int(tts_raw.get("cmd_cooldown", 120))),
+                service_command=str(tts_raw.get("service_command", "") or ""),
+                service_cwd=str(tts_raw.get("service_cwd", "") or ""),
+                service_log_path=str(tts_raw.get("service_log_path", "") or ""),
+                gsv_config_path=str(tts_raw.get("gsv_config_path", "") or ""),
+                stop_wait_seconds=max(3, int(tts_raw.get("stop_wait_seconds", 10))),
             ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
@@ -492,9 +521,19 @@ class GlobalConfig:
                 "ref_audio_path": self.tts.ref_audio_path,
                 "prompt_text": self.tts.prompt_text,
                 "speed_factor": self.tts.speed_factor,
+                "top_k": self.tts.top_k,
+                "top_p": self.tts.top_p,
+                "temperature": self.tts.temperature,
+                "fragment_interval": self.tts.fragment_interval,
+                "text_split_method": self.tts.text_split_method,
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+                "service_command": self.tts.service_command,
+                "service_cwd": self.tts.service_cwd,
+                "service_log_path": self.tts.service_log_path,
+                "gsv_config_path": self.tts.gsv_config_path,
+                "stop_wait_seconds": self.tts.stop_wait_seconds,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
@@ -601,9 +640,19 @@ class GlobalConfig:
                 "ref_audio_path": self.tts.ref_audio_path,
                 "prompt_text": self.tts.prompt_text,
                 "speed_factor": self.tts.speed_factor,
+                "top_k": self.tts.top_k,
+                "top_p": self.tts.top_p,
+                "temperature": self.tts.temperature,
+                "fragment_interval": self.tts.fragment_interval,
+                "text_split_method": self.tts.text_split_method,
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+                "service_command": self.tts.service_command,
+                "service_cwd": self.tts.service_cwd,
+                "service_log_path": self.tts.service_log_path,
+                "gsv_config_path": self.tts.gsv_config_path,
+                "stop_wait_seconds": self.tts.stop_wait_seconds,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),

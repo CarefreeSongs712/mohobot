@@ -306,7 +306,14 @@ music_knowledge:
 
 **并发**：GSV 一次只能合成一条 → 框架侧全局 FIFO 队列串行消费；队列满（上限可配，默认 16）**丢弃最新**请求。模型权重不运行时切换，GSV 服务端启动时通过 `tts_infer.yaml` 自行加载。
 
-**配置**：GSV 相关全部在全局 `tts:` 段（地址/队列上限/超时/媒体格式/参考音频路径/prompt_text/语速/标注提示词模板/指令限制，WebUI 全局配置页可编辑）；每 bot 仅 `tts_enabled` 开关（WebUI Bot 配置页），修改开关需重启生效。
+**WebUI「🔊 TTS 语音」独立板块**（与模型配置同级）：
+
+- **GSV 服务控制**：手动启动/停止/重启 GSV 后台进程（`tts.service_command + service_cwd` 拉起 detached 进程，日志重定向到 `service_log_path`）。**GSV 进程独立于 mohobot 生命周期**——mohobot 启动不拉起它、关闭也不停它。停止流程：`/control exit` 优雅退出 → 等待 `stop_wait_seconds`（默认 10s）→ 仍在监听则 kill 监听该端口的进程兜底（按端口找 pid，不按命令名 pgrep，防误杀）。
+- **合成队列监控**：运行状态（TCP 探测 base_url 端口）、当前合成中的任务、队列深度、累计成功/失败/丢弃计数（页面打开时 5 秒自动刷新）。
+- **发送配置**：`/tts` 请求参数全部可调（语速/切分方式/句间停顿/top_k/top_p/temperature/超时等），保存后原位热同步立即生效（仅队列上限需重启）。
+- **GSV 模型配置**：表单编辑 `tts_infer.yaml` 的 `custom:` 段（device/is_half/version/GPT 权重/SoVITS 权重/BERT 路径），保存自动 `.bak` 时间戳备份，其余段保留不动；重启 GSV 后生效。可查看 GSV 日志尾部。
+
+**配置**：GSV 相关全部在全局 `tts:` 段（WebUI 独立板块可编辑）；每 bot 仅 `tts_enabled` 开关（WebUI Bot 配置页），修改开关需重启生效。
 
 ```yaml
 tts:
@@ -318,13 +325,24 @@ tts:
   ref_audio_path: "D:/GSV/refs/voice.wav"   # GSV 服务器本机路径
   prompt_text: "参考音频里说的那句话"
   speed_factor: 1.0
+  text_split_method: "cut5"  # cut0 不切/cut1 每4句/cut2 凑50字/cut3 句号/cut4 句点/cut5 按标点
+  fragment_interval: 0.3     # 句间停顿(秒)
+  top_k: 15
+  top_p: 1.0
+  temperature: 1.0
   queue_maxsize: 16
-  timeout: 60
+  timeout: 300               # CPU 推理一句约 40s, 300 起步
   cmd_max_chars: 30
   cmd_cooldown: 120
+  # GSV 后台进程管理(面板手动启停)
+  service_command: '/root/QQBot/GSV/GPT-SoVITS/.venv/bin/python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer_cpu.yaml'
+  service_cwd: "/root/QQBot/GSV/GPT-SoVITS"
+  service_log_path: "/root/QQBot/GSV/api_v2.log"
+  gsv_config_path: "/root/QQBot/GSV/GPT-SoVITS/GPT_SoVITS/configs/tts_infer_cpu.yaml"
+  stop_wait_seconds: 10
 ```
 
-实现在 `mohobot/services/gsv_tts.py`（客户端+队列）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。另有独立脚本 `scripts/tts_standalone.py`（不依赖 mohobot，仅 httpx，可直接验证 GSV 服务连通性）。
+实现在 `mohobot/services/gsv_tts.py`（客户端+队列+进程管理）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。另有独立脚本 `scripts/tts_standalone.py`（不依赖 mohobot，仅 httpx，可直接验证 GSV 服务连通性）。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 

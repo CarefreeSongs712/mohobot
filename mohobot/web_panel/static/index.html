@@ -232,6 +232,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="usage"><span class="icon">📈</span> 用量统计</div>
     <div class="nav-item" data-page="config"><span class="icon">⚙️</span> 配置文件</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
+    <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
     <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
@@ -357,6 +358,67 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       </div>
     </div>
     <button class="btn" onclick="saveModels()">保存模型配置</button>
+  </div>
+
+  <!-- 3.5 TTS 语音 -->
+  <div class="page" id="page-tts">
+    <h2>🔊 TTS 语音（GPT-SoVITS）</h2>
+    <div class="subtitle">GSV 后台进程启停（独立于本服务生命周期）、合成队列监控、发送参数与 GSV 模型配置</div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">🖥️ GSV 服务</div>
+        <div id="tts-svc-status" class="stat-label">⏳ 加载中…</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn small" onclick="ttsServiceAction('start')">▶ 启动</button>
+          <button class="btn small secondary" onclick="ttsServiceAction('stop')">■ 停止</button>
+          <button class="btn small secondary" onclick="ttsServiceAction('restart')">↻ 重启</button>
+          <button class="btn small secondary" onclick="ttsRefresh()">刷新状态</button>
+        </div>
+        <div class="small" style="color:var(--text-dim);margin-top:8px">
+          启动命令/工作目录/日志路径在下方「进程管理配置」中设置；启动后模型加载约需 1~2 分钟（期间状态显示未运行）。停止流程：control exit → 等待 10 秒 → kill 监听进程兜底。
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">🎚️ 合成队列</div>
+        <div id="tts-queue-status" class="stat-label">⏳ 加载中…</div>
+        <div class="small" style="color:var(--text-dim);margin-top:8px">
+          单飞行串行：GSV 一次只合成一条；队列满丢弃最新。本页打开时每 5 秒自动刷新。
+        </div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">📤 发送配置（mohobot → GSV）</div>
+        <div id="tts-send-form"></div>
+        <button class="btn" onclick="saveTtsConfig()">保存发送配置</button>
+        <div class="small" style="color:var(--text-dim);margin-top:6px">
+          保存后除「等待队列上限」需重启外，其余立即热生效；GSV 采样参数直接透传 /tts。
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">⚙️ 进程管理与 GSV 配置</div>
+        <div id="tts-svc-form"></div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn" onclick="saveTtsServiceConfig()">保存进程配置</button>
+          <button class="btn secondary" onclick="saveGsvConfig(false)">保存 GSV 配置</button>
+          <button class="btn secondary" onclick="saveGsvConfig(true)">保存 GSV 配置并重启</button>
+        </div>
+        <div class="small" style="color:var(--text-dim);margin-top:6px">
+          进程配置保存即生效；GSV 配置写入 tts_infer yaml 的 custom 段（自动 .bak 备份），重启 GSV 后生效。
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📋 GSV 日志尾部</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button class="btn small secondary" onclick="ttsLoadLog()">刷新日志</button>
+        <span class="hint" id="tts-log-hint"></span>
+      </div>
+      <textarea id="tts-log" readonly style="width:100%;height:220px;font-family:monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)"></textarea>
+    </div>
   </div>
 
   <!-- 4. Plugins -->
@@ -583,11 +645,13 @@ document.querySelectorAll('.nav-item').forEach(item => {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     item.classList.add('active');
     document.getElementById('page-' + item.dataset.page).classList.add('active');
+    if (item.dataset.page !== 'tts') ttsStopAutoRefresh();
     switch (item.dataset.page) {
       case 'dashboard': loadDashboard(); break;
       case 'usage': loadUsageStats(); break;
       case 'config': loadConfigPage(); break;
       case 'models': loadModels(); break;
+      case 'tts': loadTtsPage(); break;
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
       case 'ban': loadBanPage(); break;
@@ -969,20 +1033,7 @@ async function loadConfigPage() {
       checkField('emotion.enabled', '启用情感系统', globalConfigCache.emotion?.enabled, '好感度/亲密度/关系阶段/长期记忆; 开关修改后需重启生效') +
       checkField('emotion.smart_update', '智能按需分析', globalConfigCache.emotion?.smart_update, '按关键词/间隔/强制计数按需调用情感分析 LLM; 关闭则每轮都分析(token 消耗增加)') +
       formField('emotion.force_update_interval', '强制分析间隔(轮)', globalConfigCache.emotion?.force_update_interval, { hint: '每 N 轮对话强制触发一次情感分析' }) +
-      formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' }) +
-      '<hr style="border-color:var(--border);margin:14px 0">' +
-      '<div class="card-title">🔊 TTS 语音(GPT-SoVITS)</div>' +
-      checkField('tts.enabled', '启用 TTS', globalConfigCache.tts?.enabled, '全局开关(服务在启动时创建); 每个 bot 还需在 Bot 配置里单独开启 tts_enabled') +
-      formField('tts.base_url', 'GSV API 地址', globalConfigCache.tts?.base_url, { hint: 'GPT-SoVITS api_v2 地址, 如 http://127.0.0.1:9880' }) +
-      formField('tts.ref_audio_path', '参考音频路径', globalConfigCache.tts?.ref_audio_path, { hint: 'GSV 服务器本机路径, 零样本克隆音色' }) +
-      textareaField('tts.prompt_text', '参考音频原文', globalConfigCache.tts?.prompt_text, '参考音频里说的那句话(与音频一致可显著提升音质)') +
-      formField('tts.media_type', '音频格式', globalConfigCache.tts?.media_type, { hint: 'wav/ogg/aac; ogg/aac 需 GSV 端 ffmpeg, wav 最稳' }) +
-      formField('tts.speed_factor', '语速倍率', globalConfigCache.tts?.speed_factor, { hint: '1.0 为原速' }) +
-      formField('tts.queue_maxsize', '等待队列上限', globalConfigCache.tts?.queue_maxsize, { hint: 'GSV 单飞行串行; 队列满时丢弃最新请求' }) +
-      formField('tts.timeout', '合成超时(秒)', globalConfigCache.tts?.timeout, { hint: '单次合成的 HTTP 超时' }) +
-      formField('tts.cmd_max_chars', '/tts 文本上限(字)', globalConfigCache.tts?.cmd_max_chars, { hint: '非管理员使用 /tts 的文本长度上限(默认 30)' }) +
-      formField('tts.cmd_cooldown', '/tts 冷却(秒)', globalConfigCache.tts?.cmd_cooldown, { hint: '非管理员两次 /tts 的最小间隔(默认 120), 管理员不受限' }) +
-      textareaField('tts.tts_prompt_template', '标注提示词模板', globalConfigCache.tts?.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认');
+      formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' });
 
     const sel = document.getElementById('config-bot-select');
     const bots = (botListCache.bots || []).slice();
@@ -1107,19 +1158,6 @@ async function saveGlobalConfig() {
       force_update_interval: num('cfg-emotion.force_update_interval', 5),
       significance_threshold: num('cfg-emotion.significance_threshold', 5),
     },
-    tts: {
-      enabled: document.getElementById('cfg-tts.enabled')?.checked ?? false,
-      base_url: document.getElementById('cfg-tts.base_url')?.value?.trim() || 'http://127.0.0.1:9880',
-      ref_audio_path: document.getElementById('cfg-tts.ref_audio_path')?.value?.trim() || '',
-      prompt_text: document.getElementById('cfg-tts.prompt_text')?.value || '',
-      media_type: document.getElementById('cfg-tts.media_type')?.value?.trim() || 'wav',
-      speed_factor: num('cfg-tts.speed_factor', 1.0),
-      queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
-      timeout: num('cfg-tts.timeout', 60),
-      cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
-      cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
-      tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
-    },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
     admins: (document.getElementById('cfg-admins')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
@@ -1228,6 +1266,185 @@ async function saveModels() {
     await apiJSON('/api/models', { method: 'PUT', body: { data } });
     showToast('模型配置已保存（重启后生效）');
   } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+// ═══════════════ 3.5 TTS 语音 ═══════════════
+let ttsCache = null;
+let ttsRefreshTimer = null;
+
+async function loadTtsPage() {
+  // 打开时先无条件拉一次(避免只依赖定时刷新)
+  clearInterval(ttsRefreshTimer);
+  ttsRefreshTimer = null;
+  await ttsRefreshAll();
+  ttsRefreshTimer = setInterval(ttsRefreshAll, 5000);
+}
+
+async function ttsRefreshAll() {
+  try {
+    ttsCache = await Promise.all([
+      apiJSON('/api/tts/status'),
+      apiJSON('/api/tts/config'),
+      apiJSON('/api/tts/gsv_config').catch(() => null),
+    ]);
+  } catch (e) { showToast('TTS 状态加载失败: ' + e.message, false); return; }
+  const [status, cfg, gsv] = ttsCache;
+  renderTtsStatus(status);
+  renderTtsSendForm(cfg);
+  renderTtsServiceForm(cfg);
+  renderTtsGsvForm(gsv);
+}
+
+function ttsStopAutoRefresh() {
+  clearInterval(ttsRefreshTimer);
+  ttsRefreshTimer = null;
+}
+
+function renderTtsStatus(s) {
+  const svc = [
+    s.tts_enabled ? '✅ TTS 已启用' : '⛔ TTS 未启用',
+    s.service_configured ? '（已配置启动命令）' : '（未配置启动命令）',
+  ].join(' ');
+  const running = s.running
+    ? '<span style="color:var(--green)">● 运行中</span>'
+    : '<span style="color:var(--red)">○ 未运行</span>';
+  const cur = s.current ? `${s.current.source}·${s.current.bot_id}: ${s.current.text}` : '无';
+  document.getElementById('tts-svc-status').innerHTML =
+    `<div class="stat-label">${running} · ${svc}</div>` +
+    `<div class="stat-label" style="margin-top:6px">GSV 地址: ${s.base_url || '(未配置)'}</div>`;
+  document.getElementById('tts-queue-status').innerHTML =
+    `<div class="stat-label">队列: ${s.queued} / ${s.queue_maxsize === 0 ? '—' : s.queue_maxsize}</div>` +
+    `<div class="stat-label">当前合成: ${cur}</div>` +
+    `<div class="stat-label">累计: 成功 ${s.stats.done} · 失败 ${s.stats.failed} · 丢弃 ${s.stats.dropped}</div>`;
+}
+
+function renderTtsSendForm(cfg) {
+  document.getElementById('tts-send-form').innerHTML =
+    checkField('tts.enabled', '启用 TTS', cfg.enabled, '全局开关(服务在启动时创建); 每个 bot 还需在 Bot 配置里单独开启 tts_enabled') +
+    formField('tts.base_url', 'GSV API 地址', cfg.base_url, { hint: 'GPT-SoVITS api_v2 地址, 如 http://127.0.0.1:9880' }) +
+    formField('tts.ref_audio_path', '参考音频路径', cfg.ref_audio_path, { hint: 'GSV 服务器本机路径, 零样本克隆音色' }) +
+    textareaField('tts.prompt_text', '参考音频原文', cfg.prompt_text, '参考音频里说的那句话(与音频一致可显著提升音质)') +
+    formField('tts.media_type', '音频格式', cfg.media_type, { hint: 'wav/ogg/aac; ogg/aac 需 GSV 端 ffmpeg, wav 最稳' }) +
+    formField('tts.speed_factor', '语速倍率', cfg.speed_factor, { hint: '1.0 为原速' }) +
+    formField('tts.text_split_method', '切分方式', cfg.text_split_method, { hint: 'cut0 不切/cut1 每4句/cut2 凑50字/cut3 句号/cut4 句点/cut5 按标点' }) +
+    formField('tts.fragment_interval', '句间停顿(秒)', cfg.fragment_interval, { hint: '合成音频里句与句之间的停顿' }) +
+    formField('tts.top_k', 'top_k', cfg.top_k, { hint: 'GPT 采样候选数(默认 15)' }) +
+    formField('tts.top_p', 'top_p', cfg.top_p, { hint: '累计概率采样(默认 1)' }) +
+    formField('tts.temperature', 'temperature', cfg.temperature, { hint: '采样随机性(默认 1), 越高越随机' }) +
+    formField('tts.timeout', '合成超时(秒)', cfg.timeout, { hint: 'CPU 推理一句约 40s, 默认 300' }) +
+    formField('tts.queue_maxsize', '等待队列上限', cfg.queue_maxsize, { hint: '单飞行串行, 队列满丢最新; 修改需重启生效' }) +
+    formField('tts.cmd_max_chars', '/tts 文本上限(字)', cfg.cmd_max_chars, { hint: '非管理员使用 /tts 的文本长度上限(默认 30)' }) +
+    formField('tts.cmd_cooldown', '/tts 冷却(秒)', cfg.cmd_cooldown, { hint: '非管理员两次 /tts 的最小间隔(默认 120), 管理员不受限' }) +
+    textareaField('tts.tts_prompt_template', '标注提示词模板', cfg.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认');
+}
+
+function renderTtsServiceForm(cfg) {
+  document.getElementById('tts-svc-form').innerHTML =
+    formField('tts.service_command', 'GSV 启动命令', cfg.service_command,
+      { hint: '示例: /root/QQBot/GSV/GPT-SoVITS/.venv/bin/python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer_cpu.yaml' }) +
+    formField('tts.service_cwd', '工作目录', cfg.service_cwd, { hint: 'GSV 源码根目录, 如 /root/QQBot/GSV/GPT-SoVITS' }) +
+    formField('tts.service_log_path', '日志文件', cfg.service_log_path, { hint: 'GSV 输出日志(面板可看尾部); 留空则丢弃输出' }) +
+    formField('tts.gsv_config_path', 'GSV 配置文件', cfg.gsv_config_path, { hint: 'tts_infer yaml 路径(下方 GSV 配置编辑它)' }) +
+    formField('tts.stop_wait_seconds', '停止等待(秒)', cfg.stop_wait_seconds, { hint: 'control exit 后等待退出, 超时 kill 监听进程' });
+}
+
+function renderTtsGsvForm(gsv) {
+  const box = document.getElementById('tts-svc-form');
+  if (!gsv || !gsv.custom) {
+    return; // 未配置 gsv_config_path 或读取失败 — 按钮仍可点(会报错)
+  }
+  const c = gsv.custom;
+  box.insertAdjacentHTML('beforeend',
+    '<hr style="border-color:var(--border);margin:14px 0">' +
+    '<div class="card-title" style="font-size:15px">🔧 GSV 模型配置 (custom 段)</div>' +
+    formField('gsv.device', '设备', c.device, { hint: 'cpu / cuda(有 GPU 可大幅提速)' }) +
+    formField('gsv.is_half', '半精度', c.is_half === undefined ? '' : c.is_half, { hint: 'cuda 常用 true; cpu 用 false' }) +
+    formField('gsv.version', '版本', c.version, { hint: 'v1/v2/v3/v4/v2Pro/v2ProPlus' }) +
+    formField('gsv.t2s_weights_path', 'GPT 权重', c.t2s_weights_path, { hint: '如 GPT_weights_v2Pro/LUO13_1.0_V2PS-e50.ckpt' }) +
+    formField('gsv.vits_weights_path', 'SoVITS 权重', c.vits_weights_path, { hint: '如 GPT_SoVITS/pretrained_models/v2Pro/s2Gv2Pro.pth' }) +
+    formField('gsv.bert_base_path', 'BERT 路径', c.bert_base_path || '', { hint: '中文文本编码模型' }) +
+    formField('gsv.cnhuhbert_base_path', 'CNHuBERT 路径', c.cnhuhbert_base_path || '') +
+    `<div class="small" style="color:var(--text-dim);margin-top:6px">写入文件 ${gsv.path} (自动 .bak 备份); 其余 v1~v4 段保留不动; 保存后需重启 GSV 生效。</div>`);
+}
+
+async function saveTtsConfig() {
+  const num = (id, def) => { const el = document.getElementById(id); if (!el) return def; const v = parseFloat(el.value); return isNaN(v) ? def : v; };
+  const data = {
+    enabled: document.getElementById('cfg-tts.enabled')?.checked ?? false,
+    base_url: document.getElementById('cfg-tts.base_url')?.value?.trim() || 'http://127.0.0.1:9880',
+    ref_audio_path: document.getElementById('cfg-tts.ref_audio_path')?.value?.trim() || '',
+    prompt_text: document.getElementById('cfg-tts.prompt_text')?.value || '',
+    media_type: document.getElementById('cfg-tts.media_type')?.value?.trim() || 'wav',
+    speed_factor: num('cfg-tts.speed_factor', 1.0),
+    text_split_method: document.getElementById('cfg-tts.text_split_method')?.value?.trim() || 'cut5',
+    fragment_interval: num('cfg-tts.fragment_interval', 0.3),
+    top_k: num('cfg-tts.top_k', 15),
+    top_p: num('cfg-tts.top_p', 1),
+    temperature: num('cfg-tts.temperature', 1),
+    timeout: num('cfg-tts.timeout', 300),
+    queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
+    cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
+    cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
+    tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
+  };
+  try {
+    const r = await apiJSON('/api/tts/config', { method: 'PUT', body: { data } });
+    showToast('发送配置已保存' + (r.note ? '（' + r.note + '）' : ''));
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function saveTtsServiceConfig() {
+  const data = {
+    service_command: document.getElementById('cfg-tts.service_command')?.value || '',
+    service_cwd: document.getElementById('cfg-tts.service_cwd')?.value || '',
+    service_log_path: document.getElementById('cfg-tts.service_log_path')?.value || '',
+    gsv_config_path: document.getElementById('cfg-tts.gsv_config_path')?.value || '',
+    stop_wait_seconds: parseInt(document.getElementById('cfg-tts.stop_wait_seconds').value) || 10,
+  };
+  try {
+    await apiJSON('/api/tts/config', { method: 'PUT', body: { data } });
+    // 进程相关字段直接影响 start/stop/status, 重新拉状态
+    await ttsRefreshAll();
+    showToast('进程配置已保存');
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function saveGsvConfig(restart) {
+  const c = ttsCache && ttsCache[2];
+  if (!c || !c.custom) { showToast('GSV 配置不可用(未配置 gsv_config_path?)', false); return; }
+  const custom = {};
+  for (const key of ['device', 'is_half', 'version', 't2s_weights_path',
+                     'vits_weights_path', 'bert_base_path', 'cnhuhbert_base_path']) {
+    const el = document.getElementById('gsv.' + key);
+    if (el) custom[key] = el.value;
+  }
+  if (custom.is_half !== undefined && custom.is_half !== '') {
+    custom.is_half = (String(custom.is_half).toLowerCase() === 'true' || String(custom.is_half) === '1');
+  }
+  try {
+    await apiJSON('/api/tts/gsv_config', { method: 'PUT', body: { data: { custom } } });
+    showToast('GSV 配置已保存' + (restart ? '，正在重启 GSV…' : ''));
+    if (restart) await ttsServiceAction('restart');
+    else await ttsRefreshAll();
+  } catch (e) { showToast('GSV 配置保存失败: ' + e.message, false); }
+}
+
+async function ttsServiceAction(action) {
+  try {
+    const r = await apiJSON('/api/tts/service', { method: 'POST', body: { data: { action } } });
+    showToast(r.message || action + ' 完成');
+  } catch (e) { showToast(action + ' 失败: ' + e.message, false); }
+  await ttsRefreshAll();
+}
+
+async function ttsLoadLog() {
+  try {
+    const r = await apiJSON('/api/tts/log?lines=200');
+    document.getElementById('tts-log').value = r.log || r.error || '';
+    document.getElementById('tts-log-hint').textContent = r.error ? '' : '已刷新';
+  } catch (e) {
+    document.getElementById('tts-log').value = '日志加载失败: ' + e.message;
+  }
 }
 
 // ═══════════════ 4. Plugins ═══════════════
