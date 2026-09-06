@@ -23,11 +23,13 @@ class CommandHandler(Interceptor):
     UNKNOWN_CMD_COOLDOWN = 3600
 
     def __init__(self, context_manager, llm_service, ws_server, plugin_system=None,
-                 emotion_manager=None):
+                 emotion_manager=None, tts_service=None, admins=None):
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._ws = ws_server
         self._plugin_system = plugin_system
+        self._tts = tts_service
+        self._admins: set[str] = {str(a) for a in (admins or [])}
         # Command registry: {name: (handler_func, help_text)}
         # help_text format: "<用途说明> | 用法: /cmd ..."
         self._commands: dict[str, tuple] = {
@@ -36,6 +38,7 @@ class CommandHandler(Interceptor):
             "hist":   (self._cmd_hist,    "打印当前会话内容 (调试)"),
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
+            "tts":    (self._cmd_tts,     "语音合成 | 用法: /tts <文本>(非管理员限30字)"),
         }
         # 情感系统命令(未启用时 emotion_manager 为 None, 不注册)
         if emotion_manager is not None:
@@ -48,6 +51,8 @@ class CommandHandler(Interceptor):
         self._plugin_commands: dict[str, dict] = {}
         # 未知指令提醒时间戳: {(chat_type, chat_id): last_remind_ts} (会话级节流)
         self._unknown_remind_at: dict[tuple[str, str], float] = {}
+        # /tts 指令冷却: {(bot_id, user_id): last_use_ts} (非管理员)
+        self._tts_last_use: dict[tuple[str, str], float] = {}
 
     def register_plugin_commands(self, commands: dict[str, str]) -> None:
         """Register commands provided by plugins, shown in /help output."""
@@ -377,3 +382,66 @@ class CommandHandler(Interceptor):
         chat_type, chat_id, _ = await self._get_target_info(event)
         await self._ctx_mgr.clear_context(bot_id, chat_type, chat_id)
         return "当前会话已清空。"
+
+    # ── 指令 TTS(/tts) ────────────────────────────────────────
+
+    def _is_admin(self, event: MessageEvent) -> bool:
+        return str(getattr(event, "user_id", "") or "") in self._admins
+
+    def _bot_tts_enabled(self, bot_id: str) -> bool:
+        """该 bot 的 tts_enabled 开关(per-bot config)。"""
+        if self._ws is None:
+            return False
+        bm = getattr(self._ws, "_bot_manager", None)
+        if bm is None:
+            return False
+        instance = bm.get(bot_id)
+        return bool(instance is not None and getattr(instance.config, "tts_enabled", False))
+
+    async def _cmd_tts(
+        self, bot_id: str, event: MessageEvent, args: list[str]
+    ) -> str | None:
+        """语音合成: 把指定文本转成语音发出(只发语音, 不显示文本)。
+
+        非管理员: 限 cmd_max_chars 字 + cmd_cooldown 秒冷却(全局配置)。
+        队列满丢最新时回提示; 合成失败由 TTSService 回错误文本。
+        """
+        if self._tts is None:
+            return "语音功能未开启。"
+        tts_cfg = getattr(self._tts, "cfg", None)
+        if tts_cfg is None or not tts_cfg.enabled:
+            return "语音功能未开启。"
+        if not self._bot_tts_enabled(bot_id):
+            return "本 bot 未开启语音功能。"
+
+        text = " ".join(args).strip()
+        if not text:
+            return "用法: /tts <文本>"
+
+        is_admin = self._is_admin(event)
+        if not is_admin:
+            max_chars = max(1, int(tts_cfg.cmd_max_chars))
+            if len(text) > max_chars:
+                return f"文本太长啦，最多 {max_chars} 字（管理员不限）。"
+            cooldown = max(0, int(tts_cfg.cmd_cooldown))
+            if cooldown > 0:
+                key = (bot_id, str(getattr(event, "user_id", "") or ""))
+                now = _time.time()
+                last = self._tts_last_use.get(key, 0.0)
+                if now - last < cooldown:
+                    remain = int(cooldown - (now - last)) + 1
+                    return f"语音合成冷却中，{remain} 秒后再试～"
+                self._tts_last_use[key] = now
+
+        if isinstance(event, GroupMessageEvent):
+            chat_type, chat_id = "group", str(event.group_id)
+        else:
+            chat_type, chat_id = "private", str(event.user_id)
+        from mohobot.services.gsv_tts import TTSJob
+        accepted = self._tts.submit(TTSJob(
+            bot_id=bot_id, chat_type=chat_type, chat_id=chat_id,
+            text=text, source="command",
+        ))
+        if not accepted:
+            return "语音队列已满，请稍后再试～"
+        return None  # 语音随后由 TTS worker 异步发出

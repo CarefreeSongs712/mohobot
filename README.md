@@ -18,6 +18,7 @@
 - **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件；插件配置由 `_conf_schema.json` 驱动，WebUI 可视化编辑热生效
 - **Web 管理面板** — FastAPI + SSE 实时日志流、文件系统浏览器、配置在线编辑、统计看板
 - **可配置拦截器** — 指令拦截（`/` 开头）、关键词拦截（预设回复）
+- **TTS 语音（GPT-SoVITS）** — LLM 回复自动朗读（模型自标 `<tts>` 句）+ `/tts` 指令直读，全局单飞行队列、队列满丢最新，合成失败降级纯文本
 
 ## 🏗️ 技术栈
 
@@ -295,6 +296,35 @@ music_knowledge:
     base_url: "https://vcpedia.cn"
     category: "Category:洛天依歌曲"
 ```
+
+## 🔊 TTS 语音（GPT-SoVITS 接入）
+
+基于本地/局域网 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) `api_v2` 服务（`python api_v2.py -a 127.0.0.1 -p 9880`）把文字转成语音发送。两条通路：
+
+- **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注一句适合朗读的话（可省略，尽量 ≤20 字；超长时截到第一个句末标点，多标注取第一个，忘写闭标签自动容错）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后取出标注句经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。
+- **`/tts <文本>` 指令**（群聊多 bot 由 bot_id 最小者响应）：文本直接转语音；非管理员限 30 字 + 120 秒冷却（全局配置可改），管理员不限。
+
+**并发**：GSV 一次只能合成一条 → 框架侧全局 FIFO 队列串行消费；队列满（上限可配，默认 16）**丢弃最新**请求。模型权重不运行时切换，GSV 服务端启动时通过 `tts_infer.yaml` 自行加载。
+
+**配置**：GSV 相关全部在全局 `tts:` 段（地址/队列上限/超时/媒体格式/参考音频路径/prompt_text/语速/标注提示词模板/指令限制，WebUI 全局配置页可编辑）；每 bot 仅 `tts_enabled` 开关（WebUI Bot 配置页），修改开关需重启生效。
+
+```yaml
+tts:
+  enabled: true
+  base_url: "http://127.0.0.1:9880"
+  media_type: "wav"          # wav/ogg/aac(ogg/aac 需 GSV 端 ffmpeg)
+  text_lang: "zh"
+  prompt_lang: "zh"
+  ref_audio_path: "D:/GSV/refs/voice.wav"   # GSV 服务器本机路径
+  prompt_text: "参考音频里说的那句话"
+  speed_factor: 1.0
+  queue_maxsize: 16
+  timeout: 60
+  cmd_max_chars: 30
+  cmd_cooldown: 120
+```
+
+实现在 `mohobot/services/gsv_tts.py`（客户端+队列）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。另有独立脚本 `scripts/tts_standalone.py`（不依赖 mohobot，仅 httpx，可直接验证 GSV 服务连通性）。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 

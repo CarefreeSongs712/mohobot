@@ -969,7 +969,20 @@ async function loadConfigPage() {
       checkField('emotion.enabled', '启用情感系统', globalConfigCache.emotion?.enabled, '好感度/亲密度/关系阶段/长期记忆; 开关修改后需重启生效') +
       checkField('emotion.smart_update', '智能按需分析', globalConfigCache.emotion?.smart_update, '按关键词/间隔/强制计数按需调用情感分析 LLM; 关闭则每轮都分析(token 消耗增加)') +
       formField('emotion.force_update_interval', '强制分析间隔(轮)', globalConfigCache.emotion?.force_update_interval, { hint: '每 N 轮对话强制触发一次情感分析' }) +
-      formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' });
+      formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' }) +
+      '<hr style="border-color:var(--border);margin:14px 0">' +
+      '<div class="card-title">🔊 TTS 语音(GPT-SoVITS)</div>' +
+      checkField('tts.enabled', '启用 TTS', globalConfigCache.tts?.enabled, '全局开关(服务在启动时创建); 每个 bot 还需在 Bot 配置里单独开启 tts_enabled') +
+      formField('tts.base_url', 'GSV API 地址', globalConfigCache.tts?.base_url, { hint: 'GPT-SoVITS api_v2 地址, 如 http://127.0.0.1:9880' }) +
+      formField('tts.ref_audio_path', '参考音频路径', globalConfigCache.tts?.ref_audio_path, { hint: 'GSV 服务器本机路径, 零样本克隆音色' }) +
+      textareaField('tts.prompt_text', '参考音频原文', globalConfigCache.tts?.prompt_text, '参考音频里说的那句话(与音频一致可显著提升音质)') +
+      formField('tts.media_type', '音频格式', globalConfigCache.tts?.media_type, { hint: 'wav/ogg/aac; ogg/aac 需 GSV 端 ffmpeg, wav 最稳' }) +
+      formField('tts.speed_factor', '语速倍率', globalConfigCache.tts?.speed_factor, { hint: '1.0 为原速' }) +
+      formField('tts.queue_maxsize', '等待队列上限', globalConfigCache.tts?.queue_maxsize, { hint: 'GSV 单飞行串行; 队列满时丢弃最新请求' }) +
+      formField('tts.timeout', '合成超时(秒)', globalConfigCache.tts?.timeout, { hint: '单次合成的 HTTP 超时' }) +
+      formField('tts.cmd_max_chars', '/tts 文本上限(字)', globalConfigCache.tts?.cmd_max_chars, { hint: '非管理员使用 /tts 的文本长度上限(默认 30)' }) +
+      formField('tts.cmd_cooldown', '/tts 冷却(秒)', globalConfigCache.tts?.cmd_cooldown, { hint: '非管理员两次 /tts 的最小间隔(默认 120), 管理员不受限' }) +
+      textareaField('tts.tts_prompt_template', '标注提示词模板', globalConfigCache.tts?.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认');
 
     const sel = document.getElementById('config-bot-select');
     const bots = (botListCache.bots || []).slice();
@@ -1052,6 +1065,9 @@ async function loadBotConfig() {
       formField('command_prefix', '指令前缀', b.command_prefix) +
       `<div class="form-row"><label>启用</label>
         <label class="switch"><input type="checkbox" id="cfg-enabled" ${b.enabled ? 'checked' : ''}><span class="slider"></span></label></div>` +
+      `<div class="form-row"><label>TTS 语音</label>
+        <label class="switch"><input type="checkbox" id="cfg-tts_enabled" ${b.tts_enabled ? 'checked' : ''}><span class="slider"></span></label>
+        <div class="hint">开启后该 bot 的 LLM 回复可带朗读标注、并响应 /tts 指令(GSV 地址等在全局配置); 修改后需重启生效</div></div>` +
       textareaField('keyword_replies_json', '关键词回复（JSON）', JSON.stringify(b.keyword_replies || {}, null, 2), '格式: {"关键词": "回复内容"}');
   } catch (e) { showToast('加载 Bot 配置失败: ' + e.message, false); }
 }
@@ -1091,6 +1107,19 @@ async function saveGlobalConfig() {
       force_update_interval: num('cfg-emotion.force_update_interval', 5),
       significance_threshold: num('cfg-emotion.significance_threshold', 5),
     },
+    tts: {
+      enabled: document.getElementById('cfg-tts.enabled')?.checked ?? false,
+      base_url: document.getElementById('cfg-tts.base_url')?.value?.trim() || 'http://127.0.0.1:9880',
+      ref_audio_path: document.getElementById('cfg-tts.ref_audio_path')?.value?.trim() || '',
+      prompt_text: document.getElementById('cfg-tts.prompt_text')?.value || '',
+      media_type: document.getElementById('cfg-tts.media_type')?.value?.trim() || 'wav',
+      speed_factor: num('cfg-tts.speed_factor', 1.0),
+      queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
+      timeout: num('cfg-tts.timeout', 60),
+      cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
+      cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
+      tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
+    },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
     admins: (document.getElementById('cfg-admins')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
@@ -1113,6 +1142,7 @@ async function saveBotConfig() {
     vision_model_override: document.getElementById('cfg-vision_model_override').value,
     command_prefix: document.getElementById('cfg-command_prefix').value,
     enabled: document.getElementById('cfg-enabled').checked,
+    tts_enabled: document.getElementById('cfg-tts_enabled')?.checked ?? false,
   };
   try {
     data.keyword_replies = JSON.parse(document.getElementById('cfg-keyword_replies_json').value || '{}');

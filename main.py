@@ -52,6 +52,7 @@ class MohobotApplication:
         self._usage_recorder: UsageRecorder | None = None
         self._song_matcher: Any | None = None
         self._song_info_service: Any | None = None
+        self._tts_service: Any | None = None
         self._task_supervisor = TaskSupervisor()
         self._running = False
         self._shutting_down = False
@@ -142,6 +143,22 @@ class MohobotApplication:
                 logger.warning(f"情感系统初始化失败, 已降级: {e}")
 
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
+
+        # TTS 语音合成(GPT-SoVITS api_v2)。
+        # tts.enabled 未开启/初始化失败 → 降级为 None(正常聊天不受影响)。
+        self._tts_service = None
+        if self._config.tts.enabled and self._config.tts.base_url:
+            try:
+                from mohobot.services.gsv_tts import TTSService
+                self._tts_service = TTSService(
+                    self._config.tts,
+                    task_supervisor=self._task_supervisor,
+                )
+                logger.info(f"TTS 服务已创建: {self._config.tts.base_url}")
+            except Exception as e:
+                self._tts_service = None
+                logger.warning(f"TTS 服务初始化失败, 已降级: {e}")
+
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
             data_dir=self._config.data_dir,
@@ -189,6 +206,7 @@ class MohobotApplication:
             global_config=self._config,
             song_matcher=self._song_matcher,
             emotion_manager=self._emotion_manager,
+            tts_service=self._tts_service,
         )
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
@@ -206,6 +224,8 @@ class MohobotApplication:
             ws_server=None,  # Will be set after WS server creation
             plugin_system=self._plugin_system,
             emotion_manager=self._emotion_manager,
+            tts_service=self._tts_service,
+            admins=self._config.admins,
         )
         keyword_filter = KeywordFilter()
         # 拦截链: 封禁 → 插件 → 内置命令 → 关键词
@@ -229,6 +249,11 @@ class MohobotApplication:
         # Wire up circular references
         self._message_handler._ws = self._ws_server
         command_handler._ws = self._ws_server
+
+        # TTS: 注入 ws_server 并启动合成队列 worker
+        if self._tts_service is not None:
+            self._tts_service.set_ws(self._ws_server)
+            self._tts_service.start()
 
         # 注入 WS server 到插件(热重载后由 PluginSystem 自动重新注入)
         self._plugin_system.set_runtime_refs(ws_server=self._ws_server)
@@ -443,6 +468,10 @@ class MohobotApplication:
         # 情感系统: 取消周期落盘任务并 flush 数据
         if self._emotion_manager:
             await self._emotion_manager.shutdown()
+
+        # TTS: 停止合成队列 worker(丢弃排队任务)并关闭 HTTP 客户端
+        if getattr(self, "_tts_service", None):
+            await self._tts_service.stop()
 
         # Stop WS server
         if self._ws_server:

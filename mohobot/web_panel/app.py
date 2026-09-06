@@ -431,6 +431,11 @@ class WebPanel:
                 for k, v in emotion_data.items():
                     if hasattr(cfg.emotion, k):
                         setattr(cfg.emotion, k, v)
+            if "tts" in data:
+                tts_data = data["tts"] or {}
+                for k, v in tts_data.items():
+                    if hasattr(cfg.tts, k):
+                        setattr(cfg.tts, k, v)
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]

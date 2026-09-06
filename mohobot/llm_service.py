@@ -1015,6 +1015,15 @@ class LLMService:
                 f"发送者: {sender_name} (QQ: {event.user_id})"
             )
 
+        # TTS 语音标注提示(仅开启 TTS 的 bot): 引导 LLM 用 <tts></tts> 标注朗读句
+        if (
+            getattr(self._cfg, "tts", None) is not None
+            and self._cfg.tts.enabled
+            and bot_config is not None
+            and bot_config.tts_enabled
+        ):
+            system_content += self._cfg.tts.tts_prompt_template
+
         messages.append({"role": "system", "content": system_content})
 
         # 2. Session context — insert as alternating user/assistant messages.

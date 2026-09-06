@@ -58,6 +58,7 @@ class MessageHandler:
         global_config=None,
         song_matcher=None,
         emotion_manager=None,
+        tts_service=None,
     ):
         self._ws = ws_server
         self._ctx_mgr = context_manager
@@ -72,6 +73,8 @@ class MessageHandler:
         self._song_matcher = song_matcher
         # 情感系统(注入 + 后台分析; 未启用时为 None)
         self._emotion = emotion_manager
+        # TTS 语音服务(未启用/初始化失败时为 None)
+        self._tts = tts_service
 
         self._db = database_manager
         # 图片缓存(下载 + phash 去重 + 描述缓存)
@@ -967,7 +970,7 @@ class MessageHandler:
         - segment_reply:  按标点+长度切分为多条消息发送
         - segment_delay:  分段之间的随机延迟区间
         - reply_quote:    首条回复是否引用触发消息
-        Returns the full assembled reply text (for context save).
+        Returns the display reply text (TTS 标签已剥除, 用于 context save)。
         """
         if not self._segment_reply:
             # Non-segmented: collect everything, send as ONE message at the end
@@ -983,8 +986,16 @@ class MessageHandler:
                 bot_config=self._bot_config(bot_id),
             )
             full_reply = reply_text or ""
+            tts_text = ""
+            if self._tts_active(bot_id):
+                from mohobot.utils.tts_marker import strip_and_extract
+                full_reply, tts_text = strip_and_extract(full_reply)
             await self._send_full_text(bot_id, event, full_reply)
+            self._submit_tts(bot_id, event, tts_text)
             return full_reply
+
+        from mohobot.utils.tts_marker import TTSMarkerFilter
+        tts_filter = TTSMarkerFilter() if self._tts_active(bot_id) else None
 
         buffer = ""
         full_reply = ""
@@ -999,8 +1010,12 @@ class MessageHandler:
             bot_config=self._bot_config(bot_id),
         ):
             if chunk:
-                buffer += chunk
-                full_reply += chunk
+                if tts_filter is not None:
+                    # <tts> 标签剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
+                    chunk = tts_filter.feed(chunk)
+                if chunk:
+                    buffer += chunk
+                    full_reply += chunk
 
             # Flush complete segments from the buffer
             flushed = self._flush_ready_segments(buffer)
@@ -1014,6 +1029,14 @@ class MessageHandler:
                 segments_sent += 1
                 first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
                 buffer = ""
+
+        if tts_filter is not None:
+            # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成
+            rest, tts_text = tts_filter.finish()
+            if rest.strip():
+                segments_sent += 1
+                first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+            self._submit_tts(bot_id, event, tts_text)
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
@@ -1038,6 +1061,11 @@ class MessageHandler:
             if chunk:
                 full_reply += chunk
 
+        tts_text = ""
+        if self._tts_active(bot_id):
+            from mohobot.utils.tts_marker import strip_and_extract
+            full_reply, tts_text = strip_and_extract(full_reply)
+
         text = full_reply.strip()
         if text:
             if self._reply_quote:
@@ -1048,8 +1076,37 @@ class MessageHandler:
             else:
                 message = text
             await self._send_message(bot_id, event, message)
+        self._submit_tts(bot_id, event, tts_text)
         logger.debug(f"Single reply sent: {len(full_reply)} chars")
         return full_reply
+
+    # ── TTS 语音(LLM 自动朗读) ────────────────────────────────
+
+    def _tts_active(self, bot_id: str) -> bool:
+        """该 bot 本轮是否启用 TTS: 服务注入 + 全局开关 + per-bot 开关。"""
+        if self._tts is None:
+            return False
+        tts_cfg = getattr(self._global_config, "tts", None)
+        if tts_cfg is None or not tts_cfg.enabled:
+            return False
+        cfg = self._bot_config(bot_id)
+        return bool(cfg and cfg.tts_enabled)
+
+    def _submit_tts(self, bot_id: str, event: MessageEvent, tts_text: str) -> None:
+        """提交 TTS 合成任务; 队列满丢最新, 失败不影响已发出的文本。"""
+        if not tts_text or not self._tts_active(bot_id):
+            return
+        from mohobot.services.gsv_tts import TTSJob
+        if isinstance(event, GroupMessageEvent):
+            chat_type, chat_id = "group", str(event.group_id)
+        else:
+            chat_type, chat_id = "private", str(event.user_id)
+        accepted = self._tts.submit(TTSJob(
+            bot_id=bot_id, chat_type=chat_type, chat_id=chat_id,
+            text=tts_text, source="llm",
+        ))
+        if accepted:
+            logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")
 
     async def _send_full_text(self, bot_id, event, text: str) -> None:
         """Segment a complete reply text and send with configured delays."""
@@ -1314,7 +1371,7 @@ class MessageHandler:
     _forward_min_len = 600
 
     # 框架内置全局指令(/ 前缀, 群内多 bot 只由随机选中的一个 bot 回复)
-    _GLOBAL_COMMANDS = {"/help"}
+    _GLOBAL_COMMANDS = {"/help", "/tts"}
     # 前缀匹配的全局指令(带参数的命令): 封禁系统 /ban /pass /dec-* 系列
     _GLOBAL_COMMAND_PREFIXES = ("/ban", "/pass", "/dec-")
 

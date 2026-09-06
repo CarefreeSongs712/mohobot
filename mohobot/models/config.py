@@ -165,6 +165,38 @@ class EmotionConfig:
     intimacy_max: int = 100
 
 
+@dataclass
+class TTSConfig:
+    """TTS 语音合成配置(GPT-SoVITS api_v2)。
+
+    GSV 相关全部全局: 所有 bot 共用同一套音色/模型/参考音频;
+    每 bot 只有 tts_enabled 开关(BotConfig)。运行时不切权重,
+    GSV 服务端启动时通过 tts_infer.yaml 自行加载模型。
+    """
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:9880"
+    # 单飞行队列: GSV 一次只能合成一条, 队列满时丢最新(新请求直接放弃)
+    queue_maxsize: int = 16
+    timeout: int = 60                # 单次合成超时(秒)
+    media_type: str = "wav"          # wav / ogg / aac (ogg/aac 需 GSV 端 ffmpeg)
+    text_lang: str = "zh"
+    prompt_lang: str = "zh"
+    # 参考音频为 GSV 服务器本机路径
+    ref_audio_path: str = ""
+    prompt_text: str = ""
+    speed_factor: float = 1.0
+    # LLM 自动朗读的系统提示词模板(开启 TTS 的 bot 注入)
+    tts_prompt_template: str = (
+        "\n\n语音标注规则：如果你想说一句适合朗读出来的话（例如问候、感叹、俏皮话），"
+        "可以用 <tts></tts> 标签把它包起来，系统会把它转成语音发送。"
+        "标注是可选的，多数时候可以不标；标注内容尽量不超过 20 字；"
+        "标签内的文字仍会正常显示在聊天中。"
+    )
+    # 指令 TTS(/tts) 限制(管理员不受限)
+    cmd_max_chars: int = 30
+    cmd_cooldown: int = 120          # 非管理员冷却(秒)
+
+
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
 
 
@@ -182,6 +214,8 @@ class GlobalConfig:
     ban: BanConfig = field(default_factory=BanConfig)
     # 情感系统(好感度/亲密度/关系阶段/长期记忆; emotion.enabled 开关)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
+    # TTS 语音合成(GPT-SoVITS api_v2; 每 bot 开关在 BotConfig.tts_enabled)
+    tts: TTSConfig = field(default_factory=TTSConfig)
     # 歌曲知识库(识别 + LLM 前注入; song_database/crawler/关键词文件)
     music_knowledge: dict = field(default_factory=dict)
     # 戳一戳全局兜底文案(bot 私有 touch_replies 优先, 都为空时用内置默认)
@@ -225,6 +259,7 @@ class GlobalConfig:
         anysearch_raw = raw.get("anysearch", {})
         ban_raw = raw.get("ban", {})
         emotion_raw = raw.get("emotion", {})
+        tts_raw = raw.get("tts", {})
 
         # 旧配置迁移: agent.music_knowledge / agent.reflex.touch_replies
         # 曾嵌在已删除的 agent: 段下, 读到旧键时搬到顶层并重写配置文件
@@ -327,6 +362,24 @@ class GlobalConfig:
                 intimacy_min=int(emotion_raw.get("intimacy_min", 0)),
                 intimacy_max=int(emotion_raw.get("intimacy_max", 100)),
             ),
+            tts=TTSConfig(
+                enabled=bool(tts_raw.get("enabled", False)),
+                base_url=str(tts_raw.get("base_url", "http://127.0.0.1:9880") or "http://127.0.0.1:9880"),
+                queue_maxsize=max(1, int(tts_raw.get("queue_maxsize", 16))),
+                timeout=max(5, int(tts_raw.get("timeout", 60))),
+                media_type=str(tts_raw.get("media_type", "wav") or "wav"),
+                text_lang=str(tts_raw.get("text_lang", "zh") or "zh"),
+                prompt_lang=str(tts_raw.get("prompt_lang", "zh") or "zh"),
+                ref_audio_path=str(tts_raw.get("ref_audio_path", "") or ""),
+                prompt_text=str(tts_raw.get("prompt_text", "") or ""),
+                speed_factor=float(tts_raw.get("speed_factor", 1.0)),
+                tts_prompt_template=(
+                    str(tts_raw.get("tts_prompt_template", "") or "").strip()
+                    or TTSConfig().tts_prompt_template
+                ),
+                cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),
+                cmd_cooldown=max(0, int(tts_raw.get("cmd_cooldown", 120))),
+            ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
@@ -428,6 +481,21 @@ class GlobalConfig:
                 "intimacy_min": self.emotion.intimacy_min,
                 "intimacy_max": self.emotion.intimacy_max,
             },
+            "tts": {
+                "enabled": self.tts.enabled,
+                "base_url": self.tts.base_url,
+                "queue_maxsize": self.tts.queue_maxsize,
+                "timeout": self.tts.timeout,
+                "media_type": self.tts.media_type,
+                "text_lang": self.tts.text_lang,
+                "prompt_lang": self.tts.prompt_lang,
+                "ref_audio_path": self.tts.ref_audio_path,
+                "prompt_text": self.tts.prompt_text,
+                "speed_factor": self.tts.speed_factor,
+                "tts_prompt_template": self.tts.tts_prompt_template,
+                "cmd_max_chars": self.tts.cmd_max_chars,
+                "cmd_cooldown": self.tts.cmd_cooldown,
+            },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
             "log_dir": self.log_dir,
@@ -522,6 +590,21 @@ class GlobalConfig:
                 "intimacy_min": self.emotion.intimacy_min,
                 "intimacy_max": self.emotion.intimacy_max,
             },
+            "tts": {
+                "enabled": self.tts.enabled,
+                "base_url": self.tts.base_url,
+                "queue_maxsize": self.tts.queue_maxsize,
+                "timeout": self.tts.timeout,
+                "media_type": self.tts.media_type,
+                "text_lang": self.tts.text_lang,
+                "prompt_lang": self.tts.prompt_lang,
+                "ref_audio_path": self.tts.ref_audio_path,
+                "prompt_text": self.tts.prompt_text,
+                "speed_factor": self.tts.speed_factor,
+                "tts_prompt_template": self.tts.tts_prompt_template,
+                "cmd_max_chars": self.tts.cmd_max_chars,
+                "cmd_cooldown": self.tts.cmd_cooldown,
+            },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
             "log_dir": self.log_dir,
@@ -559,6 +642,9 @@ class BotConfig:
     chat_model_override: str = ""
     vision_model_override: str = ""
 
+    # TTS 语音: 是否开启该 bot 的 LLM 自动朗读与 /tts 指令(GSV 全局配置共用)
+    tts_enabled: bool = False
+
     # Interceptor settings
     command_prefix: str = "/"
     keyword_replies: dict[str, str] = field(default_factory=dict)
@@ -583,6 +669,7 @@ class BotConfig:
             touch_replies=list(raw.get("touch_replies", []) or []),
             chat_model_override=raw.get("chat_model_override", ""),
             vision_model_override=raw.get("vision_model_override", ""),
+            tts_enabled=bool(raw.get("tts_enabled", False)),
             command_prefix=raw.get("command_prefix", "/"),
             keyword_replies=raw.get("keyword_replies", {}),
         )
@@ -607,6 +694,7 @@ class BotConfig:
             "touch_replies": list(self.touch_replies),
             "chat_model_override": self.chat_model_override,
             "vision_model_override": self.vision_model_override,
+            "tts_enabled": self.tts_enabled,
             "command_prefix": self.command_prefix,
             "keyword_replies": self.keyword_replies,
         }

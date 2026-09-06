@@ -57,7 +57,7 @@ async def test_daily_trigger_once():
     plugin.plugin_config.update({
         "daily_like_enabled": True, "daily_like_time": "08:00",
         "daily_admin_qq": 3831097597, "daily_like_times": 10,
-        "daily_min_delay": 0, "daily_max_delay": 0,
+        "daily_like_users": [], "daily_min_delay": 0, "daily_max_delay": 0,
     })
 
     # 时间未到 → 不触发
@@ -90,7 +90,7 @@ async def test_daily_disabled_and_next_day():
     plugin = Plugin()
     plugin.plugin_config.update({
         "daily_like_enabled": False, "daily_admin_qq": 3831097597,
-        "daily_min_delay": 0, "daily_max_delay": 0,
+        "daily_like_users": [], "daily_min_delay": 0, "daily_max_delay": 0,
     })
     await plugin._maybe_daily("2026-08-30", "08:00")
     assert Plugin._ws_server.likes == []
@@ -110,7 +110,7 @@ async def test_failure_continues():
     Plugin._ws_server = ws
     plugin = Plugin()
     plugin.plugin_config.update({
-        "daily_admin_qq": 3831097597, "daily_min_delay": 0, "daily_max_delay": 0,
+        "daily_admin_qq": 3831097597, "daily_like_users": [], "daily_min_delay": 0, "daily_max_delay": 0,
     })
     await plugin._maybe_daily("2026-08-30", "08:00")
     await plugin._daily_task
