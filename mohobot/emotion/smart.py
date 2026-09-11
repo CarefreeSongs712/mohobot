@@ -21,8 +21,9 @@ class SmartUpdateManager:
     """判断一轮对话是否需要调用情感分析 LLM。"""
 
     EMOTIONAL_KEYWORDS: dict[str, list[str]] = {
+        # 不收单字高频词(如"好") — "你好/好的/好不好"会让普通寒暄直接过阈值
         "positive": ["喜欢", "爱", "开心", "高兴", "谢谢", "感谢", "感动",
-                     "温暖", "棒", "好", "不错", "可爱", "漂亮", "美丽"],
+                     "温暖", "棒", "不错", "可爱", "漂亮", "美丽"],
         "negative": ["讨厌", "恨", "生气", "愤怒", "伤心", "难过", "失望",
                      "烦", "滚", "傻", "笨", "蠢", "垃圾", "不愿意"],
         "intimate": ["想你", "想念", "关心", "担心", "在乎", "重要",
@@ -38,6 +39,14 @@ class SmartUpdateManager:
         "emoticon_positive": re.compile(r"[:：][)）]|😊|😄|😍|🥰|🤗"),
         "emoticon_negative": re.compile(r"[:：][(（]|😠|😡|😢|😭|😤"),
     }
+
+    # 关键词触发阈值: 用户消息累计情感强度达到该值才触发。
+    # 阈值 2→4: 单个关键词命中(+2/+3)不再单独触发, 需叠加强语气/第二个词。
+    KEYWORD_TRIGGER_THRESHOLD = 4
+
+    # 用户消息关键词权重。bot 回复不计分 — 本系统分析的是用户情感,
+    # bot 回复长、客套词多("好呀""不错哦"), 计分会让 bot 自己触发自己。
+    _KEYWORD_WEIGHT = {"positive": 2, "negative": 3, "intimate": 2, "conflict": 3}
 
     def should_update(
         self, state: EmotionalState, user_message: str, ai_response: str,
@@ -70,10 +79,13 @@ class SmartUpdateManager:
 
         return (True, " | ".join(reasons)) if reasons else (False, "无明显情感变化")
 
-    def _analyze_keywords(self, user_message: str, ai_response: str) -> dict[str, Any]:
+    def _analyze_keywords(self, user_message: str, ai_response: str = "") -> dict[str, Any]:
+        """用户消息关键词/语气分析(仅用户消息计分)。
+
+        ai_response 保留在签名中兼容旧调用, 但不再参与计分。
+        """
         result: dict[str, Any] = {"should_update": False, "reason": ""}
         user_lower = (user_message or "").lower()
-        reply_lower = (ai_response or "").lower()
 
         intensity = 0.0
         detected: set[str] = set()
@@ -81,23 +93,24 @@ class SmartUpdateManager:
             for kw in keywords:
                 if kw in user_lower:
                     detected.add(category)
-                    intensity += {"positive": 2, "negative": 3, "intimate": 2, "conflict": 3}[category]
-                if kw in reply_lower:
-                    detected.add(category)
-                    intensity += 1
+                    intensity += self._KEYWORD_WEIGHT[category]
+
+        # 无关键词命中时语气符号(！？表情)不单独计分 — 普通聊天几乎条条带
+        if not detected:
+            return result
 
         for name, pattern in self.INTENSITY_PATTERNS.items():
-            if pattern.search(user_message or "") or pattern.search(ai_response or ""):
+            if pattern.search(user_message or ""):
                 if "strong" in name:
                     intensity += 2
                 elif "emoticon" in name:
                     intensity += 1
                 elif name == "question":
-                    intensity += 0.5
+                    intensity += 0.25
                 elif name == "exclamation":
-                    intensity += 1
+                    intensity += 0.5
 
-        if intensity >= 2:
+        if intensity >= self.KEYWORD_TRIGGER_THRESHOLD:
             result["should_update"] = True
             if "negative" in detected and "conflict" in detected:
                 result["reason"] = "用户表达强烈负面情感和冲突"
