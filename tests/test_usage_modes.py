@@ -146,6 +146,35 @@ async def test_usage_user_id_recorded():
     assert data["bot_id"] == "bot_001"
 
 
+async def test_usage_hour_range():
+    """Nh 小时窗口(滚动): 近 1 小时不含 2 小时前的记录, 近 6 小时包含。"""
+    tmp = tempfile.mkdtemp()
+    now = time.time()
+    _write_records(tmp, [
+        {"time": now - 2 * 3600, "bot_id": "bot_001", "module": "chat", "kind": "chat",
+         "chat_type": "group", "chat_id": "888", "user_id": "111",
+         "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "cached_tokens": 0},
+        {"time": now, "bot_id": "bot_001", "module": "chat", "kind": "chat",
+         "chat_type": "group", "chat_id": "888", "user_id": "111",
+         "prompt_tokens": 60, "completion_tokens": 20, "total_tokens": 80, "cached_tokens": 0},
+    ])
+    from mohobot.llm_service import LLMService
+    svc = LLMService(global_config=GlobalConfig(data_dir=tmp))
+    r1 = await svc.get_session_usage_stats("1h")
+    assert r1["sessions"][0]["total_tokens"] == 80
+    r6 = await svc.get_session_usage_stats("6h")
+    assert r6["sessions"][0]["total_tokens"] == 230
+    await svc.close()
+
+
+async def test_usage_hour_range_validation():
+    """WebUI 范围校验接受 Nh, 拒绝非法值。"""
+    from mohobot.web_panel.app import _valid_usage_range
+    assert _valid_usage_range("1h") and _valid_usage_range("24h") and _valid_usage_range("8760h")
+    assert _valid_usage_range("today") and _valid_usage_range("7d") and _valid_usage_range("30d")
+    assert not _valid_usage_range("abc") and not _valid_usage_range("-1h")
+
+
 # ── 情感分析间隔 ─────────────────────────────────────────────
 
 def test_emotion_force_update_defaults():

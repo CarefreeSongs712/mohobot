@@ -274,13 +274,13 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       <button class="btn small secondary" id="usage-mode-user" onclick="usageSetMode('user')">按用户</button>
       <button class="btn small secondary" id="usage-mode-module" onclick="usageSetMode('module')">按用途</button>
       <span style="width:1px;height:22px;background:var(--border);margin:0 4px"></span>
-      <button class="btn small" id="usage-range-today" onclick="usageSetRange('today')">今日</button>
-      <button class="btn small secondary" id="usage-range-7d" onclick="usageSetRange('7d')">近 7 天</button>
-      <button class="btn small secondary" id="usage-range-30d" onclick="usageSetRange('30d')">近 30 天</button>
-      <input type="number" id="usage-days-input" min="1" max="3650" placeholder="天数"
+      <button class="btn small secondary" id="usage-range-1h" onclick="usageSetRange('1h')">近 1 小时</button>
+      <button class="btn small secondary" id="usage-range-6h" onclick="usageSetRange('6h')">近 6 小时</button>
+      <button class="btn small" id="usage-range-24h" onclick="usageSetRange('24h')">近 24 小时</button>
+      <input type="number" id="usage-hours-input" min="1" max="8760" placeholder="小时"
         style="width:70px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)"
-        onkeydown="if(event.key==='Enter')usageSetCustomDays()">
-      <button class="btn small secondary" onclick="usageSetCustomDays()">刷新</button>
+        onkeydown="if(event.key==='Enter')usageSetCustomHours()">
+      <button class="btn small secondary" onclick="usageSetCustomHours()">刷新</button>
       <span class="hint" id="usage-totals" style="margin-left:12px"></span>
     </div>
     <div class="card">
@@ -713,7 +713,7 @@ async function loadDashboard() {
 }
 
 // ═══════════════ 2. Usage statistics ═══════════════
-let usageRange = 'today';
+let usageRange = '24h';   // 1h | 6h | 24h | 自定义 "Nh"(近 N 小时)
 let usageMode = 'session';   // session | user | module
 let usageSortKey = 'total_tokens';   // total_tokens | calls | avg
 let usageData = null;
@@ -745,20 +745,20 @@ function usageSetMode(mode) {
 
 function usageSetRange(r) {
   usageRange = r;
-  ['today', '7d', '30d'].forEach(k => {
+  ['1h', '6h', '24h'].forEach(k => {
     const btn = document.getElementById('usage-range-' + k);
     btn.className = 'btn small' + (k === r ? '' : ' secondary');
   });
   loadUsageStats();
 }
 
-function usageSetCustomDays() {
-  const el = document.getElementById('usage-days-input');
+function usageSetCustomHours() {
+  const el = document.getElementById('usage-hours-input');
   const n = parseInt(el?.value, 10);
-  if (!n || n < 1 || n > 3650) { showToast('请输入 1-3650 之间的天数', false); return; }
-  usageRange = n + 'd';
-  // 自定义天数时取消所有预设按钮的高亮
-  ['today', '7d', '30d'].forEach(k => {
+  if (!n || n < 1 || n > 8760) { showToast('请输入 1-8760 之间的小时数', false); return; }
+  usageRange = n + 'h';
+  // 自定义小时数时取消所有预设按钮的高亮
+  ['1h', '6h', '24h'].forEach(k => {
     document.getElementById('usage-range-' + k).className = 'btn small secondary';
   });
   loadUsageStats();

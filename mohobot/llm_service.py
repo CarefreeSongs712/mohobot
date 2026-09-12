@@ -711,12 +711,19 @@ class LLMService:
 
     @staticmethod
     def _range_since(range_key: str) -> float:
-        """range_key → 起始时间戳(UTC+8 当日 00:00 起往前数 N 天)。"""
+        """range_key → 起始时间戳。
+
+        "Nh"(近 N 小时)为滚动窗口(从现在往回数); 天数窗口按 UTC+8
+        当日 00:00 起往前数 N 天(含今日), 供 /用量 命令沿用。
+        """
         import datetime
         import re
         from mohobot.utils.time_utils import TZ_UTC8
 
         now = datetime.datetime.now(TZ_UTC8)
+        if re.fullmatch(r"\d{1,4}h", range_key):
+            hours = max(1, min(8760, int(range_key[:-1])))
+            return (now - datetime.timedelta(hours=hours)).timestamp()
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if range_key == "7d":
             days = 7

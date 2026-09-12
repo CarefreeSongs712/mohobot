@@ -32,10 +32,10 @@ from typing import Any, AsyncGenerator
 
 
 def _valid_usage_range(range_key: str) -> bool:
-    """用量统计范围校验: today / 7d / 30d / 自定义 Nd(近N天, 1-3650)。"""
+    """用量统计范围校验: Nh(近N小时) / today / 7d / 30d / 自定义 Nd(近N天, 1-3650)。"""
     if range_key in ("today", "7d", "30d"):
         return True
-    return bool(re.fullmatch(r"\d{1,4}d", str(range_key)))
+    return bool(re.fullmatch(r"\d{1,4}[dh]", str(range_key)))
 
 from urllib.parse import urlsplit
 
