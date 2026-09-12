@@ -277,6 +277,8 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       <button class="btn small secondary" id="usage-range-1h" onclick="usageSetRange('1h')">近 1 小时</button>
       <button class="btn small secondary" id="usage-range-6h" onclick="usageSetRange('6h')">近 6 小时</button>
       <button class="btn small" id="usage-range-24h" onclick="usageSetRange('24h')">近 24 小时</button>
+      <button class="btn small secondary" id="usage-range-72h" onclick="usageSetRange('72h')">近 72 小时</button>
+      <button class="btn small secondary" id="usage-range-168h" onclick="usageSetRange('168h')">近 168 小时</button>
       <input type="number" id="usage-hours-input" min="1" max="8760" placeholder="小时"
         style="width:70px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)"
         onkeydown="if(event.key==='Enter')usageSetCustomHours()">
@@ -745,7 +747,7 @@ function usageSetMode(mode) {
 
 function usageSetRange(r) {
   usageRange = r;
-  ['1h', '6h', '24h'].forEach(k => {
+  ['1h', '6h', '24h', '72h', '168h'].forEach(k => {
     const btn = document.getElementById('usage-range-' + k);
     btn.className = 'btn small' + (k === r ? '' : ' secondary');
   });
@@ -758,7 +760,7 @@ function usageSetCustomHours() {
   if (!n || n < 1 || n > 8760) { showToast('请输入 1-8760 之间的小时数', false); return; }
   usageRange = n + 'h';
   // 自定义小时数时取消所有预设按钮的高亮
-  ['1h', '6h', '24h'].forEach(k => {
+  ['1h', '6h', '24h', '72h', '168h'].forEach(k => {
     document.getElementById('usage-range-' + k).className = 'btn small secondary';
   });
   loadUsageStats();
