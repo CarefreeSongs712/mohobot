@@ -18,7 +18,7 @@
 - **插件系统** — 从 `plugins/` 目录动态加载插件，可拦截消息、响应事件；插件配置由 `_conf_schema.json` 驱动，WebUI 可视化编辑热生效
 - **Web 管理面板** — FastAPI + SSE 实时日志流、文件系统浏览器、配置在线编辑、统计看板
 - **可配置拦截器** — 指令拦截（`/` 开头）、关键词拦截（预设回复）
-- **TTS 语音（GPT-SoVITS）** — LLM 回复自动朗读（模型自标 `<tts>` 句）+ `/tts` 指令直读，全局单飞行队列、队列满丢最新，合成失败降级纯文本
+- **TTS 语音（MiniMax 云端 API）** — LLM 回复自动朗读（模型自标 `<tts>` 句）+ `/tts` 指令直读，per-bot 克隆音色覆盖，单飞行队列、队列满丢最新，合成失败降级纯文本，字符计费入用量统计
 
 ## 🏗️ 技术栈
 
@@ -297,52 +297,41 @@ music_knowledge:
     category: "Category:洛天依歌曲"
 ```
 
-## 🔊 TTS 语音（GPT-SoVITS 接入）
+## 🔊 TTS 语音（MiniMax 云端 API）
 
-基于本地/局域网 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) `api_v2` 服务（`python api_v2.py -a 127.0.0.1 -p 9880`）把文字转成语音发送。两条通路：
+基于 [MiniMax](https://www.minimaxi.com/) `t2a_v2` 同步合成接口（音色为 MiniMax 克隆音色，克隆动作在 MiniMax 侧一次性完成）把文字转成语音发送。两条通路：
 
 - **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注一句适合朗读的话（可省略，尽量 ≤20 字；超长时截到第一个句末标点，多标注取第一个，忘写闭标签自动容错）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后取出标注句经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。
 - **`/tts <文本>` 指令**（群聊多 bot 由 bot_id 最小者响应）：文本直接转语音；非管理员限 30 字 + 120 秒冷却（全局配置可改），管理员不限。
 
-**并发**：GSV 一次只能合成一条 → 框架侧全局 FIFO 队列串行消费；队列满（上限可配，默认 16）**丢弃最新**请求。模型权重不运行时切换，GSV 服务端启动时通过 `tts_infer.yaml` 自行加载。
+**并发与计费**：全局 FIFO 队列单飞行串行（控费控速）；队列满（上限可配，默认 16）**丢弃最新**请求。每次成功合成把 `usage_characters` 记入用量统计（`module="tts"`，按 bot 维度），WebUI 用量页可见。
 
-**WebUI「🔊 TTS 语音」独立板块**（与模型配置同级）：
+**音色粒度**：全局默认 `voice_id`，每 bot 可用 BotConfig `tts_voice_id` 覆盖（留空用全局）——不同 bot 可以用不同克隆音色。
 
-- **GSV 服务控制**：手动启动/停止/重启 GSV 后台进程（`tts.service_command + service_cwd` 拉起 detached 进程，日志重定向到 `service_log_path`）。**GSV 进程独立于 mohobot 生命周期**——mohobot 启动不拉起它、关闭也不停它。停止流程：`/control exit` 优雅退出 → 等待 `stop_wait_seconds`（默认 10s）→ 仍在监听则 kill 监听该端口的进程兜底（按端口找 pid，不按命令名 pgrep，防误杀）。
-- **合成队列监控**：运行状态（TCP 探测 base_url 端口）、当前合成中的任务、队列深度、累计成功/失败/丢弃计数（页面打开时 5 秒自动刷新）。
-- **发送配置**：`/tts` 请求参数全部可调（语速/切分方式/句间停顿/top_k/top_p/temperature/超时等），保存后原位热同步立即生效（仅队列上限需重启）。
-- **GSV 模型配置**：表单编辑 `tts_infer.yaml` 的 `custom:` 段（device/is_half/version/GPT 权重/SoVITS 权重/BERT 路径），保存自动 `.bak` 时间戳备份，其余段保留不动；重启 GSV 后生效。可查看 GSV 日志尾部。
+**WebUI「🔊 TTS 语音」独立板块**（与模型配置同级）：服务与队列状态（配置完整度/当前合成/队列深度/成功·失败·丢弃·字符计数，5 秒自动刷新）+ 合成配置表单（API Key 掩码、模型、音色、语速/音量/音调、采样率/码率/格式、超时、队列上限、指令限制、标注提示词模板）。保存后除队列上限外**全部热生效**。
 
-**配置**：GSV 相关全部在全局 `tts:` 段（WebUI 独立板块可编辑）；每 bot 仅 `tts_enabled` 开关（WebUI Bot 配置页），修改开关需重启生效。
+**配置**（WebUI 独立板块可编辑；API Key 也可用环境变量 `MOHOBOT_MINIMAX_API_KEY` 兜底）：
 
 ```yaml
 tts:
   enabled: true
-  base_url: "http://127.0.0.1:9880"
-  media_type: "wav"          # wav/ogg/aac(ogg/aac 需 GSV 端 ffmpeg)
-  text_lang: "zh"
-  prompt_lang: "zh"
-  ref_audio_path: "D:/GSV/refs/voice.wav"   # GSV 服务器本机路径
-  prompt_text: "参考音频里说的那句话"
-  speed_factor: 1.0
-  text_split_method: "cut5"  # cut0 不切/cut1 每4句/cut2 凑50字/cut3 句号/cut4 句点/cut5 按标点
-  fragment_interval: 0.3     # 句间停顿(秒)
-  top_k: 15
-  top_p: 1.0
-  temperature: 1.0
+  base_url: "https://api.minimax.cn"   # 国内站; 国际站 https://api.minimaxi.com
+  api_key: "你的 MiniMax API Key"       # 或环境变量 MOHOBOT_MINIMAX_API_KEY
+  model: "speech-2.8-hd"               # speech-2.8-hd / speech-2.8-turbo
+  voice_id: "ltyclone01"               # 全局默认克隆音色
+  speed: 1.0
+  vol: 1.0
+  pitch: 0
+  sample_rate: 32000
+  bitrate: 128000
+  format: "mp3"
   queue_maxsize: 16
-  timeout: 300               # CPU 推理一句约 40s, 300 起步
+  timeout: 60
   cmd_max_chars: 30
   cmd_cooldown: 120
-  # GSV 后台进程管理(面板手动启停)
-  service_command: '/root/QQBot/GSV/GPT-SoVITS/.venv/bin/python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer_cpu.yaml'
-  service_cwd: "/root/QQBot/GSV/GPT-SoVITS"
-  service_log_path: "/root/QQBot/GSV/api_v2.log"
-  gsv_config_path: "/root/QQBot/GSV/GPT-SoVITS/GPT_SoVITS/configs/tts_infer_cpu.yaml"
-  stop_wait_seconds: 10
 ```
 
-实现在 `mohobot/services/gsv_tts.py`（客户端+队列+进程管理）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。另有独立脚本 `scripts/tts_standalone.py`（不依赖 mohobot，仅 httpx，可直接验证 GSV 服务连通性）。
+实现在 `mohobot/services/minimax_tts.py`（t2a_v2 客户端 + 队列）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 

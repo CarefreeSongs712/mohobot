@@ -398,6 +398,18 @@ class CommandHandler(Interceptor):
         instance = bm.get(bot_id)
         return bool(instance is not None and getattr(instance.config, "tts_enabled", False))
 
+    def _bot_tts_voice_id(self, bot_id: str) -> str | None:
+        """该 bot 的 MiniMax 音色(per-bot tts_voice_id; 留空返回 None=用全局)。"""
+        if self._ws is None:
+            return None
+        bm = getattr(self._ws, "_bot_manager", None)
+        if bm is None:
+            return None
+        instance = bm.get(bot_id)
+        if instance is None:
+            return None
+        return (getattr(instance.config, "tts_voice_id", "") or "").strip() or None
+
     async def _cmd_tts(
         self, bot_id: str, event: MessageEvent, args: list[str]
     ) -> str | None:
@@ -437,10 +449,11 @@ class CommandHandler(Interceptor):
             chat_type, chat_id = "group", str(event.group_id)
         else:
             chat_type, chat_id = "private", str(event.user_id)
-        from mohobot.services.gsv_tts import TTSJob
+        from mohobot.services.minimax_tts import TTSJob
         accepted = self._tts.submit(TTSJob(
             bot_id=bot_id, chat_type=chat_type, chat_id=chat_id,
             text=text, source="command",
+            voice_id=self._bot_tts_voice_id(bot_id),
         ))
         if not accepted:
             return "语音队列已满，请稍后再试～"

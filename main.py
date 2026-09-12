@@ -144,17 +144,22 @@ class MohobotApplication:
 
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
 
-        # TTS 语音合成(GPT-SoVITS api_v2)。
+        # TTS 语音合成(MiniMax t2a_v2 云端 API)。
         # tts.enabled 未开启/初始化失败 → 降级为 None(正常聊天不受影响)。
         self._tts_service = None
         if self._config.tts.enabled and self._config.tts.base_url:
             try:
-                from mohobot.services.gsv_tts import TTSService
+                from mohobot.services.minimax_tts import TTSService
                 self._tts_service = TTSService(
                     self._config.tts,
                     task_supervisor=self._task_supervisor,
+                    usage_recorder=self._usage_recorder,
                 )
-                logger.info(f"TTS 服务已创建: {self._config.tts.base_url}")
+                if not self._config.tts.api_key:
+                    logger.warning("TTS 已启用但未配置 api_key(MOHOBOT_MINIMAX_API_KEY 或 tts.api_key), 合成将失败")
+                if not self._config.tts.voice_id:
+                    logger.warning("TTS 已启用但未配置全局 voice_id(tts.voice_id)")
+                logger.info(f"TTS 服务已创建: {self._config.tts.base_url} (model={self._config.tts.model})")
             except Exception as e:
                 self._tts_service = None
                 logger.warning(f"TTS 服务初始化失败, 已降级: {e}")

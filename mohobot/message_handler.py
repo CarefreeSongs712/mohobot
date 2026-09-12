@@ -1093,17 +1093,23 @@ class MessageHandler:
         return bool(cfg and cfg.tts_enabled)
 
     def _submit_tts(self, bot_id: str, event: MessageEvent, tts_text: str) -> None:
-        """提交 TTS 合成任务; 队列满丢最新, 失败不影响已发出的文本。"""
+        """提交 TTS 合成任务; 队列满丢最新, 失败不影响已发出的文本。
+
+        voice_id 在提交时按 per-bot 配置解析好(BotConfig.tts_voice_id,
+        留空用全局默认), 队列 worker 无需再查 bot 配置。
+        """
         if not tts_text or not self._tts_active(bot_id):
             return
-        from mohobot.services.gsv_tts import TTSJob
+        from mohobot.services.minimax_tts import TTSJob
         if isinstance(event, GroupMessageEvent):
             chat_type, chat_id = "group", str(event.group_id)
         else:
             chat_type, chat_id = "private", str(event.user_id)
+        cfg = self._bot_config(bot_id)
         accepted = self._tts.submit(TTSJob(
             bot_id=bot_id, chat_type=chat_type, chat_id=chat_id,
             text=tts_text, source="llm",
+            voice_id=(cfg.tts_voice_id or None) if cfg else None,
         ))
         if accepted:
             logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")

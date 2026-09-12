@@ -31,8 +31,9 @@ class UsageRecorder:
         chat_type: str = "",
         chat_id: str = "",
         user_id: str = "",
+        chars: int = 0,
     ) -> None:
-        if usage is None:
+        if usage is None and chars <= 0:
             return
         try:
             # 缓存命中 token: OpenAI 风格 prompt_tokens_details.cached_tokens,
@@ -56,6 +57,8 @@ class UsageRecorder:
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
                 "cached_tokens": cached,
+                # TTS 等非 token 计费模块的字符消耗(token 全为 0)
+                "chars": int(chars),
             }
             await self._writer.append(record)
         except Exception as exc:
