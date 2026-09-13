@@ -173,7 +173,9 @@ class MohobotApplication:
 
         # 4. Load plugins
         # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
-        self._plugin_system.set_runtime_refs(bot_manager=self._bot_manager)
+        self._plugin_system.set_runtime_refs(
+            bot_manager=self._bot_manager, llm_service=self._llm_service,
+        )
         self._plugin_system.set_admin_ids(list(self._config.admins))
         # Anysearch 实时联网搜索客户端(供插件与流水线使用)
         from mohobot.anysearch import AnySearchClient

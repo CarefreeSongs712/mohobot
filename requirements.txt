@@ -29,6 +29,9 @@ lunarcalendar>=0.0.9
 # Optional relationship graph rendering:
 #   pip install playwright && playwright install chromium
 
+# Optional QQ空间说说响应解析 (plugins/qzone; 缺失时降级 json.loads)
+# json5>=0.9.0
+
 # Config
 PyYAML>=6.0
 

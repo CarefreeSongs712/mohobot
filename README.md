@@ -228,11 +228,11 @@ database:
 
 **插件形态**：单文件插件（`plugins/xxx.py`）或目录插件（`plugins/xxx/main.py` + 可选 `core/` 子模块），热加载/热重载/启停无需重启。
 
-**插件配置系统**：插件目录放 `_conf_schema.json` 声明配置项（类型：`string/int/bool/list/object`+items，含 `description/hint/default/slider/invisible`），配置存于 `data/plugins_config/{name}.json`（全局一份），Web 面板"插件管理"页自动渲染表单编辑、保存即热生效（调用插件 `on_config_update` 回调）。
+**插件配置系统**：插件目录放 `_conf_schema.json` 声明配置项（类型：`string/int/float/bool/list/object`+items，含 `description/hint/default/slider/invisible`），配置存于 `data/plugins_config/{name}.json`（全局一份），Web 面板"插件管理"页自动渲染表单编辑、保存即热生效（调用插件 `on_config_update` 回调）。
 
 **事件钩子**：`on_message` / `on_notice` / `on_meta` / `on_request`（好友申请、群邀请，插件接管后框架不再自动同意）。
 
-**注入**：`inject_ws_server` / `inject_bot_manager` / `inject_data_dir` / `inject_anysearch_client` / `inject_admin_ids`（全局管理员，与封禁系统共用配置顶层 `admins`）。
+**注入**：`inject_ws_server` / `inject_bot_manager` / `inject_data_dir` / `inject_anysearch_client` / `inject_llm_service`（视觉描述/情感等 LLM 能力）/ `inject_admin_ids`（全局管理员，与封禁系统共用配置顶层 `admins`）。
 
 ## 👥 关系管理器插件（移植自 astrbot_plugin_relationship）
 
@@ -270,6 +270,19 @@ database:
 - 明确**不支持**"来一首xxx"等自然语言模糊匹配
 
 > 移植自 [astrbot_plugin_netease_music](https://github.com/NachoCrazy/netease-music-astrbot-plugin) v2.0.0（作者：NachoCrazy），依赖自部署的 NeteaseCloudMusicApi 服务。
+
+## 📝 QQ空间说说插件（移植自 astrbot_plugin_qzone_lite）
+
+`plugins/qzone/` — QQ 空间说说：看/发/删/评/回评/赞（命令带 `/` 前缀，多 bot 群去重）：
+
+- **命令**：`/看说说 [@QQ] [序号/范围]`（无 @ 时看动态流；范围如 `0~3`）、`/评说说 [@QQ] [序号] <内容>`、`/回评 [@QQ] [说说序号] [评论序号] <内容>`、`/赞说说 [@QQ] [序号/范围]`；管理员：`/发说说 <文本> [图片]` `/删说说 [序号/范围]` `/重置QQCookies` — **管理员命令仅私聊处理，群聊内一律静默忽略**
+- **登录态 per-bot**：每个 bot 经自己的 OneBot 连接调 `get_cookies(user.qzone.qq.com)` 自动获取 Cookies，缓存于 `data/plugins_data/qzone/cookies_{bot_id}.json`，失效自动重取（可关 `auto_reset_on_login_expired`）
+- **发图**：`/发说说 文本` 支持消息自带图片 + 引用（回复）一条带图消息取图（经 `get_msg` API）
+- **看说说图片分析**（`analyze_images_on_view_feed`，默认关）：带图说说经框架视觉模型描述图片内容（走 `inject_llm_service` 注入 + ImageCache 缓存）
+- **防限流**：请求最小间隔 + 随机抖动、429 指数退避、登录失效自动重登录；说说查询带 LRU+TTL 缓存（复用正文/图片，只刷新评论）
+- **配置**（WebUI 插件页可改、热生效）：`send_feedback` / `analyze_images_on_view_feed` / `feed_cache_max_size` / `feed_cache_ttl_seconds` / `timeout` / `request_interval` / `request_jitter`
+
+> 移植自 [astrbot_plugin_qzone_lite](https://github.com/Zhalslar/astrbot_plugin_qzone)（上游 Zhalslar/astrbot_plugin_qzone 的 Lite 裁剪版，GPL-3.0）。不迁移 LLM Tools；Cookies 由协议端自动获取（需 NapCat/LLOneBot 等支持 `get_cookies`），不再提供手动 cookies 配置；可选依赖 `json5`（缺失时降级 `json.loads` 解析响应）。
 
 ## 🎵 歌曲知识（全局歌曲识别 + LLM 前注入）
 
@@ -383,7 +396,8 @@ mohobot/
 │   ├── utils/                     # 日志、CQ 码解析等工具
 │   └── web_panel/                 # FastAPI 管理面板（8 板块，含封禁管理）
 ├── plugins/                       # 插件目录（动态加载：status / praise / divination /
-│                                  #   neteasemusic / wifepicker / relationship / song_sync）
+│                                  #   neteasemusic / wifepicker / relationship / song_sync /
+│                                  #   qzone / perception / welcome / usage_stats ...）
 ├── tests/                         # 冒烟测试（smoke_*）与单测（tests/_run_all.py 全量回归）
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
@@ -476,7 +490,7 @@ class Plugin:
 - [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳固定回复 + ping/PONG
 - [x] 全局指令去重（群内多 bot 只由最小 bot_id 回复，支持命令+空格参数）
 - [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置；模型页含可用模型列表）
-- [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync）
+- [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync / qzone）
 - [x] /help 图片渲染（PIL 深色卡片，按插件分组 + 管理员标注）
 - [ ] 消息发送限流与队列（当前仅图片突发限流）
 - [ ] 单元测试与 CI（当前为本地冒烟测试 `tests/`）

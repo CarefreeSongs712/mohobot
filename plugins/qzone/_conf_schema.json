@@ -1,0 +1,55 @@
+{
+  "auto_reset_on_login_expired": {
+    "description": "登录失效时自动重置",
+    "type": "bool",
+    "hint": "当检测到 QQ 空间登录失效时，自动清空已保存的 Cookies 并重新从协议端获取",
+    "default": true
+  },
+  "send_feedback": {
+    "description": "发送反馈",
+    "type": "bool",
+    "hint": "是否在执行操作(发布/删除/评论/点赞)时返回反馈信息",
+    "default": true
+  },
+  "analyze_images_on_view_feed": {
+    "description": "查看说说时分析图片",
+    "type": "bool",
+    "hint": "开启后，查看带图说说时调用框架视觉模型分析图片内容并附在返回中(每条最多 3 张)",
+    "default": false
+  },
+  "feed_cache_max_size": {
+    "description": "说说缓存数量",
+    "type": "int",
+    "hint": "最多缓存多少条已查询到的说说内容；设为 0 可关闭缓存",
+    "slider": { "min": 0, "max": 500, "step": 1 },
+    "default": 50
+  },
+  "feed_cache_ttl_seconds": {
+    "description": "说说缓存时间（秒）",
+    "type": "int",
+    "hint": "缓存有效期。有效期内再次查询相同位置的说说时复用正文、图片和图片分析，只刷新评论内容；设为 0 可关闭缓存",
+    "slider": { "min": 0, "max": 86400, "step": 60 },
+    "default": 1800
+  },
+  "timeout": {
+    "description": "请求超时时间",
+    "type": "int",
+    "hint": "网络请求超时时间（秒）",
+    "slider": { "min": 5, "max": 60, "step": 1 },
+    "default": 10
+  },
+  "request_interval": {
+    "description": "QQ空间请求最小间隔（秒）",
+    "type": "float",
+    "hint": "每次请求前至少等待该时长，降低限流概率",
+    "slider": { "min": 0, "max": 5, "step": 0.1 },
+    "default": 0.8
+  },
+  "request_jitter": {
+    "description": "QQ空间请求随机抖动（秒）",
+    "type": "float",
+    "hint": "在最小间隔基础上增加 0~该值的随机延时",
+    "slider": { "min": 0, "max": 3, "step": 0.1 },
+    "default": 0.6
+  }
+}

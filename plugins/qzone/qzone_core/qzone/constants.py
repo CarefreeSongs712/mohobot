@@ -1,0 +1,23 @@
+"""QQ 空间接口常量（移植自 astrbot_plugin_qzone_lite）。"""
+
+# HTTP 状态
+HTTP_STATUS_FORBIDDEN = 403
+HTTP_STATUS_UNAUTHORIZED = 401
+
+# QQ 空间业务 code
+QZONE_CODE_OK = 0
+QZONE_CODE_UNKNOWN = -9999
+QZONE_CODE_LOGIN_EXPIRED = -3000
+QZONE_CODE_PERMISSION_DENIED = -10001
+QZONE_CODE_PERMISSION_DENIED_LEGACY = 3
+
+# 内部注入键(承载 HTTP 状态等元信息, 不属于 QQ 空间协议)
+QZONE_INTERNAL_META_KEY = "__qzone_meta__"
+QZONE_INTERNAL_HTTP_STATUS_KEY = "http_status"
+
+# 解析失败占位 message
+QZONE_MSG_EMPTY_RESPONSE = "empty_response"
+QZONE_MSG_INVALID_RESPONSE = "invalid_response"
+QZONE_MSG_JSON_PARSE_ERROR = "json_parse_error"
+QZONE_MSG_NON_OBJECT_RESPONSE = "non_object_response"
+QZONE_MSG_PERMISSION_DENIED = "permission_denied"
