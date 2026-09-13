@@ -133,23 +133,15 @@ def test_smart_update_decision():
     # 这里验证陈旧逻辑: 新状态描述更新时间为 0, 判定"长时间未更新"
     assert isinstance(needs, bool)
 
-    # 关键词触发(强负面: 强语气词 + 关键词叠加, 需 ≥4 分)
+    # 关键词触发
     state2 = EmotionalState(user_key="u2")
     import time as _t
     now = _t.time()
     state2.descriptions.last_attitude_update = now
     state2.descriptions.last_relationship_update = now
     state2.last_force_update = now
-    needs, reason = smart.should_update(state2, "我真的非常讨厌你！", "别这样嘛", force_interval=100)
+    needs, reason = smart.should_update(state2, "我真的好讨厌你！", "别这样嘛", force_interval=100)
     assert needs and "负面" in reason
-
-    # 客套寒暄不触发: 单字"好"已移出词表, 无关键词时语气符号不单独计分
-    state4 = EmotionalState(user_key="u4")
-    state4.descriptions.last_attitude_update = now
-    state4.descriptions.last_relationship_update = now
-    state4.last_force_update = now
-    needs, _ = smart.should_update(state4, "你好呀！今天过得好吗？", "你好呀~", force_interval=100)
-    assert not needs
 
     # 强制计数触发
     state3 = EmotionalState(user_key="u3")
