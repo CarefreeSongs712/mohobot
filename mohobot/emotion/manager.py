@@ -157,20 +157,6 @@ class EmotionManager:
         state = self._get_or_create_state(bot_id, user_key)
         state.force_update_counter += 1
 
-        # 冷却门控(强制频率上限, 配置热生效):
-        # last_force_update==0 表示从未分析过 → 不适用(新用户首轮可分析)
-        if state.last_force_update > 0:
-            import time as _time
-            now = _time.time()
-            if state.force_update_counter < max(0, int(self._cfg.analysis_round_cooldown)):
-                # 距上次分析不足 N 轮 → 跳过(计数继续累积, 供强制更新判断)
-                self._store.set_state(bot_id, user_key, state)
-                return
-            if now - state.last_force_update < max(0, int(self._cfg.min_interval_sec)):
-                # 距上次分析不足最小间隔(秒) → 跳过
-                self._store.set_state(bot_id, user_key, state)
-                return
-
         if self._cfg.smart_update:
             needs, reason = self._smart.should_update(
                 state, user_text, ai_reply, self._cfg.force_update_interval

@@ -378,62 +378,6 @@ async def test_manager_process_turn_integration():
     await run()
 
 
-async def test_manager_cooldown_gates():
-    """冷却门控: 轮数冷却 + 最小时间间隔(WebUI 可配, 0=不限)。"""
-
-    class _FakeLLM:
-        def __init__(self):
-            self.calls = 0
-
-        async def analyze_emotion(self, prompt):
-            self.calls += 1
-            return ('{"emotion_updates": {"favor": 1}, '
-                    '"relationship": "朋友", "attitude": "温和"}')
-
-    async def run():
-        tmp = tempfile.mkdtemp()
-        llm = _FakeLLM()
-        # 新默认值存在
-        cfg = EmotionConfig()
-        assert cfg.min_interval_sec == 120
-        assert cfg.analysis_round_cooldown == 3
-
-        manager = EmotionManager(
-            data_dir=tmp, config=_make_cfg(min_interval_sec=120, analysis_round_cooldown=3),
-            llm_service=llm, admins=[999],
-        )
-
-        # 第1轮: 从未分析过(last_force_update==0) → 冷却门不适用 → 分析
-        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
-        assert llm.calls == 1
-
-        # 第2轮: 强负面关键词必触发, 但距上次分析不足 3 轮 → 轮数冷却拦下
-        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
-        assert llm.calls == 1
-
-        # 第3轮: 轮数已够(计数 > 3), 但距上次分析 < 120s → 时间间隔拦下
-        state = await manager.get_state("bot_001", "111")
-        state.force_update_counter = 10
-        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
-        assert llm.calls == 1
-
-        # 第4轮: 把 last_force_update 拨回 200s 前 → 两道门都过 → 分析
-        state = await manager.get_state("bot_001", "111")
-        import time as _t
-        state.last_force_update = _t.time() - 200
-        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
-        assert llm.calls == 2
-
-        # 0 = 不限: 两道门都关掉后每轮关键词触发都分析
-        manager._cfg = _make_cfg(min_interval_sec=0, analysis_round_cooldown=0)
-        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
-        assert llm.calls == 3
-
-        await manager.shutdown()
-
-    await run()
-
-
 async def test_manager_admin_and_injection_disabled():
     class _FakeLLM:
         async def analyze_emotion(self, prompt):

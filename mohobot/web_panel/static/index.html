@@ -997,8 +997,6 @@ async function loadConfigPage() {
       checkField('emotion.enabled', '启用情感系统', globalConfigCache.emotion?.enabled, '好感度/亲密度/关系阶段/长期记忆; 开关修改后需重启生效') +
       checkField('emotion.smart_update', '智能按需分析', globalConfigCache.emotion?.smart_update, '按关键词/间隔/强制计数按需调用情感分析 LLM; 关闭则每轮都分析(token 消耗增加)') +
       formField('emotion.force_update_interval', '强制分析间隔(轮)', globalConfigCache.emotion?.force_update_interval, { hint: '每 N 轮对话强制触发一次情感分析' }) +
-      formField('emotion.min_interval_sec', '最小分析间隔(秒)', globalConfigCache.emotion?.min_interval_sec, { hint: '同一用户两次情感分析的最小时间间隔, 0 = 不限(默认 120)' }) +
-      formField('emotion.analysis_round_cooldown', '轮数冷却(轮)', globalConfigCache.emotion?.analysis_round_cooldown, { hint: '距上次分析不足 N 轮则跳过本轮, 0 = 不限(默认 3)' }) +
       formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' });
 
     const sel = document.getElementById('config-bot-select');
@@ -1123,8 +1121,6 @@ async function saveGlobalConfig() {
       enabled: document.getElementById('cfg-emotion.enabled')?.checked ?? false,
       smart_update: document.getElementById('cfg-emotion.smart_update')?.checked ?? true,
       force_update_interval: num('cfg-emotion.force_update_interval', 5),
-      min_interval_sec: num('cfg-emotion.min_interval_sec', 120),
-      analysis_round_cooldown: num('cfg-emotion.analysis_round_cooldown', 3),
       significance_threshold: num('cfg-emotion.significance_threshold', 5),
     },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
