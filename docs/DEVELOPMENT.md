@@ -829,7 +829,8 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 
 - 主进程 `main.py:_maybe_start_review_panel()` 负责拉起：缺 `config.yaml` / `enabled: false` / 端口已被监听 → 跳过；否则 detached `Popen` 起 `review/main.py`，日志写 `review/panel.log`。
 - **数据源：`data/history` 消息事件流（唯一来源）**。history 只增不删，条目身份 = **message_id**（`mid:<id>`；无 id 时退回内容指纹 `hash:...`），审核结论永不因上下文压缩而失联（旧 contexts 指纹方案已废弃 —— 框架的 AI 总结压缩曾使生产上 97.5% 的已审条目失联）。
-- **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 本 bot（`at` 段 qq == self_id）或引用本 bot 发言（`reply` 段 id ∈ 该会话已归档 bot message_id 集合）的消息；私聊全部审。同一条群消息多 bot 各自归档一份，但 @/引用天然只命中目标 bot，不会重复审。
+- **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 本 bot（`at` 段 qq == self_id）或引用本 bot 发言（`reply` 段 id ∈ 该会话已归档 bot message_id 集合）的消息；私聊全部审（按 bot 独立会话）。
+- **群聊跨 bot 合并**：同一个群号在多只 bot 归档下的内容聚合为**一个审核会话**，session_key 的 bot 段固定 `"_merged"`（`_merged/group/{群号}`）。每只 bot 的归档各自过滤后按时间混流；同一条消息同时命中多只 bot 过滤时跨 bot 去重（优先 message_id，用户消息无 id 时兜底 time+uid+text；bot 发言不做内容级去重）。列表 bot 过滤按「该 bot 在此群的归档存在」判断，每条 bot 发言带 bot_id/bot_nickname 逐条标注。
 - `WSServer` 出站层把 bot 发送的消息以 `post_type: "message_sent"` 追加进同一个 history JSONL（`ws_server._archive_sent_message`，echo 超时用 `local:` id 兜底；发送明确失败不归档；`base64://` 大字段净化为占位）。
 - 加载器对 history 文件做**增量解析**（记录 offset，只读新增字节，mtime/size 失效；文件被截断时全量重读）。
 - 会话明细接口分页（`?page=&page_size=`，默认锚定第一条待审所在页；判定后重开自动跳下一批）。

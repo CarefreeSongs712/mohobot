@@ -112,6 +112,7 @@ def _private_events() -> list[dict]:
 
 
 def _group_events() -> list[dict]:
+    """bot_001(qq=111) 的群 20002 归档。"""
     return [
         {"post_type": "message_sent", "message_type": "group", "time": 1700000100,
          "self_id": 111, "group_id": 20002, "message_id": "GB-1",
@@ -145,24 +146,64 @@ def _group_events() -> list[dict]:
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-104",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "text", "data": {"text": "重复推送"}}]},
+        # 同时 @ 两个 bot → 两个归档各自命中, 合并后跨 bot 去重
+        {"post_type": "message", "message_type": "group", "time": 1700000110,
+         "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-106",
+         "sender": {"card": "张三", "user_id": 10001},
+         "message": [{"type": "at", "data": {"qq": "111"}},
+                     {"type": "at", "data": {"qq": "222"}},
+                     {"type": "text", "data": {"text": "都在吧"}}]},
+    ]
+
+
+def _group_events_bot2() -> list[dict]:
+    """bot_002(qq=222) 的同一群 20002 归档 — 合并会话的另一半。"""
+    return [
+        {"post_type": "message_sent", "message_type": "group", "time": 1700000107,
+         "self_id": 222, "group_id": 20002, "message_id": "GB-B1",
+         "sender": {"user_id": 222, "nickname": "天依beta"},
+         "message": [{"type": "text", "data": {"text": "我是beta"}}]},
+        # @ 别的 bot → 在 bot_002 视角过滤掉
+        {"post_type": "message", "message_type": "group", "time": 1700000108,
+         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-103",
+         "sender": {"card": "张三", "user_id": 10001},
+         "message": [{"type": "at", "data": {"qq": "111"}},
+                     {"type": "text", "data": {"text": "@bot 你好"}}]},
+        # @ 本 bot → 保留
+        {"post_type": "message", "message_type": "group", "time": 1700000105,
+         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-105",
+         "sender": {"card": "张三", "user_id": 10001},
+         "message": [{"type": "at", "data": {"qq": "222"}},
+                     {"type": "text", "data": {"text": "@beta 你好"}}]},
+        # 与 bot_001 归档同一条多 @ 消息 → 合并去重
+        {"post_type": "message", "message_type": "group", "time": 1700000110,
+         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-106",
+         "sender": {"card": "张三", "user_id": 10001},
+         "message": [{"type": "at", "data": {"qq": "111"}},
+                     {"type": "at", "data": {"qq": "222"}},
+                     {"type": "text", "data": {"text": "都在吧"}}]},
     ]
 
 
 def _build_fake_data(root: Path) -> None:
-    """构造迷你 mohobot data: bot 配置 + 私聊/群聊 history + 图片 VLM 缓存。"""
-    bots = root / "bots" / "bot_001"
-    bots.mkdir(parents=True)
-    (bots / "config.json").write_text(json.dumps(
-        {"bot_id": "bot_001", "nickname": "天依", "qq": 111}, ensure_ascii=False),
-        encoding="utf-8")
+    """构造迷你 mohobot data: 2 个 bot + 私聊/群聊 history + 图片 VLM 缓存。"""
+    for bid, nick, qq in (("bot_001", "天依", 111), ("bot_002", "天依beta", 222)):
+        bots = root / "bots" / bid
+        bots.mkdir(parents=True)
+        (bots / "config.json").write_text(json.dumps(
+            {"bot_id": bid, "nickname": nick, "qq": qq}, ensure_ascii=False),
+            encoding="utf-8")
 
     priv = root / "history" / "bot_001" / "private"
     priv.mkdir(parents=True)
     _write_jsonl(priv / "10001.jsonl", _private_events())
 
-    grp = root / "history" / "bot_001" / "group"
-    grp.mkdir(parents=True)
-    _write_jsonl(grp / "20002.jsonl", _group_events())
+    grp1 = root / "history" / "bot_001" / "group"
+    grp1.mkdir(parents=True)
+    _write_jsonl(grp1 / "20002.jsonl", _group_events())
+    grp2 = root / "history" / "bot_002" / "group"
+    grp2.mkdir(parents=True)
+    _write_jsonl(grp2 / "20002.jsonl", _group_events_bot2())
 
     cache_dir = root / "cache"
     cache_dir.mkdir(parents=True)
@@ -184,13 +225,15 @@ def test_loader_scan_and_group_filter():
         store = ReviewStore(root / "review.db")
 
         by_key = {s["session_key"]: s for s in data.list_sessions()}
-        assert set(by_key) == {"bot_001/private/10001", "bot_001/group/20002"}
+        assert set(by_key) == {"bot_001/private/10001", "_merged/group/20002"}
 
         priv = by_key["bot_001/private/10001"]
-        grp = by_key["bot_001/group/20002"]
+        grp = by_key["_merged/group/20002"]
         assert priv["total"] == 4 and priv["display_name"] == "张三"
-        # 群聊只保留: bot 发言 + @本bot + 引用本bot; 无关/@别人/重复推送 全过滤
-        assert grp["total"] == 3 and grp["display_name"] == "群 20002"
+        # 群聊合并会话: bot_001 4 条 + bot_002 2 条, 多 @ 消息跨 bot 去重后 6 条
+        assert grp["total"] == 6
+        assert grp["bots"] == ["bot_001", "bot_002"]
+        assert grp["display_name"] == "群 20002"
 
         # 私聊明细
         entries = data.enrich_entries(priv["session_key"], {}, {})
@@ -204,12 +247,20 @@ def test_loader_scan_and_group_filter():
         # 无 message_id 的条目 → 内容指纹兜底
         assert entries[3]["fingerprint"].startswith("hash:")
 
-        # 群聊明细(按档内顺序, 已去重)
+        # 群聊明细(按时间混流, 已去重; bot 发言按条标注归属)
         gentries = data.enrich_entries(grp["session_key"], {}, {})
-        assert [e["content"] for e in gentries] == ["大家好", "@bot 你好", "引用回复"]
+        assert [e["content"] for e in gentries] == [
+            "大家好", "@bot 你好", "引用回复", "@beta 你好", "我是beta", "都在吧",
+        ]
         assert gentries[0]["kind"] == "assistant" and gentries[1]["kind"] == "user"
+        # bot 发言逐条归属: bot_001 天依 / bot_002 天依beta
+        assert gentries[0]["bot_id"] == "bot_001" and gentries[0]["bot_nickname"] == "天依"
+        assert gentries[4]["bot_id"] == "bot_002" and gentries[4]["bot_nickname"] == "天依beta"
+        # 用户消息也带来源归档
+        assert gentries[1]["bot_id"] == "bot_001"
+        assert gentries[3]["bot_id"] == "bot_002"
 
-        assert data.bot_nicknames() == {"bot_001": "天依"}
+        assert data.bot_nicknames() == {"bot_001": "天依", "bot_002": "天依beta"}
         assert data.bot_self_id("bot_001") == "111"
         store.close()
 
@@ -265,9 +316,9 @@ def test_loader_sidecar_cache_persistence():
         rows2 = data2.filtered_rows(sk)
         assert len(rows2) == len(rows1)
         assert [r["mid"] for r in rows2] == [r["mid"] for r in rows1]
-        # group 会话也来自缓存(含 bot_mids, 引用过滤仍生效)
-        grow = data2.filtered_rows("bot_001/group/20002")
-        assert len(grow) == 3
+        # group 合并会话也来自缓存(含 bot_mids 与 bot 归属, 过滤仍生效)
+        grow = data2.filtered_rows("_merged/group/20002")
+        assert len(grow) == 6
 
         # 损坏的缓存 → 忽略并从磁盘重新解析, 结果不变
         cache.write_text("{corrupted", encoding="utf-8")
@@ -387,7 +438,8 @@ def _assert_full_flow(client, store) -> None:
         assert len(sess) == 2
         by_key = {s["session_key"]: s for s in sess}
         assert by_key["bot_001/private/10001"]["unreviewed"] == 4
-        assert by_key["bot_001/group/20002"]["unreviewed"] == 3
+        assert by_key["_merged/group/20002"]["unreviewed"] == 6
+        assert by_key["_merged/group/20002"]["bots"] == ["bot_001", "bot_002"]
         sk = "bot_001/private/10001"
 
         # 明细(自动锚定第一条待审所在页)
@@ -430,17 +482,17 @@ def _assert_full_flow(client, store) -> None:
                     json={"session_key": sk, "action": "skip"})
         assert store.log_count() == n_before + 1
 
-        # 群聊会话也判完 → 全局无待审
+        # 群聊合并会话也判完 → 全局无待审
         r2 = client.post("/api/review", headers=_auth(tok),
-                         json={"session_key": "bot_001/group/20002", "action": "normal"}).json()
-        assert r2["changed"] == 3
+                         json={"session_key": "_merged/group/20002", "action": "normal"}).json()
+        assert r2["changed"] == 6
 
-        # 统计 (admin: 私聊 3 正常 + 群聊 3 正常 = 6; bob 改判 1 异常)
+        # 统计 (admin: 私聊 3 正常 + 群聊 6 正常 = 9; bob 改判 1 异常)
         stats = client.get("/api/stats", headers=_auth(tok)).json()
-        assert stats["overall"]["normal"] == 6 and stats["overall"]["abnormal"] == 1
+        assert stats["overall"]["normal"] == 9 and stats["overall"]["abnormal"] == 1
         assert stats["overall"]["unreviewed"] == 0
         reviewers = {r["reviewer"]: r for r in stats["per_reviewer"]}
-        assert reviewers["admin"]["judged"] == 6 and reviewers["bob"]["judged"] == 1
+        assert reviewers["admin"]["judged"] == 9 and reviewers["bob"]["judged"] == 1
         assert reviewers["bob"]["abnormal"] == 1
 
 
@@ -483,7 +535,7 @@ def test_api_incremental_via_api():
             client.post("/api/review", headers=_auth(tok), json={"session_key": sk, "action": "normal"})
             # 群聊会话也判完, 才能断言"无待审"
             client.post("/api/review", headers=_auth(tok),
-                        json={"session_key": "bot_001/group/20002", "action": "normal"})
+                        json={"session_key": "_merged/group/20002", "action": "normal"})
             assert client.get("/api/sessions?status=unreviewed", headers=_auth(tok)).json()["sessions"] == []
 
             # 追加新消息(改 mtime 触发增量解析) → 出现增量待审

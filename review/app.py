@@ -24,7 +24,7 @@ from loguru import logger
 from review import loader as _loader
 from review.config import ReviewConfig, verify_password
 from review.hash_password import hash_password
-from review.loader import format_ts, parse_session_key
+from review.loader import MERGED_BOT_ID, format_ts, parse_session_key
 from review.store import ReviewStore
 
 TAG_OPTIONS = ["色情", "政治", "辱骂", "其他"]
@@ -207,7 +207,8 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         nicknames = await asyncio.to_thread(data.bot_nicknames)
         bots = [
             {"bot_id": b, "nickname": nicknames.get(b, b)}
-            for b in sorted({s["bot_id"] for s in sessions})
+            for b in sorted({s["bot_id"] for s in sessions
+                             if s["chat_type"] == "private"})
         ]
         return {"bots": bots, "tags": TAG_OPTIONS}
 
@@ -217,7 +218,9 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         _auth(request)
         items = await _session_counts()
         if bot:
-            items = [x for x in items if x["bot_id"] == bot]
+            # 群聊合并会话: bot 过滤按成员 bot 判断(该 bot 在此群的归档存在)
+            items = [x for x in items
+                     if x["bot_id"] == bot or bot in (x.get("bots") or [])]
         if chat_type in ("private", "group"):
             items = [x for x in items if x["chat_type"] == chat_type]
         if status == "unreviewed":
@@ -264,7 +267,8 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         return {
             "session_key": sk,
             "bot_id": bot_id,
-            "bot_nickname": nicknames.get(bot_id, bot_id),
+            "bot_nickname": (nicknames.get(bot_id, bot_id)
+                             if bot_id != MERGED_BOT_ID else ""),
             "chat_type": chat_type,
             "chat_id": chat_id,
             "display_name": info["display_name"] if info else chat_id,

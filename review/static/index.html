@@ -392,7 +392,7 @@ async function refreshSessions(){
     ].join('');
     return `<div class="sess${curSession&&curSession.session_key===s.session_key?' active':''}" data-sk="${esc(s.session_key)}">
       <div class="t"><span class="name">${esc(s.display_name)}</span>${badges}</div>
-      <div class="meta"><span>${esc(s.bot_id)}</span><span>${s.chat_type==='group'?'群聊':'私聊'}</span>
+      <div class="meta"><span>${s.chat_type==='group'?`${(s.bots||[]).length} bot 合并`:esc(s.bot_id)}</span><span>${s.chat_type==='group'?'群聊':'私聊'}</span>
         <span>${fmtDay(s.mtime)}</span></div>
     </div>`;
   }).join('');
@@ -448,7 +448,7 @@ function renderEntry(e,i){
   }
   const cls = e.status==='unreviewed'?'pending': e.status==='abnormal'?'is-abn ctx':'ctx';
   const who = e.kind==='assistant'
-    ? `<span class="who bot">🤖 ${esc(curSession.bot_nickname)}</span>`
+    ? `<span class="who bot">🤖 ${esc(e.bot_nickname || curSession.bot_nickname || 'bot')}</span>`
     : `<span class="who">${esc(e.speaker||e.role)}</span>`;
   let body='';
   if(e.content) body+=`<div class="content">${esc(e.content)}</div>`;

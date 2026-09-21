@@ -10,10 +10,11 @@ history JSONL 每行一个事件, 只增不删:
   post_type="message_sent"  bot 自己发送的消息(WSServer 出站层归档)
 
 审核范围(面板侧过滤, 归档保持完整):
-  - 私聊: 全部消息
-  - 群聊: bot 的发言 + 用户 @ 本 bot 或引用本 bot 发言的消息
-    (@: 事件 message 段里 at.qq == self_id;
-     引用: reply 段 id ∈ 该会话已归档的 bot message_id 集合)
+  - 私聊: 全部消息(按 bot 独立会话)
+  - 群聊(跨 bot 合并为一个审核会话, key 的 bot 段固定为 "_merged"):
+    每个 bot 的归档各自过滤(bot 的发言 + 用户 @ 该 bot 或引用该 bot
+    发言的消息), 再按时间混流; 同一条消息同时命中多个 bot 过滤时跨 bot
+    去重(优先 message_id, 兜底 时间+发言人+内容)。
 
 身份: 优先 message_id("mid:<id>", history 只增不删 → 审核结论永不失联);
 无 message_id 时退回内容指纹(sha256(session_key|kind|time|content))。
@@ -40,6 +41,11 @@ from pathlib import Path
 from typing import Any
 
 SCAN_TTL = 5.0  # 会话列表扫描的短 TTL(秒)
+
+# 群聊合并会话的 bot 段固定值(session_key = "_merged/group/{群号}")
+MERGED_BOT_ID = "_merged"
+
+_ROW_FIELDS = ("kind", "mid", "uid", "nick", "text", "image_url", "time", "bot")
 
 
 def session_key(bot_id: str, chat_type: str, chat_id: str) -> str:
@@ -158,11 +164,7 @@ class _FileIndex:
             "size": self.size,
             "offset": self.offset,
             "bot_mids": sorted(self.bot_mids),
-            "rows": [
-                [r["kind"], r["mid"], r["uid"], r["nick"],
-                 r["text"], r["image_url"], r["time"]]
-                for r in self.rows
-            ],
+            "rows": [[r[f] for f in _ROW_FIELDS] for r in self.rows],
         }
 
     @classmethod
@@ -172,8 +174,7 @@ class _FileIndex:
         idx.size = int(d.get("size") or 0)
         idx.offset = int(d.get("offset") or 0)
         idx.bot_mids = {str(x) for x in (d.get("bot_mids") or [])}
-        fields = ("kind", "mid", "uid", "nick", "text", "image_url", "time")
-        idx.rows = [dict(zip(fields, r)) for r in (d.get("rows") or [])]
+        idx.rows = [dict(zip(_ROW_FIELDS, r)) for r in (d.get("rows") or [])]
         return idx
 
 
@@ -184,7 +185,7 @@ class MohobotData:
     cache_path 传入时启用 sidecar 持久化(重启免冷解析)。
     """
 
-    _CACHE_VERSION = 2
+    _CACHE_VERSION = 3
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
@@ -199,6 +200,8 @@ class MohobotData:
         self._cache_loaded = False
         self._last_save = 0.0
         self._dirty = False
+        # 群聊合并行缓存: group_id -> (成员文件失效指纹, 去重排序后的行)
+        self._merged_cache: dict[str, tuple[tuple, list[dict[str, Any]]]] = {}
 
     # ── sidecar 缓存 ─────────────────────────────────────────
 
@@ -278,6 +281,17 @@ class MohobotData:
         bot_id, chat_type, chat_id = parse_session_key(sk)
         return self._hist_base() / bot_id / chat_type / f"{chat_id}.jsonl"
 
+    def merged_group_files(self, group_id: str) -> list[Path]:
+        """一个群号在所有 bot 归档目录下的文件(群聊合并会话的组成部分)。"""
+        base = self._hist_base()
+        files: list[Path] = []
+        if base.exists():
+            for bot_dir in sorted(base.iterdir()):
+                p = bot_dir / "group" / f"{group_id}.jsonl"
+                if p.exists():
+                    files.append(p)
+        return files
+
     # ── bot 元信息 ───────────────────────────────────────────
 
     def _bot_meta(self) -> dict[str, dict[str, Any]]:
@@ -355,7 +369,9 @@ class MohobotData:
                 line = line.strip()
                 if not line:
                     continue
-                row = self._parse_line(line, chat_type, self_id, idx.bot_mids)
+                row = self._parse_line(
+                    line, chat_type, self_id, idx.bot_mids, bot_id,
+                )
                 if row is not None:
                     new_rows.append(row)
             if new_rows:
@@ -365,6 +381,7 @@ class MohobotData:
 
     def _parse_line(
         self, line: str, chat_type: str, self_id: str, bot_mids: set[str],
+        bot_id: str = "",
     ) -> dict[str, Any] | None:
         """解析一行历史事件 → 过滤后的行(群聊只留 bot 相关); 不入审返回 None。"""
         try:
@@ -395,6 +412,7 @@ class MohobotData:
             return {
                 "kind": "assistant", "mid": mid, "uid": "",
                 "nick": nick, "text": text, "image_url": image_url, "time": ts,
+                "bot": bot_id,
             }
 
         # 用户消息 — 群聊需命中 @ 本 bot 或引用本 bot 发言
@@ -407,6 +425,7 @@ class MohobotData:
         return {
             "kind": "user", "mid": mid, "uid": uid,
             "nick": nick, "text": text, "image_url": image_url, "time": ts,
+            "bot": bot_id,
         }
 
     @staticmethod
@@ -441,33 +460,64 @@ class MohobotData:
         self._ensure_cache_loaded()
         result: list[dict[str, Any]] = []
         base = self._hist_base()
+        groups: dict[str, dict[str, Any]] = {}
         if base.exists():
             for bot_dir in sorted(base.iterdir()):
                 if not bot_dir.is_dir():
                     continue
-                for chat_type in ("private", "group"):
-                    type_dir = bot_dir / chat_type
-                    if not type_dir.is_dir():
-                        continue
-                    for f in sorted(type_dir.glob("*.jsonl")):
+                private_dir = bot_dir / "private"
+                if private_dir.is_dir():
+                    for f in sorted(private_dir.glob("*.jsonl")):
                         idx = self._read_file_index(f)
                         if not idx or not idx.rows:
                             continue
                         last_ts = max((r["time"] for r in idx.rows), default=0)
                         result.append({
                             "session_key": session_key(
-                                bot_dir.name, chat_type, f.stem,
+                                bot_dir.name, "private", f.stem,
                             ),
                             "bot_id": bot_dir.name,
-                            "chat_type": chat_type,
+                            "chat_type": "private",
                             "chat_id": f.stem,
                             "mtime": f.stat().st_mtime,
                             "total": len(idx.rows),
                             "last_ts": last_ts,
                             "display_name": self._display_name(
-                                chat_type, f.stem, idx.rows,
+                                "private", f.stem, idx.rows,
                             ),
                         })
+                # 群聊: 跨 bot 归档合并 —— 每个群号聚合成员/mtime
+                group_dir = bot_dir / "group"
+                if group_dir.is_dir():
+                    for f in sorted(group_dir.glob("*.jsonl")):
+                        g = groups.setdefault(f.stem, {
+                            "bots": [], "mtime": 0.0, "total": 0, "last_ts": 0,
+                        })
+                        idx = self._read_file_index(f)
+                        if not idx or not idx.rows:
+                            continue
+                        if bot_dir.name not in g["bots"]:
+                            g["bots"].append(bot_dir.name)
+                        g["mtime"] = max(g["mtime"], f.stat().st_mtime)
+                        g["total"] += len(idx.rows)
+                        g["last_ts"] = max(
+                            g["last_ts"],
+                            max((r["time"] for r in idx.rows), default=0),
+                        )
+        for gid, g in sorted(groups.items()):
+            # total 用跨 bot 去重后的数量(同一条消息多 bot 归档只算一次)
+            total = len(self._merged_rows(gid))
+            result.append({
+                "session_key": session_key(MERGED_BOT_ID, "group", gid),
+                "bot_id": MERGED_BOT_ID,
+                "chat_type": "group",
+                "chat_id": gid,
+                "mtime": g["mtime"],
+                "total": total,
+                "last_ts": g["last_ts"],
+                "display_name": f"群 {gid}",
+                "bots": g["bots"],
+            })
         self._scan_cache = (now, result)
         self._maybe_save_cache()
         return result
@@ -485,7 +535,10 @@ class MohobotData:
         return chat_id
 
     def filtered_rows(self, sk: str) -> list[dict[str, Any]]:
-        """会话的入审行(不存在/为空返回 [])。"""
+        """会话的入审行(不存在/为空返回 [])。群聊合并会话跨 bot 聚合去重。"""
+        bot_id, chat_type, chat_id = parse_session_key(sk)
+        if bot_id == MERGED_BOT_ID and chat_type == "group":
+            return self._merged_rows(chat_id)
         path = self.history_path(sk)
         if not path.exists():
             return []
@@ -496,8 +549,54 @@ class MohobotData:
             self._maybe_save_cache()
             return list(idx.rows)
 
+    def _merged_rows(self, group_id: str) -> list[dict[str, Any]]:
+        """群聊合并会话的行: 各 bot 归档过滤结果按时间混流 + 跨 bot 去重。
+
+        去重键: message_id 优先; 用户消息无 id 时兜底 (time, uid, text)
+        —— 同一条用户消息经多个 bot 归档各自命中过滤时只保留一条。
+        bot 发言各 bot 独立, 不做内容级去重。
+        """
+        files = self.merged_group_files(group_id)
+        if not files:
+            return []
+        key_parts: list[tuple] = []
+        rows_all: list[dict[str, Any]] = []
+        with self._lock:
+            for p in files:
+                idx = self._read_file_index(p)
+                if not idx:
+                    continue
+                key_parts.append((str(p), idx.mtime, idx.size))
+                rows_all.extend(idx.rows)
+            sig = tuple(key_parts)
+            cached = self._merged_cache.get(group_id)
+            if cached and cached[0] == key_parts:
+                return cached[1]
+        out: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        for row in sorted(rows_all, key=lambda r: r["time"]):
+            if row["kind"] == "assistant":
+                dk: Any = f"mid:{row['mid']}" if row["mid"] else id(row)
+            else:
+                dk = (row["mid"] if row["mid"]
+                      else (row["time"], row["uid"], row["text"]))
+            if dk in seen:
+                continue
+            seen.add(dk)
+            out.append(row)
+        with self._lock:
+            self._merged_cache[group_id] = (sig, out)
+            self._maybe_save_cache()
+        return out
+
     def load_entries(self, sk: str) -> list[dict[str, Any]] | None:
         """兼容入口: 会话入审行(不存在返回 None)。"""
+        try:
+            bot_id, chat_type, chat_id = parse_session_key(sk)
+        except ValueError:
+            return None
+        if bot_id == MERGED_BOT_ID and chat_type == "group":
+            return self._merged_rows(chat_id) or []
         path = self.history_path(sk)
         if not path.exists():
             return None
@@ -538,7 +637,11 @@ class MohobotData:
         self, sk: str, statuses: dict[str, dict[str, Any]],
         abnormal_map: dict[str, dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """把会话的入审行组装为前端展示结构(身份 + 审核状态 + 图片/VLM)。"""
+        """把会话的入审行组装为前端展示结构(身份 + 审核状态 + 图片/VLM)。
+
+        群聊合并会话里, 每条 bot 发言附带 bot_id/bot_nickname(多 bot 混流)。
+        """
+        nicknames = self.bot_nicknames()
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
         for row in self.filtered_rows(sk):
@@ -551,6 +654,7 @@ class MohobotData:
             seen.add(identity)
             st = statuses.get(identity)
             abnormal = abnormal_map.get(identity)
+            bot_id = str(row.get("bot") or "")
             out.append({
                 "fingerprint": identity,
                 "role": "assistant" if kind == "assistant" else (row["uid"] or "user"),
@@ -566,6 +670,9 @@ class MohobotData:
                 "status": st["status"] if st else "unreviewed",
                 "reviewer": (st or {}).get("reviewer", ""),
                 "reviewed_at": (st or {}).get("reviewed_at"),
+                "bot_id": bot_id,
+                "bot_nickname": (nicknames.get(bot_id, bot_id)
+                                 if kind == "assistant" and bot_id else ""),
                 "abnormal": (
                     {"id": abnormal["id"], "tags": abnormal.get("tags", []),
                      "note": abnormal.get("note", "")}
