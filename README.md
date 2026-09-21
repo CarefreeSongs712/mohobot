@@ -240,11 +240,21 @@ database:
 
 - **查询/管理**：`/群列表` `/好友列表` `/退群 <序号|群号|区间>` `/删好友 <@|QQ|序号|区间>`（管理员）
 - **审批流**：好友申请/群邀请 → 自动规则（黑名单自动拒绝、`auto_agree/reject` 开关）→ 未自动处理时转发审批消息到**审批群**（`manage_group`）或私发审批员 → 审批员**引用该消息**回复 `/同意` `/拒绝` `/拉黑`
-- **抽查**：`/抽查 <群号|@群友|@QQ> <数量>` — 转发最近聊天记录（分批发；消息取自本地 `data/history` 归档，不再调用历史查询 API，无归档时给出提示）
-- **通知自动处理**：被设为/撤管理员、被禁言（超时自动退群）、被踢（自动拉黑群/用户）、被拉群（小群/大群/群容量/互斥成员检查自动退群 + 自动抽查新群）
+- **通知自动处理**：被设为/撤管理员、被禁言（超时自动退群）、被踢（自动拉黑群/用户）、被拉群（小群/大群/群容量/互斥成员检查自动退群）
 - **其他**：`/推荐 <群号|@qq>` 发送名片、`/加审批员 @某人` `/减审批员 @某人`
 
 > 移植自 [astrbot_plugin_relationship](https://github.com/Zhalslar/astrbot_plugin_relationship) v3.0.5（Zhalslar），去掉 afdian 校验与"加好友/加群"扩展（无对应依赖），OneBot API 走 mohobot 通用 `send_to_bot`。
+
+## 🗂️ 聊天记录管理插件
+
+`plugins/chat_manager/` — 查看指定会话的聊天记录、以 bot 身份代发消息。两个命令均**仅全局管理员**（`admins`）、带 `/` 前缀，群内多 bot 时只由一个 bot 响应：
+
+- **`/查看聊天 <QQ号|群号> [条数]`** — 从本地 `data/history` 归档读最近条数（默认 20，WebUI 可改；归档不足则全部），按时间正序**合并转发到当前会话**（私聊里下命令就走私聊合并转发）。不调用任何历史查询接口，无归档时明确报错
+- **`/发送消息 <QQ号|群号> <内容>`** — 把内容以**纯文本段**发到指定会话（不解析 `[CQ:...]`，避免被当消息构造入口）；成功回执、失败给出原因
+- **目标自动判定**（群号与 QQ 号都是纯数字，字面无法区分）：`/查看聊天` 按本地归档判定（群归档优先）；`/发送消息` 按 `get_group_list` 判定（在群列表里即群，否则当私聊）——群列表接口失败时**取消发送**，不猜测
+- **配置**（WebUI 插件页可改、热生效）：`default_count`（默认条数）/ `batch_size`（单批转发条数，超过自动分批、批间隔 0.5 秒）
+
+> 原 relationship 插件的 `/抽查` 与"被拉进新群自动抽查"已移除，查看聊天记录功能由此插件接管（不再依赖 `@` 定位、不再调用历史查询 API）。
 
 ## 🌸 抽老婆插件（移植自 astrbot-plugin-wifepicker）
 
@@ -397,11 +407,11 @@ mohobot/
 │   └── web_panel/                 # FastAPI 管理面板（8 板块，含封禁管理）
 ├── plugins/                       # 插件目录（动态加载：status / praise / divination /
 │                                  #   neteasemusic / wifepicker / relationship / song_sync /
-│                                  #   qzone / perception / welcome / usage_stats ...）
+│                                  #   qzone / perception / welcome / usage_stats / chat_manager ...）
 ├── tests/                         # 冒烟测试（smoke_*）与单测（tests/_run_all.py 全量回归）
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
-│   ├── history/{bot_id}/          # 【只读】原始聊天记录 JSONL
+│   ├── history/{bot_id}/          # 消息事件 JSONL（收到的 message + bot 发送的 message_sent）
 │   ├── contexts/{bot_id}/         # 【可读写】会话上下文
 │   ├── database/                  # SQLite（mohobot.db）
 │   └── cache/images/              # 图片缓存
@@ -414,13 +424,23 @@ mohobot/
 
 | 数据 | 位置 | 性质 | 格式 | 用途 |
 |------|------|------|------|------|
-| 聊天历史 | `data/history/` | 只读归档 | JSONL（每行一个事件） | 审计、全量回溯、训练导出 |
+| 聊天历史 | `data/history/` | 追加式归档 | JSONL（每行一个事件） | 审计、全量回溯、审核面板数据源 |
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
 | 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 
-- **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入
+- **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
 - **数据隔离**：会话数据按 bot_id 分目录
+
+## 📋 聊天记录审核面板（review/, 端口 9091）
+
+半独立 WebUI：**独立进程**（mohobot 启动时若 `review/config.yaml` 存在且 `enabled: true` 则拉起，mohobot 退出不影响它）、独立端口（默认 9091）、独立配置与独立 SQLite（`review/data/review.db`），对 mohobot 的 `data/` **严格只读**。
+
+- **数据源**：`data/history` 消息事件流（唯一来源）。history 只增不删，消息身份用 **message_id** —— 审核结论永不因上下文压缩/改写而失联
+- **审核范围（面板侧过滤，归档保持完整）**：群聊只审 **bot 的发言** 与 **用户 @ 本 bot 或引用本 bot 发言** 的消息；私聊全部审
+- **界面**：审核（按会话分页浏览，默认锚定第一条待审）、异常记录（标签：色情/政治/辱骂/其他，可编辑、可导出 CSV）、统计（总量/按 Bot/按审核员/操作日志）
+- **账号**：`review/config.yaml` 手工维护用户（密码只存 PBKDF2 哈希，`python -m review.hash_password` 生成）；登录后可自助改密（仅自己，需旧密码，写回保留注释）
+- **登录防爆破**：登录处理全局串行化 + 每次尝试固定 0.5s 硬延迟（登录耗时恒定防计时侧信道）
 
 ## 💬 聊天指令
 
@@ -490,7 +510,7 @@ class Plugin:
 - [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳固定回复 + ping/PONG
 - [x] 全局指令去重（群内多 bot 只由最小 bot_id 回复，支持命令+空格参数）
 - [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置；模型页含可用模型列表）
-- [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync / qzone）
+- [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync / qzone / chat_manager）
 - [x] /help 图片渲染（PIL 深色卡片，按插件分组 + 管理员标注）
 - [ ] 消息发送限流与队列（当前仅图片突发限流）
 - [ ] 单元测试与 CI（当前为本地冒烟测试 `tests/`）

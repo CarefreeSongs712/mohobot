@@ -56,7 +56,7 @@ def load_config(path: str | Path) -> ReviewConfig:
     cfg.enabled = bool(raw.get("enabled", True))
     cfg.host = str(server.get("host", "127.0.0.1"))
     cfg.port = int(server.get("port", 9091))
-    cfg.data_dir = str(raw.get("data_dir", "../data"))
+    cfg.data_dir = str(raw.get("data_dir") or "data")
     cfg.token_expiry = int(raw.get("token_expiry", 3600))
 
     users_raw = raw.get("users") or []

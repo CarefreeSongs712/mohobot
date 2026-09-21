@@ -251,6 +251,7 @@ class MohobotApplication:
             outbound_interval=self._config.server.outbound_interval,
             outbound_maxsize=self._config.server.outbound_maxsize,
             outbound_enqueue_timeout=self._config.server.outbound_enqueue_timeout,
+            data_dir=self._config.data_dir,
         )
 
         # Wire up circular references

@@ -2,10 +2,14 @@
 
 鉴权: config.yaml 手工维护用户(PBKDF2 哈希), 登录发内存 token
 (Authorization: Bearer), 与主面板同构; 所有用户权限相同。
+登录防爆破: 处理全局串行化 + 每次尝试固定 0.5s 硬延迟
+(登录耗时恒定防计时侧信道, 串行使并发爆破失效)。
+数据源: mohobot data/history 消息事件流(唯一来源, 身份=message_id)。
 """
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import secrets
@@ -33,6 +37,8 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
 
     # 内存 token 表: {token: {user, expiry}}
     tokens: dict[str, dict[str, Any]] = {}
+    # 登录串行锁(防爆破: 同一时刻只处理一个登录请求)
+    login_lock: asyncio.Lock = asyncio.Lock()
 
     def _auth(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -91,18 +97,22 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
 
     @app.post("/api/login")
     async def login(request: Request):
-        body = await request.json()
-        username = str(body.get("username", "")).strip()
-        password = str(body.get("password", ""))
-        user = next((u for u in cfg.users if u.username == username), None)
-        if user is None or not verify_password(password, user.password_hash):
-            logger.warning(f"审核面板登录失败: {username}")
-            raise HTTPException(status_code=401, detail="用户名或密码错误")
-        _cleanup_tokens()
-        token = secrets.token_hex(32)
-        tokens[token] = {"user": username, "expiry": time.time() + cfg.token_expiry}
-        logger.info(f"审核面板登录成功: {username}")
-        return {"token": token, "username": username}
+        # 串行化 + 无条件 0.5s 硬延迟: 防并发爆破, 且无论成败登录耗时恒定
+        # (不给攻击者"密码对不对"的计时侧信道)
+        async with login_lock:
+            await asyncio.sleep(0.5)
+            body = await request.json()
+            username = str(body.get("username", "")).strip()
+            password = str(body.get("password", ""))
+            user = next((u for u in cfg.users if u.username == username), None)
+            if user is None or not verify_password(password, user.password_hash):
+                logger.warning(f"审核面板登录失败: {username}")
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+            _cleanup_tokens()
+            token = secrets.token_hex(32)
+            tokens[token] = {"user": username, "expiry": time.time() + cfg.token_expiry}
+            logger.info(f"审核面板登录成功: {username}")
+            return {"token": token, "username": username}
 
     @app.post("/api/logout")
     async def logout(request: Request):
@@ -211,11 +221,16 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         items = _sort_sessions(items, sort)
         return {"sessions": items}
 
-    @app.get("/api/session/{bot_id}/{chat_type}/{chat_id}/{session_id}")
+    @app.get("/api/session/{bot_id}/{chat_type}/{chat_id}")
     async def session_detail(request: Request, bot_id: str, chat_type: str,
-                             chat_id: str, session_id: str):
+                             chat_id: str, page: int = 0, page_size: int = 100):
+        """会话明细(分页)。
+
+        page<=0 时自动锚定第一条待审消息所在页(无待审则最后一页),
+        前端判定完当前页后重新打开会话即自动跳到下一批待审。
+        """
         _auth(request)
-        sk = _loader.session_key(bot_id, chat_type, chat_id, session_id)
+        sk = _loader.session_key(bot_id, chat_type, chat_id)
         entries = data.enrich_entries(sk, store.statuses_by_session().get(sk, {}),
                                       store.abnormal_by_fingerprint())
         if not entries:
@@ -224,18 +239,32 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             (s for s in data.list_sessions() if s["session_key"] == sk), None
         )
         nicknames = data.bot_nicknames()
+        total = len(entries)
+        unreviewed = sum(1 for e in entries if e["status"] == "unreviewed")
+        page_size = max(1, min(int(page_size or 100), 500))
+        pages = max(1, (total + page_size - 1) // page_size)
+        if page <= 0:
+            first_pend = next(
+                (i for i, e in enumerate(entries) if e["status"] == "unreviewed"),
+                None,
+            )
+            page = (first_pend // page_size + 1) if first_pend is not None else pages
+        page = min(max(page, 1), pages)
+        window = entries[(page - 1) * page_size: page * page_size]
         return {
             "session_key": sk,
             "bot_id": bot_id,
             "bot_nickname": nicknames.get(bot_id, bot_id),
             "chat_type": chat_type,
             "chat_id": chat_id,
-            "session_id": session_id,
             "display_name": info["display_name"] if info else chat_id,
             "mtime": info["mtime"] if info else 0,
-            "unreviewed": sum(1 for e in entries if e["status"] == "unreviewed"),
-            "total": sum(1 for e in entries if e["kind"] != "summary"),
-            "entries": entries,
+            "unreviewed": unreviewed,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "entries": window,
         }
 
     # ── 审核操作 ─────────────────────────────────────────────

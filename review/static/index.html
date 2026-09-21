@@ -185,6 +185,10 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
           <button class="primary" id="btnNormal">✓ 对话正常</button>
           <button class="danger" id="btnAbnormal">✗ 对话异常</button>
           <button id="btnSkip">跳过 →</button>
+          <span style="width:1px;height:20px;background:var(--border);flex:none"></span>
+          <button class="ghost" id="pgPrev">‹ 上一页</button>
+          <span class="remind" id="pgLabel" style="flex:none;white-space:nowrap"></span>
+          <button class="ghost" id="pgNext">下一页 ›</button>
           <span class="remind" id="footHint"></span>
         </div>
       </div>
@@ -400,9 +404,9 @@ $('sortBtn').onclick=()=>{ sortMode = sortMode==='oldest'?'recent':'oldest';
   $('sortBtn').textContent = sortMode==='oldest'?'⏳ 最旧优先':'🕒 最近优先'; refreshSessions() };
 
 /* ================= 会话明细 ================= */
-async function openSession(sk){
+async function openSession(sk, page){
   try{
-    curSession = await api('/api/session/'+sk);
+    curSession = await api('/api/session/'+sk+(page?`?page=${page}`:''));
   }catch(e){ toast(e.message); return }
   document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.sk===sk));
   renderSession();
@@ -427,9 +431,16 @@ function renderSession(showAllCtx=false){
   const cb=$('chatBody'); cb.innerHTML=html;
   const so=$('showOlder');
   if(so) so.onclick=()=>renderSession(true);
+  updatePager();
   // 滚动到第一条待审消息
   const first = cb.querySelector('.entry.pending');
   if(first) setTimeout(()=>first.scrollIntoView({block:'center'}), 0);
+}
+function updatePager(){
+  const s=curSession; if(!s) return;
+  $('pgLabel').textContent = `第 ${s.page}/${s.pages} 页`;
+  $('pgPrev').disabled = s.page<=1;
+  $('pgNext').disabled = s.page>=s.pages;
 }
 function renderEntry(e,i){
   if(e.kind==='summary'){
@@ -460,7 +471,7 @@ function renderEntry(e,i){
 }
 function updateFoot(){
   const n = curSession? curSession.entries.filter(e=>e.status==='unreviewed').length : 0;
-  $('footHint').textContent = n>0?`当前待审 ${n} 条, 三个按钮都作用于这些消息`:'当前会话没有待审消息';
+  $('footHint').textContent = n>0?`本页待审 ${n} 条, 按钮作用于本页`:'本页没有待审消息';
   $('btnNormal').disabled = n===0; $('btnAbnormal').disabled = n===0;
 }
 
@@ -473,11 +484,16 @@ $('btnSkip').onclick = async ()=>{
 };
 $('btnNormal').onclick = async ()=>{
   if(!curSession) return;
-  const d = await api('/api/review',{method:'POST',body:{session_key:curSession.session_key,action:'normal'}});
+  const fps = curSession.entries.filter(e=>e.status==='unreviewed').map(e=>e.fingerprint);
+  if(!fps.length) return;
+  const d = await api('/api/review',{method:'POST',body:{session_key:curSession.session_key,action:'normal',fingerprints:fps}});
   toast(`已标记 ${d.changed} 条正常`);
   afterJudge(d);
 };
 $('btnAbnormal').onclick = ()=>{ if(curSession) openAbModal() };
+
+$('pgPrev').onclick=()=>{ const s=curSession; if(s&&s.page>1) openSession(s.session_key, s.page-1) };
+$('pgNext').onclick=()=>{ const s=curSession; if(s&&s.page<s.pages) openSession(s.session_key, s.page+1) };
 
 function afterJudge(d){
   const sk=curSession.session_key;

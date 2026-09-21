@@ -20,11 +20,20 @@ from loguru import logger
 
 from mohobot.models.onebot import Event
 from mohobot.bot_manager import BotManager
+from mohobot.file_store import JSONLWriter
 from mohobot.services.outbound import ChatAddress, OutboundScheduler, ReplySender
 from mohobot.services.task_supervisor import TaskSupervisor, TaskSupervisorClosed
+from mohobot.utils.cq_code import extract_plain_text
 
 # Type alias for the event callback
 EventCallback = Callable[[str, Event, dict[str, Any]], Awaitable[None]]
+
+# 归档进 history 的消息发送类 action(其余 action 是查询/管理类, 不归档)
+_MESSAGE_ACTIONS = {
+    "send_group_msg": "group",
+    "send_private_msg": "private",
+    "send_group_forward_msg": "group",
+}
 
 
 class WSServer:
@@ -42,12 +51,17 @@ class WSServer:
         outbound_interval: float = 0.5,
         outbound_maxsize: int = 100,
         outbound_enqueue_timeout: float = 2.0,
+        data_dir: str = "./data",
     ):
         self._host = host
         self._port = port
         self._max_size = max_size
         self._bot_manager = bot_manager
         self._task_supervisor = task_supervisor
+        self._data_dir = data_dir
+        # bot 发言归档: bot 发出的消息以 message_sent 事件写入 history JSONL
+        # (与收到的消息同一目录/文件), 供审核面板识别"bot 说过什么"。
+        self._archive_writers: dict[str, JSONLWriter] = {}
         self._outbound_scheduler = outbound_scheduler or OutboundScheduler(
             send_interval_sec=outbound_interval,
             queue_maxsize=outbound_maxsize,
@@ -85,6 +99,9 @@ class WSServer:
             self._server = None
             logger.info("WebSocket server stopped")
         await self._outbound_scheduler.close()
+        for writer in self._archive_writers.values():
+            await writer.close()
+        self._archive_writers.clear()
 
     async def close(self) -> None:
         """Alias for lifecycle integrations that expose close()."""
@@ -181,6 +198,20 @@ class WSServer:
         If wait_response=True, waits for the OneBot client's response
         (via echo) and returns it; otherwise returns None.
         """
+        params = params or {}
+
+        # 消息发送类 action 统一走 _send_tracked(带 bot 发言归档), 保留响应语义
+        if action in _MESSAGE_ACTIONS:
+            chat_type = _MESSAGE_ACTIONS[action]
+            chat_id = params.get("group_id") if chat_type == "group" else params.get("user_id")
+            if chat_id is None:
+                logger.warning(f"send_to_bot({action}) 缺少目标 id, bot {bot_id}")
+                return None
+            return await self._send_tracked(
+                bot_id, action, params, chat_type, chat_id,
+                wait_response=wait_response, timeout=timeout,
+            )
+
         instance = self._bot_manager.get(bot_id)
         if not instance:
             logger.warning(f"Cannot send to bot {bot_id}: not connected")
@@ -217,30 +248,185 @@ class WSServer:
     async def _send_tracked(
         self, bot_id: str, action: str, params: dict[str, Any],
         chat_type: str, chat_id: int | str,
-    ) -> None:
-        """Send a message WITHOUT waiting for the response.
+        wait_response: bool = False, timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        """Send a message with echo tracking + bot speech archival.
 
-        The echo is registered so that when the OneBot client responds,
-        handle_api_response records the message_id (for reply-quote detection).
-        This keeps streaming fast — no 10s timeout blocking every segment.
+        - echo 注册后, OneBot 客户端响应会:
+            1) 记录 message_id 到 BotInstance(引用回复检测);
+            2) resolve 归档 future → 后台把这条 bot 发言以 message_sent
+               事件写入 history JSONL(审核数据源)。
+        - wait_response=False(流式分段路径): 不等待, 保持发送速度;
+        - wait_response=True: 等待并返回响应 dict(查询语义不变)。
         """
         import uuid
         instance = self._bot_manager.get(bot_id)
         if not instance:
             logger.warning(f"Cannot send to bot {bot_id}: not connected")
-            return
+            return None
         echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
+        future = self._bot_manager.create_response_future(bot_id, echo)
+        payload = {"action": action, "params": params, "echo": echo}
         try:
             await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
-                lambda: instance.send({"action": action, "params": params, "echo": echo}),
+                lambda: instance.send(payload),
                 label=action,
             )
         except Exception:
             # Send failed — don't leave the tracked entry dangling
             self._bot_manager.drop_pending_sent(echo)
+            self._bot_manager.remove_response_future(bot_id, echo)
             raise
+        self._spawn_archive_task(self._archive_sent_message(
+            bot_id, chat_type, chat_id, action, params, future, echo,
+        ))
+        if not wait_response:
+            return None
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"API response timeout for {action} (bot {bot_id})")
+            return None
+        finally:
+            self._bot_manager.remove_response_future(bot_id, echo)
+
+    def _spawn_archive_task(self, coro) -> None:
+        """派发归档后台任务(supervisor 优先, 关闭中回退裸 task)。"""
+        if self._task_supervisor is not None:
+            try:
+                self._task_supervisor.create_task(
+                    coro, name="archive-send", owner="archive",
+                )
+                return
+            except TaskSupervisorClosed:
+                pass
+        asyncio.create_task(coro)
+
+    # 归档等待 echo 响应的超时(秒); 超时用本地标记 id 兜底
+    _ARCHIVE_ECHO_TIMEOUT = 8.0
+
+    async def _archive_sent_message(
+        self, bot_id: str, chat_type: str, chat_id: int | str,
+        action: str, params: dict[str, Any],
+        future: asyncio.Future, echo: str,
+    ) -> None:
+        """把一条 bot 发言以 message_sent 事件写入 history JSONL。
+
+        - message_id 优先取 echo 响应返回值(稳定身份, 审核结论不失联);
+          超时/未返回时用本地标记兜底(仍唯一, 但不会被"引用 bot 消息"命中)。
+        - 客户端明确返回失败(retcode 非成功)说明消息未发出, 不归档。
+        """
+        try:
+            resp = await asyncio.wait_for(
+                future, timeout=self._ARCHIVE_ECHO_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            resp = None
+        except Exception:
+            return  # 发送链路失败(连接断开等), 不归档
+        finally:
+            self._bot_manager.remove_response_future(bot_id, echo)
+            self._bot_manager.drop_pending_sent(echo)
+
+        if resp is not None:
+            status = str(resp.get("status", "") or "").lower()
+            try:
+                retcode = int(resp.get("retcode", 0) or 0)
+            except (TypeError, ValueError):
+                retcode = 0
+            if retcode != 0 or status not in ("", "ok", "async"):
+                return  # 客户端明确失败, 消息未发出
+
+        data = (resp or {}).get("data") or {}
+        mid = data.get("message_id")
+        if mid is not None and str(mid).strip():
+            message_id = str(mid)
+        else:
+            import uuid
+            message_id = f"local:{uuid.uuid4().hex}"
+        content = self._archive_content(action, params)
+        if content is None:
+            return
+        await self._write_archive_line(bot_id, chat_type, chat_id, message_id, content)
+
+    @staticmethod
+    def _archive_content(action: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """归档用的消息内容(统一成消息段列表); 无内容返回 None。"""
+        if action == "send_group_forward_msg":
+            # 合并转发: 展平为一条带署名的文本(bot 发言按节点内容归档)
+            lines = []
+            for node in (params.get("messages") or []):
+                nd = (node or {}).get("data") or {}
+                nick = str(nd.get("nickname") or nd.get("user_id") or "").strip()
+                body = extract_plain_text(nd.get("content") or "").strip()
+                if body:
+                    lines.append(f"{nick}: {body}" if nick else body)
+            text = "【合并转发】"
+            if lines:
+                text += "\n" + "\n".join(lines)
+            return [{"type": "text", "data": {"text": text}}]
+        return WSServer._sanitize_archive_segments(params.get("message"))
+
+    @staticmethod
+    def _sanitize_archive_segments(message) -> list[dict[str, Any]] | None:
+        """归档前净化消息段: base64:// 大字段(图片/语音)替换为占位, 防 history 膨胀。"""
+        if isinstance(message, str):
+            text = message.strip()
+            return [{"type": "text", "data": {"text": text}}] if text else None
+        if not isinstance(message, list):
+            return None
+        out: list[dict[str, Any]] = []
+        for seg in message:
+            if not isinstance(seg, dict):
+                continue
+            data = dict(seg.get("data") or {})
+            if str(data.get("file") or "").startswith("base64://"):
+                data["file"] = "base64://…"
+                data.pop("url", None)
+            out.append({"type": seg.get("type"), "data": data})
+        return out or None
+
+    async def _write_archive_line(
+        self, bot_id: str, chat_type: str, chat_id: int | str,
+        message_id: str, content: list[dict[str, Any]],
+    ) -> None:
+        """写一条 message_sent 事件进 history JSONL(失败只记日志)。"""
+        instance = self._bot_manager.get(bot_id)
+        bot_qq = instance.qq if instance else 0
+        bot_nick = instance.nickname if instance else bot_id
+        event: dict[str, Any] = {
+            "post_type": "message_sent",
+            "message_type": chat_type,
+            "time": int(time_module.time()),
+            "self_id": bot_qq,
+            "user_id": bot_qq,
+            "message_id": message_id,
+            "message": content,
+            "sender": {"user_id": bot_qq, "nickname": bot_nick, "card": ""},
+        }
+        if chat_type == "group":
+            try:
+                event["group_id"] = int(chat_id)
+            except (TypeError, ValueError):
+                event["group_id"] = chat_id
+        try:
+            path = self._archive_path(bot_id, chat_type, chat_id)
+            await self._get_archive_writer(path).append(event)
+        except Exception as e:
+            logger.debug(f"bot 发言归档失败(bot={bot_id}, {chat_type}:{chat_id}): {e}")
+
+    def _archive_path(self, bot_id: str, chat_type: str, chat_id: int | str) -> str:
+        """bot 发言的 history 归档路径(与收到的消息同文件)。"""
+        return f"{self._data_dir}/history/{bot_id}/{chat_type}/{chat_id}.jsonl"
+
+    def _get_archive_writer(self, path: str) -> JSONLWriter:
+        writer = self._archive_writers.get(path)
+        if writer is None:
+            writer = JSONLWriter(path)
+            self._archive_writers[path] = writer
+        return writer
 
     async def send_group_msg(
         self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]
