@@ -265,6 +265,31 @@ def test_loader_scan_and_group_filter():
         store.close()
 
 
+def test_loader_dedup_repushed_same_mid():
+    """同一 message_id 重复推送(如好友请求隔天重发, 时间不同) → 只留首条,
+    列表 total 与明细身份数一致(否则出现"列表显示待审、点进去全审完"的死审核)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        path = root / "history" / "bot_001" / "private" / "10001.jsonl"
+        repush = {"post_type": "message", "message_type": "private", "time": 1700005000,
+                  "self_id": 111, "user_id": 10001, "message_id": "M-100",
+                  "sender": {"user_id": 10001, "nickname": "张三"},
+                  "message": [{"type": "text", "data": {"text": "请求添加你为好友"}}]}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(repush, ensure_ascii=False) + "\n")
+        os.utime(path, (2200000000, 2200000000))
+        data = MohobotData(root)
+        rows = data.filtered_rows("bot_001/private/10001")
+        assert len(rows) == 4, f"重推同 mid 不应新增行: {len(rows)}"
+        assert sum(1 for r in rows if r["mid"] == "M-100") == 1
+        sessions = {s["session_key"]: s for s in data.list_sessions(force=True)}
+        assert sessions["bot_001/private/10001"]["total"] == 4
+        # 逐条增量追加的重推同样被去重
+        data2 = MohobotData(root, cache_path=root / "c.json")
+        assert data2.filtered_rows("bot_001/private/10001") == rows
+
+
 def test_loader_incremental_append_and_rewrite():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

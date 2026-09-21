@@ -145,16 +145,19 @@ def _render_message(message: Any) -> tuple[str, str]:
 class _FileIndex:
     """单个 history JSONL 的增量解析缓存。"""
 
-    __slots__ = ("mtime", "size", "offset", "rows", "bot_mids")
+    __slots__ = ("mtime", "size", "offset", "rows", "bot_mids", "seen_mids")
 
     def __init__(self) -> None:
         self.mtime: float = -1.0
         self.size: int = -1
         self.offset: int = 0
-        # 过滤后的行(仅入审内容): {kind, mid, uid, nick, text, image_url, time}
+        # 过滤后的行(仅入审内容): {kind, mid, uid, nick, text, image_url, time, bot}
+        # 同一 message_id 重复推送(断线重推/好友请求重发)在解析时去重, 只留首条
         self.rows: list[dict[str, Any]] = []
         # 该会话内 bot 发言的 message_id 集合(引用过滤用; 含未过过滤的转发)
         self.bot_mids: set[str] = set()
+        # 已见 message_id(去重用; 与 rows 同生命周期)
+        self.seen_mids: set[str] = set()
 
     # ── sidecar 缓存序列化(rows 用紧凑列表, 每行 7 字段) ─────
 
@@ -175,6 +178,7 @@ class _FileIndex:
         idx.offset = int(d.get("offset") or 0)
         idx.bot_mids = {str(x) for x in (d.get("bot_mids") or [])}
         idx.rows = [dict(zip(_ROW_FIELDS, r)) for r in (d.get("rows") or [])]
+        idx.seen_mids = {r["mid"] for r in idx.rows if r["mid"]}
         return idx
 
 
@@ -185,7 +189,7 @@ class MohobotData:
     cache_path 传入时启用 sidecar 持久化(重启免冷解析)。
     """
 
-    _CACHE_VERSION = 3
+    _CACHE_VERSION = 4
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
@@ -351,6 +355,7 @@ class MohobotData:
                 # 文件被截断/替换 → 全量重读
                 idx.rows = []
                 idx.bot_mids = set()
+                idx.seen_mids = set()
                 idx.offset = 0
             new_rows: list[dict[str, Any]] = []
             try:
@@ -372,8 +377,13 @@ class MohobotData:
                 row = self._parse_line(
                     line, chat_type, self_id, idx.bot_mids, bot_id,
                 )
-                if row is not None:
-                    new_rows.append(row)
+                if row is None:
+                    continue
+                if row["mid"] and row["mid"] in idx.seen_mids:
+                    continue  # 同一消息重复推送(重连重推/好友请求重发) → 只留首条
+                if row["mid"]:
+                    idx.seen_mids.add(row["mid"])
+                new_rows.append(row)
             if new_rows:
                 idx.rows.extend(new_rows)
                 self._mark_dirty()
