@@ -18,15 +18,23 @@ history JSONL 每行一个事件, 只增不删:
 身份: 优先 message_id("mid:<id>", history 只增不删 → 审核结论永不失联);
 无 message_id 时退回内容指纹(sha256(session_key|kind|time|content))。
 
-性能: 每个文件增量解析(记录上次读取 offset, 只解析新增字节), mtime/size
-失效; 群聊过滤在解析时按行判定(bot message_id 集合随解析同步构建, 引用
-消息必然晚于被引用的 bot 发言入档)。
+性能:
+  - 每个文件增量解析(记录上次读取 offset, 只解析新增字节), mtime/size
+    失效; 群聊过滤在解析时按行判定(bot message_id 集合随解析同步构建,
+    引用消息必然晚于被引用的 bot 发言入档)。
+  - 解析结果持久化到 sidecar 缓存(review/data/loader_cache.json, 传
+    cache_path 才启用): 重启直接加载, 不再冷解析全量 history(生产
+    1.5GB/219 万行, 冷解析会把整个面板卡住几分钟)。
+  - 加载器方法为同步纯函数, 由调用方(run_in_executor)决定执行线程;
+    内部用线程锁保护缓存, 允许并发调用。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -142,16 +150,124 @@ class _FileIndex:
         # 该会话内 bot 发言的 message_id 集合(引用过滤用; 含未过过滤的转发)
         self.bot_mids: set[str] = set()
 
+    # ── sidecar 缓存序列化(rows 用紧凑列表, 每行 7 字段) ─────
+
+    def to_cache(self) -> dict[str, Any]:
+        return {
+            "mtime": self.mtime,
+            "size": self.size,
+            "offset": self.offset,
+            "bot_mids": sorted(self.bot_mids),
+            "rows": [
+                [r["kind"], r["mid"], r["uid"], r["nick"],
+                 r["text"], r["image_url"], r["time"]]
+                for r in self.rows
+            ],
+        }
+
+    @classmethod
+    def from_cache(cls, d: dict[str, Any]) -> "_FileIndex":
+        idx = cls()
+        idx.mtime = float(d.get("mtime") or 0)
+        idx.size = int(d.get("size") or 0)
+        idx.offset = int(d.get("offset") or 0)
+        idx.bot_mids = {str(x) for x in (d.get("bot_mids") or [])}
+        fields = ("kind", "mid", "uid", "nick", "text", "image_url", "time")
+        idx.rows = [dict(zip(fields, r)) for r in (d.get("rows") or [])]
+        return idx
+
 
 class MohobotData:
-    """只读访问 mohobot 数据目录(history 增量解析 + mtime 失效缓存)。"""
+    """只读访问 mohobot 数据目录(history 增量解析 + mtime 失效缓存)。
 
-    def __init__(self, data_dir: str | Path):
+    方法均为同步纯函数; 内部线程锁保护, 允许调用方用线程池并发执行。
+    cache_path 传入时启用 sidecar 持久化(重启免冷解析)。
+    """
+
+    _CACHE_VERSION = 2
+    _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
+
+    def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
         self.data_dir = Path(data_dir)
+        self._lock = threading.RLock()
         self._file_cache: dict[str, _FileIndex] = {}     # path -> _FileIndex
         self._meta_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
         self._imgmap_cache: tuple[float, dict] | None = None
         self._scan_cache: tuple[float, list[dict]] | None = None
+        # sidecar 持久化缓存(可选)
+        self._cache_path = Path(cache_path) if cache_path else None
+        self._cache_loaded = False
+        self._last_save = 0.0
+        self._dirty = False
+
+    # ── sidecar 缓存 ─────────────────────────────────────────
+
+    def _ensure_cache_loaded(self) -> None:
+        """首次使用时加载 sidecar(损坏/版本不符则当无缓存, 冷解析兜底)。"""
+        if self._cache_loaded:
+            return
+        self._cache_loaded = True
+        if self._cache_path is None:
+            return
+        try:
+            if not self._cache_path.exists():
+                return
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            if data.get("version") != self._CACHE_VERSION:
+                return
+            for rel, d in (data.get("files") or {}).items():
+                try:
+                    self._file_cache[str(self.data_dir / rel)] = _FileIndex.from_cache(d)
+                except Exception:
+                    continue
+        except Exception:
+            pass  # 缓存文件损坏 → 忽略, 走冷解析
+
+    def flush_cache(self) -> None:
+        """立即落盘 sidecar(进程退出时调用)。"""
+        self._save_cache(force=True)
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+
+    def _maybe_save_cache(self) -> None:
+        """解析有增量时按节流间隔保存 sidecar。"""
+        if self._cache_path is None or not self._dirty:
+            return
+        now = time.time()
+        if now - self._last_save < self._SAVE_MIN_INTERVAL:
+            return
+        self._save_cache()
+
+    def _save_cache(self, force: bool = False) -> None:
+        if self._cache_path is None or not self._dirty:
+            return
+        now = time.time()
+        if not force and now - self._last_save < self._SAVE_MIN_INTERVAL:
+            return
+        files: dict[str, Any] = {}
+        with self._lock:
+            for path, idx in self._file_cache.items():
+                try:
+                    if not Path(path).exists():
+                        continue  # 文件已删除 → 不再缓存
+                except OSError:
+                    continue
+                rel = Path(path).relative_to(self.data_dir).as_posix()
+                files[rel] = idx.to_cache()
+        payload = {"version": self._CACHE_VERSION, "files": files}
+        tmp = self._cache_path.with_suffix(".json.tmp")
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._cache_path)  # 原子替换
+            self._last_save = now
+            self._dirty = False
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # ── 目录工具 ─────────────────────────────────────────────
 
@@ -167,25 +283,26 @@ class MohobotData:
     def _bot_meta(self) -> dict[str, dict[str, Any]]:
         """{bot_id: {"nickname":…, "qq":…}} — 从 data/bots/{id}/config.json 读。"""
         now = time.time()
-        if self._meta_cache and now - self._meta_cache[0] < SCAN_TTL:
-            return self._meta_cache[1]
-        result: dict[str, dict[str, Any]] = {}
-        bots_dir = self.data_dir / "bots"
-        if bots_dir.exists():
-            for d in sorted(bots_dir.iterdir()):
-                cfg_file = d / "config.json"
-                if not cfg_file.is_file():
-                    continue
-                try:
-                    cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                result[d.name] = {
-                    "nickname": str(cfg.get("nickname") or "") or d.name,
-                    "qq": str(cfg.get("qq") or ""),
-                }
-        self._meta_cache = (now, result)
-        return result
+        with self._lock:
+            if self._meta_cache and now - self._meta_cache[0] < SCAN_TTL:
+                return self._meta_cache[1]
+            result: dict[str, dict[str, Any]] = {}
+            bots_dir = self.data_dir / "bots"
+            if bots_dir.exists():
+                for d in sorted(bots_dir.iterdir()):
+                    cfg_file = d / "config.json"
+                    if not cfg_file.is_file():
+                        continue
+                    try:
+                        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    result[d.name] = {
+                        "nickname": str(cfg.get("nickname") or "") or d.name,
+                        "qq": str(cfg.get("qq") or ""),
+                    }
+            self._meta_cache = (now, result)
+            return result
 
     def bot_nicknames(self) -> dict[str, str]:
         return {b: m["nickname"] for b, m in self._bot_meta().items()}
@@ -197,47 +314,54 @@ class MohobotData:
     # ── history 增量解析 ─────────────────────────────────────
 
     def _read_file_index(self, path: Path) -> _FileIndex | None:
-        """读一个 history 文件的过滤行(增量: 只解析新增字节)。损坏返回 None。"""
+        """读一个 history 文件的过滤行(增量: 只解析新增字节)。损坏返回 None。
+
+        首次调用会先加载 sidecar 缓存; 有增量时标脏并按节流落盘。
+        """
+        self._ensure_cache_loaded()
         try:
             st = path.stat()
         except OSError:
             return None
         key = str(path)
-        idx = self._file_cache.get(key)
-        if idx is None:
-            idx = _FileIndex()
-            self._file_cache[key] = idx
-        mtime, size = st.st_mtime, st.st_size
-        if idx.mtime == mtime and idx.size == size:
-            return idx
+        with self._lock:
+            idx = self._file_cache.get(key)
+            if idx is None:
+                idx = _FileIndex()
+                self._file_cache[key] = idx
+            mtime, size = st.st_mtime, st.st_size
+            if idx.mtime == mtime and idx.size == size:
+                return idx
 
-        if size < idx.offset or idx.mtime < 0:
-            # 文件被截断/替换 → 全量重读
-            idx.rows = []
-            idx.bot_mids = set()
-            idx.offset = 0
-        new_rows: list[dict[str, Any]] = []
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                if idx.offset:
-                    fh.seek(idx.offset)
-                new_text = fh.read()
-                idx.offset = fh.tell()
-            idx.mtime, idx.size = mtime, size
-        except OSError:
-            return None
-        bot_id = path.parts[-3]
-        chat_type = path.parts[-2]
-        self_id = self.bot_self_id(bot_id)
-        for line in new_text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            row = self._parse_line(line, chat_type, self_id, idx.bot_mids)
-            if row is not None:
-                new_rows.append(row)
-        idx.rows.extend(new_rows)
-        return idx
+            if size < idx.offset or idx.mtime < 0:
+                # 文件被截断/替换 → 全量重读
+                idx.rows = []
+                idx.bot_mids = set()
+                idx.offset = 0
+            new_rows: list[dict[str, Any]] = []
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    if idx.offset:
+                        fh.seek(idx.offset)
+                    new_text = fh.read()
+                    idx.offset = fh.tell()
+                idx.mtime, idx.size = mtime, size
+            except OSError:
+                return None
+            bot_id = path.parts[-3]
+            chat_type = path.parts[-2]
+            self_id = self.bot_self_id(bot_id)
+            for line in new_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                row = self._parse_line(line, chat_type, self_id, idx.bot_mids)
+                if row is not None:
+                    new_rows.append(row)
+            if new_rows:
+                idx.rows.extend(new_rows)
+                self._mark_dirty()
+            return idx
 
     def _parse_line(
         self, line: str, chat_type: str, self_id: str, bot_mids: set[str],
@@ -314,6 +438,7 @@ class MohobotData:
         if not force and self._scan_cache and now - self._scan_cache[0] < SCAN_TTL:
             return self._scan_cache[1]
 
+        self._ensure_cache_loaded()
         result: list[dict[str, Any]] = []
         base = self._hist_base()
         if base.exists():
@@ -344,6 +469,7 @@ class MohobotData:
                             ),
                         })
         self._scan_cache = (now, result)
+        self._maybe_save_cache()
         return result
 
     @staticmethod
@@ -364,7 +490,11 @@ class MohobotData:
         if not path.exists():
             return []
         idx = self._read_file_index(path)
-        return list(idx.rows) if idx else []
+        if not idx:
+            return []
+        with self._lock:
+            self._maybe_save_cache()
+            return list(idx.rows)
 
     def load_entries(self, sk: str) -> list[dict[str, Any]] | None:
         """兼容入口: 会话入审行(不存在返回 None)。"""
@@ -372,7 +502,10 @@ class MohobotData:
         if not path.exists():
             return None
         idx = self._read_file_index(path)
-        return list(idx.rows) if idx else []
+        if not idx:
+            return []
+        with self._lock:
+            return list(idx.rows)
 
     # ── VLM 图片概括 ─────────────────────────────────────────
 

@@ -242,6 +242,41 @@ def test_loader_incremental_append_and_rewrite():
         assert data.list_sessions(force=True)[0]["total"] == 1
 
 
+def test_loader_sidecar_cache_persistence():
+    """sidecar 持久化: 重启(新实例)直接加载缓存, 不再冷解析; 损坏缓存安全降级。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        cache = root / "sidecar" / "loader_cache.json"
+        sk = "bot_001/private/10001"
+
+        # 第一次: 正常解析 + flush 落盘
+        data1 = MohobotData(root, cache_path=cache)
+        rows1 = data1.filtered_rows(sk)
+        assert len(rows1) == 4
+        data1.flush_cache()
+        assert cache.exists()
+        payload = json.loads(cache.read_text(encoding="utf-8"))
+        assert payload["version"] == MohobotData._CACHE_VERSION
+        assert any("history" in k for k in payload["files"])
+
+        # 第二次(模拟重启): 新实例直接加载缓存, 结果一致
+        data2 = MohobotData(root, cache_path=cache)
+        rows2 = data2.filtered_rows(sk)
+        assert len(rows2) == len(rows1)
+        assert [r["mid"] for r in rows2] == [r["mid"] for r in rows1]
+        # group 会话也来自缓存(含 bot_mids, 引用过滤仍生效)
+        grow = data2.filtered_rows("bot_001/group/20002")
+        assert len(grow) == 3
+
+        # 损坏的缓存 → 忽略并从磁盘重新解析, 结果不变
+        cache.write_text("{corrupted", encoding="utf-8")
+        data3 = MohobotData(root, cache_path=cache)
+        assert len(data3.filtered_rows(sk)) == len(rows1)
+        data3.flush_cache()
+        assert json.loads(cache.read_text(encoding="utf-8"))["version"] == MohobotData._CACHE_VERSION
+
+
 # ── 审核存储(身份换成 message_id, 语义不变) ──────────────────
 
 def test_store_judge_rejudge_skip():

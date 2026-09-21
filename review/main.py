@@ -46,7 +46,7 @@ def main() -> None:
     logger.remove()
     logger.add(sys.stderr, level="INFO")
 
-    data = MohobotData(data_dir)
+    data = MohobotData(data_dir, cache_path=REVIEW_DIR / "data" / "loader_cache.json")
     store = ReviewStore(REVIEW_DIR / "data" / "review.db")
     app = create_app(cfg, data, store, config_path=config_path)
 
@@ -57,6 +57,10 @@ def main() -> None:
     try:
         uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="warning")
     finally:
+        try:
+            data.flush_cache()  # history 解析缓存落盘(重启免冷解析)
+        except Exception:
+            pass
         store.close()
 
 

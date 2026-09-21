@@ -59,15 +59,17 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
 
     # ── 会话计数辅助 ─────────────────────────────────────────
 
-    def _session_counts() -> list[dict[str, Any]]:
+    async def _session_counts() -> list[dict[str, Any]]:
         """把 loader 会话概要与审核状态合并 → 带 unreviewed/normal/abnormal 计数。
 
         force=True 重扫目录(文件级 mtime 缓存使其开销仅为 stat 调用),
         保证 mohobot 侧新写入的消息立即可见。
+        loader 的重调用走线程执行, 冷启动(首次全量解析 1.5GB history)
+        也只挂起当前请求, 不冻结事件循环。
         """
         all_statuses = store.statuses_by_session()
         items = []
-        for s in data.list_sessions(force=True):
+        for s in await asyncio.to_thread(data.list_sessions, True):
             sk = s["session_key"]
             sts = all_statuses.get(sk, {})
             normal = sum(1 for v in sts.values() if v["status"] == "normal")
@@ -87,10 +89,13 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     def _unreviewed_fps(sk: str, entries: list[dict[str, Any]]) -> list[str]:
         return [e["fingerprint"] for e in entries if e["status"] == "unreviewed"]
 
-    def _remaining_unreviewed(sk: str) -> int:
+    async def _remaining_unreviewed(sk: str) -> int:
         """判定后重算剩余待审(重新取最新审核状态, 不用判定前的快照)。"""
-        entries = data.enrich_entries(sk, store.statuses_by_session().get(sk, {}),
-                                      store.abnormal_by_fingerprint())
+        entries = await asyncio.to_thread(
+            data.enrich_entries, sk,
+            store.statuses_by_session().get(sk, {}),
+            store.abnormal_by_fingerprint(),
+        )
         return len(_unreviewed_fps(sk, entries or []))
 
     # ── Auth ─────────────────────────────────────────────────
@@ -198,10 +203,11 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     @app.get("/api/bootstrap")
     async def bootstrap(request: Request):
         _auth(request)
-        nicknames = data.bot_nicknames()
+        sessions = await asyncio.to_thread(data.list_sessions)
+        nicknames = await asyncio.to_thread(data.bot_nicknames)
         bots = [
             {"bot_id": b, "nickname": nicknames.get(b, b)}
-            for b in sorted({s["bot_id"] for s in data.list_sessions()})
+            for b in sorted({s["bot_id"] for s in sessions})
         ]
         return {"bots": bots, "tags": TAG_OPTIONS}
 
@@ -209,7 +215,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     async def sessions(request: Request, bot: str = "", chat_type: str = "",
                        status: str = "all", sort: str = "oldest"):
         _auth(request)
-        items = _session_counts()
+        items = await _session_counts()
         if bot:
             items = [x for x in items if x["bot_id"] == bot]
         if chat_type in ("private", "group"):
@@ -231,14 +237,18 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         """
         _auth(request)
         sk = _loader.session_key(bot_id, chat_type, chat_id)
-        entries = data.enrich_entries(sk, store.statuses_by_session().get(sk, {}),
-                                      store.abnormal_by_fingerprint())
+        entries = await asyncio.to_thread(
+            data.enrich_entries, sk,
+            store.statuses_by_session().get(sk, {}),
+            store.abnormal_by_fingerprint(),
+        )
         if not entries:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
+        sessions = await asyncio.to_thread(data.list_sessions)
         info = next(
-            (s for s in data.list_sessions() if s["session_key"] == sk), None
+            (s for s in sessions if s["session_key"] == sk), None
         )
-        nicknames = data.bot_nicknames()
+        nicknames = await asyncio.to_thread(data.bot_nicknames)
         total = len(entries)
         unreviewed = sum(1 for e in entries if e["status"] == "unreviewed")
         page_size = max(1, min(int(page_size or 100), 500))
@@ -281,15 +291,18 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         except ValueError:
             raise HTTPException(status_code=400, detail="bad session_key")
 
-        entries = data.enrich_entries(sk, store.statuses_by_session().get(sk, {}),
-                                      store.abnormal_by_fingerprint())
+        entries = await asyncio.to_thread(
+            data.enrich_entries, sk,
+            store.statuses_by_session().get(sk, {}),
+            store.abnormal_by_fingerprint(),
+        )
         if entries is None or not entries:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
 
         if action == "skip":
             store.skip(sk, user, detail=str(body.get("detail", "")))
             return {"ok": True, "action": "skip",
-                    "remaining_unreviewed": _remaining_unreviewed(sk)}
+                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
 
         # 未指定指纹 → 默认当前全部待审
         if not fps:
@@ -303,7 +316,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             changed = store.judge(sk, fps, "normal", user)
             logger.info(f"[review] {user}: {sk} 正常 {changed} 条")
             return {"ok": True, "action": "normal", "changed": changed,
-                    "remaining_unreviewed": _remaining_unreviewed(sk)}
+                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
 
         if action == "abnormal":
             tags = [str(t) for t in (body.get("tags") or []) if t in TAG_OPTIONS]
@@ -319,7 +332,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
                 )
             logger.info(f"[review] {user}: {sk} 异常 {len(fps)} 条 (tags={tags})")
             return {"ok": True, "action": "abnormal", "changed": len(fps),
-                    "remaining_unreviewed": _remaining_unreviewed(sk)}
+                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
 
         raise HTTPException(status_code=400, detail=f"未知操作: {action}")
 
@@ -329,9 +342,9 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     async def abnormal_list(request: Request, bot: str = "", tag: str = ""):
         _auth(request)
         records = store.list_abnormal(bot=bot, tag=tag)
-        nicknames = data.bot_nicknames()
+        nicknames = await asyncio.to_thread(data.bot_nicknames)
         # 附会话显示名
-        name_map = {s["session_key"]: s["display_name"] for s in data.list_sessions()}
+        name_map = {s["session_key"]: s["display_name"] for s in await asyncio.to_thread(data.list_sessions)}
         for r in records:
             r["bot_id"] = r["session_key"].split("/", 1)[0]
             r["bot_nickname"] = nicknames.get(r["bot_id"], r["bot_id"])
@@ -354,8 +367,8 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     async def export(request: Request, bot: str = "", tag: str = ""):
         _auth(request)
         records = store.list_abnormal(bot=bot, tag=tag)
-        nicknames = data.bot_nicknames()
-        name_map = {s["session_key"]: s["display_name"] for s in data.list_sessions()}
+        nicknames = await asyncio.to_thread(data.bot_nicknames)
+        name_map = {s["session_key"]: s["display_name"] for s in await asyncio.to_thread(data.list_sessions)}
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -389,7 +402,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     @app.get("/api/stats")
     async def stats(request: Request):
         _auth(request)
-        counts = _session_counts()
+        counts = await _session_counts()
         per_bot: dict[str, dict[str, int]] = {}
         overall = {"total": 0, "normal": 0, "abnormal": 0, "unreviewed": 0}
         for c in counts:
@@ -397,7 +410,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             for k in overall:
                 b[k] += c[k]
                 overall[k] += c[k]
-        nicknames = data.bot_nicknames()
+        nicknames = await asyncio.to_thread(data.bot_nicknames)
         return {
             "overall": overall,
             "per_bot": [
