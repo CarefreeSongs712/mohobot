@@ -29,13 +29,13 @@ async def test_plugin_config_system() -> None:
 
     # schema 解析
     schema = meta["config_schema"]
-    assert set(schema.keys()) == {"manage_group", "manage_users", "check", "request", "notice", "batch_delay_min", "batch_delay_max"}
-    assert schema["check"]["items"]["count"]["default"] == 20
+    assert set(schema.keys()) == {"manage_group", "manage_users", "request", "notice", "batch_delay_min", "batch_delay_max"}
+    assert schema["batch_delay_min"]["default"] == 10
     assert schema["notice"]["items"]["max_group_capacity"]["default"] == 100
 
     # 默认配置生成 + 存档写入
     config = meta["config"]
-    assert config["check"]["count"] == 20
+    assert config["batch_delay_min"] == 10
     assert config["notice"]["max_ban_days"] == 3
     assert config["request"]["auto_agree_friend"] is False
     assert config["manage_users"] == []
@@ -46,13 +46,13 @@ async def test_plugin_config_system() -> None:
     ok = await ps.save_plugin_config("relationship", {
         "manage_group": "123456",
         "manage_users": ["2001"],
-        "check": {"count": 50},
+        "batch_delay_min": 15,
         "request": {"auto_agree_friend": True},
         "notice": {"max_group_capacity": 200},
     })
     assert ok
     meta2 = next(m for m in ps._plugins if m["name"] == "relationship")
-    assert meta2["config"]["check"]["count"] == 50
+    assert meta2["config"]["batch_delay_min"] == 15
     assert meta2["config"]["request"]["auto_agree_friend"] is True
     assert meta2["config"]["manage_group"] == "123456"
     # 实例已注入(plugin_config 属性)
@@ -60,7 +60,7 @@ async def test_plugin_config_system() -> None:
     assert getattr(inst, "plugin_config", {}).get("manage_group") == "123456"
     # 存档已更新
     saved = json.loads(archive.read_text(encoding="utf-8"))
-    assert saved["check"]["count"] == 50
+    assert saved["batch_delay_min"] == 15
 
     # 未知插件保存 → False
     assert await ps.save_plugin_config("nope", {}) is False
@@ -237,15 +237,15 @@ async def test_schema_coercion() -> None:
 
     # 面板提交错误类型: int 字段给字符串, bool 给字符串, list 给逗号串
     ok = await ps.save_plugin_config("relationship", {
-        "check": {"count": "50", "batch_size": "abc", "delay": "10"},
+        "batch_delay_min": "50",
+        "notice": {"max_ban_days": "abc"},
         "request": {"auto_agree_friend": "true", "auto_reject_group": 1},
         "manage_users": "2001,2002",
     })
     assert ok
     cfg = ps.get_plugin_config("relationship")
-    assert cfg["check"]["count"] == 50, cfg["check"]["count"]
-    assert cfg["check"]["batch_size"] == 40, "非法 int 回退默认值"
-    assert cfg["check"]["delay"] == 10
+    assert cfg["batch_delay_min"] == 50, cfg["batch_delay_min"]
+    assert cfg["notice"]["max_ban_days"] == 3, "非法 int 回退默认值"
     assert cfg["request"]["auto_agree_friend"] is True
     assert cfg["request"]["auto_reject_group"] is True
     assert cfg["manage_users"] == ["2001", "2002"]
@@ -260,15 +260,16 @@ async def test_schema_coercion() -> None:
     import json as _json
     archive = Path(tmp) / "plugins_config" / "relationship.json"
     archive.write_text(_json.dumps({
-        "check": {"count": "abc", "batch_size": "55"},
+        "batch_delay_min": "abc",
+        "batch_delay_max": "55",
         "notice": {"max_group_capacity": "abc"},
     }), encoding="utf-8")
     ps2 = PluginSystem(plugins_dir="plugins", data_dir=tmp)
     await ps2.load_plugins()
     meta2 = next(m for m in ps2._plugins if m["name"] == "relationship")
     cfg2 = meta2["config"]
-    assert cfg2["check"]["count"] == 20, "脏 int 回退默认"
-    assert cfg2["check"]["batch_size"] == 55, "合法数字字符串应转换"
+    assert cfg2["batch_delay_min"] == 10, "脏 int 回退默认"
+    assert cfg2["batch_delay_max"] == 55, "合法数字字符串应转换"
     assert cfg2["notice"]["max_group_capacity"] == 100
     print("[5] schema 类型强转 + 存档脏值防护 OK")
 

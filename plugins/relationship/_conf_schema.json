@@ -11,51 +11,6 @@
     "type": "list",
     "default": []
   },
-  "check": {
-    "description": "抽查配置",
-    "type": "object",
-    "items": {
-      "count": {
-        "description": "抽查消息默认数量",
-        "type": "int",
-        "hint": "每次抽查默认抽查多少条消息, “抽查”命令可输入一个数字来指定抽查数量, 自动抽查使用默认值",
-        "slider": {
-          "min": 1,
-          "max": 100,
-          "step": 1
-        },
-        "default": 20
-      },
-      "batch_size": {
-        "description": "单次转发消息数量",
-        "type": "int",
-        "hint": "一次性转发过多消息容易报错, 消息超过此数量会自动分批次转发",
-        "slider": {
-          "min": 10,
-          "max": 60,
-          "step": 1
-        },
-        "default": 40
-      },
-      "check_new_group": {
-        "description": "是否自动抽查群聊天记录",
-        "hint": "开启后, 每次bot被拉入新群时, 会自动抽查对应群的聊天记录",
-        "type": "bool",
-        "default": true
-      },
-      "delay": {
-        "description": "新群延迟抽查时间（秒）",
-        "hint": "机器人被拉入新群后, 等待多少秒再执行自动抽查",
-        "type": "int",
-        "slider": {
-          "min": 0,
-          "max": 600,
-          "step": 1
-        },
-        "default": 30
-      }
-    }
-  },
   "request": {
     "description": "请求配置",
     "hint": "请求类事件：群邀请、好友申请",

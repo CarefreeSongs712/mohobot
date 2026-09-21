@@ -28,11 +28,6 @@ class PluginConfig:
         self._admin_ids = [str(a) for a in (admins or [])]
         self._rebuild()
 
-    @property
-    def data_dir(self) -> str:
-        """框架数据目录(抽查读 data/history 用)。"""
-        return self._data_dir
-
     def _rebuild(self) -> None:
         """从 self._data 重建全部派生字段(init 与磁盘重读共用)。"""
         # 1. 管理员(全局配置 admins 注入)
@@ -57,10 +52,8 @@ class PluginConfig:
         # 5. 子配置
         request = self._data.get("request") or {}
         notice = self._data.get("notice") or {}
-        check = self._data.get("check") or {}
         self.request = RequestConfig(request)
         self.notice = NoticeConfig(notice)
-        self.check = CheckConfig(check)
 
         # 6. 黑名单引用
         self.group_blacklist = self.request.group_blacklist
@@ -186,14 +179,6 @@ class PluginConfig:
             await json_update(self._config_path(), _merge, default={})
         except Exception as e:
             logger.warning(f"关系插件配置持久化失败: {e}")
-
-
-class CheckConfig:
-    def __init__(self, data: dict):
-        self.count = int(data.get("count", 20))
-        self.batch_size = int(data.get("batch_size", 40))
-        self.check_new_group = bool(data.get("check_new_group", True))
-        self.delay = int(data.get("delay", 30))
 
 
 class RequestConfig:

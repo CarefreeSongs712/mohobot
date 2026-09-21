@@ -1,6 +1,6 @@
 """通知处理 — 移植自 astrbot_plugin_relationship (core/notice/handle.py)。
 
-根据决策结果: 发管理员通知/操作者回复、自动退群、拉黑、抽查新群。
+根据决策结果: 发管理员通知/操作者回复、自动退群、拉黑。
 (欢迎消息已拆分为独立插件 plugins/welcome)
 """
 
@@ -12,7 +12,6 @@ from typing import Any
 from loguru import logger
 
 from relationship_core.config import PluginConfig
-from relationship_core.forward import ForwardTool
 from relationship_core.notice.decision import NoticeDecision
 from relationship_core.notice.model import NoticeMessage
 
@@ -38,25 +37,6 @@ class NoticeHandle:
         # 管理者提示(审批群/审批员)
         if result.admin_reply:
             await self._send_admin(bot_id, result.admin_reply)
-
-        # 查群(被拉入新群时自动抽查聊天记录)
-        if (
-            self.cfg.check.check_new_group
-            and result.check_group
-            and (self.cfg.manage_group or self.cfg.admin_id)
-        ):
-            if self.cfg.check.delay > 0:
-                await asyncio.sleep(self.cfg.check.delay)
-            await ForwardTool.source_forward(
-                ws_server=self.cfg.ws_server,
-                bot_id=bot_id,
-                count=self.cfg.check.count,
-                source_group_id=int(notice.group_id),
-                forward_group_id=int(self.cfg.manage_group) if self.cfg.manage_group else None,
-                forward_user_id=int(self.cfg.admin_id) if self.cfg.admin_id else None,
-                batch_size=self.cfg.check.batch_size,
-                data_dir=self.cfg.data_dir,
-            )
 
         # 拉黑群聊/用户
         if result.black_group:

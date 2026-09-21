@@ -2,7 +2,7 @@
 
 帮助管理 QQ 好友与群聊: 群列表/好友列表/退群/删好友/审批员管理、
 好友申请与群邀请审批(完整审批流: 审批群/审批员转发 + 引用回复审批)、
-抽查聊天记录、通知类事件自动处理(管理员变动/禁言/被踢/被拉群)。
+通知类事件自动处理(管理员变动/禁言/被踢/被拉群)。
 
 适配 mohobot:
 - 命令带 / 前缀; 权限使用全局 admins(配置顶层 admins, 与封禁系统共用)
@@ -41,7 +41,6 @@ COMMANDS = {
     "同意": "cmd_agree",
     "拒绝": "cmd_refuse",
     "拉黑": "cmd_block",
-    "抽查": "cmd_check",
     "推荐": "cmd_contact",
     "批量加群": "cmd_batch_join_group",
     "批量加好友": "cmd_batch_add_friend",
@@ -62,7 +61,6 @@ class Plugin:
             {"name": "同意", "desc": "同意好友申请或群邀请(引用审批消息, 审批员)"},
             {"name": "拒绝", "desc": "拒绝好友申请或群邀请(引用审批消息, 审批员)"},
             {"name": "拉黑", "desc": "拒绝并拉黑好友申请人或邀请群(引用审批消息, 审批员)"},
-            {"name": "抽查", "desc": "抽查 <群号|@群友|@QQ> <数量>(管理员)"},
             {"name": "推荐", "desc": "推荐 <群号/@群友/@qq>"},
             {"name": "批量加群", "desc": "批量加群 <群号1,群号2,...> — 逐个申请加群, 随机延迟(管理员)"},
             {"name": "批量加好友", "desc": "批量加好友 <QQ1,QQ2,...> — 逐个申请加好友, 随机延迟(管理员)"},
@@ -247,11 +245,6 @@ class Plugin:
 
     async def cmd_block(self, bot_id: str, event: Any, rest: str) -> str:
         return await self._request.handle_cmd(bot_id, event, approve=False, extra=rest, block=True)
-
-    async def cmd_check(self, bot_id: str, event: Any, rest: str) -> str:
-        if not self._check_admin(event):
-            return "❌ 你没有权限执行此操作。"
-        return await self._normal.check_messages(bot_id, event, rest)
 
     async def cmd_contact(self, bot_id: str, event: Any, rest: str) -> str:
         return await self._contact.contact(bot_id, event, rest)

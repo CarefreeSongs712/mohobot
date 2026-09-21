@@ -1,0 +1,24 @@
+{
+  "default_count": {
+    "description": "默认查看条数",
+    "hint": "「/查看聊天」不写条数时读取多少条记录; 归档不足该条数时全部转发",
+    "type": "int",
+    "default": 20,
+    "slider": {
+      "min": 1,
+      "max": 200,
+      "step": 1
+    }
+  },
+  "batch_size": {
+    "description": "单批转发条数",
+    "hint": "一次性转发过多节点容易失败, 超过此数量会自动分批转发(每批之间间隔 0.5 秒)",
+    "type": "int",
+    "default": 40,
+    "slider": {
+      "min": 10,
+      "max": 60,
+      "step": 1
+    }
+  }
+}

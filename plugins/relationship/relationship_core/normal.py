@@ -1,14 +1,12 @@
 """普通命令处理 — 移植自 astrbot_plugin_relationship (core/normal.py)。
 
-群列表/好友列表/退群/删好友/审批员管理/抽查。
-抽查的消息取自本地归档(data/history), 其余动作走 send_to_bot。
+群列表/好友列表/退群/删好友/审批员管理。
+动作走 ws_server.send_to_bot。发送支持批量, 失败跳过继续。
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-from loguru import logger
 
 from relationship_core.config import PluginConfig
 from relationship_core.utils import api_call, get_ats, get_nickname, parse_multi_input
@@ -138,40 +136,3 @@ class NormalHandle:
             await self.cfg.remove_manage_user(at_id)
             msgs.append(f"已移除审批员: {nickname}")
         return "\n".join(msgs)
-
-    async def check_messages(self, bot_id: str, event: Any, raw: str) -> str:
-        """抽查 <群号|@群友|@QQ> <数量>, 转发最近聊天记录到当前会话。
-
-        消息取自本地归档 data/history(不调用历史查询 API); 无记录时给出提示。
-        """
-        from relationship_core.forward import ForwardTool
-
-        parts = (raw or "").split()
-        count = self.cfg.check.count
-        target_arg = ""
-        for p in parts:
-            if p.isdigit() and count == self.cfg.check.count and target_arg == "":
-                # 第一个数字可能是群号/QQ, 第二个是数量
-                target_arg = p
-            elif p.isdigit():
-                count = int(p)
-        # @ 优先
-        at_ids = get_ats(event, noself=True)
-
-        try:
-            group_id = getattr(event, "group_id", 0)
-            await ForwardTool.check_messages(
-                ws_server=self.cfg.ws_server,
-                bot_id=bot_id,
-                at_ids=at_ids,
-                target_arg=target_arg,
-                count=count,
-                reply_group_id=group_id,
-                reply_user_id=getattr(event, "user_id", 0),
-                batch_size=self.cfg.check.batch_size,
-                data_dir=self.cfg.data_dir,
-            )
-            return None  # 转发已发送, 无需文本回复
-        except Exception as e:
-            logger.error(f"抽查失败: {e}")
-            return f"❌ 抽查失败: {e}"

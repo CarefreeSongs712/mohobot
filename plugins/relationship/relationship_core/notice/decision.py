@@ -17,7 +17,6 @@ class NoticeResult:
     admin_reply: str = ""
     operator_reply: str = ""
 
-    check_group: bool = False
     leave_group: bool = False
     black_group: bool = False
     black_user: bool = False
@@ -128,9 +127,6 @@ class NoticeDecision:
                 return
             if await self._check_mutual_blacklist(result, gid):
                 return
-
-        # 走到这里说明要么审批员拉群, 要么全部检查通过
-        result.check_group = True
 
     # ── 各种检查 ─────────────────────────────────────────────
 
