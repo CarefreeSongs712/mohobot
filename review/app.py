@@ -64,16 +64,13 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
 
         force=True 重扫目录(文件级 mtime 缓存使其开销仅为 stat 调用),
         保证 mohobot 侧新写入的消息立即可见。
-        loader 的重调用走线程执行, 冷启动(首次全量解析 1.5GB history)
-        也只挂起当前请求, 不冻结事件循环。
+        计数来自 store 的进程内缓存(与 statuses_by_session 同一次构建),
+        loader/DB 的重调用都走线程, 不冻结事件循环。
         """
-        all_statuses = store.statuses_by_session()
+        counts = await asyncio.to_thread(store.counts_by_session)
         items = []
         for s in await asyncio.to_thread(data.list_sessions, True):
-            sk = s["session_key"]
-            sts = all_statuses.get(sk, {})
-            normal = sum(1 for v in sts.values() if v["status"] == "normal")
-            abnormal = sum(1 for v in sts.values() if v["status"] == "abnormal")
+            normal, abnormal = counts.get(s["session_key"], (0, 0))
             unreviewed = max(0, s["total"] - normal - abnormal)
             items.append({**s, "normal": normal, "abnormal": abnormal, "unreviewed": unreviewed})
         return items
@@ -89,14 +86,19 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
     def _unreviewed_fps(sk: str, entries: list[dict[str, Any]]) -> list[str]:
         return [e["fingerprint"] for e in entries if e["status"] == "unreviewed"]
 
-    async def _remaining_unreviewed(sk: str) -> int:
-        """判定后重算剩余待审(重新取最新审核状态, 不用判定前的快照)。"""
-        entries = await asyncio.to_thread(
-            data.enrich_entries, sk,
+    def _remaining_after(entries: list[dict[str, Any]], judged: list[str]) -> int:
+        """在已取到的 entries 上算剩余待审(判定后调用, 免去重新加载+重新 enrich)。"""
+        done = set(judged)
+        return sum(1 for e in entries
+                   if e["status"] == "unreviewed" and e["fingerprint"] not in done)
+
+    def _enrich_sync(sk: str) -> list[dict[str, Any]]:
+        """会话明细组装(含状态/异常读取) — 整体在线程里跑, 不阻塞事件循环。"""
+        return data.enrich_entries(
+            sk,
             store.statuses_by_session().get(sk, {}),
             store.abnormal_by_fingerprint(),
         )
-        return len(_unreviewed_fps(sk, entries or []))
 
     # ── Auth ─────────────────────────────────────────────────
 
@@ -240,11 +242,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         """
         _auth(request)
         sk = _loader.session_key(bot_id, chat_type, chat_id)
-        entries = await asyncio.to_thread(
-            data.enrich_entries, sk,
-            store.statuses_by_session().get(sk, {}),
-            store.abnormal_by_fingerprint(),
-        )
+        entries = await asyncio.to_thread(_enrich_sync, sk)
         if not entries:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
         sessions = await asyncio.to_thread(data.list_sessions)
@@ -295,18 +293,14 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         except ValueError:
             raise HTTPException(status_code=400, detail="bad session_key")
 
-        entries = await asyncio.to_thread(
-            data.enrich_entries, sk,
-            store.statuses_by_session().get(sk, {}),
-            store.abnormal_by_fingerprint(),
-        )
+        entries = await asyncio.to_thread(_enrich_sync, sk)
         if entries is None or not entries:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
 
         if action == "skip":
             store.skip(sk, user, detail=str(body.get("detail", "")))
             return {"ok": True, "action": "skip",
-                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
+                    "remaining_unreviewed": _remaining_after(entries, [])}
 
         # 未指定指纹 → 默认当前全部待审
         if not fps:
@@ -320,23 +314,23 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             changed = store.judge(sk, fps, "normal", user)
             logger.info(f"[review] {user}: {sk} 正常 {changed} 条")
             return {"ok": True, "action": "normal", "changed": changed,
-                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
+                    "remaining_unreviewed": _remaining_after(entries, fps)}
 
         if action == "abnormal":
             tags = [str(t) for t in (body.get("tags") or []) if t in TAG_OPTIONS]
             note = str(body.get("note", "")).strip()
-            for fp in fps:
-                e = by_fp.get(fp)
-                if e is None:
-                    continue
-                store.judge(sk, [fp], "abnormal", user)
+            # 判定批量一次写入(避免逐条 judge 各自扫一遍本会话结论)
+            marked = [fp for fp in fps if fp in by_fp]
+            store.judge(sk, marked, "abnormal", user)
+            for fp in marked:
+                e = by_fp[fp]
                 store.add_abnormal(
                     sk, fp, e["role"], e["speaker"] or e["role"],
                     e["content"], e["message_id"], tags, note, user,
                 )
-            logger.info(f"[review] {user}: {sk} 异常 {len(fps)} 条 (tags={tags})")
-            return {"ok": True, "action": "abnormal", "changed": len(fps),
-                    "remaining_unreviewed": await _remaining_unreviewed(sk)}
+            logger.info(f"[review] {user}: {sk} 异常 {len(marked)} 条 (tags={tags})")
+            return {"ok": True, "action": "abnormal", "changed": len(marked),
+                    "remaining_unreviewed": _remaining_after(entries, marked)}
 
         raise HTTPException(status_code=400, detail=f"未知操作: {action}")
 

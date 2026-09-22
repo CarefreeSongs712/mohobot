@@ -379,6 +379,37 @@ def test_store_judge_rejudge_skip():
         store.close()
 
 
+def test_store_statuses_cache_and_external_write():
+    """状态缓存: 命中时不重建; 本地写入增量补丁立即可见; 外部写入(库戳记变化)自动重建。"""
+    with tempfile.TemporaryDirectory() as td:
+        db = Path(td) / "review.db"
+        store = ReviewStore(db)
+        sk = "bot_001/private/10001"
+
+        first = store.statuses_by_session()
+        assert first == {} and store.counts_by_session() == {}
+        assert store.statuses_by_session() is first, "无变化时应命中同一缓存对象"
+
+        # 本地 judge → 缓存增量补丁(不重建), 计数同步
+        assert store.judge(sk, ["mid:A", "mid:B"], "normal", "alice") == 2
+        st = store.statuses_by_session()
+        assert st[sk]["mid:A"]["status"] == "normal"
+        assert store.counts_by_session()[sk] == (2, 0)
+
+        # 改判 → 计数从 normal 挪到 abnormal
+        assert store.judge(sk, ["mid:A"], "abnormal", "bob") == 1
+        assert store.statuses_by_session()[sk]["mid:A"]["status"] == "abnormal"
+        assert store.counts_by_session()[sk] == (1, 1)
+
+        # 外部写入(另一个连接写同一个库) → db/wal 戳记变化 → 自动重建
+        other = ReviewStore(db)
+        other.judge(sk, ["mid:C"], "normal", "carol")
+        other.close()
+        assert store.statuses_by_session()[sk]["mid:C"]["status"] == "normal"
+        assert store.counts_by_session()[sk] == (2, 1)
+        store.close()
+
+
 def test_store_abnormal_and_stats():
     with tempfile.TemporaryDirectory() as td:
         store = ReviewStore(Path(td) / "review.db")

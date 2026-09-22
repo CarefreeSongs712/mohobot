@@ -496,10 +496,19 @@ $('pgPrev').onclick=()=>{ const s=curSession; if(s&&s.page>1) openSession(s.sess
 $('pgNext').onclick=()=>{ const s=curSession; if(s&&s.page<s.pages) openSession(s.session_key, s.page+1) };
 
 function afterJudge(d){
-  const sk=curSession.session_key;
-  refreshSessions();
+  const s = curSession; if(!s) return;
+  const sk = s.session_key;
+  // 乐观更新: 本地立刻把这些条目标为已审(底部计数/徽标不等服务端回包)
+  const judged = new Set(s.entries.filter(e=>e.status==='unreviewed').map(e=>e.fingerprint));
+  s.entries.forEach(e=>{ if(judged.has(e.fingerprint)) e.status='normal' });
+  s.unreviewed = d.remaining_unreviewed;
+  const item = sessionItems.find(x=>x.session_key===sk);
+  if(item) item.unreviewed = d.remaining_unreviewed;
+  updateFoot();
+  // 先用本地列表切下一个会话(零等待), 侧栏刷新放后台
   if(d.remaining_unreviewed===0){ toast('本会话已审完, 切换下一个'); gotoNext(); }
-  else openSession(sk);
+  else renderSession();
+  refreshSessions();
 }
 function gotoNext(){
   // 在当前过滤列表中找下一个待审会话(从当前位置向后环形)
