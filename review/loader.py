@@ -159,16 +159,7 @@ class _FileIndex:
         # 已见 message_id(去重用; 与 rows 同生命周期)
         self.seen_mids: set[str] = set()
 
-    # ── sidecar 缓存序列化(rows 用紧凑列表, 每行 7 字段) ─────
-
-    def to_cache(self) -> dict[str, Any]:
-        return {
-            "mtime": self.mtime,
-            "size": self.size,
-            "offset": self.offset,
-            "bot_mids": sorted(self.bot_mids),
-            "rows": [[r[f] for f in _ROW_FIELDS] for r in self.rows],
-        }
+    # ── sidecar 缓存反序列化(rows 为紧凑列表, 字段见 _ROW_FIELDS) ─────
 
     @classmethod
     def from_cache(cls, d: dict[str, Any]) -> "_FileIndex":
@@ -204,6 +195,8 @@ class MohobotData:
         self._cache_loaded = False
         self._last_save = 0.0
         self._dirty = False
+        self._saving = False
+        self._save_thread: threading.Thread | None = None
         # 群聊合并行缓存: group_id -> (成员文件失效指纹, 去重排序后的行)
         self._merged_cache: dict[str, tuple[tuple, list[dict[str, Any]]]] = {}
 
@@ -231,46 +224,87 @@ class MohobotData:
             pass  # 缓存文件损坏 → 忽略, 走冷解析
 
     def flush_cache(self) -> None:
-        """立即落盘 sidecar(进程退出时调用)。"""
+        """立即落盘(进程退出/测试收尾用): 等后台保存线程结束, 再补一次同步保存。"""
+        thread = self._save_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30.0)
         self._save_cache(force=True)
 
     def _mark_dirty(self) -> None:
         self._dirty = True
 
     def _maybe_save_cache(self) -> None:
-        """解析有增量时按节流间隔保存 sidecar。"""
+        """解析有增量时按节流间隔保存 sidecar(后台线程, 不占用请求线程)。"""
         if self._cache_path is None or not self._dirty:
             return
         now = time.time()
         if now - self._last_save < self._SAVE_MIN_INTERVAL:
             return
-        self._save_cache()
+        self._last_save = now  # 先占位, 防并发重复触发
+        self._spawn_save()
+
+    def _spawn_save(self) -> None:
+        """后台落盘(10MB 量级的序列化+写盘, 不让请求线程等)。"""
+        with self._lock:
+            if self._saving:
+                return
+            self._saving = True
+
+        def _run() -> None:
+            try:
+                self._save_cache(force=True)
+            finally:
+                with self._lock:
+                    self._saving = False
+
+        thread = threading.Thread(
+            target=_run, name="review-loader-save", daemon=True,
+        )
+        self._save_thread = thread
+        thread.start()
 
     def _save_cache(self, force: bool = False) -> None:
-        if self._cache_path is None or not self._dirty:
+        """落盘 sidecar: 锁内只做轻量快照(引用), 序列化与写盘在锁外。"""
+        if self._cache_path is None:
             return
-        now = time.time()
-        if not force and now - self._last_save < self._SAVE_MIN_INTERVAL:
-            return
-        files: dict[str, Any] = {}
         with self._lock:
-            for path, idx in self._file_cache.items():
-                try:
-                    if not Path(path).exists():
-                        continue  # 文件已删除 → 不再缓存
-                except OSError:
-                    continue
+            if not self._dirty:
+                return
+            now = time.time()
+            if not force and now - self._last_save < self._SAVE_MIN_INTERVAL:
+                return
+            snapshot = [
+                (path, idx.mtime, idx.size, idx.offset,
+                 sorted(idx.bot_mids), list(idx.rows))
+                for path, idx in self._file_cache.items()
+            ]
+            self._dirty = False
+            self._last_save = now
+
+        files: dict[str, Any] = {}
+        for path, mtime, size, offset, bot_mids, rows in snapshot:
+            try:
+                if not Path(path).exists():
+                    continue  # 文件已删除 → 不再缓存
                 rel = Path(path).relative_to(self.data_dir).as_posix()
-                files[rel] = idx.to_cache()
+            except (OSError, ValueError):
+                continue
+            files[rel] = {
+                "mtime": mtime,
+                "size": size,
+                "offset": offset,
+                "bot_mids": bot_mids,
+                "rows": [[r[f] for f in _ROW_FIELDS] for r in rows],
+            }
         payload = {"version": self._CACHE_VERSION, "files": files}
         tmp = self._cache_path.with_suffix(".json.tmp")
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._cache_path)  # 原子替换
-            self._last_save = now
-            self._dirty = False
         except Exception:
+            with self._lock:
+                self._dirty = True  # 写失败 → 置脏, 下次增量时重试
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:

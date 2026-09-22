@@ -288,6 +288,7 @@ def test_loader_dedup_repushed_same_mid():
         # 逐条增量追加的重推同样被去重
         data2 = MohobotData(root, cache_path=root / "c.json")
         assert data2.filtered_rows("bot_001/private/10001") == rows
+        data2.flush_cache()
 
 
 def test_loader_incremental_append_and_rewrite():
