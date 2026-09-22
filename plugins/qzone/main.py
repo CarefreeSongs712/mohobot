@@ -55,12 +55,12 @@ class Plugin:
 
     info = {
         "commands": [
-            {"name": "看说说", "desc": "查看QQ空间说说: /看说说 [@QQ] [序号/范围]"},
-            {"name": "发说说", "desc": "发布说说(管理员/私聊): /发说说 <文本> [图片]"},
-            {"name": "删说说", "desc": "删除自己的说说(管理员/私聊): /删说说 [序号/范围]"},
-            {"name": "评说说", "desc": "评论说说: /评说说 [@QQ] [序号] <内容>"},
-            {"name": "回评", "desc": "回复评论: /回评 [@QQ] [说说序号] [评论序号] <内容>"},
-            {"name": "赞说说", "desc": "点赞说说: /赞说说 [@QQ] [序号/范围]"},
+            {"name": "看说说", "desc": "查看QQ空间说说: /看说说 [@QQ] [序号/范围]", "admin": True},
+            {"name": "发说说", "desc": "发布说说(管理员/私聊): /发说说 <文本> [图片]", "admin": True},
+            {"name": "删说说", "desc": "删除自己的说说(管理员/私聊): /删说说 [序号/范围]", "admin": True},
+            {"name": "评说说", "desc": "评论说说: /评说说 [@QQ] [序号] <内容>", "admin": True},
+            {"name": "回评", "desc": "回复评论: /回评 [@QQ] [说说序号] [评论序号] <内容>", "admin": True},
+            {"name": "赞说说", "desc": "点赞说说: /赞说说 [@QQ] [序号/范围]", "admin": True},
             {"name": "重置QQCookies", "desc": "重置QQ空间登录态(管理员/私聊)", "admin": True},
         ],
     }
@@ -85,17 +85,17 @@ class Plugin:
     # 命令别名表(小写): -> (handler 名, 需管理员)
     _COMMANDS: dict[str, tuple[str, bool]] = {}
     for _alias in ("看说说", "查看说说"):
-        _COMMANDS[_alias] = ("view", False)
+        _COMMANDS[_alias] = ("view", True)
     for _alias in ("发说说",):
         _COMMANDS[_alias] = ("publish", True)
     for _alias in ("删说说", "删除说说"):
         _COMMANDS[_alias] = ("delete", True)
     for _alias in ("评说说", "评论说说", "读说说"):
-        _COMMANDS[_alias] = ("comment", False)
+        _COMMANDS[_alias] = ("comment", True)
     for _alias in ("回评", "回复评论"):
-        _COMMANDS[_alias] = ("reply", False)
+        _COMMANDS[_alias] = ("reply", True)
     for _alias in ("赞说说", "点赞说说"):
-        _COMMANDS[_alias] = ("like", False)
+        _COMMANDS[_alias] = ("like", True)
     for _alias in ("重置qqcookies", "重置cookies"):
         _COMMANDS[_alias] = ("reset_cookies", True)
 

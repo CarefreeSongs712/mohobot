@@ -318,7 +318,9 @@ def test_plugin_class_shape():
     assert callable(plugin.on_message)
     assert callable(plugin.on_shutdown)
     assert "/看说说" in plugin.global_triggers
-    assert plugin._COMMANDS["看说说"] == ("view", False)
+    assert plugin._COMMANDS["看说说"] == ("view", True)
+    assert plugin._COMMANDS["评说说"] == ("comment", True)
+    assert plugin._COMMANDS["赞说说"] == ("like", True)
     assert plugin._COMMANDS["发说说"] == ("publish", True)
     assert plugin._COMMANDS["重置qqcookies"] == ("reset_cookies", True)
 
