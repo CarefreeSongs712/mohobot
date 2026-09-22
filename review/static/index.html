@@ -80,7 +80,7 @@ main{flex:1; overflow:hidden; position:relative}
 .entry.ctx{opacity:.42}
 .entry.ctx:hover{opacity:.85}
 .entry.pending{border-left-color:var(--warn)}
-.entry.is-abn{border-left-color:var(--bad)}
+.entry.is-abn{border-left-color:var(--bad); opacity:1; background:#241a18}
 .entry.exempt{opacity:.35; font-style:italic}
 .entry img.msg-img{max-width:260px; max-height:200px; border-radius:8px; margin-top:6px; display:block; border:1px solid var(--border)}
 .vlm{margin-top:5px; font-size:12px; color:#9fb8cc; background:#1a2430; border:1px solid #24384a; padding:5px 9px; border-radius:6px}
@@ -413,18 +413,24 @@ async function openSession(sk, page){
 }
 function renderSession(showAllCtx=false){
   const s=curSession;
-  $('chatHead').innerHTML = `<div class="t">${esc(s.display_name)} <span style="color:var(--dim);font-size:12px">${esc(s.bot_nickname)} · ${s.chat_type==='group'?'群聊':'私聊'} · ${esc(s.chat_id)}</span></div>
+  const abChip = s.abnormal_count>0
+    ? `<span class="badge bad" id="abJump" title="跳到异常条目" style="cursor:pointer;margin-left:6px">⚠ 异常 ${s.abnormal_count}</span>` : '';
+  $('chatHead').innerHTML = `<div class="t">${esc(s.display_name)} <span style="color:var(--dim);font-size:12px">${esc(s.bot_nickname)} · ${s.chat_type==='group'?'群聊':'私聊'} · ${esc(s.chat_id)}</span>${abChip}</div>
     <div class="meta">共 ${s.total} 条 · 待审 ${s.unreviewed} · 最后更新 ${fmtTime(s.mtime)}</div>`;
   $('chatFoot').style.display='flex';
   updateFoot();
   const entries=s.entries;
-  // 第一条待审之前的已审消息是"上下文": 默认最多展示 8 条淡显, 更早的折叠
+  // 默认最多展示"锚点"前 8 条已审消息作为上下文; 锚点 = 最早的待审/异常条目
+  // (异常条目必须露出 —— 否则会被折叠或被滚动顶出视野, 出现"列表说有异常却看不到")
   const firstPending = entries.findIndex(e=>e.status==='unreviewed');
+  const firstAbn = entries.findIndex(e=>e.status==='abnormal');
+  let anchor = firstPending >= 0 ? firstPending : entries.length;
+  if(firstAbn >= 0 && firstAbn < anchor) anchor = firstAbn;
   let startIdx = 0;
   let html='';
-  if(!showAllCtx && firstPending>8){
-    startIdx = firstPending-8;
-    html+=`<button class="ghost show-older" id="showOlder">▸ 展开更早的 ${firstPending-8} 条已审消息</button>`;
+  if(!showAllCtx && anchor>8){
+    startIdx = anchor-8;
+    html+=`<button class="ghost show-older" id="showOlder">▸ 展开更早的 ${startIdx} 条已审消息</button>`;
   }
   const body=entries.map((e,i)=>({e,i})).filter(({i})=>i>=startIdx);
   html+=body.map(({e,i})=>renderEntry(e,i)).join('');
@@ -432,9 +438,16 @@ function renderSession(showAllCtx=false){
   const so=$('showOlder');
   if(so) so.onclick=()=>renderSession(true);
   updatePager();
-  // 滚动到第一条待审消息
-  const first = cb.querySelector('.entry.pending');
-  if(first) setTimeout(()=>first.scrollIntoView({block:'center'}), 0);
+  // 异常条目一键跳转(本页没有就跳到它所在的页)
+  const jump=$('abJump');
+  if(jump) jump.onclick=()=>{
+    const local=cb.querySelector('.entry.is-abn');
+    if(local) local.scrollIntoView({block:'center', behavior:'smooth'});
+    else if((s.abnormal_pages||[]).length) openSession(s.session_key, s.abnormal_pages[0]);
+  };
+  // 滚动定位: 优先异常条目(需要人看的), 否则第一条待审
+  const target = cb.querySelector('.entry.is-abn') || cb.querySelector('.entry.pending');
+  if(target) setTimeout(()=>target.scrollIntoView({block:'center'}), 0);
 }
 function updatePager(){
   const s=curSession; if(!s) return;
@@ -446,7 +459,7 @@ function renderEntry(e,i){
   if(e.kind==='summary'){
     return `<div class="summary-note ${e.status==='exempt'?'':''}" data-i="${i}">【较早对话总结(系统生成, 免审)】${esc(e.content)}</div>`;
   }
-  const cls = e.status==='unreviewed'?'pending': e.status==='abnormal'?'is-abn ctx':'ctx';
+  const cls = e.status==='unreviewed'?'pending': e.status==='abnormal'?'is-abn':'ctx';
   const who = e.kind==='assistant'
     ? `<span class="who bot">🤖 ${esc(e.bot_nickname || curSession.bot_nickname || 'bot')}</span>`
     : `<span class="who">${esc(e.speaker||e.role)}</span>`;
@@ -568,9 +581,19 @@ async function loadAbnormal(){
     <td>${r.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join(' ')}</td>
     <td class="content-cell">${esc(r.note)}</td>
     <td>${esc(r.reviewer)}</td>
-    <td><button class="ghost" data-edit="${r.id}">编辑</button></td>
+    <td style="white-space:nowrap"><button class="ghost" data-edit="${r.id}">编辑</button>
+      <button class="ghost" data-del="${r.id}" style="color:var(--bad)">删除</button></td>
   </tr>`).join('')}</tbody></table>`;
   el.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditModal(parseInt(b.dataset.edit)));
+  el.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
+    const id=parseInt(b.dataset.del);
+    if(!confirm(`删除异常记录 #${id}？\n\n该消息的审核结论会一并撤销(回到未审核)。`)) return;
+    try{
+      await api('/api/abnormal/'+id,{method:'DELETE'});
+      toast('已删除, 该消息回到未审核');
+      loadAbnormal();
+    }catch(e){ toast(e.message) }
+  });
 }
 $('abBot').onchange=loadAbnormal; $('abTag').onchange=loadAbnormal; $('abRefresh').onclick=loadAbnormal;
 $('abExport').onclick=()=>downloadCsv('/api/export?'+new URLSearchParams({bot:$('abBot').value,tag:$('abTag').value}));

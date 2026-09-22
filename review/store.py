@@ -178,18 +178,24 @@ class ReviewStore:
 
     def _patch_statuses_locked(
         self, session_key: str, updates: list[tuple[str, str, str, float]],
+        removed: list[str] | None = None,
     ) -> None:
         """本地写入后增量更新状态缓存(缓存未建立时无需处理)。
 
         同时刷新 db 戳记 —— 否则本地写 wal 会让下次读取误判为"外部写入"而重建。
         """
-        if self._statuses_cache is None or not updates:
+        removed = removed or []
+        if self._statuses_cache is None or (not updates and not removed):
             return
         bucket = self._statuses_cache.setdefault(session_key, {})
         counts = None
         if self._counts_cache is not None:
             prev_counts = self._counts_cache.get(session_key, (0, 0))
             counts = [prev_counts[0], prev_counts[1]]
+        for fp in removed:
+            prev = bucket.pop(fp, None)
+            if counts is not None and prev is not None:
+                counts[0 if prev["status"] == "normal" else 1] -= 1
         for fp, status, reviewer, ts in updates:
             prev = bucket.get(fp)
             if counts is not None and prev is not None:
@@ -312,6 +318,37 @@ class ReviewStore:
         item = dict(row)
         item["tags"] = json.loads(item.get("tags") or "[]")
         return item
+
+    def delete_abnormal(self, record_id: int, reviewer: str) -> dict[str, Any] | None:
+        """删除一条异常记录, 并把该消息的审核结论一并撤销(回到未审核)。
+
+        撤销结论是必要的: 否则会话里会残留一条"没有标签/备注的异常"。
+        返回被删记录(不存在返回 None)。操作留痕 action="abnormal_delete"。
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            row = cur.execute(
+                "SELECT * FROM abnormal_records WHERE id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            rec = dict(row)
+            cur.execute("DELETE FROM abnormal_records WHERE id=?", (record_id,))
+            cur.execute(
+                "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
+                (rec["session_key"], rec["fingerprint"]),
+            )
+            cur.execute(
+                "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
+                "VALUES (?,?,?,?,?,?)",
+                (time.time(), reviewer, "abnormal_delete", rec["session_key"],
+                 rec["fingerprint"], f"#{record_id}"),
+            )
+            self._conn.commit()
+            self._patch_statuses_locked(
+                rec["session_key"], [], removed=[rec["fingerprint"]],
+            )
+        return rec
 
     # ── 统计 ─────────────────────────────────────────────────
 

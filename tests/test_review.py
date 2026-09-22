@@ -411,6 +411,31 @@ def test_store_statuses_cache_and_external_write():
         store.close()
 
 
+def test_store_delete_abnormal_reverts_status():
+    """删除异常记录: 记录消失 + 该消息结论撤销(回到未审核) + 缓存计数同步。"""
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "review.db")
+        sk = "bot_001/private/10001"
+        fp = "mid:TH-1"
+        store.judge(sk, [fp], "abnormal", "alice")
+        assert store.counts_by_session()[sk] == (0, 1)
+        rid = store.add_abnormal(sk, fp, "10001", "李四", "违规内容", "M-1",
+                                 ["辱骂"], "备注", "alice")
+        assert store.get_abnormal(rid) is not None
+
+        rec = store.delete_abnormal(rid, "bob")
+        assert rec and rec["fingerprint"] == fp
+        # 记录已删 + 结论撤销 → 未审核(不在 reviewed_entries 里)
+        assert store.get_abnormal(rid) is None
+        assert store.list_abnormal() == []
+        assert store.statuses_by_session().get(sk, {}) == {}
+        assert store.counts_by_session().get(sk, (0, 0)) == (0, 0)
+        assert any(l["action"] == "abnormal_delete" for l in store.recent_log())
+        # 幂等: 再删返回 None
+        assert store.delete_abnormal(rid, "bob") is None
+        store.close()
+
+
 def test_store_abnormal_and_stats():
     with tempfile.TemporaryDirectory() as td:
         store = ReviewStore(Path(td) / "review.db")
@@ -526,6 +551,25 @@ def _assert_full_flow(client, store) -> None:
                           json={"tags": ["色情"], "note": "改判"}).status_code == 200
         recs = client.get("/api/abnormal?tag=色情", headers=_auth(tok)).json()["records"]
         assert len(recs) == 1 and recs[0]["note"] == "改判"
+
+        # 会话明细带上异常可见性元数据(前端据此显示角标/跳页)
+        detail2 = client.get("/api/session/" + sk, headers=_auth(tok)).json()
+        assert detail2["abnormal_count"] == 1 and detail2["abnormal_pages"] == [1]
+
+        # 删除异常记录 → 记录消失且该消息回到未审核
+        assert client.delete(f"/api/abnormal/{rid}", headers=_auth(tok)).status_code == 200
+        assert client.get("/api/abnormal", headers=_auth(tok)).json()["records"] == []
+        detail3 = client.get("/api/session/" + sk, headers=_auth(tok)).json()
+        assert detail3["abnormal_count"] == 0
+        assert detail3["unreviewed"] == 1, "被撤销结论的消息应回到未审核"
+        assert client.delete(f"/api/abnormal/{rid}", headers=_auth(tok)).status_code == 404
+        assert client.delete(f"/api/abnormal/{rid}").status_code == 401
+        # 重新标记异常(保持后续断言/统计口径不变)
+        client.post("/api/review", headers=_auth(tok_bob),
+                    json={"session_key": sk, "action": "abnormal",
+                          "fingerprints": [fp], "tags": ["色情"], "note": "改判"})
+        detail4 = client.get("/api/session/" + sk, headers=_auth(tok)).json()
+        assert detail4["abnormal_count"] == 1 and detail4["unreviewed"] == 0
 
         # CSV 导出
         r = client.get("/api/export", headers=_auth(tok))

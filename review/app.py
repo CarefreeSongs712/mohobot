@@ -262,6 +262,11 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             page = (first_pend // page_size + 1) if first_pend is not None else pages
         page = min(max(page, 1), pages)
         window = entries[(page - 1) * page_size: page * page_size]
+        # 异常条目所在页(前端可一键跳转, 避免异常条目落在别的页看不到)
+        abnormal_pages = sorted({
+            i // page_size + 1
+            for i, e in enumerate(entries) if e["status"] == "abnormal"
+        })
         return {
             "session_key": sk,
             "bot_id": bot_id,
@@ -272,6 +277,8 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             "display_name": info["display_name"] if info else chat_id,
             "mtime": info["mtime"] if info else 0,
             "unreviewed": unreviewed,
+            "abnormal_count": sum(1 for e in entries if e["status"] == "abnormal"),
+            "abnormal_pages": abnormal_pages,
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -360,6 +367,19 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         if not ok:
             raise HTTPException(status_code=404, detail="记录不存在")
         return {"ok": True}
+
+    @app.delete("/api/abnormal/{record_id}")
+    async def abnormal_delete(request: Request, record_id: int):
+        """删除异常记录 —— 该消息的审核结论同时撤销(回到未审核)。"""
+        user = _auth(request)
+        rec = await asyncio.to_thread(store.delete_abnormal, record_id, user)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        logger.info(
+            f"[review] {user}: 删除异常记录 #{record_id} "
+            f"({rec['session_key']}) → 该消息回到未审核"
+        )
+        return {"ok": True, "id": record_id}
 
     @app.get("/api/export")
     async def export(request: Request, bot: str = "", tag: str = ""):
