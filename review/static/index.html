@@ -475,7 +475,7 @@ function renderEntry(e,i){
   if(e.status==='unreviewed') st=`<span class="badge pending">未审核</span>`;
   else if(e.status==='normal') st=`<span class="badge ok">正常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`;
   else if(e.status==='abnormal') st=`<span class="badge bad">异常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`
-    + (e.abnormal?` ${e.abnormal.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}${e.abnormal.note?` <span>📝 ${esc(e.abnormal.note)}</span>`:''}`:'');
+    + (e.abnormal?` ${((e.abnormal.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(''))}${e.abnormal.note?` <span>📝 ${esc(e.abnormal.note)}</span>`:''}`:'');
   else st=`<span class="badge dim">免审</span>`;
   const mid = e.message_id?`<span class="mid">id:${esc(e.message_id)}</span>`:'';
   return `<div class="entry ${cls}" data-i="${i}" data-fp="${esc(e.fingerprint)}">

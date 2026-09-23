@@ -237,14 +237,24 @@ class ReviewStore:
             return dict(self._counts_cache or {})
 
     def abnormal_by_fingerprint(self) -> dict[str, dict[str, Any]]:
-        """{fingerprint: 最新一条异常记录} — 会话明细里给 abnormal 条目附带标签/备注。"""
+        """{fingerprint: 最新一条异常记录} — 会话明细里给 abnormal 条目附带标签/备注。
+
+        tags 必须解析成数组(前端按列表渲染; 原始行里是 JSON 文本, 直接透传
+        会让前端 .map 抛错 → 整个会话渲染失败, 表现为"会话打不开")。
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM abnormal_records ORDER BY id ASC"
             ).fetchall()
         result: dict[str, dict[str, Any]] = {}
         for r in rows:
-            result[r["fingerprint"]] = dict(r)
+            item = dict(r)
+            try:
+                tags = json.loads(item.get("tags") or "[]")
+            except (ValueError, TypeError):
+                tags = []
+            item["tags"] = tags if isinstance(tags, list) else []
+            result[r["fingerprint"]] = item
         return result
 
     # ── 异常记录 ─────────────────────────────────────────────

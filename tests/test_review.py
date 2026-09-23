@@ -411,6 +411,21 @@ def test_store_statuses_cache_and_external_write():
         store.close()
 
 
+def test_abnormal_by_fingerprint_tags_are_list():
+    """abnormal_by_fingerprint 的 tags 必须是数组 —— 原始 JSON 文本透传
+    会让前端 .map 抛 TypeError, 整个会话渲染失败(表现为"会话打不开")。"""
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "review.db")
+        sk = "bot_001/private/10001"
+        fp = "mid:T-1"
+        store.judge(sk, [fp], "abnormal", "alice")
+        store.add_abnormal(sk, fp, "10001", "李四", "内容", "M-1",
+                           ["辱骂"], "备注", "alice")
+        m = store.abnormal_by_fingerprint()
+        assert isinstance(m[fp]["tags"], list) and m[fp]["tags"] == ["辱骂"]
+        store.close()
+
+
 def test_store_delete_abnormal_reverts_status():
     """删除异常记录: 记录消失 + 该消息结论撤销(回到未审核) + 缓存计数同步。"""
     with tempfile.TemporaryDirectory() as td:
@@ -570,6 +585,9 @@ def _assert_full_flow(client, store) -> None:
                           "fingerprints": [fp], "tags": ["色情"], "note": "改判"})
         detail4 = client.get("/api/session/" + sk, headers=_auth(tok)).json()
         assert detail4["abnormal_count"] == 1 and detail4["unreviewed"] == 0
+        # 明细里异常条目的 tags 必须是数组(字符串会让前端渲染整个会话失败)
+        ab_entry = next(e for e in detail4["entries"] if e["status"] == "abnormal")
+        assert isinstance(ab_entry["abnormal"]["tags"], list)
 
         # CSV 导出
         r = client.get("/api/export", headers=_auth(tok))
