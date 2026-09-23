@@ -206,6 +206,57 @@ async def test_expert_malformed_json_recovery():
     assert updates["source"] == "llm_analysis"
 
 
+async def test_expert_circuit_half_open_recovery():
+    """熔断半开恢复: 冷却期满放行试探调用, 成功复位 / 失败重新熔断并重置冷却。"""
+    calls = {"n": 0}
+    ok_json = ('{"emotion_updates": {"favor": 1}, '
+               '"relationship": "朋友", "attitude": "温和"}')
+
+    def make_llm(ok: bool):
+        async def fake_llm(prompt):
+            calls["n"] += 1
+            return ok_json if ok else None
+        return fake_llm
+
+    async def run():
+        state = EmotionalState(user_key="u1")
+        expert = EmotionExpert(llm_call=make_llm(False), retries=1)
+
+        # 连续 3 次失败 → 熔断
+        for _ in range(3):
+            out = await expert.analyze("a", "b", state, "小雅")
+            assert out["source"] == "smart_fallback"
+        assert not expert._llm_available
+        assert expert._tripped_at > 0
+
+        # 冷却期内: 不调 LLM, 直接降级
+        n = calls["n"]
+        out = await expert.analyze("a", "b", state, "小雅")
+        assert out["source"] == "smart_fallback"
+        assert calls["n"] == n
+
+        # 冷却期满(模拟 5 分钟流逝) → 半开探测; API 已恢复 → 成功复位
+        expert._llm_call = make_llm(True)
+        expert._tripped_at -= 301
+        out = await expert.analyze("a", "b", state, "小雅")
+        assert out["source"] == "llm_analysis"
+        assert expert._llm_available and expert._llm_failures == 0
+        assert expert._tripped_at == 0.0
+
+        # 半开探测失败 → 立即重新熔断, 冷却重新计时
+        expert2 = EmotionExpert(llm_call=make_llm(False), retries=1)
+        for _ in range(3):
+            await expert2.analyze("a", "b", state, "小雅")
+        expert2._tripped_at -= 301
+        old_trip = expert2._tripped_at
+        out = await expert2.analyze("a", "b", state, "小雅")
+        assert out["source"] == "smart_fallback"
+        assert not expert2._llm_available
+        assert expert2._tripped_at > old_trip
+
+    await run()
+
+
 # ── 5. 存储 ───────────────────────────────────────────────────
 
 async def test_store_roundtrip():

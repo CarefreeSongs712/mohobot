@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -22,6 +23,8 @@ from .models import (
 
 # 连续失败 N 次后停用 LLM, 全部走关键词降级
 LLM_MAX_CONSECUTIVE_FAILURES = 3
+# 熔断后的半开恢复冷却(秒): 期满放行一次试探性调用, 成功复位/失败重新计时
+LLM_CIRCUIT_COOLDOWN_SEC = 300
 
 
 class EmotionExpert:
@@ -40,11 +43,13 @@ class EmotionExpert:
         self._retry_delay = retry_delay
         self._llm_available = True
         self._llm_failures = 0
+        self._tripped_at: float = 0.0   # 熔断打开的时刻(半开恢复冷却计时基准)
 
     async def analyze(
         self, user_msg: str, bot_reply: str, state: EmotionalState, bot_name: str = "AI"
     ) -> dict[str, Any]:
         """分析入口: 返回 {favor, intimacy, 8 情绪, relationship_text, attitude_text, source}。"""
+        self._maybe_half_open()
         try:
             if self._llm_available:
                 text = await self._call_llm_with_retry(user_msg, bot_reply, state, bot_name)
@@ -52,6 +57,7 @@ class EmotionExpert:
                     updates = self._parse(text)
                     updates["source"] = "llm_analysis"
                     self._llm_failures = 0
+                    self._tripped_at = 0.0
                     return self._ensure_completeness(updates, state)
                 # LLM 不可用或返回空
                 self._record_failure()
@@ -65,9 +71,22 @@ class EmotionExpert:
         updates["source"] = "smart_fallback"
         return self._ensure_completeness(updates, state)
 
+    def _maybe_half_open(self) -> None:
+        """熔断打开且冷却期满 → 半开放行一次试探性调用。
+
+        成功由 analyze() 正常路径复位; 失败经 _record_failure() 重新熔断并重置冷却计时。
+        """
+        if (not self._llm_available and self._tripped_at
+                and time.time() - self._tripped_at >= LLM_CIRCUIT_COOLDOWN_SEC):
+            self._llm_available = True
+            logger.info(
+                f"情感分析 LLM 熔断冷却 {LLM_CIRCUIT_COOLDOWN_SEC}s 期满, 半开探测"
+            )
+
     def reset_llm_availability(self) -> None:
         self._llm_available = True
         self._llm_failures = 0
+        self._tripped_at = 0.0
 
     # ── LLM 调用 ─────────────────────────────────────────────
 
@@ -95,6 +114,7 @@ class EmotionExpert:
         self._llm_failures += 1
         if self._llm_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
             self._llm_available = False
+            self._tripped_at = time.time()   # (重)进入熔断态, 半开冷却从此计时
             logger.warning("情感分析 LLM 连续失败, 已停用(改用关键词降级)")
 
     def _record_failure_quiet(self) -> None:
