@@ -46,7 +46,10 @@ class EmotionManager:
         self._memory = MemorySystem()
         self._store = EmotionStore(f"{data_dir}/emotion", self._memory)
         self._smart = SmartUpdateManager()
-        self._expert = EmotionExpert(llm_call=self._analyze_llm)
+        self._expert = EmotionExpert(
+            llm_call=self._analyze_llm,
+            timeout=max(5, int(getattr(config, "analysis_timeout_sec", 90))),
+        )
         self._admins: set[int] = {int(a) for a in (admins or [])}
         self._save_task: asyncio.Task | None = None
 
@@ -88,6 +91,10 @@ class EmotionManager:
     def sync_config(self, cfg) -> None:
         """WebUI 保存后热同步(对象替换为最新加载的 EmotionConfig)。"""
         self._cfg = cfg
+        try:
+            self._expert._timeout = max(5, int(getattr(cfg, "analysis_timeout_sec", 90)))
+        except Exception:
+            pass
 
     def set_admin_ids(self, ids: list) -> None:
         self._admins = {int(a) for a in (ids or [])}

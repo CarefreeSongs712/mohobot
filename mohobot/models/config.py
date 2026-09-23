@@ -158,6 +158,7 @@ class EmotionConfig:
     enabled: bool = False            # 总开关(重启生效)
     smart_update: bool = True        # 智能按需调用情感分析 LLM(关闭则每轮都分析)
     force_update_interval: int = 10  # 每 N 轮强制触发一次情感分析
+    analysis_timeout_sec: int = 90   # 情感分析单次 LLM 调用超时(秒; 推理型慢模型/高负载时调大)
     significance_threshold: int = 5  # 情感变化达到该值才写入长期记忆
     favour_min: int = -100
     favour_max: int = 100
@@ -359,6 +360,7 @@ class GlobalConfig:
                 enabled=bool(emotion_raw.get("enabled", False)),
                 smart_update=bool(emotion_raw.get("smart_update", True)),
                 force_update_interval=int(emotion_raw.get("force_update_interval", 10)),
+                analysis_timeout_sec=int(emotion_raw.get("analysis_timeout_sec", 90)),
                 significance_threshold=int(emotion_raw.get("significance_threshold", 5)),
                 favour_min=int(emotion_raw.get("favour_min", -100)),
                 favour_max=int(emotion_raw.get("favour_max", 100)),
@@ -481,6 +483,7 @@ class GlobalConfig:
                 "enabled": self.emotion.enabled,
                 "smart_update": self.emotion.smart_update,
                 "force_update_interval": self.emotion.force_update_interval,
+                "analysis_timeout_sec": self.emotion.analysis_timeout_sec,
                 "significance_threshold": self.emotion.significance_threshold,
                 "favour_min": self.emotion.favour_min,
                 "favour_max": self.emotion.favour_max,
@@ -593,6 +596,7 @@ class GlobalConfig:
                 "enabled": self.emotion.enabled,
                 "smart_update": self.emotion.smart_update,
                 "force_update_interval": self.emotion.force_update_interval,
+                "analysis_timeout_sec": self.emotion.analysis_timeout_sec,
                 "significance_threshold": self.emotion.significance_threshold,
                 "favour_min": self.emotion.favour_min,
                 "favour_max": self.emotion.favour_max,
