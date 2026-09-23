@@ -918,14 +918,15 @@ class LLMService:
             logger.warning(f"上下文总结失败: {e}")
             return None
 
-    async def analyze_emotion(self, prompt: str) -> str | None:
+    async def analyze_emotion(self, prompt: str, model: str | None = None) -> str | None:
         """情感专家分析(二次 LLM; 独立 emotion 模型可配, 缺省回退 chat 模型)。
 
+        model: 按次指定模型(队列积压时的快速模型 burst); 留空用配置的 emotion_model。
         失败/未配置返回 None, 调用方(EmotionExpert)自行降级。
         """
         if self._emotion_client is None:
             return None
-        model = self._cfg.llm.emotion_model or self._cfg.llm.chat_model
+        model = model or self._cfg.llm.emotion_model or self._cfg.llm.chat_model
         try:
             resp = await self._emotion_client.chat.completions.create(
                 model=model,

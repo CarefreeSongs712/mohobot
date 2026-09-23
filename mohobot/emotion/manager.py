@@ -54,6 +54,9 @@ class EmotionManager:
         self._save_task: asyncio.Task | None = None
         # 单并发队列: 同一时刻只允许一次情感分析 LLM 调用, 其余排队等待
         self._analysis_lock = asyncio.Lock()
+        self._pending_analysis = 0      # 已进入分析段(排队+进行中)的任务数
+        self._burst_left = 0            # 快速模型 burst 剩余次数
+        self._active_model: str | None = None   # 本次分析用的模型(None=配置的正常模型)
 
     # ── 生命周期 ─────────────────────────────────────────────
 
@@ -86,6 +89,9 @@ class EmotionManager:
                 logger.debug(f"情感数据周期落盘失败: {e}")
 
     def _analyze_llm(self, prompt: str):
+        """情感分析 LLM 调用(burst 期间按次指定快速模型)。"""
+        if self._active_model:
+            return self._llm.analyze_emotion(prompt, model=self._active_model)
         return self._llm.analyze_emotion(prompt)
 
     # ── 配置热同步 / 管理员 ──────────────────────────────────
@@ -181,25 +187,57 @@ class EmotionManager:
         bot_name = self._bot_name_provider(bot_id)
         # 单并发队列: 情感分析串行执行(同时只有一次 LLM 调用), 其余排队等待。
         # 多用户并发重 prompt 会把网关打满引发超时连锁; 串行化降低峰值压力。
-        async with self._analysis_lock:
-            updates = await self._expert.analyze(user_text, ai_reply, state, bot_name)
-            self.apply_expert_updates(state, updates)
+        self._pending_analysis += 1
+        try:
+            async with self._analysis_lock:
+                # 此刻仍在等待的任务数(自己已持锁) = 排队积压深度。
+                # 积压超过阈值 → 用快速模型 burst 若干次, 尽快消化队列。
+                self._pick_analysis_model(self._pending_analysis - 1)
+                updates = await self._expert.analyze(user_text, ai_reply, state, bot_name)
+                self.apply_expert_updates(state, updates)
 
-            significance = self._calculate_significance(updates)
-            written = self._memory.add_interaction(
-                bot_id, user_key, user_text, ai_reply,
-                significance, updates, threshold=int(self._cfg.significance_threshold),
-            )
-            if written:
-                self._store.touch_memory_dirty(bot_id)
+                significance = self._calculate_significance(updates)
+                written = self._memory.add_interaction(
+                    bot_id, user_key, user_text, ai_reply,
+                    significance, updates, threshold=int(self._cfg.significance_threshold),
+                )
+                if written:
+                    self._store.touch_memory_dirty(bot_id)
 
-            state.reset_force_update_counter()
-            StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
-            self._store.set_state(bot_id, user_key, state)
+                state.reset_force_update_counter()
+                StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
+                self._store.set_state(bot_id, user_key, state)
+        finally:
+            self._pending_analysis -= 1
+            self._active_model = None
         logger.debug(
             f"情感更新完成({bot_id}/{user_key}): "
             f"favor={state.favor} intimacy={state.intimacy} source={updates.get('source')}"
         )
+
+    def _pick_analysis_model(self, queued: int) -> None:
+        """选择本次分析用的模型: 队列积压超阈值时启用快速模型 burst。
+
+        burst 进行中不重复触发(一次触发固定连续 count 次);
+        burst_model 为空表示不启用(始终用配置的正常模型)。
+        """
+        burst_model = str(getattr(self._cfg, "burst_model", "") or "").strip()
+        if not burst_model:
+            self._active_model = None
+            return
+        threshold = max(0, int(getattr(self._cfg, "queue_burst_threshold", 5)))
+        count = max(1, int(getattr(self._cfg, "queue_burst_count", 3)))
+        if queued > threshold and self._burst_left <= 0:
+            self._burst_left = count
+            logger.info(
+                f"情感分析队列积压 {queued} > {threshold}, 启用快速模型 "
+                f"{burst_model} 连续 {count} 次"
+            )
+        if self._burst_left > 0:
+            self._burst_left -= 1
+            self._active_model = burst_model
+        else:
+            self._active_model = None
 
     # ── 更新应用(移植 _apply_expert_updates) ─────────────────
 

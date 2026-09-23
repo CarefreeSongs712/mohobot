@@ -998,6 +998,9 @@ async function loadConfigPage() {
       checkField('emotion.smart_update', '智能按需分析', globalConfigCache.emotion?.smart_update, '按关键词/间隔/强制计数按需调用情感分析 LLM; 关闭则每轮都分析(token 消耗增加)') +
       formField('emotion.force_update_interval', '强制分析间隔(轮)', globalConfigCache.emotion?.force_update_interval, { hint: '每 N 轮对话强制触发一次情感分析' }) +
       formField('emotion.analysis_timeout_sec', '分析超时(秒)', globalConfigCache.emotion?.analysis_timeout_sec, { hint: '情感分析单次 LLM 调用超时; 推理型慢模型/高负载时调大(默认 90)' }) +
+      formField('emotion.burst_model', '积压快速模型', globalConfigCache.emotion?.burst_model, { hint: '队列积压时改用该快速模型; 留空=不启用(默认 DeepSeek-V4-Flash)' }) +
+      formField('emotion.queue_burst_threshold', '积压触发阈值(个)', globalConfigCache.emotion?.queue_burst_threshold, { hint: '排队等待的分析数超过该值时启用快速模型(默认 5)' }) +
+      formField('emotion.queue_burst_count', '快速模型连续次数', globalConfigCache.emotion?.queue_burst_count, { hint: '每次触发快速模型连续调用几次(默认 3)' }) +
       formField('emotion.significance_threshold', '记忆显著度阈值', globalConfigCache.emotion?.significance_threshold, { hint: '情感变化总幅度达到该值才写入长期记忆(默认 5)' });
 
     const sel = document.getElementById('config-bot-select');
@@ -1123,6 +1126,9 @@ async function saveGlobalConfig() {
       smart_update: document.getElementById('cfg-emotion.smart_update')?.checked ?? true,
       force_update_interval: num('cfg-emotion.force_update_interval', 5),
       analysis_timeout_sec: num('cfg-emotion.analysis_timeout_sec', 90),
+      burst_model: document.getElementById('cfg-emotion.burst_model')?.value ?? 'DeepSeek-V4-Flash',
+      queue_burst_threshold: num('cfg-emotion.queue_burst_threshold', 5),
+      queue_burst_count: num('cfg-emotion.queue_burst_count', 3),
       significance_threshold: num('cfg-emotion.significance_threshold', 5),
     },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐

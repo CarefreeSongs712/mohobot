@@ -451,6 +451,48 @@ async def test_manager_analysis_serialized():
     await run()
 
 
+async def test_manager_queue_burst_fast_model():
+    """队列积压超阈值 → 改用快速模型连续 N 次, 之后回到正常模型。"""
+    seen: list = []
+
+    class _FakeLLM:
+        async def analyze_emotion(self, prompt, model=None):
+            seen.append(model)
+            await asyncio.sleep(0.02)
+            return ('{"emotion_updates": {"favor": 1}, '
+                    '"relationship": "朋友", "attitude": "温和"}')
+
+    async def run():
+        tmp = tempfile.mkdtemp()
+        manager = EmotionManager(
+            data_dir=tmp,
+            config=_make_cfg(
+                smart_update=False, queue_burst_threshold=1,
+                queue_burst_count=2, burst_model="Fast-Model",
+            ),
+            llm_service=_FakeLLM(), admins=[999],
+        )
+        # 4 个并发任务, 首个持锁时排队 3 个 > 阈值 1 → burst 2 次(不重复续期)
+        await asyncio.gather(*[
+            manager.process_turn("bot_001", str(2000 + i), "你好", "嗯嗯")
+            for i in range(4)
+        ])
+        assert seen.count("Fast-Model") == 2, seen
+        assert seen.count(None) == 2, seen
+
+        # burst_model 留空 → 永不启用
+        manager._cfg = _make_cfg(smart_update=False, burst_model="")
+        seen.clear()
+        await asyncio.gather(*[
+            manager.process_turn("bot_001", str(3000 + i), "你好", "嗯嗯")
+            for i in range(3)
+        ])
+        assert seen == [None, None, None], seen
+        await manager.shutdown()
+
+    await run()
+
+
 async def test_manager_admin_and_injection_disabled():
     class _FakeLLM:
         async def analyze_emotion(self, prompt):

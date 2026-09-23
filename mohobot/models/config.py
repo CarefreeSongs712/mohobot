@@ -159,6 +159,10 @@ class EmotionConfig:
     smart_update: bool = True        # 智能按需调用情感分析 LLM(关闭则每轮都分析)
     force_update_interval: int = 10  # 每 N 轮强制触发一次情感分析
     analysis_timeout_sec: int = 90   # 情感分析单次 LLM 调用超时(秒; 推理型慢模型/高负载时调大)
+    # 队列积压时改用快速模型 burst(把积压快速消化掉, 再回到正常模型):
+    queue_burst_threshold: int = 5        # 排队任务超过该值时启用
+    queue_burst_count: int = 3            # 快速模型连续调用次数
+    burst_model: str = "DeepSeek-V4-Flash"  # 快速模型名(留空=不启用 burst)
     significance_threshold: int = 5  # 情感变化达到该值才写入长期记忆
     favour_min: int = -100
     favour_max: int = 100
@@ -361,6 +365,9 @@ class GlobalConfig:
                 smart_update=bool(emotion_raw.get("smart_update", True)),
                 force_update_interval=int(emotion_raw.get("force_update_interval", 10)),
                 analysis_timeout_sec=int(emotion_raw.get("analysis_timeout_sec", 90)),
+                queue_burst_threshold=int(emotion_raw.get("queue_burst_threshold", 5)),
+                queue_burst_count=int(emotion_raw.get("queue_burst_count", 3)),
+                burst_model=str(emotion_raw.get("burst_model", "DeepSeek-V4-Flash") or ""),
                 significance_threshold=int(emotion_raw.get("significance_threshold", 5)),
                 favour_min=int(emotion_raw.get("favour_min", -100)),
                 favour_max=int(emotion_raw.get("favour_max", 100)),
@@ -484,6 +491,9 @@ class GlobalConfig:
                 "smart_update": self.emotion.smart_update,
                 "force_update_interval": self.emotion.force_update_interval,
                 "analysis_timeout_sec": self.emotion.analysis_timeout_sec,
+                "queue_burst_threshold": self.emotion.queue_burst_threshold,
+                "queue_burst_count": self.emotion.queue_burst_count,
+                "burst_model": self.emotion.burst_model,
                 "significance_threshold": self.emotion.significance_threshold,
                 "favour_min": self.emotion.favour_min,
                 "favour_max": self.emotion.favour_max,
@@ -597,6 +607,9 @@ class GlobalConfig:
                 "smart_update": self.emotion.smart_update,
                 "force_update_interval": self.emotion.force_update_interval,
                 "analysis_timeout_sec": self.emotion.analysis_timeout_sec,
+                "queue_burst_threshold": self.emotion.queue_burst_threshold,
+                "queue_burst_count": self.emotion.queue_burst_count,
+                "burst_model": self.emotion.burst_model,
                 "significance_threshold": self.emotion.significance_threshold,
                 "favour_min": self.emotion.favour_min,
                 "favour_max": self.emotion.favour_max,
