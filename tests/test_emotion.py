@@ -421,6 +421,36 @@ async def test_manager_process_turn_integration():
     await run()
 
 
+async def test_manager_analysis_serialized():
+    """单并发队列: 多用户并发触发时, 情感分析 LLM 调用互斥排队(同时最多 1 次)。"""
+    active = {"n": 0, "max": 0}
+
+    class _FakeLLM:
+        async def analyze_emotion(self, prompt):
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+            await asyncio.sleep(0.05)
+            active["n"] -= 1
+            return ('{"emotion_updates": {"favor": 1}, '
+                    '"relationship": "朋友", "attitude": "温和"}')
+
+    async def run():
+        tmp = tempfile.mkdtemp()
+        manager = EmotionManager(
+            data_dir=tmp, config=_make_cfg(smart_update=False),  # 每轮都分析, 强制排队
+            llm_service=_FakeLLM(), admins=[999],
+        )
+        await asyncio.gather(*[
+            manager.process_turn("bot_001", str(1000 + i), "你好", "嗯嗯")
+            for i in range(4)
+        ])
+        assert active["max"] == 1, f"并发峰值应为 1, 实际 {active['max']}"
+        assert (await manager.get_state("bot_001", "1001")).favor == 1
+        await manager.shutdown()
+
+    await run()
+
+
 async def test_manager_admin_and_injection_disabled():
     class _FakeLLM:
         async def analyze_emotion(self, prompt):

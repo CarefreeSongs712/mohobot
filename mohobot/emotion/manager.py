@@ -52,6 +52,8 @@ class EmotionManager:
         )
         self._admins: set[int] = {int(a) for a in (admins or [])}
         self._save_task: asyncio.Task | None = None
+        # 单并发队列: 同一时刻只允许一次情感分析 LLM 调用, 其余排队等待
+        self._analysis_lock = asyncio.Lock()
 
     # ── 生命周期 ─────────────────────────────────────────────
 
@@ -177,20 +179,23 @@ class EmotionManager:
 
         logger.debug(f"情感更新触发({bot_id}/{user_key}): {reason}")
         bot_name = self._bot_name_provider(bot_id)
-        updates = await self._expert.analyze(user_text, ai_reply, state, bot_name)
-        self.apply_expert_updates(state, updates)
+        # 单并发队列: 情感分析串行执行(同时只有一次 LLM 调用), 其余排队等待。
+        # 多用户并发重 prompt 会把网关打满引发超时连锁; 串行化降低峰值压力。
+        async with self._analysis_lock:
+            updates = await self._expert.analyze(user_text, ai_reply, state, bot_name)
+            self.apply_expert_updates(state, updates)
 
-        significance = self._calculate_significance(updates)
-        written = self._memory.add_interaction(
-            bot_id, user_key, user_text, ai_reply,
-            significance, updates, threshold=int(self._cfg.significance_threshold),
-        )
-        if written:
-            self._store.touch_memory_dirty(bot_id)
+            significance = self._calculate_significance(updates)
+            written = self._memory.add_interaction(
+                bot_id, user_key, user_text, ai_reply,
+                significance, updates, threshold=int(self._cfg.significance_threshold),
+            )
+            if written:
+                self._store.touch_memory_dirty(bot_id)
 
-        state.reset_force_update_counter()
-        StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
-        self._store.set_state(bot_id, user_key, state)
+            state.reset_force_update_counter()
+            StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
+            self._store.set_state(bot_id, user_key, state)
         logger.debug(
             f"情感更新完成({bot_id}/{user_key}): "
             f"favor={state.favor} intimacy={state.intimacy} source={updates.get('source')}"
