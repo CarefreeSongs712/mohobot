@@ -87,6 +87,7 @@ main{flex:1; overflow:hidden; position:relative}
 .vlm::before{content:"🖼 VLM: "; color:#5b8bab}
 .img-fallback{margin-top:6px; color:var(--dim); font-size:12px}
 .tag{display:inline-block; font-size:11px; background:#3a221c; color:var(--bad); border-radius:8px; padding:0 8px}
+.one-btn{font-size:11px; padding:1px 8px; border-radius:6px; margin-left:4px}
 .summary-note{color:var(--dim); font-size:12px; background:var(--bg2); border:1px dashed var(--border); border-radius:8px; padding:7px 12px; margin-bottom:12px}
 .show-older{margin:4px 0 14px; font-size:12px}
 .chat-foot{flex:none; border-top:1px solid var(--border); background:var(--bg2); padding:10px 16px; display:flex; gap:10px; align-items:center}
@@ -201,6 +202,7 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
         <select id="abTag" style="width:140px"><option value="">全部标签</option></select>
         <span class="spacer" style="flex:1"></span>
         <button id="abExport">⬇ 导出 CSV</button>
+        <button id="abDeleteAll" style="color:var(--bad)">🗑 删除全部</button>
         <button class="ghost" id="abRefresh">⟳ 刷新</button>
       </div>
       <div class="panel-body" id="abnormalBody"><div class="empty">加载中…</div></div>
@@ -472,7 +474,9 @@ function renderEntry(e,i){
   if(!e.image_url && e.content==='[图片]') body+=`<div class="img-fallback">[图片]</div>`;
   if(e.vlm) body+=`<div class="vlm">${esc(e.vlm)}</div>`;
   let st='';
-  if(e.status==='unreviewed') st=`<span class="badge pending">未审核</span>`;
+  if(e.status==='unreviewed') st=`<span class="badge pending">未审核</span>`
+    + `<button class="ghost one-btn" data-act="normal" data-fp="${esc(e.fingerprint)}">✓ 正常</button>`
+    + `<button class="ghost one-btn" data-act="abnormal" data-fp="${esc(e.fingerprint)}" style="color:var(--bad)">✗ 异常</button>`;
   else if(e.status==='normal') st=`<span class="badge ok">正常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`;
   else if(e.status==='abnormal') st=`<span class="badge bad">异常</span><span>${esc(e.reviewer)} · ${fmtDay(e.reviewed_at)}</span>`
     + (e.abnormal?` ${((e.abnormal.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(''))}${e.abnormal.note?` <span>📝 ${esc(e.abnormal.note)}</span>`:''}`:'');
@@ -501,19 +505,26 @@ $('btnNormal').onclick = async ()=>{
   if(!fps.length) return;
   const d = await api('/api/review',{method:'POST',body:{session_key:curSession.session_key,action:'normal',fingerprints:fps}});
   toast(`已标记 ${d.changed} 条正常`);
-  afterJudge(d);
+  afterJudge(d, fps, 'normal');
 };
 $('btnAbnormal').onclick = ()=>{ if(curSession) openAbModal() };
 
 $('pgPrev').onclick=()=>{ const s=curSession; if(s&&s.page>1) openSession(s.session_key, s.page-1) };
 $('pgNext').onclick=()=>{ const s=curSession; if(s&&s.page<s.pages) openSession(s.session_key, s.page+1) };
 
-function afterJudge(d){
+function afterJudge(d, judgedFps, judgedStatus, abInfo){
   const s = curSession; if(!s) return;
   const sk = s.session_key;
-  // 乐观更新: 本地立刻把这些条目标为已审(底部计数/徽标不等服务端回包)
-  const judged = new Set(s.entries.filter(e=>e.status==='unreviewed').map(e=>e.fingerprint));
-  s.entries.forEach(e=>{ if(judged.has(e.fingerprint)) e.status='normal' });
+  // 乐观更新: 只把本次真正判定的条目改状态(底部计数/徽标不等服务端回包)
+  if(judgedFps){
+    const done = new Set(judgedFps);
+    s.entries.forEach(e=>{
+      if(e.status!=='unreviewed' || !done.has(e.fingerprint)) return;
+      e.status = judgedStatus || 'normal';
+      if(e.status==='abnormal')
+        e.abnormal = {id:null, tags:(abInfo&&abInfo.tags)||[], note:(abInfo&&abInfo.note)||''};
+    });
+  }
   s.unreviewed = d.remaining_unreviewed;
   const item = sessionItems.find(x=>x.session_key===sk);
   if(item) item.unreviewed = d.remaining_unreviewed;
@@ -523,6 +534,22 @@ function afterJudge(d){
   else renderSession();
   refreshSessions();
 }
+/* 单条处理: 会话里的 ✓/✗ 按钮(事件委托, 兼容列表重渲染) */
+$('chatBody').addEventListener('click', async (ev)=>{
+  const btn = ev.target.closest('button.one-btn');
+  if(!btn || !curSession) return;
+  const fp = btn.dataset.fp, act = btn.dataset.act;
+  if(act==='normal'){
+    try{
+      const d = await api('/api/review',{method:'POST',
+        body:{session_key:curSession.session_key, action:'normal', fingerprints:[fp]}});
+      toast('已标记 1 条正常');
+      afterJudge(d, [fp], 'normal');
+    }catch(e){ toast(e.message) }
+  }else{
+    openAbModal(fp);   // 异常走弹窗(填标签/备注), 只预选这一条
+  }
+});
 function gotoNext(){
   // 在当前过滤列表中找下一个待审会话(从当前位置向后环形)
   if(!sessionItems.length){ $('chatBody').innerHTML='<div class="empty">队列为空</div>'; return }
@@ -540,8 +567,9 @@ function gotoNext(){
 }
 
 /* ── 异常弹窗 ── */
-function openAbModal(){
-  const pend = curSession.entries.filter(e=>e.status==='unreviewed');
+function openAbModal(onlyFp){
+  let pend = curSession.entries.filter(e=>e.status==='unreviewed');
+  if(onlyFp) pend = pend.filter(e=>e.fingerprint===onlyFp);   // 单条处理: 只预选这一条
   if(!pend.length) return;
   $('abFps').innerHTML = pend.map(e=>`<div class="fp-item"><label>
     <input type="checkbox" checked value="${esc(e.fingerprint)}">
@@ -561,13 +589,15 @@ $('abSave').onclick = async ()=>{
     session_key:curSession.session_key, action:'abnormal', fingerprints:fps, tags, note}});
   $('abModal').classList.remove('show');
   toast(`已标记 ${d.changed} 条异常`);
-  afterJudge(d);
+  afterJudge(d, fps, 'abnormal', {tags, note});
 };
 
 /* ================= 异常记录 ================= */
+let abLastRecords = [];
 async function loadAbnormal(){
   const q=new URLSearchParams({bot:$('abBot').value, tag:$('abTag').value});
   const d=await api('/api/abnormal?'+q);
+  abLastRecords = d.records;
   const el=$('abnormalBody');
   if(!d.records.length){ el.innerHTML='<div class="empty">暂无异常记录</div>'; return }
   el.innerHTML=`<table class="data"><thead><tr>
@@ -597,6 +627,18 @@ async function loadAbnormal(){
 }
 $('abBot').onchange=loadAbnormal; $('abTag').onchange=loadAbnormal; $('abRefresh').onclick=loadAbnormal;
 $('abExport').onclick=()=>downloadCsv('/api/export?'+new URLSearchParams({bot:$('abBot').value,tag:$('abTag').value}));
+$('abDeleteAll').onclick = async ()=>{
+  const n = abLastRecords.length;
+  if(!n){ toast('当前筛选下没有异常记录'); return }
+  const scope = `${$('abBot').value||'全部 Bot'} / ${$('abTag').value||'全部标签'}`;
+  if(!confirm(`确认删除 ${scope} 下的 ${n} 条异常记录？\n\n对应消息当前结论为「异常」的会一并撤销(回到未审核)。`)) return;
+  try{
+    const q = new URLSearchParams({bot:$('abBot').value, tag:$('abTag').value});
+    const d = await api('/api/abnormal?'+q, {method:'DELETE'});
+    toast(`已删除 ${d.deleted} 条异常记录`);
+    loadAbnormal();
+  }catch(e){ toast(e.message) }
+};
 
 let editRecord=null;
 async function openEditModal(id){

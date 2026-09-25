@@ -330,9 +330,10 @@ class ReviewStore:
         return item
 
     def delete_abnormal(self, record_id: int, reviewer: str) -> dict[str, Any] | None:
-        """删除一条异常记录, 并把该消息的审核结论一并撤销(回到未审核)。
+        """删除一条异常记录, 并在消息当前结论为「异常」时将其撤销(回到未审核)。
 
-        撤销结论是必要的: 否则会话里会残留一条"没有标签/备注的异常"。
+        撤销是必要的: 否则会话里会残留一条"没有标签/备注的异常"。
+        结论已是 normal/不存在的(陈旧记录)则保留结论不动。
         返回被删记录(不存在返回 None)。操作留痕 action="abnormal_delete"。
         """
         with self._lock:
@@ -343,11 +344,18 @@ class ReviewStore:
             if row is None:
                 return None
             rec = dict(row)
-            cur.execute("DELETE FROM abnormal_records WHERE id=?", (record_id,))
-            cur.execute(
-                "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
+            removed: list[str] = []
+            st = cur.execute(
+                "SELECT status FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
                 (rec["session_key"], rec["fingerprint"]),
-            )
+            ).fetchone()
+            if st is not None and st["status"] == "abnormal":
+                cur.execute(
+                    "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
+                    (rec["session_key"], rec["fingerprint"]),
+                )
+                removed.append(rec["fingerprint"])
+            cur.execute("DELETE FROM abnormal_records WHERE id=?", (record_id,))
             cur.execute(
                 "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
                 "VALUES (?,?,?,?,?,?)",
@@ -356,9 +364,63 @@ class ReviewStore:
             )
             self._conn.commit()
             self._patch_statuses_locked(
-                rec["session_key"], [], removed=[rec["fingerprint"]],
+                rec["session_key"], [], removed=removed,
             )
         return rec
+
+    def delete_all_abnormal(
+        self, bot: str = "", tag: str = "", reviewer: str = "",
+    ) -> int:
+        """批量删除异常记录(可按 bot 前缀/标签过滤), 对应消息结论一并撤销。
+
+        撤销规则与单条一致: 仅当消息当前结论为「异常」时撤销(回到未审核);
+        已是 normal 的陈旧记录只删记录、不动结论。
+        返回删除条数。批量操作只写一条 review_log 留痕。
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            rows = cur.execute(
+                "SELECT * FROM abnormal_records ORDER BY id ASC"
+            ).fetchall()
+            targets: list[dict[str, Any]] = []
+            for r in rows:
+                item = dict(r)
+                try:
+                    tags = json.loads(item.get("tags") or "[]")
+                except (ValueError, TypeError):
+                    tags = []
+                if not isinstance(tags, list):
+                    tags = []
+                if bot and not str(item["session_key"]).startswith(f"{bot}/"):
+                    continue
+                if tag and tag not in tags:
+                    continue
+                targets.append(item)
+            cache_removed: dict[str, list[str]] = {}
+            for item in targets:
+                cur.execute("DELETE FROM abnormal_records WHERE id=?", (item["id"],))
+                st = cur.execute(
+                    "SELECT status FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
+                    (item["session_key"], item["fingerprint"]),
+                ).fetchone()
+                if st is not None and st["status"] == "abnormal":
+                    cur.execute(
+                        "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
+                        (item["session_key"], item["fingerprint"]),
+                    )
+                    cache_removed.setdefault(item["session_key"], []).append(
+                        item["fingerprint"])
+            if targets:
+                cur.execute(
+                    "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (time.time(), reviewer, "abnormal_delete", "",
+                     "", f"批量 {len(targets)} 条 (bot={bot or '全部'}, tag={tag or '全部'})"),
+                )
+                self._conn.commit()
+                for sk, fps in cache_removed.items():
+                    self._patch_statuses_locked(sk, [], removed=fps)
+            return len(targets)
 
     # ── 统计 ─────────────────────────────────────────────────
 

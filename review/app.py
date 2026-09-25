@@ -381,6 +381,23 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         )
         return {"ok": True, "id": record_id}
 
+    @app.delete("/api/abnormal")
+    async def abnormal_delete_all(request: Request, bot: str = "", tag: str = ""):
+        """批量删除异常记录(可按 bot 前缀/标签过滤)。
+
+        对应消息当前结论为「异常」的一并撤销(回到未审核);
+        已是 normal 的陈旧记录只删记录、不动结论。
+        """
+        user = _auth(request)
+        deleted = await asyncio.to_thread(
+            store.delete_all_abnormal, bot, tag, user,
+        )
+        logger.info(
+            f"[review] {user}: 批量删除异常记录 {deleted} 条 "
+            f"(bot={bot or '全部'}, tag={tag or '全部'})"
+        )
+        return {"ok": True, "deleted": deleted}
+
     @app.get("/api/export")
     async def export(request: Request, bot: str = "", tag: str = ""):
         _auth(request)
