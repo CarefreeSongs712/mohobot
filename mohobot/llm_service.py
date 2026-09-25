@@ -928,6 +928,42 @@ class LLMService:
             logger.warning(f"上下文总结失败: {e}")
             return None
 
+    async def complete_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str = "",
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        module: str = "plugin",
+    ) -> str:
+        """通用单轮补全(供插件调用): 无上下文/无事件/无工具。
+
+        复用 chat 模型; 失败返回空串(调用方自行降级), 不抛异常。
+        """
+        if not self._available or self._chat_client is None:
+            logger.warning("LLM 未配置, complete_text 不可用")
+            return ""
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        try:
+            resp = await self._chat_client.chat.completions.create(
+                model=self._cfg.llm.chat_model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            await self._record_usage(
+                self._cfg.llm.chat_model, getattr(resp, "usage", None),
+                "", None, module=module, kind="complete",
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.warning(f"complete_text 调用失败(module={module}): {e}")
+            return ""
+
     async def analyze_emotion(self, prompt: str, model: str | None = None) -> str | None:
         """情感专家分析(二次 LLM; 独立 emotion 模型可配, 缺省回退 chat 模型)。
 

@@ -51,5 +51,81 @@
     "hint": "在最小间隔基础上增加 0~该值的随机延时",
     "slider": { "min": 0, "max": 3, "step": 0.1 },
     "default": 0.6
+  },
+  "comment_reply_enabled": {
+    "description": "自动回复评论（自己说说收到新评论）",
+    "type": "bool",
+    "hint": "开启后周期扫描自己的说说，发现新评论用 LLM 生成回复（回复该评论）",
+    "default": false
+  },
+  "atme_reply_enabled": {
+    "description": "自动回复被@",
+    "type": "bool",
+    "hint": "开启后周期检测「被 @」并 LLM 生成回复",
+    "default": false
+  },
+  "atme_mode": {
+    "description": "被@检测模式",
+    "type": "string",
+    "hint": "api=调用「与我相关」接口（内置，开箱即用，推荐）；feeds_scan=扫描好友动态流正文/评论中的 @bot昵称",
+    "default": "api"
+  },
+  "atme_api_url": {
+    "description": "「与我相关」接口 URL（高级覆盖）",
+    "type": "string",
+    "hint": "留空使用内置接口（已实测验证）。仅当腾讯改版接口失效时才需要覆盖",
+    "default": ""
+  },
+  "atme_match_keyword": {
+    "description": "被@条目匹配词（api 模式）",
+    "type": "string",
+    "hint": "「与我相关」条目文本含该词才回复（默认 \"@\"，被@条目文本总是含 @昵称 标记；赞/访问/评论不含）",
+    "default": "@"
+  },
+  "atme_keyword": {
+    "description": "被@匹配词（feeds_scan 模式）",
+    "type": "string",
+    "hint": "动态流中出现该词即视为被@。留空自动用「@bot昵称」",
+    "default": ""
+  },
+  "scan_interval_sec": {
+    "description": "自动回复轮询间隔（秒）",
+    "type": "int",
+    "hint": "周期扫描间隔，过密可能触发空间风控",
+    "slider": { "min": 60, "max": 3600, "step": 30 },
+    "default": 300
+  },
+  "scan_count": {
+    "description": "每轮扫描说说条数",
+    "type": "int",
+    "hint": "每轮检查自己最新多少条说说的评论",
+    "slider": { "min": 1, "max": 20, "step": 1 },
+    "default": 10
+  },
+  "max_comment_age_sec": {
+    "description": "评论最大回复时限（秒）",
+    "type": "int",
+    "hint": "只回复该时间内的新评论（0=不限），防止停机后补回复积压旧评论",
+    "slider": { "min": 0, "max": 604800, "step": 3600 },
+    "default": 86400
+  },
+  "auto_reply_max_length": {
+    "description": "生成回复最大长度（字）",
+    "type": "int",
+    "hint": "LLM 生成回复的截断长度",
+    "slider": { "min": 20, "max": 200, "step": 10 },
+    "default": 60
+  },
+  "auto_reply_prompt": {
+    "description": "回复生成提示词模板",
+    "type": "text",
+    "hint": "占位符：{nick}=对方昵称，{content}=对方说的内容，{post}=说说内容。system 侧自动附加 bot 人设",
+    "default": "你的QQ好友 {nick} 在QQ空间里与你互动：\"{content}\"\n相关说说内容：\"{post}\"\n请以 bot 的口吻写一条自然、口语化的回复。"
+  },
+  "auto_reply_fallback": {
+    "description": "回复生成失败兜底文案",
+    "type": "string",
+    "hint": "LLM 不可用/生成失败时发送，{nick} 可用",
+    "default": "谢谢你的互动~"
   }
 }

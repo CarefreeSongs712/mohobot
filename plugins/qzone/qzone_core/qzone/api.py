@@ -265,3 +265,82 @@ class QzoneAPI(QzoneHttpClient):
             },
         )
         return ApiResponse.from_raw(raw)
+
+    # ── @我(与我相关)列表 ─────────────────────────────────────
+    # 数据源: 网页版「与我相关」页签 = feeds2_html_pav_all + 通知参数。
+    # 实测(2026-09, 抓包验证): getappnotification=1&getnotifi=1 时返回
+    # 与我相关条目(赞/评论/访问/被@), JSONP _Callback 包装, data.data 为条目数组。
+
+    ATME_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds2_html_pav_all"
+
+    async def get_atme_list(self, *, offset: int = 0, count: int = 10) -> dict[str, Any]:
+        """拉取「与我相关」列表, 返回解析后的原始 dict(含 data.data 条目数组)。
+
+        条目种类(实测): appid=217 赞/评论我的说说, 403 访问我的主页,
+        被@ 时条目文本含 "@昵称" 标记。失败抛 RuntimeError。
+        """
+        raw = await self.request(
+            "GET",
+            self.ATME_URL,
+            params=lambda ctx: {
+                "uin": ctx.uin,
+                "begin_time": 0,
+                "end_time": 0,
+                "getappnotification": 1,
+                "getnotifi": 1,
+                "has_get_key": 0,
+                "offset": offset,
+                "set": 0,
+                "count": count,
+                "useutf8": 1,
+                "outputhtmlfeed": 1,
+                "scope": 1,
+                "g_tk": ctx.gtk2,
+            },
+        )
+        resp = ApiResponse.from_raw(raw)
+        if not resp.ok:
+            raise RuntimeError(f"「与我相关」接口失败: {resp.message}(code={resp.code})")
+        return resp.data
+
+
+def parse_atme_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """解析「与我相关」响应 → 归一化条目列表。
+
+    data 为 get_atme_list 返回的 dict(其 data.data 是条目数组, 条目 html 为
+    渲染片段)。归一化字段:
+      uin/nickname — 互动者; content — 条目纯文本(动作+内容预览);
+      time — abstime; post_uin/post_tid — 从 .../{uin}/mood/{tid} 链接提取
+      (无 mood 链接的条目如"访问主页"为 None)。
+    """
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        inner = inner.get("data")
+    if not isinstance(inner, list):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for it in inner:
+        if not isinstance(it, dict):
+            continue
+        html = str(it.get("html") or "")
+        # 动作文本 + 内容预览(去标签 + HTML 实体转义)
+        import re as _re
+        import html as _html
+        plain = _html.unescape(_re.sub(r"<[^>]+>", " ", html))
+        plain = _re.sub(r"\s+", " ", plain).strip()
+        # 从链接提取说说归属(第一个 /mood/ 链接)
+        post_uin = post_tid = None
+        m = _re.search(r"qq\.com/(\d+)/mood/([0-9a-zA-Z.]+)", html)
+        if m:
+            post_uin, post_tid = m.group(1), m.group(2)
+        result.append({
+            "uin": it.get("uin"),
+            "nickname": it.get("nickname"),
+            "content": plain,
+            "time": it.get("abstime") or 0,
+            "appid": it.get("appid"),
+            "post_uin": post_uin,
+            "post_tid": post_tid,
+        })
+    return result

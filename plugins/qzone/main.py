@@ -20,6 +20,8 @@ mohobot 适配要点:
 
 from __future__ import annotations
 
+import asyncio
+import random
 from typing import Any
 
 from loguru import logger
@@ -27,7 +29,18 @@ from loguru import logger
 from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent
 from mohobot.utils.cq_code import extract_image_urls, extract_plain_text
 
-from qzone_core import LitePostService, Post, QzoneAPI, QzoneSession
+from qzone_core import (
+    AutoReplyStore,
+    LitePostService,
+    Post,
+    QzoneAPI,
+    QzoneSession,
+    clean_reply_text,
+    content_key,
+    render_reply_prompt,
+)
+from qzone_core.qzone.parser import QzoneParser
+from qzone_core.qzone.api import parse_atme_items
 from qzone_core.utils import (
     extract_at_ids,
     parse_comment_args,
@@ -37,6 +50,13 @@ from qzone_core.utils import (
 
 # 群聊长文本(>=600 字)改用合并转发, 与框架 _send_reply 阈值一致
 _FORWARD_MIN_LEN = 600
+
+# 自动回复提示词默认模板({nick}/{content}/{post} 占位符)
+_DEFAULT_REPLY_PROMPT = (
+    "你的QQ好友 {nick} 在QQ空间里与你互动：\"{content}\"\n"
+    "相关说说内容：\"{post}\"\n"
+    "请以 bot 的口吻写一条自然、口语化的回复。"
+)
 
 
 class Plugin:
@@ -51,6 +71,7 @@ class Plugin:
         "/回评", "/回复评论",
         "/赞说说", "/点赞说说",
         "/重置QQCookies", "/重置cookies", "/重置qqcookies",
+        "/与我相关",
     }
 
     info = {
@@ -62,6 +83,7 @@ class Plugin:
             {"name": "回评", "desc": "回复评论: /回评 [@QQ] [说说序号] [评论序号] <内容>", "admin": True},
             {"name": "赞说说", "desc": "点赞说说: /赞说说 [@QQ] [序号/范围]", "admin": True},
             {"name": "重置QQCookies", "desc": "重置QQ空间登录态(管理员/私聊)", "admin": True},
+            {"name": "与我相关", "desc": "查看「与我相关」接口原始响应(管理员/私聊, 调试用)", "admin": True},
         ],
     }
 
@@ -80,6 +102,19 @@ class Plugin:
         "timeout": 10,
         "request_interval": 0.8,
         "request_jitter": 0.6,
+        # ── 自动回复(被@ / 自己说说被评论) ──
+        "comment_reply_enabled": False,     # 自己说说收到新评论 → LLM 回复
+        "atme_reply_enabled": False,        # 被 @ → LLM 回复
+        "atme_mode": "api",                 # api(与我相关接口, 开箱即用) | feeds_scan(动态流扫 @昵称)
+        "atme_api_url": "",                 # 高级覆盖: 留空用内置「与我相关」接口
+        "atme_match_keyword": "@",          # api 模式条目匹配词(被@条目文本含 "@昵称")
+        "atme_keyword": "",                 # feeds_scan 匹配词, 空=自动用 "@{bot昵称}"
+        "scan_interval_sec": 300,           # 轮询间隔(秒)
+        "scan_count": 10,                   # 每轮扫描自己最新说说条数
+        "max_comment_age_sec": 86400,       # 只回复该时间内的评论(0=不限), 防止补回复积压旧评论
+        "auto_reply_max_length": 60,        # 生成回复最大长度
+        "auto_reply_prompt": _DEFAULT_REPLY_PROMPT,
+        "auto_reply_fallback": "谢谢你的互动~",  # LLM 失败时的兜底文案({nick} 可用)
     }
 
     # 命令别名表(小写): -> (handler 名, 需管理员)
@@ -98,12 +133,16 @@ class Plugin:
         _COMMANDS[_alias] = ("like", True)
     for _alias in ("重置qqcookies", "重置cookies"):
         _COMMANDS[_alias] = ("reset_cookies", True)
+    _COMMANDS["与我相关"] = ("atme_debug", True)
 
     def __init__(self):
         self.plugin_config: dict = dict(self._DEFAULTS)
         # per-bot 实例: {bot_id: QzoneAPI / LitePostService}
         self._apis: dict[str, QzoneAPI] = {}
         self._services: dict[str, LitePostService] = {}
+        # 自动回复: per-bot 去重存储 + 登录/请求失败退避(到点前跳过该 bot)
+        self._auto_stores: dict[str, AutoReplyStore] = {}
+        self._auto_fail_until: dict[str, float] = {}
 
     # ── 框架注入 ──────────────────────────────────────────────
 
@@ -392,3 +431,291 @@ class Plugin:
         api, _ = self._get_api(bot_id)
         await api.session.reset_login_state(clear_cookies=True)
         return (True, "QQ Cookies 已重置，下次需要时会重新获取")
+
+    async def _cmd_atme_debug(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
+        """调试: 调「与我相关」接口并返回解析后的条目(验证登录态与识别效果)。"""
+        try:
+            api, _ = self._get_api(bot_id)
+            import json as _json
+            items = parse_atme_items(await api.get_atme_list())
+            preview = [
+                {k: it.get(k) for k in ("nickname", "content", "post_uin", "post_tid", "time")}
+                for it in items[:10]
+            ]
+        except Exception as e:
+            return (True, f"「与我相关」接口调用失败: {e}")
+        return (True, f"「与我相关」共 {len(items)} 条, 前 10 条:\n{_json.dumps(preview, ensure_ascii=False, indent=1)}")
+
+    # ══ 自动回复(被@ / 自己说说被评论) ══════════════════════════
+
+    @property
+    def interval_sec(self) -> int:
+        """框架周期任务间隔(每轮循环前重读, 配置热更新即时生效)。"""
+        try:
+            return max(60, int(self._cfg("scan_interval_sec", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    def _get_auto_store(self, bot_id: str) -> AutoReplyStore:
+        store = self._auto_stores.get(bot_id)
+        if store is None:
+            from pathlib import Path
+            store = AutoReplyStore(
+                Path(self._data_dir) / "plugins_data" / "qzone" / f"auto_reply_{bot_id}.json",
+            )
+            self._auto_stores[bot_id] = store
+        return store
+
+    @staticmethod
+    def _comment_key(post: Post, comment) -> str:
+        """评论去重 key(tid 缺失时用 时间+内容哈希 兜底)。"""
+        fallback = comment.tid or content_key(
+            comment.create_time, comment.content[:50],
+        )
+        return f"selfc:{post.uin}:{post.tid}:{comment.uin}:{fallback}"
+
+    @staticmethod
+    def _atme_feeds_candidates(posts: list[Post], keyword: str, self_uin: int):
+        """从动态流(好友说说)中提取 @bot 候选: 正文含关键词或评论含关键词。
+
+        返回 [(post, comment_or_None, key)]; 关键词形如 "@昵称"。
+        """
+        out: list[tuple[Post, object | None, str]] = []
+        for post in posts:
+            if int(post.uin) == int(self_uin):
+                continue  # 自己的说说交给评论监听处理
+            if keyword in post.text or keyword in post.rt_con:
+                out.append((post, None, f"atmef:{post.uin}:{post.tid}:text"))
+            for idx, c in enumerate(post.comments):
+                if keyword not in c.content or int(c.uin) == int(self_uin):
+                    continue
+                fallback = c.tid or content_key(c.create_time, c.content[:50])
+                out.append((post, idx, f"atmef:{post.uin}:{post.tid}:{c.uin}:{fallback}"))
+        return out
+
+    async def on_tick(self) -> None:
+        """周期任务: 逐 bot 轮询「自己说说被评论」与「被@」。"""
+        if not (bool(self._cfg("comment_reply_enabled", False))
+                or bool(self._cfg("atme_reply_enabled", False))):
+            return
+        ws = self._ws_server
+        bm = getattr(ws, "_bot_manager", None) if ws is not None else None
+        if bm is None:
+            return
+        import time as _time
+        for bot in list(bm.all_bots):
+            bot_id = bot.bot_id
+            until = self._auto_fail_until.get(bot_id, 0.0)
+            if until and _time.monotonic() < until:
+                continue
+            try:
+                await self._auto_reply_once(bot_id)
+            except Exception as e:
+                # 登录失效/网络异常等: 退避 10 分钟再试, 避免每轮刷日志
+                self._auto_fail_until[bot_id] = _time.monotonic() + 600
+                logger.warning(f"[qzone][{bot_id}] 自动回复轮询失败, 10 分钟后重试: {e}")
+
+    async def _auto_reply_once(self, bot_id: str) -> None:
+        comment_on = bool(self._cfg("comment_reply_enabled", False))
+        atme_on = bool(self._cfg("atme_reply_enabled", False))
+        if not (comment_on or atme_on):
+            return
+        api, service = self._get_api(bot_id)
+        self_uin = await api.session.get_uin()
+        if comment_on:
+            await self._monitor_own_comments(bot_id, api, service, self_uin)
+        if atme_on:
+            await self._monitor_atme(bot_id, api, service, self_uin)
+
+    # ── 自己说说被评论 → 回复 ─────────────────────────────────
+
+    async def _monitor_own_comments(self, bot_id: str, api, service, self_uin: int) -> None:
+        store = self._get_auto_store(bot_id)
+        scan_count = max(1, min(20, int(self._cfg("scan_count", 10))))
+        posts = await service.query_feeds(
+            target_id=str(self_uin), pos=0, num=scan_count, with_detail=False,
+        )
+        if not posts:
+            return
+        if not await store.is_baselined():
+            # 首启基线: 现存评论全部标记已读, 不回复历史
+            for post in posts:
+                for comment in post.comments:
+                    await store.mark_seen(self._comment_key(post, comment))
+            await store.set_baselined()
+            await store.save()
+            logger.info(f"[qzone][{bot_id}] 评论自动回复基线建立: {len(posts)} 条说说")
+            return
+        max_age = max(0, int(self._cfg("max_comment_age_sec", 86400)))
+        import time as _time
+        for post in posts:
+            for idx, comment in enumerate(post.comments):
+                if int(comment.uin) == int(self_uin):
+                    continue
+                key = self._comment_key(post, comment)
+                if await store.is_seen(key):
+                    continue
+                await store.mark_seen(key)
+                await store.save()
+                if (max_age and comment.create_time
+                        and _time.time() - comment.create_time > max_age):
+                    continue
+                text = await self._generate_auto_text(
+                    bot_id, comment.nickname, comment.plain_content, post,
+                )
+                try:
+                    if comment.tid:
+                        await service.reply_comment(post, idx, text)
+                    else:
+                        await service.comment_posts(post, text)
+                    logger.info(
+                        f"[qzone][{bot_id}] 自动回复评论: {post.tid} ← {comment.nickname}: {text}"
+                    )
+                except Exception as e:
+                    logger.error(f"[qzone][{bot_id}] 自动回复评论失败: {e}")
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+
+    # ── 被@ → 回复(双模式) ────────────────────────────────────
+
+    async def _monitor_atme(self, bot_id: str, api, service, self_uin: int) -> None:
+        mode = str(self._cfg("atme_mode", "feeds_scan"))
+        if mode == "api":
+            await self._monitor_atme_api(bot_id, api, service, self_uin)
+        else:
+            await self._monitor_atme_feeds(bot_id, api, service, self_uin)
+
+    async def _monitor_atme_feeds(self, bot_id: str, api, service, self_uin: int) -> None:
+        """动态流扫描模式: 好友动态正文/评论里出现 @bot昵称 即视为被@。"""
+        keyword = str(self._cfg("atme_keyword", "") or "").strip()
+        if not keyword:
+            keyword = f"@{self._bot_nickname(bot_id)}"
+        resp = await api.get_recent_feeds()
+        posts = QzoneParser.parse_recent_feeds(resp.data)
+        candidates = self._atme_feeds_candidates(posts, keyword, self_uin)
+        if not candidates:
+            return
+        store = self._get_auto_store(bot_id)
+        for post, comment_or_idx, key in candidates:
+            if await store.is_seen(key):
+                continue
+            await store.mark_seen(key)
+            await store.save()
+            if comment_or_idx is None:
+                # 说说正文里被 @ → 评论该说说
+                content = post.text or post.rt_con
+                text = await self._generate_auto_text(bot_id, post.name, content, post)
+                try:
+                    await service.comment_posts(post, text)
+                    logger.info(f"[qzone][{bot_id}] 自动回复被@(正文): {post.tid} ← {text}")
+                except Exception as e:
+                    logger.error(f"[qzone][{bot_id}] 自动回复被@(正文)失败: {e}")
+            else:
+                idx = int(comment_or_idx)
+                if idx >= len(post.comments):
+                    continue
+                comment = post.comments[idx]
+                text = await self._generate_auto_text(
+                    bot_id, comment.nickname, comment.plain_content, post,
+                )
+                try:
+                    if comment.tid:
+                        await service.reply_comment(post, idx, text)
+                    else:
+                        await service.comment_posts(post, text)
+                    logger.info(
+                        f"[qzone][{bot_id}] 自动回复被@(评论): {post.tid} ← {comment.nickname}: {text}"
+                    )
+                except Exception as e:
+                    logger.error(f"[qzone][{bot_id}] 自动回复被@(评论)失败: {e}")
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+    async def _monitor_atme_api(self, bot_id: str, api, service, self_uin: int) -> None:
+        """「与我相关」接口模式(实测 feeds2_html_pav_all + 通知参数)。
+
+        只回复含匹配词(默认 "@")的条目 —— 赞/访问/评论我的说说不含 @,
+        评论我的说说由评论监听处理(避免双重回复); 条目没有 mood 链接
+        (如访问主页)直接跳过。
+        """
+        raw_items = await api.get_atme_list()
+        items = parse_atme_items(raw_items)
+        if not items:
+            return
+        keyword = str(self._cfg("atme_match_keyword", "@") or "").strip()
+        store = self._get_auto_store(bot_id)
+        for item in items:
+            post_uin = item.get("post_uin")
+            post_tid = item.get("post_tid")
+            if not post_uin or not post_tid:
+                continue  # 无说说归属(访问主页等)
+            if str(post_uin) == str(self_uin):
+                continue  # 自己的说说 → 评论监听负责
+            content = str(item.get("content") or "")
+            if keyword and keyword not in content:
+                continue  # 赞/评论等不含 @ 的条目
+            key = (
+                f"atme:{post_uin}:{post_tid}:{item.get('uin')}:"
+                f"{item.get('time') or content_key(item.get('uin'), content[:50])}"
+            )
+            if await store.is_seen(key):
+                continue
+            await store.mark_seen(key)
+            await store.save()
+            post = await self._fetch_post_detail(api, str(post_uin), str(post_tid))
+            if post is None:
+                continue
+            nick = str(item.get("nickname") or item.get("uin") or "好友")
+            text = await self._generate_auto_text(bot_id, nick, content, post)
+            try:
+                await service.comment_posts(post, text)
+                logger.info(
+                    f"[qzone][{bot_id}] 自动回复被@(api): {post_uin}/{post_tid} ← {text}"
+                )
+            except Exception as e:
+                logger.error(f"[qzone][{bot_id}] 自动回复被@(api)失败: {e}")
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+    async def _fetch_post_detail(self, api, post_uin: str, post_tid: str) -> Post | None:
+        """按 (uin, tid) 拉取说说详情(含评论); 失败返回 None。"""
+        try:
+            stub = Post(uin=int(post_uin), tid=str(post_tid))
+            resp = await api.get_detail(stub)
+            parsed = QzoneParser.parse_feeds([resp.data]) if resp.ok and resp.data else []
+            return parsed[0] if parsed else None
+        except Exception as e:
+            logger.warning(f"[qzone] 拉取说说详情失败({post_uin}/{post_tid}): {e}")
+            return None
+
+    # ── LLM 回复生成 ──────────────────────────────────────────
+
+    async def _generate_auto_text(
+        self, bot_id: str, nick: str, content: str, post: Post,
+    ) -> str:
+        """LLM 生成回复(带 bot 人设 system); 失败降级为固定文案。"""
+        max_len = max(10, int(self._cfg("auto_reply_max_length", 60)))
+        fallback_tpl = str(self._cfg("auto_reply_fallback", "谢谢你的互动~"))
+        llm = self._llm_service
+        if llm is None:
+            return clean_reply_text(fallback_tpl.replace("{nick}", nick), max_len)
+        post_text = (post.text or post.rt_con or "")[:200]
+        prompt = render_reply_prompt(
+            str(self._cfg("auto_reply_prompt", _DEFAULT_REPLY_PROMPT)),
+            nick=nick, content=content, post=post_text,
+        )
+        system = (
+            f"你是QQ空间用户「{self._bot_nickname(bot_id)}」。"
+            f"{self._bot_persona(bot_id)}\n"
+            f"直接输出回复内容, 不要任何前缀、引号或解释, 不超过 {max_len} 字, 口语化。"
+        )
+        raw = await llm.complete_text(
+            prompt, system_prompt=system, max_tokens=max_len * 2 + 64,
+            temperature=0.8, module="qzone",
+        )
+        text = clean_reply_text(raw, max_len)
+        return text or clean_reply_text(fallback_tpl.replace("{nick}", nick), max_len)
+
+    def _bot_persona(self, bot_id: str) -> str:
+        ws = self._ws_server
+        bm = getattr(ws, "_bot_manager", None) if ws is not None else None
+        inst = bm.get(bot_id) if bm is not None else None
+        persona = (getattr(inst.config, "persona", "") or "").strip() if inst is not None else ""
+        return persona

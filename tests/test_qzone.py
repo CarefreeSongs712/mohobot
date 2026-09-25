@@ -396,5 +396,225 @@ async def main() -> None:
     print("\nALL QZONE TESTS PASSED")
 
 
+
+# ══ 自动回复(被@ / 自己说说被评论) ══════════════════════════════
+
+from qzone_core.auto_reply import (  # noqa: E402
+    AutoReplyStore,
+    clean_reply_text,
+    content_key,
+    render_reply_prompt,
+)
+
+
+async def test_auto_reply_store_dedup_and_baseline():
+    with tempfile.TemporaryDirectory() as td:
+        store = AutoReplyStore(Path(td) / "auto_reply_bot_001.json")
+        assert not await store.is_seen("k1")
+        assert not await store.is_baselined()
+        await store.mark_seen("k1")
+        await store.mark_seen("k1")  # 幂等
+        await store.set_baselined()
+        await store.save()
+
+        # 重新加载(新实例) 验证持久化
+        store2 = AutoReplyStore(Path(td) / "auto_reply_bot_001.json")
+        assert await store2.is_seen("k1")
+        assert await store2.is_baselined()
+        assert not await store2.is_seen("k2")
+
+
+async def test_auto_reply_store_trim():
+    with tempfile.TemporaryDirectory() as td:
+        store = AutoReplyStore(Path(td) / "trim.json")
+        for i in range(1100):
+            await store.mark_seen(f"k{i}")
+        await store.save()
+        store2 = AutoReplyStore(Path(td) / "trim.json")
+        assert not await store2.is_seen("k0")       # 最旧的被裁剪
+        assert await store2.is_seen("k1099")
+
+
+def test_content_key_stable():
+    assert content_key(1, "abc", 123) == content_key(1, "abc", 123)
+    assert content_key(1, "abc") != content_key(1, "abd")
+
+
+def test_render_reply_prompt():
+    text = render_reply_prompt(
+        "好友 {nick} 说: {content} 说说: {post}",
+        nick="小明", content="你好", post="今天真开心",
+    )
+    assert text == "好友 小明 说: 你好 说说: 今天真开心"
+
+
+def test_clean_reply_text():
+    assert clean_reply_text('"你好呀。"', 60) == "你好呀"
+    assert clean_reply_text("  多  行\n文本  ", 60) == "多 行 文本"
+    assert len(clean_reply_text("x" * 200, 60)) == 60
+    assert clean_reply_text("", 60) == ""
+
+
+def test_plugin_comment_key():
+    plugin = _fresh_plugin()
+    post = Post(uin=111, tid="42", name="a", text="hi")
+    c1 = Comment(uin=222, nickname="b", content="赞", create_time=100, tid=7)
+    c2 = Comment(uin=222, nickname="b", content="赞", create_time=100, tid=0)
+    assert plugin._comment_key(post, c1) == "selfc:111:42:222:7"
+    # tid 缺失 → 时间+内容哈希兜底
+    k2 = plugin._comment_key(post, c2)
+    assert k2.startswith("selfc:111:42:222:") and "selfc:111:42:222:0" != k2
+
+
+def test_plugin_atme_feeds_candidates():
+    plugin = _fresh_plugin()
+    own = Post(uin=111, tid="1", name="me", text=f"@meBot 你好")
+    other = Post(uin=222, tid="2", name="friend", text=f"来玩 @meBot")
+    plain = Post(uin=333, tid="3", name="c", text="没有@")
+    commented = Post(
+        uin=444, tid="4", name="d", text="随便说说",
+        comments=[
+            Comment(uin=555, nickname="e", content=f"@meBot 带我一个", create_time=1, tid=9),
+            Comment(uin=111, nickname="me", content=f"@meBot 自己", create_time=2, tid=8),
+        ],
+    )
+    cands = plugin._atme_feeds_candidates([own, other, plain, commented], "@meBot", 111)
+    keys = [k for _, _, k in cands]
+    # 自己的说说(正文@)不算; 他人正文1条 + 评论1条(自己的评论不算)
+    assert len(cands) == 2
+    assert any(k.startswith("atmef:222:2:text") for k in keys)
+    assert any(k.startswith("atmef:444:4:555:9") for k in keys)
+
+
+async def test_plugin_tick_disabled_noop():
+    plugin = _fresh_plugin()
+    plugin.plugin_config["comment_reply_enabled"] = False
+    plugin.plugin_config["atme_reply_enabled"] = False
+    await plugin.on_tick()  # 未启用: 直接返回, 不需 ws
+
+
+def test_plugin_interval_property():
+    plugin = _fresh_plugin()
+    plugin.plugin_config["scan_interval_sec"] = 30
+    assert plugin.interval_sec == 60  # 下限 60
+    plugin.plugin_config["scan_interval_sec"] = 600
+    assert plugin.interval_sec == 600
+
+
+async def test_plugin_generate_auto_text_fallback():
+    plugin = _fresh_plugin()
+    plugin._llm_service = None  # 无 LLM → 兜底文案
+    post = Post(uin=1, tid="1", name="a", text="hi")
+    text = await plugin._generate_auto_text("bot_001", "小明", "你好", post)
+    assert text  # 非空
+    assert len(text) <= 60
+
+
+async def test_plugin_generate_auto_text_llm():
+    class _FakeLLM:
+        async def complete_text(self, prompt, **kw):
+            assert "小明" in prompt
+            return '"这是一条生成的回复呀。"'
+    plugin = _fresh_plugin()
+    plugin._llm_service = _FakeLLM()
+    post = Post(uin=1, tid="1", name="a", text="hi")
+    text = await plugin._generate_auto_text("bot_001", "小明", "你好", post)
+    assert text == "这是一条生成的回复呀"
+
+
+def test_parse_atme_items_shapes():
+    from qzone_core.qzone.api import parse_atme_items
+    # 实测形态: data.data 条目数组, html 含动作文本与 mood 链接
+    items = parse_atme_items({"data": {"data": [
+        {"uin": "1936995136", "nickname": "依伴", "appid": "403", "abstime": "1790314429",
+         "html": '<a href="http://user.qzone.qq.com/1936995136">依伴</a> 访问了我的主页 13:33'},
+        {"uin": "2644672227", "nickname": "都督白忧", "appid": "217", "abstime": "1790313937",
+         "html": '<a href="http://user.qzone.qq.com/2644672227">都督白忧</a> 赞了我的说说 '
+                 '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e4005aa96aed5b0300.1">…</a>'},
+    ]}})
+    assert items[0]["post_tid"] is None  # 访问主页无 mood 链接
+    assert items[1]["post_uin"] == "3831097597"
+    assert items[1]["post_tid"] == "fde859e4005aa96aed5b0300.1"
+    assert "赞了我的说说" in items[1]["content"]
+    # 空/异形响应
+    assert parse_atme_items({}) == []
+    assert parse_atme_items({"data": {"data": [None, "x"]}}) == []
+
+
+async def test_plugin_atme_debug():
+    plugin = _fresh_plugin()
+    ev = _private_event([{"type": "text", "data": {"text": "/与我相关"}}], user_id=3831097597)
+    # 未登录(无注入)时报错但命令已消费
+    handled, reply = await plugin.on_message("bot_001", ev, {})
+    assert handled is True
+
+
+async def test_plugin_atme_api_filter():
+    """api 模式筛选: 只回复含 @ 的他人说说条目; 自己说说/赞/访问跳过。"""
+    plugin = _fresh_plugin()
+    plugin.plugin_config["atme_mode"] = "api"
+    plugin.plugin_config["atme_reply_enabled"] = True
+
+    class _FakeAPI:
+        def __init__(self, items):
+            self._items = items
+            self.atme_calls = 0
+            self.details = []
+            self.session = None
+
+        async def get_atme_list(self):
+            self.atme_calls += 1
+            return {"data": {"data": self._items}}
+
+        async def get_detail(self, post):
+            self.details.append((post.uin, post.tid))
+            from qzone_core.model import Post as P
+            return type("R", (), {"ok": True, "data": {"tid": post.tid, "uin": post.uin, "content": "带@的内容"}})()
+
+    class _FakeSession:
+        async def get_uin(self):
+            return 111
+
+    from qzone_core.model import Comment
+    mention_html = ('<a href="http://user.qzone.qq.com/222">小明</a> 在说说中提到了我 '
+                    '<a href="http://user.qzone.qq.com/222/mood/abc111.1">说说</a> @墨染荷韵 来玩')
+    like_html = ('<a href="http://user.qzone.qq.com/333">阿三</a> 赞了我的说说 '
+                 '<a href="http://user.qzone.qq.com/111/mood/def222.1">…</a>')
+    visit_html = '<a href="http://user.qzone.qq.com/444">访客</a> 访问了我的主页'
+    own_mention_html = ('<a href="http://user.qzone.qq.com/555">老五</a> 在说说中提到了我 '
+                        '<a href="http://user.qzone.qq.com/111/mood/ghi333.1">说说</a> @墨染荷韵')
+
+    api = _FakeAPI([
+        {"uin": "222", "nickname": "小明", "appid": "217", "abstime": "100", "html": mention_html},
+        {"uin": "333", "nickname": "阿三", "appid": "217", "abstime": "101", "html": like_html},
+        {"uin": "444", "nickname": "访客", "appid": "403", "abstime": "102", "html": visit_html},
+        {"uin": "555", "nickname": "老五", "appid": "217", "abstime": "103", "html": own_mention_html},
+    ])
+    api.session = _FakeSession()
+
+    plugin._apis["bot_001"] = api
+    # LLM 返回固定文案
+    class _FakeLLM:
+        async def complete_text(self, prompt, **kw):
+            return "来啦来啦"
+    plugin._llm_service = _FakeLLM()
+
+    sent = []
+    class _FakeService:
+        async def comment_posts(self, post, content):
+            sent.append((post.uin, post.tid, content))
+
+    plugin._services["bot_001"] = _FakeService()
+
+    await plugin._auto_reply_once("bot_001")
+    # 只有 222 的他人说说被@ 条目触发了评论
+    assert len(sent) == 1
+    assert sent[0][0] == 222 and sent[0][1] == "abc111.1"
+    assert sent[0][2] == "来啦来啦"
+    # 第二轮: 同一条目已去重, 不再回复
+    await plugin._auto_reply_once("bot_001")
+    assert len(sent) == 1
+
+
 if __name__ == "__main__":
     asyncio.run(main())
