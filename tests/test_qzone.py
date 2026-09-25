@@ -531,11 +531,20 @@ def test_parse_atme_items_shapes():
         {"uin": "2644672227", "nickname": "都督白忧", "appid": "217", "abstime": "1790313937",
          "html": '<a href="http://user.qzone.qq.com/2644672227">都督白忧</a> 赞了我的说说 '
                  '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e4005aa96aed5b0300.1">…</a>'},
+        # 实测被@条目: 动作文本"提到我"/"评论提到我", mood 链接 tid 以 "." 结尾
+        {"uin": "3831097597", "nickname": "墨染荷韵", "appid": "311", "abstime": "1790354977",
+         "html": '<a href="http://user.qzone.qq.com/3831097597">墨染荷韵</a> 提到我 00:50 '
+                 '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e461a6b66ac2ab0100.">说说</a> '
+                 '@洛天依bot-5 晚安'},
     ]}})
     assert items[0]["post_tid"] is None  # 访问主页无 mood 链接
+    # 点赞条目: tid 截去评论锚点后缀 .1
     assert items[1]["post_uin"] == "3831097597"
-    assert items[1]["post_tid"] == "fde859e4005aa96aed5b0300.1"
+    assert items[1]["post_tid"] == "fde859e4005aa96aed5b0300"
     assert "赞了我的说说" in items[1]["content"]
+    # 被@条目: tid 以点结尾也归一化为基础 tid(否则 get_detail 报 -8 原文已删除)
+    assert items[2]["post_tid"] == "fde859e461a6b66ac2ab0100"
+    assert "@" in items[2]["content"]
     # 空/异形响应
     assert parse_atme_items({}) == []
     assert parse_atme_items({"data": {"data": [None, "x"]}}) == []
@@ -609,7 +618,7 @@ async def test_plugin_atme_api_filter():
     await plugin._auto_reply_once("bot_001")
     # 只有 222 的他人说说被@ 条目触发了评论
     assert len(sent) == 1
-    assert sent[0][0] == 222 and sent[0][1] == "abc111.1"
+    assert sent[0][0] == 222 and sent[0][1] == "abc111"
     assert sent[0][2] == "来啦来啦"
     # 第二轮: 同一条目已去重, 不再回复
     await plugin._auto_reply_once("bot_001")

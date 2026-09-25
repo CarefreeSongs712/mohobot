@@ -329,11 +329,15 @@ def parse_atme_items(data: dict[str, Any]) -> list[dict[str, Any]]:
         import html as _html
         plain = _html.unescape(_re.sub(r"<[^>]+>", " ", html))
         plain = _re.sub(r"\s+", " ", plain).strip()
-        # 从链接提取说说归属(第一个 /mood/ 链接)
+        # 从链接提取说说归属(第一个 /mood/ 链接)。
+        # 实测: 被@条目的 mood 链接 tid 以 "." 结尾(如 .../mood/fde859...0100.),
+        # 点赞条目带评论锚点(如 .../mood/fde859...0300.1); get_detail 只认
+        # 无后缀的基础 tid, 因此截去第一个 "." 起的锚点后缀。
         post_uin = post_tid = None
         m = _re.search(r"qq\.com/(\d+)/mood/([0-9a-zA-Z.]+)", html)
         if m:
-            post_uin, post_tid = m.group(1), m.group(2)
+            post_uin = m.group(1)
+            post_tid = m.group(2).split(".", 1)[0]
         result.append({
             "uin": it.get("uin"),
             "nickname": it.get("nickname"),
