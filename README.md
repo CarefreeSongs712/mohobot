@@ -406,7 +406,7 @@ mohobot/
 │   ├── interceptors/              # 拦截器（封禁、指令、关键词、插件系统）
 │   ├── models/                    # OneBot 协议与配置模型
 │   ├── utils/                     # 日志、CQ 码解析等工具
-│   └── web_panel/                 # FastAPI 管理面板（8 板块，含封禁管理）
+│   └── web_panel/                 # FastAPI 管理面板（含封禁管理、情感管理板块）
 ├── plugins/                       # 插件目录（动态加载：status / praise / divination /
 │                                  #   neteasemusic / wifepicker / relationship / song_sync /
 │                                  #   qzone / perception / welcome / usage_stats / chat_manager ...）
@@ -476,6 +476,7 @@ mohobot/
 5. 💬 **对话数据** — 浏览/编辑各会话上下文
 6. 📋 **实时日志** — SSE 日志流，支持多选级别筛选（DEBUG/INFO/WARN/ERROR）
 7. 🔧 **系统设置** — 修改密码、重启服务
+8. 💗 **情感管理** — 每用户好感度/亲密度/关系阶段/长期记忆查看（只读记忆），设置好感/亲密/态度、重置用户、清空 bot 数据（确认框防护），分析队列/burst/熔断运行状态 5 秒自动刷新
 
 生成密码哈希：
 

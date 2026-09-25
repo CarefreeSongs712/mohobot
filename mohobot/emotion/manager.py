@@ -355,5 +355,24 @@ class EmotionManager:
     async def flush(self) -> None:
         await self._store.flush()
 
+    def runtime_status(self) -> dict[str, Any]:
+        """面板监控快照: 启停/分析队列/burst/熔断/存储统计。"""
+        return {
+            "enabled": self.enabled,
+            "smart_update": bool(self._cfg.smart_update),
+            "analysis_timeout_sec": int(getattr(self._cfg, "analysis_timeout_sec", 90)),
+            "burst_model": str(getattr(self._cfg, "burst_model", "") or ""),
+            "queue_pending": self._pending_analysis,
+            "burst_left": self._burst_left,
+            "active_model": self._active_model,
+            "expert": self._expert.status(),
+            "store": self._store.stats(),
+            "memory": self._memory.stats(),
+        }
+
+    def user_memory(self, bot_id: str, user_key: str) -> list[dict[str, Any]]:
+        """某用户的长期记忆记录(新→旧, 只读)。"""
+        return self._memory.user_records(bot_id, str(user_key))
+
     def stats(self) -> dict[str, Any]:
         return {"store": self._store.stats(), "memory": self._memory.stats()}

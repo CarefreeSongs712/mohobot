@@ -83,6 +83,20 @@ class EmotionExpert:
                 f"情感分析 LLM 熔断冷却 {LLM_CIRCUIT_COOLDOWN_SEC}s 期满, 半开探测"
             )
 
+    def status(self) -> dict[str, Any]:
+        """熔断/失败计数的只读快照(面板监控用)。"""
+        tripped = not self._llm_available and self._tripped_at > 0
+        cooldown_left = 0.0
+        if tripped:
+            elapsed = time.time() - self._tripped_at
+            cooldown_left = max(0.0, LLM_CIRCUIT_COOLDOWN_SEC - elapsed)
+        return {
+            "llm_available": self._llm_available,
+            "consecutive_failures": self._llm_failures,
+            "tripped": tripped,
+            "cooldown_remaining_sec": round(cooldown_left, 1),
+        }
+
     def reset_llm_availability(self) -> None:
         self._llm_available = True
         self._llm_failures = 0

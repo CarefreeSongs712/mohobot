@@ -80,7 +80,7 @@ python tests/_js_check.py         # WebUI JS 括号平衡检查（改 index.html
 python tests/smoke_startup.py     # 真实启动+关闭冒烟，用 tests/test_config.yaml
 ```
 
-**当前基线：`43 passed, 1 failed`**（2026-09 核对）。唯一失败是 `test_perception.py::test_perception_content` —— **日期相关的既有问题**：感知文本含「法定节假日」分支，节日当天（如中秋）断言「工作日/周末/休息日」必挂，与代码改动无关。改动后以此为对照。
+**当前基线：`45 passed, 0 failed`**（2026-09-25 实测，含新增的 `test_emotion_webui.py`）。改动后以此为对照。
 
 runner 机制（`tests/_run_all.py`）：
 
@@ -820,7 +820,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - **路径安全**：所有 `bot_id` 路径参数过 `_safe_id`（`^[A-Za-z0-9_-]{1,128}$`）。
 - 备份/恢复/清理需再次输入账号密码；zip 恢复有 zip-slip 防护。
 - 审计：除登录外所有 POST/PUT/PATCH/DELETE 写 `data/audit/web_admin.jsonl`，敏感 key 递归打码。
-- 板块与端点（实际 10 个，docstring 里写「7 个」已过时）：
+- 板块与端点（实际 11 个，docstring 里写「7 个」已过时）：
 
 | 板块 | 端点 |
 |---|---|
@@ -834,6 +834,9 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 | 系统设置 | `PUT /api/settings/password`、`POST /api/settings/restart` |
 | 数据管理 | `POST /api/data/{backup,restore,cleanup}`（scope: cache/history/contexts/ban） |
 | 封禁管理 | `GET /api/ban`、`POST /api/ban/operate` |
+| 情感管理 | `GET /api/emotion/status`（队列/burst/熔断/存储快照）、`GET /api/emotion/states?bot_id=`（按好感降序、跳过零互动用户）、`POST /api/emotion/operate`（action=set_favor/set_intimacy/set_attitude/reset_user/clear_bot）、`GET /api/emotion/memory?bot_id=&user_id=`（只读记忆） |
+
+> 情感板块用户身份只显示 QQ 号（不解析昵称）。`clear_bot` 清空该 bot 的情感状态与长期记忆（store.clear_bot 两者一起清）；态度文本在 manager 层先截断到 20 字再校验。回归测试 `tests/test_emotion_webui.py`。
 
 ### 9.2 审核面板 `review/`
 
@@ -882,7 +885,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 
 10. **默认值不一致**：`server.port` dataclass 默认 `8060` vs 示例 yaml `8081`；`database.file` 默认 `luotianyi.db` vs 示例 `mohobot.db`。**以 `config/global.yaml` 为准**，dataclass 默认只在没写 yaml 时生效。
 11. **`config/global.example.yaml` 落后**：缺 `context_summary_enabled` / `context_trim_at_rounds` / `context_trim_remove_rounds` / `group_recent_msgs_count` / `tts.*` 整段。
-12. **`app.py` docstring 说「7 板块」，实际 10 个**。
+12. **`app.py` docstring 说「7 板块」，实际 11 个**。
 
 **会咬人的机制**
 

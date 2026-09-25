@@ -134,6 +134,13 @@ class MemorySystem:
             lines.append(f"重要时刻: {important_count}个")
         return "\n".join(lines)
 
+    def user_records(self, bot_id: str, user_key: str) -> list[dict[str, Any]]:
+        """某用户的全部长期记忆(新→旧)。"""
+        records = self._memory.get(bot_id, {}).get(user_key)
+        if not records:
+            return []
+        return [r.to_dict() for r in reversed(records)]
+
     def user_memory_stats(self, bot_id: str, user_key: str) -> dict[str, Any]:
         records = self._memory.get(bot_id, {}).get(user_key)
         return {

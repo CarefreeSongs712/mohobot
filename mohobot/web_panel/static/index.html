@@ -236,6 +236,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
     <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
+    <div class="nav-item" data-page="emotion"><span class="icon">💗</span> 情感管理</div>
     <div class="nav-item" data-page="logs"><span class="icon">📋</span> 实时日志</div>
     <div class="nav-item" data-page="settings"><span class="icon">🛠️</span> 系统设置</div>
   </nav>
@@ -482,6 +483,52 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     </div>
   </div>
 
+  <!-- 9. 情感管理 -->
+  <div class="page" id="page-emotion">
+    <h2>💗 情感管理</h2>
+    <div class="subtitle">好感度 / 亲密度 / 关系阶段 / 长期记忆 — 数据按 bot 隔离, 修改即时落盘</div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">📡 运行状态</div>
+      <div id="emo-status" class="stat-label">未加载</div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">⚙️ 管理操作</div>
+      <div class="form-row">
+        <label>Bot</label><select id="emo-bot"></select>
+      </div>
+      <div class="form-row">
+        <label>操作</label>
+        <select id="emo-action">
+          <option value="set_favor">设置好感度</option>
+          <option value="set_intimacy">设置亲密度</option>
+          <option value="set_attitude">设置 AI 态度</option>
+          <option value="reset_user">重置用户情感</option>
+          <option value="clear_bot">清空该 bot 全部情感数据</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>QQ 号</label><input type="text" id="emo-uid" placeholder="被操作用户 QQ (清空 bot 时可留空)">
+      </div>
+      <div class="form-row">
+        <label>数值/文本</label><input type="text" id="emo-value" placeholder="好感/亲密: 整数; 态度: ≤20 字文本">
+      </div>
+      <button class="btn" onclick="emoOperate()">执行操作</button>
+      <button class="btn secondary" style="margin-left:8px" onclick="emoLoadStates()">刷新列表</button>
+    </div>
+    <div class="card">
+      <div class="card-title">👥 用户情感状态</div>
+      <div id="emo-states"><div class="conv-empty">未加载</div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">🧠 长期记忆 (只读)</div>
+      <div class="form-row">
+        <label>QQ 号</label><input type="text" id="emo-mem-uid" placeholder="要查看记忆的用户 QQ">
+      </div>
+      <button class="btn" onclick="emoLoadMemory()">查看记忆</button>
+      <div id="emo-memory" style="margin-top:10px"><div class="conv-empty">未加载</div></div>
+    </div>
+  </div>
+
   <!-- 7. Settings -->
   <div class="page" id="page-settings">
     <h2>🛠️ 系统设置</h2>
@@ -610,6 +657,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
     item.classList.add('active');
     document.getElementById('page-' + item.dataset.page).classList.add('active');
     if (item.dataset.page !== 'tts') ttsStopAutoRefresh();
+    if (item.dataset.page !== 'emotion') emoStopAutoRefresh();
     switch (item.dataset.page) {
       case 'dashboard': loadDashboard(); break;
       case 'usage': loadUsageStats(); break;
@@ -619,6 +667,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
       case 'ban': loadBanPage(); break;
+      case 'emotion': loadEmotionPage(); break;
       case 'logs': startLogStream(); break;
       case 'settings': loadSettings(); break;
     }
@@ -1835,6 +1884,192 @@ async function banRemove(uid) {
     showToast('已删除');
     loadBanPage();
   } catch (e) { showToast('删除失败: ' + e.message, false); }
+}
+
+// ═══════════════ 9. Emotion (情感管理) ═══════════════
+const EMO_EMOTION_NAMES = {
+  joy: '喜悦', trust: '信任', fear: '恐惧', surprise: '惊讶',
+  sadness: '悲伤', disgust: '厌恶', anger: '愤怒', anticipation: '期待',
+};
+let emoStatusTimer = null;
+
+function emoStopAutoRefresh() {
+  if (emoStatusTimer) { clearInterval(emoStatusTimer); emoStatusTimer = null; }
+}
+
+async function loadEmotionPage() {
+  emoStopAutoRefresh();
+  emoLoadBots();
+  emoLoadStatus();
+  emoLoadStates();
+  emoStatusTimer = setInterval(emoLoadStatus, 5000);
+}
+
+async function emoLoadBots() {
+  try {
+    const r = await apiJSON('/api/bots');
+    const sel = document.getElementById('emo-bot');
+    const prev = sel.value;
+    sel.innerHTML = (r.bots || []).map(b =>
+      `<option value="${esc(b.bot_id)}">${esc(b.bot_id)} (${esc(b.nickname || String(b.qq || '未绑定'))})</option>`
+    ).join('') || '<option value="">(无 bot)</option>';
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  } catch (e) { showToast('加载 Bot 列表失败: ' + e.message, false); }
+}
+
+function emoFavorColor(v) {
+  return v > 30 ? '#5cb85c' : v < -30 ? '#d9534f' : v < 0 ? '#f0ad4e' : 'inherit';
+}
+
+async function emoLoadStatus() {
+  const el = document.getElementById('emo-status');
+  try {
+    const s = await apiJSON('/api/emotion/status');
+    const expert = s.expert || {};
+    const breaker = expert.tripped
+      ? `<span style="color:#d9534f">熔断中(冷却剩余 ${Math.ceil(expert.cooldown_remaining_sec || 0)}s)</span>`
+      : (expert.llm_available ? '<span style="color:#5cb85c">正常</span>' : '<span style="color:#d9534f">停用</span>');
+    el.innerHTML =
+      `<span class="badge ${s.enabled ? 'online' : 'offline'}">${s.enabled ? '已启用' : '未启用(重启生效)'}</span> ` +
+      `分析队列: ${s.queue_pending} | 当前模型: ${esc(s.active_model || '正常模型')}` +
+      (s.burst_left > 0 ? ` (burst 剩余 ${s.burst_left} 次)` : '') +
+      ` | 分析 LLM: ${breaker} (连续失败 ${expert.consecutive_failures ?? 0})` +
+      ` | 已加载 bot: ${s.store?.bots_loaded ?? 0} / 用户: ${s.store?.users_total ?? 0} / 待落盘: ${s.store?.dirty_bots ?? 0}` +
+      ` | 长期记忆: ${s.memory?.records ?? 0} 条`;
+  } catch (e) {
+    el.innerHTML = `<span style="color:#d9534f">${esc(e.message)}</span>`;
+  }
+}
+
+function emoDominant(emotions) {
+  const entries = Object.entries(emotions || {});
+  if (!entries.length) return '中立';
+  const max = Math.max(...entries.map(e => e[1]));
+  if (!max) return '中立';
+  const top = entries.filter(e => e[1] === max).map(e => EMO_EMOTION_NAMES[e[0]] || e[0]);
+  return (top.length > 1 ? '复合(' + top.join('+') + ')' : top[0]) + ' ' + max;
+}
+
+async function emoLoadStates() {
+  const botId = document.getElementById('emo-bot').value;
+  const el = document.getElementById('emo-states');
+  if (!botId) { el.innerHTML = '<div class="conv-empty">暂无 Bot</div>'; return; }
+  try {
+    const r = await apiJSON('/api/emotion/states?bot_id=' + encodeURIComponent(botId));
+    const states = r.states || [];
+    if (!states.length) {
+      el.innerHTML = '<div class="conv-empty">暂无情感数据(用户与 bot 互动后生成)</div>';
+      return;
+    }
+    el.innerHTML =
+      '<table><thead><tr><th>QQ</th><th>好感</th><th>亲密</th><th>阶段</th><th>主导情绪</th><th>态度 / 关系</th><th>互动(正/负)</th><th>最近互动</th><th>操作</th></tr></thead><tbody>' +
+      states.map(emoStateRow).join('') +
+      '</tbody></table>';
+  } catch (e) { showToast('加载情感状态失败: ' + e.message, false); }
+}
+
+function emoStateRow(s) {
+  const stat = s.stats || {};
+  const last = stat.last_interaction_time
+    ? new Date(stat.last_interaction_time * 1000).toLocaleString()
+    : '—';
+  return `<tr>
+    <td>${esc(s.user_key)}</td>
+    <td style="color:${emoFavorColor(s.favor)};font-weight:600">${s.favor}</td>
+    <td>${s.intimacy}</td>
+    <td>${esc(s.relationship_stage || '')}</td>
+    <td>${esc(emoDominant(s.emotions))}</td>
+    <td>${esc((s.descriptions || {}).attitude || '')} / ${esc((s.descriptions || {}).relationship || '')}</td>
+    <td>${stat.total_count || 0} (+${stat.positive_count || 0}/-${stat.negative_count || 0})</td>
+    <td class="dim">${last}</td>
+    <td>
+      <button class="btn btn-sm" onclick="emoFillEdit('${esc(s.user_key)}')">编辑</button>
+      <button class="btn btn-sm" onclick="emoViewMemory('${esc(s.user_key)}')">记忆</button>
+      <button class="btn btn-sm" onclick="emoResetUser('${esc(s.user_key)}')">重置</button>
+    </td>
+  </tr>`;
+}
+
+function emoFillEdit(uid) {
+  document.getElementById('emo-uid').value = uid;
+  document.getElementById('emo-action').value = 'set_favor';
+  document.getElementById('emo-value').value = '';
+  document.getElementById('emo-value').focus();
+}
+
+async function emoOperate() {
+  const action = document.getElementById('emo-action').value;
+  const botId = document.getElementById('emo-bot').value;
+  const uid = document.getElementById('emo-uid').value.trim();
+  const value = document.getElementById('emo-value').value.trim();
+  if (!botId) { showToast('请先选择 Bot', false); return; }
+  if (action === 'clear_bot') {
+    if (!confirm(`确认清空 bot ${botId} 的全部情感数据(含长期记忆)? 此操作不可恢复!`)) return;
+  } else if (!uid) {
+    showToast('请输入 QQ 号', false); return;
+  }
+  const payload = {
+    data: {
+      action, bot_id: botId, user_id: uid,
+      value: value !== '' ? Number(value) : undefined,
+      text: action === 'set_attitude' ? value : undefined,
+    },
+  };
+  try {
+    await apiJSON('/api/emotion/operate', { method: 'POST', body: payload });
+    showToast('操作成功');
+    emoLoadStates();
+    emoLoadStatus();
+  } catch (e) { showToast('操作失败: ' + e.message, false); }
+}
+
+async function emoResetUser(uid) {
+  const botId = document.getElementById('emo-bot').value;
+  if (!botId) { showToast('请先选择 Bot', false); return; }
+  if (!confirm(`确认重置用户 ${uid} 的情感状态(好感/亲密/情绪归零)?`)) return;
+  try {
+    await apiJSON('/api/emotion/operate', { method: 'POST', body: { data: { action: 'reset_user', bot_id: botId, user_id: uid } } });
+    showToast('已重置');
+    emoLoadStates();
+  } catch (e) { showToast('重置失败: ' + e.message, false); }
+}
+
+async function emoViewMemory(uid) {
+  document.getElementById('emo-mem-uid').value = uid;
+  emoLoadMemory();
+}
+
+async function emoLoadMemory() {
+  const botId = document.getElementById('emo-bot').value;
+  const uid = document.getElementById('emo-mem-uid').value.trim();
+  const el = document.getElementById('emo-memory');
+  if (!botId) { showToast('请先选择 Bot', false); return; }
+  if (!uid) { showToast('请输入 QQ 号', false); return; }
+  try {
+    const r = await apiJSON('/api/emotion/memory?bot_id=' + encodeURIComponent(botId) + '&user_id=' + encodeURIComponent(uid));
+    const records = r.records || [];
+    if (!records.length) {
+      el.innerHTML = '<div class="conv-empty">该用户暂无长期记忆(显著度达标的互动才会写入)</div>';
+      return;
+    }
+    const st = r.stats || {};
+    el.innerHTML =
+      `<div class="hint" style="margin-bottom:6px">共 ${records.length} 条 | 平均显著度 ${(st.avg_significance ?? 0).toFixed(1)}</div>` +
+      records.map(emoRecordHtml).join('');
+  } catch (e) { showToast('加载记忆失败: ' + e.message, false); }
+}
+
+function emoRecordHtml(rec) {
+  const changes = Object.entries(rec.emotional_changes || {})
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${EMO_EMOTION_NAMES[k] || k}${v > 0 ? '+' : ''}${v}`)
+    .join(', ');
+  const time = rec.timestamp ? new Date(rec.timestamp * 1000).toLocaleString() : '—';
+  return `<div style="border-bottom:1px solid var(--border);padding:8px 0">
+    <div class="dim" style="font-size:12px">${time} · 显著度 ${rec.significance}${changes ? ' · ' + esc(changes) : ''}</div>
+    <div style="margin-top:4px">👤 ${esc(rec.user_msg || '')}</div>
+    <div style="margin-top:2px" class="dim">🤖 ${esc(rec.ai_response || '')}</div>
+  </div>`;
 }
 
 // ═══════════════ 7. Settings ═══════════════
