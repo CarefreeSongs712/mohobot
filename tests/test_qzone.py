@@ -580,23 +580,58 @@ def test_parse_atme_items_shapes():
         {"uin": "2644672227", "nickname": "都督白忧", "appid": "217", "abstime": "1790313937",
          "html": '<a href="http://user.qzone.qq.com/2644672227">都督白忧</a> 赞了我的说说 '
                  '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e4005aa96aed5b0300.1">…</a>'},
-        # 实测被@条目: 动作文本"提到我"/"评论提到我", mood 链接 tid 以 "." 结尾
+        # 实测被@条目: 动作文本"提到我"(正文@)/"评论提到我"(评论@), tid 以 "." 结尾
         {"uin": "3831097597", "nickname": "墨染荷韵", "appid": "311", "abstime": "1790354977",
          "html": '<a href="http://user.qzone.qq.com/3831097597">墨染荷韵</a> 提到我 00:50 '
                  '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e461a6b66ac2ab0100.">说说</a> '
                  '@洛天依bot-5 晚安'},
+        {"uin": "3831097597", "nickname": "墨染荷韵", "appid": "311", "abstime": "1790354978",
+         "html": '<a href="http://user.qzone.qq.com/3831097597">墨染荷韵</a> 评论提到我 00:51 '
+                 '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e461a6b66ac2ab0100.">说说</a> '
+                 '评论里 @洛天依bot-5'},
+        # 线程普通"回复"条目: 正文预览含 @ 但不是被@
+        {"uin": "3900533653", "nickname": "洛水天依", "appid": "311", "abstime": "1790355168",
+         "html": '<a href="http://user.qzone.qq.com/3900533653">洛水天依</a> 回复 00:52 '
+                 '<a href="http://user.qzone.qq.com/3831097597/mood/fde859e461a6b66ac2ab0100.">说说</a> '
+                 '@洛天依bot-5 晚安 洛水天依 : 666'},
     ]}})
     assert items[0]["post_tid"] is None  # 访问主页无 mood 链接
+    assert items[0]["action"] == "other"
     # 点赞条目: tid 截去评论锚点后缀 .1
     assert items[1]["post_uin"] == "3831097597"
     assert items[1]["post_tid"] == "fde859e4005aa96aed5b0300"
-    assert "赞了我的说说" in items[1]["content"]
+    assert items[1]["action"] == "other"
     # 被@条目: tid 以点结尾也归一化为基础 tid(否则 get_detail 报 -8 原文已删除)
     assert items[2]["post_tid"] == "fde859e461a6b66ac2ab0100"
-    assert "@" in items[2]["content"]
+    assert items[2]["action"] == "mention"
+    # 评论中@ → comment_mention
+    assert items[3]["action"] == "comment_mention"
+    assert items[3]["post_tid"] == "fde859e461a6b66ac2ab0100"
+    # 线程"回复"条目不是被@(即使正文预览含 @)
+    assert items[4]["action"] == "other"
     # 空/异形响应
     assert parse_atme_items({}) == []
     assert parse_atme_items({"data": {"data": [None, "x"]}}) == []
+
+
+def test_find_mention_comment():
+    plugin = _fresh_plugin()
+    post = Post(uin=222, tid="t1", name="a", text="post", comments=[
+        Comment(uin=3831097597, nickname="墨染荷韵", content="路过", create_time=1, tid=11),
+        Comment(uin=3831097597, nickname="墨染荷韵", content="@洛天依bot-5 晚安", create_time=2, tid=12),
+        Comment(uin=3831097597, nickname="墨染荷韵", content="又路过", create_time=3, tid=13),
+    ])
+    # 定位该用户最新一条含 @ 的评论
+    idx = plugin._find_mention_comment(post, 3831097597, "洛天依bot-5")
+    assert idx == 1
+    # 昵称匹配兜底
+    post.comments[1].content = "洛天依bot-5 你好"
+    assert plugin._find_mention_comment(post, 3831097597, "洛天依bot-5") == 1
+    # 无 @ 评论 → None
+    post2 = Post(uin=222, tid="t2", name="a", comments=[
+        Comment(uin=3831097597, nickname="x", content="来看看不说话", create_time=1, tid=21),
+    ])
+    assert plugin._find_mention_comment(post2, 3831097597, "洛天依bot-5") is None
 
 
 async def test_plugin_atme_debug():
@@ -608,14 +643,15 @@ async def test_plugin_atme_debug():
 
 
 async def test_plugin_atme_api_filter():
-    """api 模式筛选: 只回复含 @ 的他人说说条目; 自己说说/赞/访问跳过。"""
+    """api 模式: 只处理"提到我/评论提到我"; 正文@→评论说说, 评论@→回评该评论。"""
     plugin = _fresh_plugin()
     plugin.plugin_config["atme_mode"] = "api"
     plugin.plugin_config["atme_reply_enabled"] = True
 
     class _FakeAPI:
-        def __init__(self, items):
+        def __init__(self, items, comments=None):
             self._items = items
+            self._comments = comments or []
             self.atme_calls = 0
             self.details = []
             self.session = None
@@ -627,27 +663,43 @@ async def test_plugin_atme_api_filter():
         async def get_detail(self, post):
             self.details.append((post.uin, post.tid))
             from qzone_core.model import Post as P
-            return type("R", (), {"ok": True, "data": {"tid": post.tid, "uin": post.uin, "content": "带@的内容"}})()
+            return type("R", (), {"ok": True, "data": {
+                "tid": post.tid, "uin": post.uin, "content": "带@的内容",
+                "commentlist": self._comments,
+            }})()
 
     class _FakeSession:
         async def get_uin(self):
             return 111
 
     from qzone_core.model import Comment
-    mention_html = ('<a href="http://user.qzone.qq.com/222">小明</a> 在说说中提到了我 '
-                    '<a href="http://user.qzone.qq.com/222/mood/abc111.1">说说</a> @墨染荷韵 来玩')
-    like_html = ('<a href="http://user.qzone.qq.com/333">阿三</a> 赞了我的说说 '
-                 '<a href="http://user.qzone.qq.com/111/mood/def222.1">…</a>')
-    visit_html = '<a href="http://user.qzone.qq.com/444">访客</a> 访问了我的主页'
-    own_mention_html = ('<a href="http://user.qzone.qq.com/555">老五</a> 在说说中提到了我 '
-                        '<a href="http://user.qzone.qq.com/111/mood/ghi333.1">说说</a> @墨染荷韵')
+    # 实测动作文案: "提到我"=正文@, "评论提到我"=评论中@
+    mention_html = ('<a href="http://user.qzone.qq.com/222">小明</a> 提到我 '
+                    '<a href="http://user.qzone.qq.com/222/mood/abc111.">说说</a> @墨染荷韵 来玩')
+    cmention_html = ('<a href="http://user.qzone.qq.com/333">阿三</a> 评论提到我 '
+                     '<a href="http://user.qzone.qq.com/333/mood/def222.">说说</a> '
+                     '评论里 @墨染荷韵 看看')
+    like_html = ('<a href="http://user.qzone.qq.com/444">老四</a> 赞了我的说说 '
+                 '<a href="http://user.qzone.qq.com/111/mood/ghi333.1">…</a>')
+    reply_html = ('<a href="http://user.qzone.qq.com/445">老五</a> 回复 00:52 '
+                  '<a href="http://user.qzone.qq.com/222/mood/abc111.">说说</a> '
+                  '@墨染荷韵 晚安 洛水天依 : 666')
+    own_mention_html = ('<a href="http://user.qzone.qq.com/555">老六</a> 提到我 '
+                        '<a href="http://user.qzone.qq.com/111/mood/jkl444.">说说</a> @墨染荷韵')
 
+    # def222 的详情里: 阿三(333)的最新 @ 评论是 tid=7 那条(应被回评)
+    detail_comments = [
+        {"tid": 6, "uin": "333", "name": "阿三", "content": "普通评论", "create_time": 100},
+        {"tid": 7, "uin": "333", "name": "阿三", "content": "@墨染荷韵 看看", "create_time": 101},
+        {"tid": 8, "uin": "999", "name": "别人", "content": "@墨染荷韵 不是我", "create_time": 102},
+    ]
     api = _FakeAPI([
-        {"uin": "222", "nickname": "小明", "appid": "217", "abstime": "100", "html": mention_html},
-        {"uin": "333", "nickname": "阿三", "appid": "217", "abstime": "101", "html": like_html},
-        {"uin": "444", "nickname": "访客", "appid": "403", "abstime": "102", "html": visit_html},
-        {"uin": "555", "nickname": "老五", "appid": "217", "abstime": "103", "html": own_mention_html},
-    ])
+        {"uin": "222", "nickname": "小明", "appid": "311", "abstime": "100", "html": mention_html},
+        {"uin": "333", "nickname": "阿三", "appid": "311", "abstime": "101", "html": cmention_html},
+        {"uin": "444", "nickname": "老四", "appid": "217", "abstime": "102", "html": like_html},
+        {"uin": "445", "nickname": "老五", "appid": "311", "abstime": "103", "html": reply_html},
+        {"uin": "555", "nickname": "老六", "appid": "311", "abstime": "104", "html": own_mention_html},
+    ], comments=detail_comments)
     api.session = _FakeSession()
 
     plugin._apis["bot_001"] = api
@@ -657,21 +709,25 @@ async def test_plugin_atme_api_filter():
             return "来啦来啦"
     plugin._llm_service = _FakeLLM()
 
-    sent = []
+    comments_sent, replied = [], []
     class _FakeService:
         async def comment_posts(self, post, content):
-            sent.append((post.uin, post.tid, content))
+            comments_sent.append((post.uin, post.tid, content))
+        async def reply_comment(self, post, idx, content):
+            replied.append((post.uin, post.tid, idx, content))
 
     plugin._services["bot_001"] = _FakeService()
 
     await plugin._auto_reply_once("bot_001")
-    # 只有 222 的他人说说被@ 条目触发了评论
-    assert len(sent) == 1
-    assert sent[0][0] == 222 and sent[0][1] == "abc111"
-    assert sent[0][2] == "来啦来啦"
-    # 第二轮: 同一条目已去重, 不再回复
+    # 正文@(222): 评论说说; 评论@(333): 回评其最新 @ 评论(idx=1, tid=7)
+    assert comments_sent == [(222, "abc111", "来啦来啦")]
+    assert replied == [(333, "def222", 1, "来啦来啦")]
+    # 赞(444)/线程回复(445)/自己说说上的@(555) 都没触发
+    assert api.details == [(222, "abc111"), (333, "def222")]
+    # 第二轮: 同一说说已去重, 不再回复
     await plugin._auto_reply_once("bot_001")
-    assert len(sent) == 1
+    assert comments_sent == [(222, "abc111", "来啦来啦")]
+    assert replied == [(333, "def222", 1, "来啦来啦")]
 
 
 if __name__ == "__main__":

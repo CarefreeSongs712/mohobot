@@ -329,6 +329,14 @@ def parse_atme_items(data: dict[str, Any]) -> list[dict[str, Any]]:
         import html as _html
         plain = _html.unescape(_re.sub(r"<[^>]+>", " ", html))
         plain = _re.sub(r"\s+", " ", plain).strip()
+        # 动作分类(实测文案): "提到我"=正文@, "评论提到我"=评论中@,
+        # 其余(赞/评论/回复/访问)不是被@。先匹配长词防子串误判。
+        if "评论提到我" in plain or "回复提到我" in plain:
+            action = "comment_mention"
+        elif "提到我" in plain:
+            action = "mention"
+        else:
+            action = "other"
         # 从链接提取说说归属(第一个 /mood/ 链接)。
         # 实测: 被@条目的 mood 链接 tid 以 "." 结尾(如 .../mood/fde859...0100.),
         # 点赞条目带评论锚点(如 .../mood/fde859...0300.1); get_detail 只认
@@ -344,6 +352,7 @@ def parse_atme_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "content": plain,
             "time": it.get("abstime") or 0,
             "appid": it.get("appid"),
+            "action": action,
             "post_uin": post_uin,
             "post_tid": post_tid,
         })

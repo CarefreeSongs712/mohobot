@@ -672,9 +672,9 @@ class Plugin:
     async def _monitor_atme_api(self, bot_id: str, api, service, self_uin: int) -> None:
         """「与我相关」接口模式(实测 feeds2_html_pav_all + 通知参数)。
 
-        只回复含匹配词(默认 "@")的条目 —— 赞/访问/评论我的说说不含 @,
-        评论我的说说由评论监听处理(避免双重回复); 条目没有 mood 链接
-        (如访问主页)直接跳过。
+        只处理被@动作: "提到我"(正文@) → 评论该说说;
+        "评论提到我"(评论中@) → 回评那条评论(定位该用户最新一条 @bot 评论);
+        其余动作(赞/评论/回复/访问)一律忽略 —— 评论我的说说由评论监听负责。
         去重按 (post_uin, post_tid): 同一条说说上的多次 @/动态只处理一次。
         """
         raw_items = await api.get_atme_list()
@@ -685,6 +685,9 @@ class Plugin:
         bot_qqs = self._bot_qq_set()
         store = self._get_auto_store(bot_id)
         for item in items:
+            action = item.get("action")
+            if action not in ("mention", "comment_mention"):
+                continue  # 赞/评论/回复/访问等不是被@
             post_uin = item.get("post_uin")
             post_tid = item.get("post_tid")
             if not post_uin or not post_tid:
@@ -695,7 +698,7 @@ class Plugin:
                 continue  # 其它 bot 的说说不处理
             content = str(item.get("content") or "")
             if keyword and keyword not in content:
-                continue  # 赞/评论等不含 @ 的条目
+                continue
             blocked, why = await self._actor_blocked(item.get("uin"))
             if blocked:
                 logger.debug(f"[qzone][{bot_id}] 跳过被@条目({why}): {item.get('uin')}")
@@ -714,15 +717,42 @@ class Plugin:
             nick = str(item.get("nickname") or item.get("uin") or "好友")
             text = await self._generate_auto_text(bot_id, nick, content, post)
             try:
-                await service.comment_posts(post, text)
+                if action == "comment_mention":
+                    idx = self._find_mention_comment(
+                        post, item.get("uin"), self._bot_nickname(bot_id),
+                    )
+                else:
+                    idx = None
+                if idx is not None and post.comments[idx].tid:
+                    await service.reply_comment(post, idx, text)
+                    target = f"回评#{idx}"
+                else:
+                    await service.comment_posts(post, text)
+                    target = "评论说说"
                 await store.incr_post_reply(self._post_key(post_uin, post_tid))
                 await store.save()
                 logger.info(
-                    f"[qzone][{bot_id}] 自动回复被@(api): {post_uin}/{post_tid} ← {text}"
+                    f"[qzone][{bot_id}] 自动回复被@(api/{target}): {post_uin}/{post_tid} ← {text}"
                 )
             except Exception as e:
                 logger.error(f"[qzone][{bot_id}] 自动回复被@(api)失败: {e}")
             await asyncio.sleep(random.uniform(1.5, 3.0))
+
+    @staticmethod
+    def _find_mention_comment(post: Post, actor_uin, bot_nickname: str) -> int | None:
+        """定位该用户在说说评论中最新一条 @bot 的评论(倒序找)。
+
+        匹配条件: 评论内容含 "@" 或 bot 昵称; 找不到返回 None(退化为评论说说)。
+        """
+        nick = (bot_nickname or "").strip()
+        for idx in range(len(post.comments) - 1, -1, -1):
+            c = post.comments[idx]
+            if int(c.uin) != int(actor_uin):
+                continue
+            content = c.content or ""
+            if "@" in content or (nick and nick in content):
+                return idx
+        return None
 
     async def _fetch_post_detail(self, api, post_uin: str, post_tid: str) -> Post | None:
         """按 (uin, tid) 拉取说说详情(含评论); 失败返回 None。"""
