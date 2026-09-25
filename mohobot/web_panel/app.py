@@ -200,6 +200,8 @@ class WebPanel:
         self._sse_tickets: dict[str, float] = {}
         self._token_expiry = 3600  # 1 hour
         self._start_time = time.time()
+        # 登录防爆破: 全局串行化 + 每次尝试固定 0.5s 硬延迟
+        self._login_lock = asyncio.Lock()
         # framework 统计缓存(60s TTL): history 遍历开销大, 避免每次刷新阻塞
         self._fw_stats_cache: tuple[float, dict] | None = None
         from mohobot.services.audit import AuditLogger
@@ -304,14 +306,21 @@ class WebPanel:
 
         @app.post("/api/login")
         async def login(req: LoginRequest):
-            if req.username != self._username:
-                raise HTTPException(status_code=401, detail="用户名或密码错误")
-            if not self._password_hash or not self._verify_password(req.password, self._password_hash):
-                raise HTTPException(status_code=401, detail="用户名或密码错误")
+            # 串行化 + 无条件 0.5s 硬延迟: 防并发爆破, 且无论成败登录耗时恒定
+            # (不给攻击者"密码对不对"的计时侧信道), 与审核面板 review/ 同款
+            async with self._login_lock:
+                await asyncio.sleep(0.5)
+                if req.username != self._username:
+                    logger.warning(f"Web panel: 登录失败(用户名不存在): {req.username!r}")
+                    raise HTTPException(status_code=401, detail="用户名或密码错误")
+                if not self._password_hash or not self._verify_password(req.password, self._password_hash):
+                    logger.warning(f"Web panel: 登录失败(密码错误): {req.username!r}")
+                    raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-            token = os.urandom(32).hex()
-            self._tokens[token] = time.time() + self._token_expiry
-            return {"token": token, "username": self._username}
+                token = os.urandom(32).hex()
+                self._tokens[token] = time.time() + self._token_expiry
+                logger.info(f"Web panel: 登录成功: {req.username}")
+                return {"token": token, "username": self._username}
 
         @app.post("/api/logout")
         async def logout(request: Request):

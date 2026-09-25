@@ -813,7 +813,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 ### 9.1 主面板 `mohobot/web_panel/app.py`
 
 - 单文件 FastAPI，全部路由是 `_setup_routes()` 里的闭包；前端是单文件 `static/index.html`。
-- **认证**：PBKDF2-HMAC-SHA256（100000 轮，格式 `pbkdf2_sha256$salt$hex`）+ **Bearer token**（32 字节 hex，1 小时 TTL，进程内存）。**不用 cookie**。前端存 `localStorage['mohobot_token']`。
+- **认证**：PBKDF2-HMAC-SHA256（100000 轮，格式 `pbkdf2_sha256$salt$hex`）+ **Bearer token**（32 字节 hex，1 小时 TTL，进程内存）。**不用 cookie**。前端存 `localStorage['mohobot_token']`。登录防爆破（与 review/ 同款）：处理全局串行化（`_login_lock`）+ 每次尝试无条件 0.5s 硬延迟（耗时恒定防计时侧信道），失败写 loguru WARNING（用户名不存在/密码错误分列），成功写 INFO。
 - 无默认密码：`__init__` 找不到 hash 也没有 `MOHOBOT_WEB_PASSWORD` 就 `raise ValueError`。
 - SSE 日志流：因为 `EventSource` 不能带 header，先 `POST /api/logs/ticket` 拿一次性 30 秒票据，再 `GET /api/logs/stream?ticket=...&level=DEBUG,INFO`。日志 sink 是 loguru handler，`stop()` 时移除（防重启后重复 sink）。
 - **密钥掩码 + 留空保留**：`GET` 时 `llm/anysearch/tts` 中含 `key|token|secret|password` 的字段返回 `********`；保存时提交空串或掩码则**保留原值**。
