@@ -109,6 +109,10 @@ class MessageHandler:
         # 每次收到消息时从插件收集, 附加到 LLM 回复请求(不写入 context)
         self._perception_text: dict[tuple, str] = {}
 
+        # 私聊自动回复判定: 重复文本追踪 {(bot_id, user_id): {text, time, count}}
+        # (仅内存; 连续 REPEAT_LIMIT 条相同文本且相邻间隔 < REPEAT_WINDOW 秒判定为自动回复)
+        self._repeat_state: dict[tuple[str, int], dict] = {}
+
     def set_interceptors(self, interceptors: list) -> None:
         """Set the ordered interceptor chain."""
         self._interceptors = interceptors
@@ -235,6 +239,45 @@ class MessageHandler:
         self._last_image_time[key] = now
         return False
 
+    # ── 私聊自动回复判定 ──
+    # QQ 自动回复无统一结构化标记(生产实测): 有的形态文本带「[自动回复]」前缀
+    # (raw_message 里是 CQ 转义 &#91;自动回复&#93;), 有的是 QQ 预设文案纯文本
+    # (如"我在线的，马上回消息")。因此除前缀外辅以"连续重复"启发式。
+    _AUTO_REPLY_PREFIX = "[自动回复]"
+    _AUTO_REPLY_REPEAT_LIMIT = 3
+    _AUTO_REPLY_REPEAT_WINDOW = 300.0  # 秒
+
+    def _ignore_auto_reply_enabled(self) -> bool:
+        """开关读取自 GlobalConfig(WebPanel 保存 setattr 同一实例, 天然热生效)。"""
+        return bool(getattr(self._global_config, "ignore_auto_reply", True))
+
+    def _is_auto_reply(self, bot_id: str, event: PrivateMessageEvent) -> bool:
+        """判定私聊消息是否自动回复(仅私聊路径调用)。
+
+        规则 1: 文本以「[自动回复]」开头。
+        规则 2: 同一 (bot_id, user_id) 连续 _AUTO_REPLY_REPEAT_LIMIT 条相同文本,
+        且相邻间隔 < _AUTO_REPLY_REPEAT_WINDOW 秒(任一间隔超窗即重置计数)。
+        """
+        text = extract_plain_text(event.message)
+        if text.startswith(self._AUTO_REPLY_PREFIX):
+            return True
+        if not text:
+            return False
+
+        now = time_module.time()
+        key = (bot_id, event.user_id)
+        state = self._repeat_state.get(key)
+        if (
+            state is None
+            or state["text"] != text
+            or now - state["time"] >= self._AUTO_REPLY_REPEAT_WINDOW
+        ):
+            self._repeat_state[key] = {"text": text, "time": now, "count": 1}
+            return False
+        state["time"] = now
+        state["count"] += 1
+        return state["count"] >= self._AUTO_REPLY_REPEAT_LIMIT
+
     async def _handle_message(self, bot_id: str, event: MessageEvent, raw: dict) -> None:
         """Process a message event through the pipeline."""
         text_preview = extract_plain_text(event.message)[:80]
@@ -242,6 +285,16 @@ class MessageHandler:
             f"Message from bot={bot_id}, user={event.user_id}, "
             f"type={event.message_type}, text='{text_preview}'"
         )
+
+        # ── 私聊自动回复过滤: 命中即静默丢弃(不回复/不写上下文/不入库/不走插件) ──
+        # 归档已在 handle_event Step 1 落盘(history 保留)。
+        if isinstance(event, PrivateMessageEvent) and self._ignore_auto_reply_enabled():
+            if self._is_auto_reply(bot_id, event):
+                logger.info(
+                    f"Ignoring auto-reply private message: bot={bot_id}, user={event.user_id}, "
+                    f"text='{text_preview[:40]}'"
+                )
+                return
 
         # ── 群消息: 记录群内 bot 存在(全局指令去重依据) ──
         if isinstance(event, GroupMessageEvent):

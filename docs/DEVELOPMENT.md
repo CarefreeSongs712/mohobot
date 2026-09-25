@@ -224,6 +224,7 @@ interceptors = [ban_filter, plugin_system, command_handler, keyword_filter]
 
 - **合并转发**：群聊纯文本回复 ≥ `_forward_min_len`（600 字）自动改合并转发，每块 1000 字（`_forward_chunk_chars`），失败回退普通发送。
 - **工具结果泄漏防御**：`_sanitize_tool_leak` —— 整条以 `[工具` 开头则丢弃；含 `"\n[工具调用: "` 则截断。
+- **私聊自动回复过滤**（`ignore_auto_reply`，默认开）：`_handle_message` 最开头（拦截器链/插件观察钩子之前）对私聊消息判定，命中即静默丢弃（归档保留）。判定规则写死：① 文本以 `[自动回复]` 开头；② 同一 (bot_id, user_id) 连续 3 条相同文本且相邻间隔 < 5 分钟（内存 `_repeat_state`，超窗/换文本重置）。QQ 自动回复无统一结构化标记（有的带前缀、有的是 QQ 预设纯文案如"我在线的，马上回消息"），生产实测见 `docs/DEVELOPMENT.md` 本节备注。
 - **戳一戳**：`notice_type=notify, sub_type=poke` 且 target 是本 bot → 从 `touch_replies` 随机取一条回复。优先级：bot 私有 > 全局 > 内置 `DEFAULT_TOUCH_REPLIES`。
 - **request 事件**：交给插件 `on_request`；插件不接管则**静默不处理**（不自动同意好友/入群）。
 - **上下文写的 role 是 `"QQ号-昵称"`**（`_speaker_role`），LLM 靠这个知道「谁说的」；`LLMService._build_messages` 把非 `user`/`assistant`/`system`/`summary` 的角色转成 `user` 并加 `[role]: ` 前缀。
@@ -359,7 +360,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*` |
 | `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
-| 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count` |
+| 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
 
 `BotConfig`（`data/bots/{bot_id}/config.json`）：`bot_id / qq / nickname / persona / enabled / touch_replies / chat_model_override / vision_model_override / tts_enabled / tts_voice_id / command_prefix / keyword_replies`。
 

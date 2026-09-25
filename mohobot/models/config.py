@@ -246,6 +246,10 @@ class GlobalConfig:
     # 群聊最近消息: 生成回复时把群内最近 N 条消息临时注入 prompt(不写入 context,
     # 不参与 AI 总结压缩), 用于感知群聊氛围。0 = 关闭。
     group_recent_msgs_count: int = 10
+    # 私聊自动回复过滤: 命中即静默丢弃(不回复/不写上下文/不入库, history 归档保留)。
+    # 判定规则写死: ① 文本以「[自动回复]」开头; ② 同一用户连续 3 条相同文本且
+    # 相邻间隔 < 5 分钟(QQ 自动回复无统一标记, 见 docs/DEVELOPMENT.md)。
+    ignore_auto_reply: bool = True
 
     @classmethod
     def load(cls, path: str | Path = "./config/global.yaml") -> "GlobalConfig":
@@ -410,6 +414,7 @@ class GlobalConfig:
                 1, int(raw.get("context_summary_min_interval_hours", 24))
             ),
             group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
+            ignore_auto_reply=bool(raw.get("ignore_auto_reply", True)),
             music_knowledge=dict(music_raw or {}),
             touch_replies=[str(t) for t in (touch_raw or [])],
         )
@@ -531,6 +536,7 @@ class GlobalConfig:
             "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
+            "ignore_auto_reply": self.ignore_auto_reply,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -647,6 +653,7 @@ class GlobalConfig:
             "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
+            "ignore_auto_reply": self.ignore_auto_reply,
         }
 
 

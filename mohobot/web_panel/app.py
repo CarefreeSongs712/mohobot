@@ -458,7 +458,8 @@ class WebPanel:
                         "context_summary_sweep_enabled",
                         "context_summary_sweep_interval_minutes",
                         "context_summary_min_interval_hours",
-                        "group_recent_msgs_count"):
+                        "group_recent_msgs_count",
+                        "ignore_auto_reply"):
                 if key in data:
                     setattr(cfg, key, data[key])
 

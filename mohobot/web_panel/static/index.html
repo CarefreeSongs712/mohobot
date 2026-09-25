@@ -977,6 +977,7 @@ async function loadConfigPage() {
       formField('context_summary_sweep_interval_minutes', '周期扫描间隔(分钟)', globalConfigCache.context_summary_sweep_interval_minutes, { hint: '后台多久扫描一次旧对话(默认30)' }) +
       formField('context_summary_min_interval_hours', '重复压缩最小间隔(小时)', globalConfigCache.context_summary_min_interval_hours, { hint: '已压缩过的会话再次周期压缩的最小间隔(默认24=一天); 超过触发轮数不受此限' }) +
       formField('group_recent_msgs_count', '群聊最近消息条数', globalConfigCache.group_recent_msgs_count, { hint: '回复时临时注入群内最近 N 条消息(不写入上下文,不参与总结); 0=关闭' }) +
+      checkField('ignore_auto_reply', '忽略私聊自动回复', globalConfigCache.ignore_auto_reply, 'QQ 自动回复(文本以[自动回复]开头, 或同一用户连续3条相同文本且间隔<5分钟)静默忽略: 不回复不记上下文, 归档保留') +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">💬 回复行为</div>' +
       checkField('reply.stream', '流式请求', globalConfigCache.reply?.stream, '逐 token 接收,false 则等完整回复') +
@@ -1109,6 +1110,7 @@ async function saveGlobalConfig() {
     context_summary_sweep_interval_minutes: parseInt(document.getElementById('cfg-context_summary_sweep_interval_minutes').value) || 30,
     context_summary_min_interval_hours: parseInt(document.getElementById('cfg-context_summary_min_interval_hours').value) || 24,
     group_recent_msgs_count: parseInt(document.getElementById('cfg-group_recent_msgs_count').value) || 0,
+    ignore_auto_reply: document.getElementById('cfg-ignore_auto_reply')?.checked ?? true,
     reply: {
       stream: document.getElementById('cfg-reply.stream')?.checked ?? true,
       segment_reply: document.getElementById('cfg-reply.segment_reply')?.checked ?? true,

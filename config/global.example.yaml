@@ -127,6 +127,12 @@ emotion:
 # 都为空时使用内置默认(见 mohobot/message_handler.py DEFAULT_TOUCH_REPLIES)。
 touch_replies: []
 
+# ── 私聊自动回复过滤 ──────────────────────────────────────────
+# 命中即静默丢弃(不回复/不写上下文/不入库; history 归档保留)。
+# 判定规则(写死): 文本以「[自动回复]」开头, 或同一用户连续 3 条相同文本
+# 且相邻间隔 < 5 分钟。
+ignore_auto_reply: true
+
 log_dir: "./logs"
 data_dir: "./data"
 plugins_dir: "./plugins"
