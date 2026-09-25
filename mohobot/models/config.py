@@ -250,6 +250,10 @@ class GlobalConfig:
     # 判定规则写死: ① 文本以「[自动回复]」开头; ② 同一用户连续 3 条相同文本且
     # 相邻间隔 < 5 分钟(QQ 自动回复无统一标记, 见 docs/DEVELOPMENT.md)。
     ignore_auto_reply: bool = True
+    # history 双写过渡: 群聊消息除合并存储(data/history/group/{群号}.jsonl)外,
+    # 仍按旧布局 data/history/{bot_id}/group/{群号}.jsonl 归档一份(回滚保险)。
+    # 确认新布局稳定后改 false 停止旧写入(热生效)。
+    history_dual_write: bool = True
 
     @classmethod
     def load(cls, path: str | Path = "./config/global.yaml") -> "GlobalConfig":
@@ -415,6 +419,7 @@ class GlobalConfig:
             ),
             group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
             ignore_auto_reply=bool(raw.get("ignore_auto_reply", True)),
+            history_dual_write=bool(raw.get("history_dual_write", True)),
             music_knowledge=dict(music_raw or {}),
             touch_replies=[str(t) for t in (touch_raw or [])],
         )
@@ -537,6 +542,7 @@ class GlobalConfig:
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
             "ignore_auto_reply": self.ignore_auto_reply,
+            "history_dual_write": self.history_dual_write,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -654,6 +660,7 @@ class GlobalConfig:
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
             "ignore_auto_reply": self.ignore_auto_reply,
+            "history_dual_write": self.history_dual_write,
         }
 
 

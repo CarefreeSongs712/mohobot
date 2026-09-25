@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time as time_module
+from collections import OrderedDict
 from typing import Any
 
 from loguru import logger
@@ -69,6 +70,8 @@ class MessageHandler:
         self._command_handler = None  # CommandHandler 引用(set_interceptors 时捕获)
         self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
         self._writer_registry: dict[str, JSONLWriter] = {}
+        # 群合并归档的 message_id 去重窗口: {group_id: OrderedDict[mid, None]}
+        self._group_mid_window: dict[Any, OrderedDict] = {}
         # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
         self._song_matcher = song_matcher
         # 情感系统(注入 + 后台分析; 未启用时为 None)
@@ -145,16 +148,53 @@ class MessageHandler:
             logger.exception(f"Error handling event from bot {bot_id}: {e}")
 
     async def _archive_event(self, bot_id: str, event: MessageEvent, raw: dict) -> None:
-        """Write raw event to history JSONL."""
+        """Write raw event to history JSONL.
+
+        群聊合并存储: 所有 bot 收到的群消息写进同一个
+        data/history/group/{群号}.jsonl, 写入时按 message_id 去重(同一条群
+        消息会经每个 bot 的连接各推送一次), 行内 bot_id 标注接收 bot;
+        私聊仍按 bot 分目录(不同 bot 与同一用户的私聊是不同对话)。
+        history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
+        一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
+        """
+        dual_write = bool(getattr(self._global_config, "history_dual_write", True))
         if isinstance(event, PrivateMessageEvent):
             file_path = f"{self._data_dir}/history/{bot_id}/private/{event.user_id}.jsonl"
+            await self._get_or_create_writer(file_path).append(raw)
         elif isinstance(event, GroupMessageEvent):
-            file_path = f"{self._data_dir}/history/{bot_id}/group/{event.group_id}.jsonl"
+            group_id = event.group_id
+            if self._claim_group_mid(group_id, str(raw.get("message_id") or "")):
+                payload = dict(raw)
+                payload["bot_id"] = bot_id
+                file_path = f"{self._data_dir}/history/group/{group_id}.jsonl"
+                await self._get_or_create_writer(file_path).append(payload)
+            if dual_write:
+                legacy_path = f"{self._data_dir}/history/{bot_id}/group/{group_id}.jsonl"
+                await self._get_or_create_writer(legacy_path).append(raw)
         else:
             return
 
-        writer = self._get_or_create_writer(file_path)
-        await writer.append(raw)
+    # 群合并归档的 message_id 去重窗口(每群保留最近 N 条): 重复推送只发生在
+    # 多 bot 同时收到同一条群消息(毫秒级间隔)与重连重推(秒级), 窗口足够覆盖;
+    # 窗口仅存内存, 重启后理论上有一次重复写入的可能, 消费方(review)读侧仍
+    # 按 message_id 兜底去重。
+    _GROUP_MID_WINDOW = 2048
+
+    def _claim_group_mid(self, group_id, message_id: str) -> bool:
+        """认领群合并归档的 message_id: True=首次(应写入), False=重复(跳过)。
+
+        纯同步操作(检查与登记之间无 await), 多 bot 派发任务并发调用时天然
+        互斥, 无需加锁。无 message_id 的消息无法去重, 恒返回 True。
+        """
+        if not message_id:
+            return True
+        window = self._group_mid_window.setdefault(group_id, OrderedDict())
+        if message_id in window:
+            return False
+        window[message_id] = None
+        if len(window) > self._GROUP_MID_WINDOW:
+            window.popitem(last=False)
+        return True
 
     def _get_or_create_writer(self, file_path: str) -> JSONLWriter:
         """Get or create a JSONLWriter for the given path."""

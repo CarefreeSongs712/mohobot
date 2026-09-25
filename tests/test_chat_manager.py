@@ -134,9 +134,16 @@ def _sent_event(text, mid, *, bot_qq=2192362623, nickname="洛天依"):
 
 
 def _write_history(data_dir, lines, *, chat_type="group", chat_id=None):
-    """写归档文件 history/{BOT}/{group|private}/{id}.jsonl, 返回路径。"""
+    """写归档文件, 返回路径。
+
+    群聊合并布局: history/group/{群号}.jsonl(与 bot 无关);
+    私聊: history/{BOT}/private/{QQ}.jsonl。
+    """
     target_id = GROUP if chat_id is None else chat_id
-    path = Path(data_dir) / "history" / BOT / chat_type / f"{target_id}.jsonl"
+    if chat_type == "group":
+        path = Path(data_dir) / "history" / "group" / f"{target_id}.jsonl"
+    else:
+        path = Path(data_dir) / "history" / BOT / "private" / f"{target_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(json.dumps(e, ensure_ascii=False) for e in lines) + "\n",

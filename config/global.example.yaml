@@ -133,6 +133,12 @@ touch_replies: []
 # 且相邻间隔 < 5 分钟。
 ignore_auto_reply: true
 
+# ── history 双写过渡 ──────────────────────────────────────────
+# 群聊消息除合并存储(data/history/group/{群号}.jsonl, 跨 bot 去重)外,
+# 仍按旧布局 data/history/{bot_id}/group/ 归档一份(回滚保险)。
+# 确认新布局稳定后改 false 停止旧写入(WebUI 可改热生效)。
+history_dual_write: true
+
 log_dir: "./logs"
 data_dir: "./data"
 plugins_dir: "./plugins"

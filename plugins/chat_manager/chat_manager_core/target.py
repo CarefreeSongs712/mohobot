@@ -35,8 +35,14 @@ def parse_chat_id(raw: str) -> str | None:
 
 
 def history_path(data_dir: str, bot_id: str, target: Target) -> Path:
-    """该会话的归档文件路径 data/history/{bot_id}/{group|private}/{id}.jsonl。"""
-    return Path(data_dir) / "history" / bot_id / target.chat_type / f"{target.chat_id}.jsonl"
+    """该会话的归档文件路径。
+
+    群聊是跨 bot 合并存储: data/history/group/{群号}.jsonl(与 bot_id 无关);
+    私聊按 bot 分目录: data/history/{bot_id}/private/{QQ}.jsonl。
+    """
+    if target.is_group:
+        return Path(data_dir) / "history" / "group" / f"{target.chat_id}.jsonl"
+    return Path(data_dir) / "history" / bot_id / "private" / f"{target.chat_id}.jsonl"
 
 
 def resolve_by_history(data_dir: str, bot_id: str, chat_id: str) -> Target | None:

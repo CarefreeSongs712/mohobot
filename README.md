@@ -198,6 +198,7 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 - Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
 - 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
 - 更新部署：`git pull origin main` 后 `kill -TERM <pid>` 重启
+- **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码默认 `history_dual_write: true` 双写过渡，确认稳定后在 WebUI 关闭
 
 ### 上下文压缩与群聊最近消息
 
@@ -250,7 +251,7 @@ database:
 
 `plugins/chat_manager/` — 查看指定会话的聊天记录、以 bot 身份代发消息。两个命令均**仅全局管理员**（`admins`）、带 `/` 前缀，群内多 bot 时只由一个 bot 响应：
 
-- **`/查看聊天 <QQ号|群号> [条数]`** — 从本地 `data/history` 归档读最近条数（默认 20，WebUI 可改；归档不足则全部；**含用户发言与 bot 自己的发言**，转出来是一段完整对话），按时间正序**合并转发到当前会话**（私聊里下命令就走私聊合并转发）。不调用任何历史查询接口，无归档时明确报错。转发可靠性：剥离 reply 引用段（目标会话无法解析、会被 NapCat 拒整批）；图片/语音等 URL 过期导致整批失败时，自动降级为纯文本占位重试一次，保证记录必达
+- **`/查看聊天 <QQ号|群号> [条数]`** — 从本地 `data/history` 归档读最近条数（默认 20，WebUI 可改；归档不足则全部；**含用户发言与 bot 自己的发言**，转出来是一段完整对话；群聊读跨 bot 合并归档，所有 bot 的发言都在），按时间正序**合并转发到当前会话**（私聊里下命令就走私聊合并转发）。不调用任何历史查询接口，无归档时明确报错。转发可靠性：剥离 reply 引用段（目标会话无法解析、会被 NapCat 拒整批）；图片/语音等 URL 过期导致整批失败时，自动降级为纯文本占位重试一次，保证记录必达
 - **`/发送消息 <QQ号|群号> <内容>`** — 把内容以**纯文本段**发到指定会话（不解析 `[CQ:...]`，避免被当消息构造入口）；成功回执、失败给出原因
 - **目标自动判定**（群号与 QQ 号都是纯数字，字面无法区分）：`/查看聊天` 按本地归档判定（群归档优先）；`/发送消息` 按 `get_group_list` 判定（在群列表里即群，否则当私聊）——群列表接口失败时**取消发送**，不猜测
 - **配置**（WebUI 插件页可改、热生效）：`default_count`（默认条数）/ `batch_size`（单批转发条数，超过自动分批、批间隔 0.5 秒）
@@ -412,7 +413,8 @@ mohobot/
 ├── tests/                         # 冒烟测试（smoke_*）与单测（tests/_run_all.py 全量回归）
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
-│   ├── history/{bot_id}/          # 消息事件 JSONL（收到的 message + bot 发送的 message_sent）
+│   ├── history/group/             # 群聊消息事件 JSONL（跨 bot 合并存储、写入去重）
+│   ├── history/{bot_id}/private/  # 私聊消息事件 JSONL（收到的 message + bot 发送的 message_sent）
 │   ├── contexts/{bot_id}/         # 【可读写】会话上下文
 │   ├── database/                  # SQLite（mohobot.db）
 │   └── cache/images/              # 图片缓存
@@ -429,17 +431,17 @@ mohobot/
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
 | 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 
-- **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）
+- **聊天历史**：**群聊跨 bot 合并存储**在 `data/history/group/{群号}.jsonl`（同一群号一个文件；同一条群消息多只 bot 都会收到，写入时按 `message_id` 近期窗口去重只落一份，行内 `bot_id` 标注接收 bot）；**私聊按 bot 分目录** `data/history/{bot_id}/private/{QQ号}.jsonl`（不同 bot 与同一用户的私聊是不同对话）。**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）。旧布局（`history/{bot_id}/group/`）在 `history_dual_write: true`（默认）期间仍同步写入一份作回滚保险，确认稳定后关闭；存量数据用 `python scripts/migrate_history_layout.py`（**停机运行**）一次性去重合并，旧文件移入 `data/history_legacy_{时间戳}/` 备份
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
-- **数据隔离**：会话数据按 bot_id 分目录
+- **数据隔离**：会话上下文按 bot_id 分目录；群聊历史为所有 bot 共享
 
 ## 📋 聊天记录审核面板（review/, 端口 9091）
 
 半独立 WebUI：**独立进程**（mohobot 启动时若 `review/config.yaml` 存在且 `enabled: true` 则拉起，mohobot 退出不影响它）、独立端口（默认 9091）、独立配置与独立 SQLite（`review/data/review.db`），对 mohobot 的 `data/` **严格只读**。
 
 - **数据源**：`data/history` 消息事件流（唯一来源）。history 只增不删，消息身份用 **message_id** —— 审核结论永不因上下文压缩/改写而失联
-- **审核范围（面板侧过滤，归档保持完整）**：群聊只审 **bot 的发言** 与 **用户 @ 本 bot 或引用本 bot 发言** 的消息；私聊全部审
-- **群聊跨 bot 合并**：同一个群号在多只 bot 归档下的内容聚合为**一个审核会话**（key 的 bot 段固定 `_merged`）；每只 bot 的归档各自过滤后按时间混流，同一条消息同时命中多只 bot 过滤时跨 bot 去重（优先 message_id，兜底 时间+发言人+内容），侧栏显示合并了 N 只 bot
+- **审核范围（面板侧过滤，归档保持完整）**：群聊只审 **bot 的发言** 与 **用户 @ 某只 bot 或引用某只 bot 发言** 的消息；私聊全部审
+- **群聊单文件会话**：群聊归档本身已跨 bot 合并存储（`history/group/{群号}.jsonl`，写侧去重），审核面板直接读单文件；bot 发言按行内 `bot_id` 归属标注，用户消息按 @/引用 命中归属到对应 bot，侧栏显示会话涉及的 bot
 - **界面**：审核（按会话分页浏览，默认锚定第一条待审）、异常记录（标签：色情/政治/辱骂/其他，可编辑、可导出 CSV）、统计（总量/按 Bot/按审核员/操作日志）
 - **账号**：`review/config.yaml` 手工维护用户（密码只存 PBKDF2 哈希，`python -m review.hash_password` 生成）；登录后可自助改密（仅自己，需旧密码，写回保留注释）
 - **登录防爆破**：登录处理全局串行化 + 每次尝试固定 0.5s 硬延迟（登录耗时恒定防计时侧信道）

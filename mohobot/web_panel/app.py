@@ -459,7 +459,8 @@ class WebPanel:
                         "context_summary_sweep_interval_minutes",
                         "context_summary_min_interval_hours",
                         "group_recent_msgs_count",
-                        "ignore_auto_reply"):
+                        "ignore_auto_reply",
+                        "history_dual_write"):
                 if key in data:
                     setattr(cfg, key, data[key])
 
@@ -1010,6 +1011,9 @@ class WebPanel:
                 base = root / d
                 if not base.exists():
                     continue
+                # history/ 下的子目录既包括 bot 目录(私聊), 也包括群聊合并
+                # 目录 group/。按 bot 筛选时只匹配 bot 目录 —— 群合并数据
+                # 为所有 bot 共享, 不随单个 bot 的筛选/清理而增删。
                 if bot_list is None:
                     bot_dirs = [e for e in base.iterdir() if e.is_dir()]
                 else:
@@ -1351,17 +1355,30 @@ class WebPanel:
             }
             history_dir = self._data_dir / "history"
             if history_dir.exists():
-                for bot_dir in history_dir.iterdir():
-                    if not bot_dir.is_dir():
+                # 群聊合并目录 history/group/*.jsonl(单层) + bot 目录
+                # {bot_id}/private/*.jsonl(两层); 逐行迭代(内存友好)
+                for entry in history_dir.iterdir():
+                    if not entry.is_dir():
                         continue
-                    for chat_dir in bot_dir.iterdir():
+                    if entry.name == "group":
+                        for f in entry.iterdir():
+                            if f.suffix == ".jsonl":
+                                result["history_files"] += 1
+                                try:
+                                    with open(f, "r", encoding="utf-8") as fh:
+                                        result["total_messages"] += sum(
+                                            1 for line in fh if line.strip()
+                                        )
+                                except OSError:
+                                    pass
+                        continue
+                    for chat_dir in entry.iterdir():
                         if not chat_dir.is_dir():
                             continue
                         for f in chat_dir.iterdir():
                             if f.suffix == ".jsonl":
                                 result["history_files"] += 1
                                 try:
-                                    # 逐行迭代(内存友好), 大文件也不一次性读入
                                     with open(f, "r", encoding="utf-8") as fh:
                                         result["total_messages"] += sum(
                                             1 for line in fh if line.strip()

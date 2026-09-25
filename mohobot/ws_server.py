@@ -52,6 +52,7 @@ class WSServer:
         outbound_maxsize: int = 100,
         outbound_enqueue_timeout: float = 2.0,
         data_dir: str = "./data",
+        global_config=None,
     ):
         self._host = host
         self._port = port
@@ -59,8 +60,11 @@ class WSServer:
         self._bot_manager = bot_manager
         self._task_supervisor = task_supervisor
         self._data_dir = data_dir
+        # GlobalConfig(history_dual_write 双写过渡开关, 每次归档时热读取)
+        self._global_config = global_config
         # bot 发言归档: bot 发出的消息以 message_sent 事件写入 history JSONL
-        # (与收到的消息同一目录/文件), 供审核面板识别"bot 说过什么"。
+        # (群聊写合并文件 data/history/group/{群号}.jsonl, 私聊与收到的消息
+        # 同一目录/文件), 供审核面板识别"bot 说过什么"。
         self._archive_writers: dict[str, JSONLWriter] = {}
         self._outbound_scheduler = outbound_scheduler or OutboundScheduler(
             send_interval_sec=outbound_interval,
@@ -392,7 +396,12 @@ class WSServer:
         self, bot_id: str, chat_type: str, chat_id: int | str,
         message_id: str, content: list[dict[str, Any]],
     ) -> None:
-        """写一条 message_sent 事件进 history JSONL(失败只记日志)。"""
+        """写一条 message_sent 事件进 history JSONL(失败只记日志)。
+
+        群聊写合并文件 data/history/group/{群号}.jsonl(与收到的群消息同文件,
+        行内 bot_id 标注发言 bot); dual_write 开启时额外按旧布局
+        {bot_id}/group/ 归档一份(回滚保险)。
+        """
         instance = self._bot_manager.get(bot_id)
         bot_qq = instance.qq if instance else 0
         bot_nick = instance.nickname if instance else bot_id
@@ -403,6 +412,7 @@ class WSServer:
             "self_id": bot_qq,
             "user_id": bot_qq,
             "message_id": message_id,
+            "bot_id": bot_id,
             "message": content,
             "sender": {"user_id": bot_qq, "nickname": bot_nick, "card": ""},
         }
@@ -412,14 +422,19 @@ class WSServer:
             except (TypeError, ValueError):
                 event["group_id"] = chat_id
         try:
-            path = self._archive_path(bot_id, chat_type, chat_id)
-            await self._get_archive_writer(path).append(event)
+            for path in self._archive_paths(bot_id, chat_type, chat_id):
+                await self._get_archive_writer(path).append(event)
         except Exception as e:
             logger.debug(f"bot 发言归档失败(bot={bot_id}, {chat_type}:{chat_id}): {e}")
 
-    def _archive_path(self, bot_id: str, chat_type: str, chat_id: int | str) -> str:
-        """bot 发言的 history 归档路径(与收到的消息同文件)。"""
-        return f"{self._data_dir}/history/{bot_id}/{chat_type}/{chat_id}.jsonl"
+    def _archive_paths(self, bot_id: str, chat_type: str, chat_id: int | str) -> list[str]:
+        """bot 发言的 history 归档路径(可能多条: 群聊合并 + 双写旧布局)。"""
+        if chat_type == "group":
+            paths = [f"{self._data_dir}/history/group/{chat_id}.jsonl"]
+            if bool(getattr(self._global_config, "history_dual_write", True)):
+                paths.append(f"{self._data_dir}/history/{bot_id}/group/{chat_id}.jsonl")
+            return paths
+        return [f"{self._data_dir}/history/{bot_id}/private/{chat_id}.jsonl"]
 
     def _get_archive_writer(self, path: str) -> JSONLWriter:
         writer = self._archive_writers.get(path)

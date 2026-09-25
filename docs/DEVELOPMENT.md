@@ -80,7 +80,7 @@ python tests/_js_check.py         # WebUI JS 括号平衡检查（改 index.html
 python tests/smoke_startup.py     # 真实启动+关闭冒烟，用 tests/test_config.yaml
 ```
 
-**当前基线：`41 passed, 0 failed`**（本次核对时实测）。改动后以此为对照。
+**当前基线：`43 passed, 1 failed`**（2026-09 核对）。唯一失败是 `test_perception.py::test_perception_content` —— **日期相关的既有问题**：感知文本含「法定节假日」分支，节日当天（如中秋）断言「工作日/周末/休息日」必挂，与代码改动无关。改动后以此为对照。
 
 runner 机制（`tests/_run_all.py`）：
 
@@ -324,7 +324,8 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 
 | 位置 | 内容 |
 |---|---|
-| `data/history/{bot_id}/{private,group}/{id}.jsonl` | 原始事件只读归档 |
+| `data/history/group/{群号}.jsonl` | 群聊合并归档（跨 bot 共享一个文件，写入时按 message_id 近期窗口去重，行内 `bot_id` 标注接收/发送 bot） |
+| `data/history/{bot_id}/private/{QQ}.jsonl` | 私聊原始事件归档（不同 bot 与同一用户的私聊是不同对话，不合并） |
 | `data/bots/{bot_id}/config.json` | per-bot 配置 |
 | `data/cache/images/` + `data/cache/image_cache_map.json` | 图片缓存 + phash 映射 |
 | `data/ban/{ban_list,banall_list,pass_list,passall_list}.json` | 封禁名单 |
@@ -337,6 +338,16 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `review/data/review.db` | 审核面板自己的库 |
 
 > `data/` 与 `logs/` **完全未纳入版本控制**（`git ls-files data` 为空）。
+
+### 4.6 history 群聊合并布局（双写过渡期）
+
+群聊消息曾经每 bot 单独存一份（`history/{bot_id}/group/{群号}.jsonl`），同一条群消息多只 bot 都会收到 → N 份重复。现改为**合并存储 + 写入去重**：
+
+- **写入**（两处）：`MessageHandler._archive_event`（收到的消息）写 `history/group/{群号}.jsonl`，行内注入 `bot_id`（接收 bot）；`WSServer._write_archive_line`（`message_sent`）写同一文件，行内 `bot_id`（发送 bot）。**私聊仍按 bot 分目录**，路径不变。
+- **去重**：`MessageHandler._claim_group_mid` —— 每群一个 `OrderedDict` 窗口（`_GROUP_MID_WINDOW = 2048`），重复 mid 直接跳过合并写入。检查与登记之间无 await，天然互斥。窗口仅存内存：重启后理论上可能重复写一次，消费方（review loader 的 `seen_mids`）读侧兜底去重。
+- **`history_dual_write`（默认 true）**：开启时群消息/发言**额外**按旧布局 `history/{bot_id}/group/` 归档一份（不去重、内容与旧代码完全一致，回滚保险）。确认新布局稳定后在 WebUI 关闭（热生效），下个版本删旧写入代码。
+- **存量迁移**：`python scripts/migrate_history_layout.py`（**停机运行**）把旧 per-bot 群文件（含遗留 QQ 号目录）按 mid 去重合并进新布局、补 `bot_id`、按时间排序，旧文件移入 `data/history_legacy_{时间戳}/` 备份。幂等，可重复执行。
+- **读侧适配**：review loader（群会话单文件 + 按行内 bot_id/@/引用做归属过滤，`_CACHE_VERSION` 已 bump 作废旧 sidecar）、chat_manager `history_path`（群路径不含 bot_id）、web_panel `_count_sync`（group 目录单层遍历）。备份/恢复/清理按 bot 筛选时不含群合并数据（共享，不拆分）。
 
 ---
 
@@ -830,9 +841,9 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 
 - 主进程 `main.py:_maybe_start_review_panel()` 负责拉起：缺 `config.yaml` / `enabled: false` / 端口已被监听 → 跳过；否则 detached `Popen` 起 `review/main.py`，日志写 `review/panel.log`。
 - **数据源：`data/history` 消息事件流（唯一来源）**。history 只增不删，条目身份 = **message_id**（`mid:<id>`；无 id 时退回内容指纹 `hash:...`），审核结论永不因上下文压缩而失联（旧 contexts 指纹方案已废弃 —— 框架的 AI 总结压缩曾使生产上 97.5% 的已审条目失联）。
-- **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 本 bot（`at` 段 qq == self_id）或引用本 bot 发言（`reply` 段 id ∈ 该会话已归档 bot message_id 集合）的消息；私聊全部审（按 bot 独立会话）。
-- **群聊跨 bot 合并**：同一个群号在多只 bot 归档下的内容聚合为**一个审核会话**，session_key 的 bot 段固定 `"_merged"`（`_merged/group/{群号}`）。每只 bot 的归档各自过滤后按时间混流；同一条消息同时命中多只 bot 过滤时跨 bot 去重（优先 message_id，用户消息无 id 时兜底 time+uid+text；bot 发言不做内容级去重）。列表 bot 过滤按「该 bot 在此群的归档存在」判断，每条 bot 发言带 bot_id/bot_nickname 逐条标注。
-- `WSServer` 出站层把 bot 发送的消息以 `post_type: "message_sent"` 追加进同一个 history JSONL（`ws_server._archive_sent_message`，echo 超时用 `local:` id 兜底；发送明确失败不归档；`base64://` 大字段净化为占位）。
+- **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 某只 bot（`at` 段 qq == 该 bot 的 self_id）或引用某只 bot 发言（`reply` 段 id ∈ 该 bot 已归档发言 mid 集合）的消息；私聊全部审（按 bot 独立会话）。
+- **群聊单文件会话**：群聊归档本身已合并存储（`history/group/{群号}.jsonl`，见 §4.6），session_key 仍固定 `"_merged/group/{群号}"`（兼容 review.db 既有结论）。bot 发言按行内 `bot_id` 归属（旧数据无该字段时按 self_id 反查 bots 配置）；用户消息命中 @/引用 时归属到对应 bot（同时命中多只取 bot_id 排序最前者）。按 bot 的 mid 集合（`bot_mids_by_bot`）与 self_id（文件内 message_sent 行自带 ∪ bots 配置）做过滤。用户消息无 id 时按 time+uid+text 兜底去重；bot 发言不做内容级去重。
+- `WSServer` 出站层把 bot 发送的消息以 `post_type: "message_sent"` 追加进同一个 history JSONL（`ws_server._write_archive_line`，echo 超时用 `local:` id 兜底；发送明确失败不归档；`base64://` 大字段净化为占位）。
 - 加载器对 history 文件做**增量解析**（记录 offset，只读新增字节，mtime/size 失效；文件被截断时全量重读）。
 - 会话明细接口分页（`?page=&page_size=`，默认锚定第一条待审所在页；判定后重开自动跳下一批）。
 - 审核状态存自己的库（`reviewed_entries` / `abnormal_records` / `review_log`）。
@@ -881,6 +892,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 16. **情感 `min_interval_sec` / `analysis_round_cooldown` 门控已被 revert**（`bfacefb`、`5c7c534`）：现在 `EmotionConfig` 没有这两个字段，`smart.py` 是**宽松版**（`"好"` 在正向关键词里、bot 回复关键词 +1、阈值 `intensity >= 2`）。别按旧文档去改这两个字段。
 17. **改 `MessageHandler` 时注意临时 `system` 块**（群聊最近消息 / 环境感知 / 情感 / 引用消息）**绝不能写回 context 文件**，否则会污染压缩与轮数统计。
 18. **`data/` 与 `logs/` 完全不入库**，本地跑测试/开发会污染工作区数据；测试必须用 `tempfile`。
+19. **`tests/_js_check.py` 自带词法误报且不拦人**：对当前 `index.html` 报 MISMATCH/UNCLOSED（对某处正则/字符串误判），且无论结果如何**退出码恒为 0**。改前端后请用 `node --check`（提取 `<script>` 内容）验证真实语法。
 
 ---
 

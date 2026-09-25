@@ -111,73 +111,65 @@ def _private_events() -> list[dict]:
     ]
 
 
-def _group_events() -> list[dict]:
-    """bot_001(qq=111) 的群 20002 归档。"""
+def _merged_group_events() -> list[dict]:
+    """群 20002 的合并归档(history/group/20002.jsonl, 新布局单文件)。
+
+    bot_001(qq=111) 与 bot_002(qq=222) 同群; 行内 bot_id 为写入时标注
+    (用户消息取首个接收 bot, bot 发言取发送 bot)。
+    """
     return [
         {"post_type": "message_sent", "message_type": "group", "time": 1700000100,
-         "self_id": 111, "group_id": 20002, "message_id": "GB-1",
+         "self_id": 111, "group_id": 20002, "message_id": "GB-1", "bot_id": "bot_001",
          "sender": {"user_id": 111, "nickname": "天依"},
          "message": [{"type": "text", "data": {"text": "大家好"}}]},
         # 无关群消息 → 过滤
         {"post_type": "message", "message_type": "group", "time": 1700000101,
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-101",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "text", "data": {"text": "群里闲聊"}}]},
-        # @ 别的 bot → 过滤
+        # @ 别的 bot(非框架 bot) → 过滤
         {"post_type": "message", "message_type": "group", "time": 1700000102,
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-102",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "at", "data": {"qq": "999"}},
                      {"type": "text", "data": {"text": "@别人"}}]},
         # @ 本 bot → 保留
         {"post_type": "message", "message_type": "group", "time": 1700000103,
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-103",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "at", "data": {"qq": "111"}},
                      {"type": "text", "data": {"text": "@bot 你好"}}]},
         # 引用 bot 发言 → 保留
         {"post_type": "message", "message_type": "group", "time": 1700000104,
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-104",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "reply", "data": {"id": "GB-1"}},
                      {"type": "text", "data": {"text": "引用回复"}}]},
         # 同一条消息重复推送 → 去重
         {"post_type": "message", "message_type": "group", "time": 1700000104,
          "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-104",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "text", "data": {"text": "重复推送"}}]},
-        # 同时 @ 两个 bot → 两个归档各自命中, 合并后跨 bot 去重
-        {"post_type": "message", "message_type": "group", "time": 1700000110,
-         "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-106",
-         "sender": {"card": "张三", "user_id": 10001},
-         "message": [{"type": "at", "data": {"qq": "111"}},
-                     {"type": "at", "data": {"qq": "222"}},
-                     {"type": "text", "data": {"text": "都在吧"}}]},
-    ]
-
-
-def _group_events_bot2() -> list[dict]:
-    """bot_002(qq=222) 的同一群 20002 归档 — 合并会话的另一半。"""
-    return [
-        {"post_type": "message_sent", "message_type": "group", "time": 1700000107,
-         "self_id": 222, "group_id": 20002, "message_id": "GB-B1",
-         "sender": {"user_id": 222, "nickname": "天依beta"},
-         "message": [{"type": "text", "data": {"text": "我是beta"}}]},
-        # @ 别的 bot → 在 bot_002 视角过滤掉
-        {"post_type": "message", "message_type": "group", "time": 1700000108,
-         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-103",
-         "sender": {"card": "张三", "user_id": 10001},
-         "message": [{"type": "at", "data": {"qq": "111"}},
-                     {"type": "text", "data": {"text": "@bot 你好"}}]},
-        # @ 本 bot → 保留
+        # @ beta → 保留, 归属 bot_002
         {"post_type": "message", "message_type": "group", "time": 1700000105,
-         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-105",
+         "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-105",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "at", "data": {"qq": "222"}},
                      {"type": "text", "data": {"text": "@beta 你好"}}]},
-        # 与 bot_001 归档同一条多 @ 消息 → 合并去重
+        {"post_type": "message_sent", "message_type": "group", "time": 1700000107,
+         "self_id": 222, "group_id": 20002, "message_id": "GB-B1", "bot_id": "bot_002",
+         "sender": {"user_id": 222, "nickname": "天依beta"},
+         "message": [{"type": "text", "data": {"text": "我是beta"}}]},
+        # 同时 @ 两个 bot → 命中多只 bot, 归属取 bot_id 排序最靠前者
         {"post_type": "message", "message_type": "group", "time": 1700000110,
-         "self_id": 222, "group_id": 20002, "user_id": 10001, "message_id": "M-106",
+         "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-106",
+         "bot_id": "bot_001",
          "sender": {"card": "张三", "user_id": 10001},
          "message": [{"type": "at", "data": {"qq": "111"}},
                      {"type": "at", "data": {"qq": "222"}},
@@ -198,12 +190,9 @@ def _build_fake_data(root: Path) -> None:
     priv.mkdir(parents=True)
     _write_jsonl(priv / "10001.jsonl", _private_events())
 
-    grp1 = root / "history" / "bot_001" / "group"
-    grp1.mkdir(parents=True)
-    _write_jsonl(grp1 / "20002.jsonl", _group_events())
-    grp2 = root / "history" / "bot_002" / "group"
-    grp2.mkdir(parents=True)
-    _write_jsonl(grp2 / "20002.jsonl", _group_events_bot2())
+    grp = root / "history" / "group"
+    grp.mkdir(parents=True)
+    _write_jsonl(grp / "20002.jsonl", _merged_group_events())
 
     cache_dir = root / "cache"
     cache_dir.mkdir(parents=True)
