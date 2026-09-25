@@ -452,6 +452,12 @@ class WebPanel:
             for key in ("touch_replies",):
                 if key in data:
                     setattr(cfg, key, data[key])
+            # 用量统计排除模型(字符串列表, 去空白)
+            if "usage_excluded_models" in data:
+                cfg.usage_excluded_models = [
+                    str(m).strip() for m in (data["usage_excluded_models"] or [])
+                    if str(m).strip()
+                ]
             for key in ("context_summary_enabled", "context_trim_at_rounds",
                         "context_trim_remove_rounds",
                         "context_summary_age_hours",
@@ -1187,6 +1193,90 @@ class WebPanel:
 
             logger.info(f"Web panel: ban operate {action} uid={uid} session={session_key or '-'}")
             return {"status": "ok"}
+
+        # ── 10. 情感管理 (emotion) ─────────────────────────────
+
+        @app.get("/api/emotion/status")
+        async def emotion_status(request: Request):
+            """情感系统运行状态快照(队列/burst/熔断/存储统计)。"""
+            await _require_auth(request)
+            if self._emotion_manager is None:
+                raise HTTPException(status_code=500, detail="情感系统未启用(开关修改后需重启)")
+            return self._emotion_manager.runtime_status()
+
+        @app.get("/api/emotion/states")
+        async def emotion_states(request: Request, bot_id: str):
+            """某 bot 的全部用户情感状态(按好感度降序, 跳过零互动用户)。"""
+            await _require_auth(request)
+            if self._emotion_manager is None:
+                raise HTTPException(status_code=500, detail="情感系统未启用(开关修改后需重启)")
+            bot_id = self._safe_id(bot_id, "bot_id")
+            states = await self._emotion_manager.all_states(bot_id)
+            items = [
+                state.to_dict()
+                for state in states.values()
+                if not state.is_initial()
+            ]
+            items.sort(key=lambda x: (x["favor"], x["intimacy"]), reverse=True)
+            return {"states": items}
+
+        @app.post("/api/emotion/operate")
+        async def emotion_operate(request: Request, body: ConfigUpdateRequest):
+            """面板情感操作: action=set_favor|set_intimacy|set_attitude|reset_user|clear_bot"""
+            await _require_auth(request)
+            if self._emotion_manager is None:
+                raise HTTPException(status_code=500, detail="情感系统未启用(开关修改后需重启)")
+            data = body.data or {}
+            action = str(data.get("action", ""))
+            bot_id = self._safe_id(str(data.get("bot_id", "")), "bot_id")
+            user_id = str(data.get("user_id", "")).strip()
+
+            if action == "clear_bot":
+                await self._emotion_manager.clear_bot(bot_id)
+                logger.info(f"Web panel: emotion clear_bot bot={bot_id}")
+                return {"status": "ok"}
+
+            if not user_id:
+                raise HTTPException(status_code=400, detail="user_id 不能为空")
+
+            if action in ("set_favor", "set_intimacy"):
+                try:
+                    value = int(data.get("value"))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="value 必须是整数")
+                state = await (
+                    self._emotion_manager.set_favor(bot_id, user_id, value)
+                    if action == "set_favor"
+                    else self._emotion_manager.set_intimacy(bot_id, user_id, value)
+                )
+            elif action == "set_attitude":
+                text = str(data.get("text", "")).strip()
+                if not text:
+                    raise HTTPException(status_code=400, detail="text 不能为空")
+                state, ok = await self._emotion_manager.set_attitude(bot_id, user_id, text)
+                if not ok:
+                    raise HTTPException(status_code=400, detail="态度文本不合法(≤20字, 不含特殊符号)")
+            elif action == "reset_user":
+                state = await self._emotion_manager.reset_user(bot_id, user_id)
+            else:
+                raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+
+            logger.info(f"Web panel: emotion operate {action} bot={bot_id} user={user_id}")
+            return {"status": "ok", "state": state.to_dict()}
+
+        @app.get("/api/emotion/memory")
+        async def emotion_memory(request: Request, bot_id: str, user_id: str):
+            """某用户的长期记忆记录(只读, 新→旧)。"""
+            await _require_auth(request)
+            if self._emotion_manager is None:
+                raise HTTPException(status_code=500, detail="情感系统未启用(开关修改后需重启)")
+            bot_id = self._safe_id(bot_id, "bot_id")
+            user_id = user_id.strip()
+            if not user_id:
+                raise HTTPException(status_code=400, detail="user_id 不能为空")
+            records = self._emotion_manager.user_memory(bot_id, user_id)
+            stats = self._emotion_manager._memory.user_memory_stats(bot_id, user_id)
+            return {"records": records, "stats": stats}
 
         # ── Static frontend ───────────────────────────────────
 

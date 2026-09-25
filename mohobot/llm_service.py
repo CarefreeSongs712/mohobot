@@ -706,8 +706,18 @@ class LLMService:
                         records.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-        self._usage_records_cache = (now + ttl, records)
-        return records
+        self._usage_records_cache = (now + ttl, self._filter_usage_records(records))
+        return self._usage_records_cache[1]
+
+    def _filter_usage_records(self, records: list[dict]) -> list[dict]:
+        """按配置排除模型(usage_excluded_models): 其调用不计入用量统计, 记录仍落盘。"""
+        excluded = {
+            str(m).strip() for m in (getattr(self._cfg, "usage_excluded_models", None) or [])
+            if str(m).strip()
+        }
+        if not excluded:
+            return records
+        return [r for r in records if str(r.get("model", "")) not in excluded]
 
     @staticmethod
     def _range_since(range_key: str) -> float:

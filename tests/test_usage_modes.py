@@ -123,6 +123,45 @@ async def test_usage_module_mode():
     await svc.close()
 
 
+async def test_usage_excluded_models():
+    """usage_excluded_models: 指定模型的调用不计入三种聚合(记录仍落盘)。"""
+    tmp = tempfile.mkdtemp()
+    _write_records(tmp, _mk_records())
+    from mohobot.llm_service import LLMService
+    cfg = GlobalConfig(data_dir=tmp, usage_excluded_models=["Qwen3-8B"])
+    svc = LLMService(global_config=cfg)
+
+    # 现有测试记录没有带 model 字段的 — 补写两条带模型的
+    from mohobot.file_store import JSONLWriter
+    import os
+    writer = JSONLWriter(os.path.join(tmp, "stats", "llm_usage.jsonl"))
+    now = time.time()
+    await writer.append({"time": now, "bot_id": "", "module": "emotion", "kind": "emotion",
+                         "model": "Qwen3-8B", "prompt_tokens": 10, "completion_tokens": 5,
+                         "total_tokens": 15, "cached_tokens": 0, "user_id": "", "chat_type": "", "chat_id": ""})
+    await writer.append({"time": now, "bot_id": "", "module": "emotion", "kind": "emotion",
+                         "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5,
+                         "total_tokens": 15, "cached_tokens": 0, "user_id": "", "chat_type": "", "chat_id": ""})
+    await writer.close()
+    svc._usage_records_cache = None  # 清缓存
+
+    result = await svc.get_module_usage_stats("30d")
+    bots = {b["bot_id"]: b for b in result["bots"]}
+    emo = bots["系统"]["modules"]["emotion"]
+    # 基础记录(40, 无 model 字段不过滤) + DeepSeek(15); Qwen3-8B(15) 被排除
+    assert emo["calls"] == 2 and emo["total_tokens"] == 55, emo
+
+    # 排除清单为空 → 全部计入
+    cfg2 = GlobalConfig(data_dir=tmp)
+    svc2 = LLMService(global_config=cfg2)
+    result2 = await svc2.get_module_usage_stats("30d")
+    bots2 = {b["bot_id"]: b for b in result2["bots"]}
+    assert bots2["系统"]["modules"]["emotion"]["calls"] == 3
+    assert bots2["系统"]["modules"]["emotion"]["total_tokens"] == 70
+    await svc.close()
+    await svc2.close()
+
+
 async def test_usage_user_id_recorded():
     """新记录写盘时带 user_id 字段。"""
     tmp = tempfile.mkdtemp()

@@ -212,6 +212,8 @@ class TTSConfig:
 class GlobalConfig:
     """Top-level global configuration."""
     admins: list[int] = field(default_factory=list)  # 全局管理员 QQ 号(封禁/插件命令共用)
+    # 用量统计排除的模型: 这些模型的调用不计入 WebUI 用量统计(记录仍落盘, 重启生效)
+    usage_excluded_models: list[str] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
@@ -303,6 +305,10 @@ class GlobalConfig:
             admins=[int(a) for a in (
                 raw.get("admins") or ban_raw.get("admins") or []
             ) if str(a).isdigit()],
+            usage_excluded_models=[
+                str(m).strip() for m in (raw.get("usage_excluded_models") or [])
+                if str(m).strip()
+            ],
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8060),
@@ -493,6 +499,7 @@ class GlobalConfig:
                 "timeout": self.anysearch.timeout,
             },
             "admins": list(self.admins),
+            "usage_excluded_models": list(self.usage_excluded_models),
             "ban": {
                 "enabled": self.ban.enabled,
             },
@@ -611,6 +618,7 @@ class GlobalConfig:
                 "timeout": self.anysearch.timeout,
             },
             "admins": list(self.admins),
+            "usage_excluded_models": list(self.usage_excluded_models),
             "ban": {
                 "enabled": self.ban.enabled,
             },

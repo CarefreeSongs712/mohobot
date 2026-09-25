@@ -76,7 +76,8 @@ async def test_perception_content():
                   "Fri": "周五", "Sat": "周六", "Sun": "周日"}[format_utc8("%a")]
     text = await inst.on_perception("bot_001", make_group_event(2001, "hi", with_image=True), {})
     assert "发送时间:" in text and weekday_cn in text
-    assert ("工作日" in text) or ("周末" in text) or ("休息日" in text), text
+    # 法定节假日/调休日输出"法定节假日(...)"或"调休工作日", 也算合法(日期敏感)
+    assert ("工作日" in text) or ("周末" in text) or ("休息日" in text) or ("节假日" in text), text
     assert "农历" in text and "年" in text
     # 节气: 当天=“今日X”, 临近=“临近X/X已过”, 之间=“当前节气: X”
     assert ("节气" in text) or ("今日" in text) or ("临近" in text) or ("已过" in text), text

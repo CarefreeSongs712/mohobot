@@ -122,6 +122,11 @@ emotion:
   intimacy_min: 0
   intimacy_max: 100
 
+# 用量统计排除的模型: 这些模型的调用不计入 WebUI 用量统计/用量命令
+# (llm_usage.jsonl 记录仍完整落盘, 仅聚合时过滤; 修改后重启生效)
+usage_excluded_models:
+- Qwen3-8B
+
 # ── 戳一戳全局兜底文案 ─────────────────────────────────────────
 # bot 私有 touch_replies(data/bots/{bot_id}/config.json)优先;
 # 都为空时使用内置默认(见 mohobot/message_handler.py DEFAULT_TOUCH_REPLIES)。
