@@ -29,6 +29,7 @@ from mohobot.models.onebot import (
     RequestEvent,
 )
 from mohobot.file_store import JSONLWriter
+from mohobot.history import archive_event, group_writer, history_path
 from mohobot.utils.cq_code import extract_plain_text
 
 
@@ -149,7 +150,11 @@ class MessageHandler:
         if isinstance(event, PrivateMessageEvent):
             file_path = f"{self._data_dir}/history/{bot_id}/private/{event.user_id}.jsonl"
         elif isinstance(event, GroupMessageEvent):
-            file_path = f"{self._data_dir}/history/{bot_id}/group/{event.group_id}.jsonl"
+            file_path = str(history_path(self._data_dir, bot_id, "group", event.group_id))
+            manager = getattr(getattr(self, "_ws", None), "_bot_manager", None)
+            raw = archive_event(raw, bot_id, manager)
+            if file_path not in self._writer_registry:
+                self._writer_registry[file_path] = group_writer(file_path)
         else:
             return
 

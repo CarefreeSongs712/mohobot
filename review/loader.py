@@ -1,7 +1,8 @@
 """mohobot 数据加载(只读) — data/history 为唯一数据源。
 
 对 mohobot 的 data/ 目录只读:
-  history/{bot_id}/{private|group}/{chat_id}.jsonl   消息事件流(收到的 + bot 发的)
+  history/{bot_id}/private/{chat_id}.jsonl           私聊事件流
+  history/_merged/group/{chat_id}.jsonl             共享群事件流(兼容旧 bot/group)
   cache/image_cache_map.json                         VLM 图片概括缓存
   bots/{bot_id}/config.json                          bot 昵称与 QQ
 
@@ -45,7 +46,7 @@ SCAN_TTL = 5.0  # 会话列表扫描的短 TTL(秒)
 # 群聊合并会话的 bot 段固定值(session_key = "_merged/group/{群号}")
 MERGED_BOT_ID = "_merged"
 
-_ROW_FIELDS = ("kind", "mid", "uid", "nick", "text", "image_url", "time", "bot")
+_ROW_FIELDS = ("kind", "mid", "uid", "nick", "text", "image_url", "time", "bot", "bots")
 
 
 def session_key(bot_id: str, chat_type: str, chat_id: str) -> str:
@@ -180,7 +181,7 @@ class MohobotData:
     cache_path 传入时启用 sidecar 持久化(重启免冷解析)。
     """
 
-    _CACHE_VERSION = 4
+    _CACHE_VERSION = 5
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
@@ -404,6 +405,14 @@ class MohobotData:
             bot_id = path.parts[-3]
             chat_type = path.parts[-2]
             self_id = self.bot_self_id(bot_id)
+            if bot_id == MERGED_BOT_ID and chat_type == "group":
+                # A new shared-history reply can quote a bot message archived
+                # before the switch. Seed reference tracking from legacy files.
+                for legacy in self.merged_group_files(path.stem):
+                    if legacy != path:
+                        old = self._read_file_index(legacy)
+                        if old:
+                            idx.bot_mids.update(old.bot_mids)
             for line in new_text.splitlines():
                 line = line.strip()
                 if not line:
@@ -434,13 +443,25 @@ class MohobotData:
             return None
         if not isinstance(d, dict):
             return None
+        shared = bot_id == MERGED_BOT_ID and chat_type == "group"
+        bot_qqs = {}
+        if shared:
+            bot_qqs = {m["qq"]: bid for bid, m in self._bot_meta().items() if m["qq"]}
+            bot_qqs.update(d.get("archive_bots") or {})
+            bot_id = str(d.get("archive_bot_id") or bot_qqs.get(str(d.get("self_id")), ""))
+        source_bot = bot_id
         post_type = d.get("post_type")
+        sender_qq = str(d.get("user_id") or (d.get("sender") or {}).get("user_id") or "")
         if post_type == "message_sent":
             kind = "assistant"
         elif post_type == "message":
-            kind = "user"
+            # A bot's outgoing message may arrive through another bot's
+            # connection before the send echo. It is still a bot utterance.
+            kind = "assistant" if shared and sender_qq in bot_qqs else "user"
         else:
             return None
+        if shared and kind == "assistant":
+            bot_id = bot_qqs.get(sender_qq, bot_id)
 
         mid = str(d.get("message_id") or "").strip()
         ts = int(d.get("time") or 0)
@@ -457,12 +478,23 @@ class MohobotData:
                 "kind": "assistant", "mid": mid, "uid": "",
                 "nick": nick, "text": text, "image_url": image_url, "time": ts,
                 "bot": bot_id,
+                "bots": sorted({b for b in (source_bot, bot_id) if b}),
             }
 
         # 用户消息 — 群聊需命中 @ 本 bot 或引用本 bot 发言
+        members = {source_bot} if source_bot else set()
         if chat_type == "group":
-            if not self._user_hits_bot(d.get("message"), self_id, bot_mids):
+            targets = bot_qqs if shared else {self_id: bot_id}
+            # Record all explicitly addressed bots, even when only one copy
+            # of a multi-@ event exists in the shared archive.
+            hits = [bid for qq, bid in targets.items()
+                    if self._user_hits_bot(d.get("message"), qq, set())]
+            quoted = self._user_hits_bot(d.get("message"), "", bot_mids)
+            if not hits and not quoted:
                 return None
+            members.update(hits)
+            if shared and hits:
+                bot_id = hits[0]
         sender = d.get("sender") or {}
         uid = str(d.get("user_id") or sender.get("user_id") or "")
         nick = str(sender.get("card") or sender.get("nickname") or "").strip() or uid
@@ -470,6 +502,7 @@ class MohobotData:
             "kind": "user", "mid": mid, "uid": uid,
             "nick": nick, "text": text, "image_url": image_url, "time": ts,
             "bot": bot_id,
+            "bots": sorted(members),
         }
 
     @staticmethod
@@ -540,8 +573,11 @@ class MohobotData:
                         idx = self._read_file_index(f)
                         if not idx or not idx.rows:
                             continue
-                        if bot_dir.name not in g["bots"]:
-                            g["bots"].append(bot_dir.name)
+                        members = (sorted({b for r in idx.rows for b in r["bots"]})
+                                   if bot_dir.name == MERGED_BOT_ID else [bot_dir.name])
+                        for member in members:
+                            if member not in g["bots"]:
+                                g["bots"].append(member)
                         g["mtime"] = max(g["mtime"], f.stat().st_mtime)
                         g["total"] += len(idx.rows)
                         g["last_ts"] = max(
@@ -614,7 +650,7 @@ class MohobotData:
                 rows_all.extend(idx.rows)
             sig = tuple(key_parts)
             cached = self._merged_cache.get(group_id)
-            if cached and cached[0] == key_parts:
+            if cached and cached[0] == sig:
                 return cached[1]
         out: list[dict[str, Any]] = []
         seen: set[Any] = set()
@@ -622,7 +658,7 @@ class MohobotData:
             if row["kind"] == "assistant":
                 dk: Any = f"mid:{row['mid']}" if row["mid"] else id(row)
             else:
-                dk = (row["mid"] if row["mid"]
+                dk = (f"mid:{row['mid']}" if row["mid"]
                       else (row["time"], row["uid"], row["text"]))
             if dk in seen:
                 continue

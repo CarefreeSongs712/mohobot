@@ -412,7 +412,8 @@ mohobot/
 ├── tests/                         # 冒烟测试（smoke_*）与单测（tests/_run_all.py 全量回归）
 ├── data/                          # 运行时数据（自动生成，勿提交）
 │   ├── bots/{bot_id}/             # Bot 配置与状态
-│   ├── history/{bot_id}/          # 消息事件 JSONL（收到的 message + bot 发送的 message_sent）
+│   ├── history/_merged/group/     # 共享群消息 JSONL（跨 Bot 去重）
+│   ├── history/{bot_id}/private/  # 各 Bot 的私聊消息 JSONL
 │   ├── contexts/{bot_id}/         # 【可读写】会话上下文
 │   ├── database/                  # SQLite（mohobot.db）
 │   └── cache/images/              # 图片缓存
@@ -429,9 +430,10 @@ mohobot/
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
 | 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 
-- **聊天历史**：按 Bot ID → 私聊/群聊 → 用户/群号 分文件，**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）
+- **聊天历史**：群聊统一写入 `data/history/_merged/group/{群号}.jsonl`，私聊仍写入 `data/history/{bot_id}/private/{QQ号}.jsonl`，**绝不**用于 LLM 实时输入。群内多个 Bot 收到的同一条消息只归档一次（优先按 `message_id`，缺失时按时间、发送者与消息内容去重），收件与出站归档共用写入锁，重启后从文件恢复去重索引。群事件附加 `archive_bot_id`（归档来源）与 `archive_bots`（QQ → Bot 标识快照），原协议事件不修改。包含收到的 `message` 与出站层产生的 `message_sent`；Bot 发言被其他 Bot 先收到时保留先到事件，由审核器根据身份快照识别为 Bot 发言。出站图片/语音的 `base64://` 大字段替换为占位防膨胀。
+- **旧归档兼容**：原 `history/{bot_id}/group/` 文件保留且不再新增写入；审核面板与 `/查看聊天` 会将其和共享群文件按时间合并、去重读取，无需迁移即可查看完整历史。审核会话键仍为 `_merged/group/{群号}`，已有审核结论保持关联。
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
-- **数据隔离**：会话数据按 bot_id 分目录
+- **数据隔离**：推理上下文和私聊历史按 bot_id 分目录，群聊历史按群号共享。
 
 ## 📋 聊天记录审核面板（review/, 端口 9091）
 
@@ -439,7 +441,7 @@ mohobot/
 
 - **数据源**：`data/history` 消息事件流（唯一来源）。history 只增不删，消息身份用 **message_id** —— 审核结论永不因上下文压缩/改写而失联
 - **审核范围（面板侧过滤，归档保持完整）**：群聊只审 **bot 的发言** 与 **用户 @ 本 bot 或引用本 bot 发言** 的消息；私聊全部审
-- **群聊跨 bot 合并**：同一个群号在多只 bot 归档下的内容聚合为**一个审核会话**（key 的 bot 段固定 `_merged`）；每只 bot 的归档各自过滤后按时间混流，同一条消息同时命中多只 bot 过滤时跨 bot 去重（优先 message_id，兜底 时间+发言人+内容），侧栏显示合并了 N 只 bot
+- **群聊跨 bot 合并**：读取共享群归档并兼容旧的分 Bot 归档，聚合为**一个审核会话**（key 的 bot 段固定 `_merged`）。共享归档识别所有已知 Bot 的发言、@ 和引用，旧归档按各 Bot 过滤后一起按时间混流并去重；侧栏保留实际 Bot 标识，不把 `_merged` 当作 Bot。
 - **界面**：审核（按会话分页浏览，默认锚定第一条待审）、异常记录（标签：色情/政治/辱骂/其他，可编辑、可导出 CSV）、统计（总量/按 Bot/按审核员/操作日志）
 - **账号**：`review/config.yaml` 手工维护用户（密码只存 PBKDF2 哈希，`python -m review.hash_password` 生成）；登录后可自助改密（仅自己，需旧密码，写回保留注释）
 - **登录防爆破**：登录处理全局串行化 + 每次尝试固定 0.5s 硬延迟（登录耗时恒定防计时侧信道）

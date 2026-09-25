@@ -26,6 +26,8 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 2. **工作数据可变**：`data/contexts/` 是 LLM 实时推理用的记忆（JSON 数组）。
 3. **历史入库**：完成的对话轮次另写 SQLite `conversations` 表。
 
+群聊 history 统一写入 `history/_merged/group/{群号}.jsonl`，由 `mohobot/history.py` 共享 writer 在收件与出站之间加锁去重，事件附带来源 Bot 与 QQ → Bot 身份快照。私聊仍在 `history/{bot_id}/private/`。旧的各 Bot 群归档保留只读，review 与 chat_manager 合并读取新旧文件；推理上下文仍按 Bot 隔离。不要为群聊新增独立的 `JSONLWriter`，应使用 `group_writer()`。
+
 代码分层：
 
 | 目录 | 职责 |

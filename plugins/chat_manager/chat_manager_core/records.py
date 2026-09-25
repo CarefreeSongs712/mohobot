@@ -18,6 +18,7 @@ from loguru import logger
 
 from chat_manager_core.onebot import api_ok
 from chat_manager_core.target import Target, history_path
+from mohobot.history import event_identity, group_history_files
 
 # 计入聊天记录的事件类型(收到的消息 + bot 自己发出的消息)
 _MESSAGE_POST_TYPES = ("message", "message_sent")
@@ -32,16 +33,29 @@ async def read_recent(
     """读归档最近 count 条消息事件; 归档不足 count 条时返回全部(可能为空)。"""
     from mohobot.file_store import jsonl_read_tail
 
-    path = history_path(data_dir, bot_id, target)
-    if not path.is_file():
-        return []
-    lines = await jsonl_read_tail(path, n=max(int(count), 1))
-    return [
+    limit = max(int(count), 1)
+    paths = (group_history_files(data_dir, target.chat_id) if target.is_group
+             else [history_path(data_dir, bot_id, target)])
+    lines = []
+    for path in paths:
+        if path.is_file():
+            lines.extend(await jsonl_read_tail(path, n=limit))
+    lines = [
         event for event in lines
         if isinstance(event, dict)
         and event.get("post_type") in _MESSAGE_POST_TYPES
         and event.get("message") not in (None, "")
     ]
+    if target.is_group:
+        seen = set()
+        unique = []
+        for event in sorted(lines, key=lambda e: int(e.get("time") or 0)):
+            identity = event_identity(event)
+            if identity not in seen:
+                seen.add(identity)
+                unique.append(event)
+        lines = unique
+    return lines[-limit:]
 
 
 def build_nodes(messages: list[dict]) -> list[dict[str, Any]]:

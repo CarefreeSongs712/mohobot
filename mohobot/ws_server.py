@@ -21,6 +21,7 @@ from loguru import logger
 from mohobot.models.onebot import Event
 from mohobot.bot_manager import BotManager
 from mohobot.file_store import JSONLWriter
+from mohobot.history import archive_event, group_writer, history_path
 from mohobot.services.outbound import ChatAddress, OutboundScheduler, ReplySender
 from mohobot.services.task_supervisor import TaskSupervisor, TaskSupervisorClosed
 from mohobot.utils.cq_code import extract_plain_text
@@ -413,13 +414,17 @@ class WSServer:
                 event["group_id"] = chat_id
         try:
             path = self._archive_path(bot_id, chat_type, chat_id)
+            if chat_type == "group":
+                event = archive_event(event, bot_id, self._bot_manager)
+                if path not in self._archive_writers:
+                    self._archive_writers[path] = group_writer(path)
             await self._get_archive_writer(path).append(event)
         except Exception as e:
             logger.debug(f"bot 发言归档失败(bot={bot_id}, {chat_type}:{chat_id}): {e}")
 
     def _archive_path(self, bot_id: str, chat_type: str, chat_id: int | str) -> str:
         """bot 发言的 history 归档路径(与收到的消息同文件)。"""
-        return f"{self._data_dir}/history/{bot_id}/{chat_type}/{chat_id}.jsonl"
+        return str(history_path(self._data_dir, bot_id, chat_type, chat_id))
 
     def _get_archive_writer(self, path: str) -> JSONLWriter:
         writer = self._archive_writers.get(path)

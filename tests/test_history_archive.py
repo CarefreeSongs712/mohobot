@@ -50,7 +50,8 @@ async def _next_payload(inst, after: int, tries: int = 80) -> dict:
 
 
 def _history_lines(tmp: Path, chat_type: str, chat_id: str) -> list[dict]:
-    path = tmp / "history" / "bot_001" / chat_type / f"{chat_id}.jsonl"
+    owner = "_merged" if chat_type == "group" else "bot_001"
+    path = tmp / "history" / owner / chat_type / f"{chat_id}.jsonl"
     if not path.exists():
         return []
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]

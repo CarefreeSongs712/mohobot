@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chat_manager_core.onebot import api_call
+from mohobot.history import group_history_files, history_path as archive_path
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,8 @@ def parse_chat_id(raw: str) -> str | None:
 
 
 def history_path(data_dir: str, bot_id: str, target: Target) -> Path:
-    """该会话的归档文件路径 data/history/{bot_id}/{group|private}/{id}.jsonl。"""
-    return Path(data_dir) / "history" / bot_id / target.chat_type / f"{target.chat_id}.jsonl"
+    """共享群归档或按 Bot 隔离的私聊归档路径。"""
+    return archive_path(data_dir, bot_id, target.chat_type, target.chat_id)
 
 
 def resolve_by_history(data_dir: str, bot_id: str, chat_id: str) -> Target | None:
@@ -46,7 +47,8 @@ def resolve_by_history(data_dir: str, bot_id: str, chat_id: str) -> Target | Non
     """
     for chat_type in ("group", "private"):
         candidate = Target(chat_type, chat_id)
-        if history_path(data_dir, bot_id, candidate).is_file():
+        if (group_history_files(data_dir, chat_id) if candidate.is_group
+                else history_path(data_dir, bot_id, candidate).is_file()):
             return candidate
     return None
 
