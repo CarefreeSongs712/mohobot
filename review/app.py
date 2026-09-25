@@ -286,6 +286,23 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             "entries": window,
         }
 
+    # ── 浏览/搜索 ────────────────────────────────────────────
+
+    @app.get("/api/search")
+    async def search(request: Request, q: str = "", bot: str = "",
+                     chat_type: str = "", limit: int = 100):
+        """消息内容搜索(全部入审消息, 子串匹配, 大小写不敏感)。
+
+        内存数据单次扫描, 毫秒级; 返回按时间倒序的命中列表,
+        带 index 供前端跳页定位。
+        """
+        _auth(request)
+        results = await asyncio.to_thread(
+            data.search_content, q, bot, chat_type,
+            min(max(int(limit or 100), 1), 200),
+        )
+        return {"q": q, "total": len(results), "results": results}
+
     # ── 审核操作 ─────────────────────────────────────────────
 
     @app.post("/api/review")

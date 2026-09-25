@@ -81,6 +81,7 @@ main{flex:1; overflow:hidden; position:relative}
 .entry.ctx:hover{opacity:.85}
 .entry.pending{border-left-color:var(--warn)}
 .entry.is-abn{border-left-color:var(--bad); opacity:1; background:#241a18}
+.entry.flash{outline:2px solid var(--accent); background:#1c2733}
 .entry.exempt{opacity:.35; font-style:italic}
 .entry img.msg-img{max-width:260px; max-height:200px; border-radius:8px; margin-top:6px; display:block; border:1px solid var(--border)}
 .vlm{margin-top:5px; font-size:12px; color:#9fb8cc; background:#1a2430; border:1px solid #24384a; padding:5px 9px; border-radius:6px}
@@ -142,6 +143,7 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
     <span class="logo">📋 审核面板</span>
     <nav>
       <button data-nav="review" class="active">审核</button>
+      <button data-nav="browse">浏览</button>
       <button data-nav="abnormal">异常记录</button>
       <button data-nav="stats">统计</button>
     </nav>
@@ -190,9 +192,35 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
           <button class="ghost" id="pgPrev">‹ 上一页</button>
           <span class="remind" id="pgLabel" style="flex:none;white-space:nowrap"></span>
           <button class="ghost" id="pgNext">下一页 ›</button>
+          <input id="pgJump" type="number" min="1" title="跳到第几页" style="width:56px;padding:2px 6px">
           <span class="remind" id="footHint"></span>
         </div>
       </div>
+    </section>
+
+    <!-- ── 浏览视图(全部会话 + 内容搜索) ── -->
+    <section class="view panel-view" id="browseView">
+      <div class="panel-toolbar">
+        <input id="brSearch" placeholder="搜索会话: 昵称 / QQ 号 / 群号…" style="width:230px">
+        <select id="brBot" style="width:140px"><option value="">全部 Bot</option></select>
+        <select id="brType" style="width:110px">
+          <option value="">全部类型</option>
+          <option value="private">私聊</option>
+          <option value="group">群聊</option>
+        </select>
+        <select id="brStatus" style="width:110px">
+          <option value="all">全部状态</option>
+          <option value="pending">有待审</option>
+          <option value="reviewed">已审完</option>
+        </select>
+        <span style="flex:1"></span>
+        <span style="color:var(--dim);font-size:12px" id="brCount"></span>
+      </div>
+      <div class="panel-toolbar">
+        <input id="brContent" placeholder="搜索消息内容(至少 2 字, 范围与审核界面一致)…" style="flex:1">
+        <span style="color:var(--dim);font-size:12px" id="brContentHint"></span>
+      </div>
+      <div class="panel-body" id="browseBody"><div class="empty">加载中…</div></div>
     </section>
 
     <!-- ── 异常记录视图 ── -->
@@ -353,11 +381,11 @@ $('pwNew2').addEventListener('keydown',e=>{ if(e.key==='Enter') $('pwSave').clic
 document.querySelectorAll('header nav button').forEach(b=>{
   b.onclick = ()=>{
     document.querySelectorAll('header nav button').forEach(x=>x.classList.toggle('active',x===b));
-    ['review','abnormal','stats'].forEach(v=>$('reviewView').classList.toggle('active',v==='review'));
     document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
     $(b.dataset.nav+'View').classList.add('active');
     if(b.dataset.nav==='abnormal') loadAbnormal();
     if(b.dataset.nav==='stats') loadStats();
+    if(b.dataset.nav==='browse') loadBrowse();
   };
 });
 
@@ -366,10 +394,12 @@ async function initBoot(){
   if(bootDone){ refreshSessions(); return }
   const d = await api('/api/bootstrap');
   TAGS = d.tags||TAGS;
-  const fb=$('fBot'), ab=$('abBot');
+  const fb=$('fBot'), ab=$('abBot'), bb=$('brBot');
   d.bots.forEach(b=>{
+    BOTS[b.bot_id] = b.nickname;
     fb.insertAdjacentHTML('beforeend',`<option value="${esc(b.bot_id)}">${esc(b.nickname)} (${esc(b.bot_id)})</option>`);
     ab.insertAdjacentHTML('beforeend',`<option value="${esc(b.bot_id)}">${esc(b.nickname)} (${esc(b.bot_id)})</option>`);
+    bb.insertAdjacentHTML('beforeend',`<option value="${esc(b.bot_id)}">${esc(b.nickname)} (${esc(b.bot_id)})</option>`);
   });
   const at=$('abTag'); TAGS.forEach(t=>at.insertAdjacentHTML('beforeend',`<option value="${esc(t)}">${esc(t)}</option>`));
   bootDone=true;
@@ -406,10 +436,12 @@ $('sortBtn').onclick=()=>{ sortMode = sortMode==='oldest'?'recent':'oldest';
   $('sortBtn').textContent = sortMode==='oldest'?'⏳ 最旧优先':'🕒 最近优先'; refreshSessions() };
 
 /* ================= 会话明细 ================= */
-async function openSession(sk, page){
+let focusFp = null;   // 打开会话后需要定位高亮的条目(内容搜索跳转用)
+async function openSession(sk, page, fp){
+  focusFp = fp || null;
   try{
     curSession = await api('/api/session/'+sk+(page?`?page=${page}`:''));
-  }catch(e){ toast(e.message); return }
+  }catch(e){ focusFp = null; toast(e.message); return }
   document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.sk===sk));
   renderSession();
 }
@@ -447,8 +479,20 @@ function renderSession(showAllCtx=false){
     if(local) local.scrollIntoView({block:'center', behavior:'smooth'});
     else if((s.abnormal_pages||[]).length) openSession(s.session_key, s.abnormal_pages[0]);
   };
-  // 滚动定位: 优先异常条目(需要人看的), 否则第一条待审
-  const target = cb.querySelector('.entry.is-abn') || cb.querySelector('.entry.pending');
+  // 滚动定位: 优先内容搜索的跳转目标, 其次异常条目(需要人看的), 否则第一条待审
+  let target = null;
+  if(focusFp){
+    target = cb.querySelector(`.entry[data-fp="${CSS.escape(focusFp)}"]`);
+    if(target){
+      setTimeout(()=>{
+        target.classList.add('flash');
+        setTimeout(()=>target.classList.remove('flash'), 2500);
+      }, 0);
+    }
+    focusFp = null;
+  }
+  if(!target) target = cb.querySelector('.entry.is-abn');
+  if(!target) target = cb.querySelector('.entry.pending');
   if(target) setTimeout(()=>target.scrollIntoView({block:'center'}), 0);
 }
 function updatePager(){
@@ -511,6 +555,12 @@ $('btnAbnormal').onclick = ()=>{ if(curSession) openAbModal() };
 
 $('pgPrev').onclick=()=>{ const s=curSession; if(s&&s.page>1) openSession(s.session_key, s.page-1) };
 $('pgNext').onclick=()=>{ const s=curSession; if(s&&s.page<s.pages) openSession(s.session_key, s.page+1) };
+$('pgJump').addEventListener('change', ()=>{
+  const s=curSession; if(!s) return;
+  const p=parseInt($('pgJump').value);
+  if(p>=1 && p<=s.pages && p!==s.page) openSession(s.session_key, p);
+  $('pgJump').value='';
+});
 
 function afterJudge(d, judgedFps, judgedStatus, abInfo){
   const s = curSession; if(!s) return;
@@ -591,6 +641,105 @@ $('abSave').onclick = async ()=>{
   toast(`已标记 ${d.changed} 条异常`);
   afterJudge(d, fps, 'abnormal', {tags, note});
 };
+
+/* ================= 浏览(全部会话 + 内容搜索) ================= */
+let browseCache = [], brContentTimer = null, brLastQuery = '';
+let BOTS = {};   // bot_id -> 昵称(bootstrap 填充)
+async function loadBrowse(){
+  const d = await api('/api/sessions?sort=recent');
+  browseCache = d.sessions;
+  renderBrowse();
+}
+$('brSearch').oninput = renderBrowse;
+$('brBot').onchange = renderBrowse;
+$('brType').onchange = renderBrowse;
+$('brStatus').onchange = renderBrowse;
+function renderBrowse(){
+  const kw = $('brSearch').value.trim().toLowerCase();
+  const bot = $('brBot').value, ct = $('brType').value, st = $('brStatus').value;
+  let items = browseCache;
+  if(bot) items = items.filter(s=>s.bot_id===bot || (s.bots||[]).includes(bot));
+  if(ct) items = items.filter(s=>s.chat_type===ct);
+  if(st==='pending') items = items.filter(s=>s.unreviewed>0);
+  if(st==='reviewed') items = items.filter(s=>s.unreviewed===0);
+  if(kw) items = items.filter(s=>
+    (s.display_name||'').toLowerCase().includes(kw) ||
+    String(s.chat_id||'').includes(kw) ||
+    (s.bot_id||'').toLowerCase().includes(kw));
+  $('brCount').textContent = `${items.length} 会话`;
+  const el = $('browseBody');
+  if(!items.length){ el.innerHTML = '<div class="empty">没有匹配的会话</div>'; return }
+  el.innerHTML = items.map(s=>{
+    const badges = [
+      s.unreviewed>0?`<span class="badge pending">未审 ${s.unreviewed}</span>`:'',
+      s.abnormal>0?`<span class="badge bad">异常 ${s.abnormal}</span>`:'',
+      s.unreviewed===0&&s.abnormal===0?`<span class="badge ok">已审完</span>`:'',
+    ].join('');
+    const who = s.chat_type==='group'?`${(s.bots||[]).length} bot 合并`:esc(s.bot_id);
+    return `<div class="sess" data-brsk="${esc(s.session_key)}">
+      <div class="t"><span class="name">${esc(s.display_name)}</span>${badges}</div>
+      <div class="meta"><span>${who}</span><span>${s.chat_type==='group'?'群聊':'私聊'}</span>
+        <span>${fmtDay(s.mtime)}</span></div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('[data-brsk]').forEach(n=>n.onclick=()=>openBrowseSession(n.dataset.brsk));
+}
+function openBrowseSession(sk, page, fp){
+  // 跳到审核视图的聊天区(复用渲染/分页); 无待审时自动定位最后一页
+  document.querySelector('header nav button[data-nav="review"]').click();
+  openSession(sk, page, fp);
+}
+/* 内容搜索(全部入审消息, 防抖 400ms) */
+$('brContent').addEventListener('input', ()=>{
+  clearTimeout(brContentTimer);
+  const q = $('brContent').value.trim();
+  brContentTimer = setTimeout(async ()=>{
+    brLastQuery = q;
+    if(q.length < 2){
+      $('brContentHint').textContent = '';
+      renderBrowse();
+      return;
+    }
+    $('brContentHint').textContent = '搜索中…';
+    const qs = encodeURIComponent(q), bot = encodeURIComponent($('brBot').value),
+          ct = encodeURIComponent($('brType').value);
+    try{
+      const d = await api(`/api/search?q=${qs}&bot=${bot}&chat_type=${ct}`);
+      if(brLastQuery !== q) return;   // 过期结果丢弃
+      $('brContentHint').textContent = `${d.total} 条匹配${d.total>=200?'(仅显示前 200)':''}`;
+      renderContentResults(q, d.results);
+    }catch(e){ $('brContentHint').textContent = e.message }
+  }, 400);
+});
+function renderContentResults(q, results){
+  const el = $('browseBody');
+  if(!results.length){ el.innerHTML = '<div class="empty">没有匹配的消息</div>'; return }
+  const ql = q.toLowerCase();
+  el.innerHTML = results.map(r=>{
+    const lower = (r.content||'').toLowerCase();
+    const pos = lower.indexOf(ql);
+    let snippet;
+    if(pos >= 0){
+      const start = Math.max(0, pos-50), end = Math.min(r.content.length, pos+q.length+50);
+      snippet = (start>0?'…':'') + esc(r.content.slice(start,pos))
+        + '<mark>' + esc(r.content.slice(pos,pos+q.length)) + '</mark>'
+        + esc(r.content.slice(pos+q.length,end)) + (end<r.content.length?'…':'');
+    }else{
+      snippet = esc((r.content||'').slice(0,160));
+    }
+    const who = r.kind==='assistant' ? `🤖 ${esc(BOTS[r.bot_id]||r.bot_id||'bot')}` : esc(r.speaker||'');
+    return `<div class="sess" data-brfp="${esc(r.fingerprint)}" data-brsk="${esc(r.session_key)}"
+      data-brpage="${Math.floor(r.index/100)+1}">
+      <div class="t"><span class="name">${esc(r.display_name)}</span></div>
+      <div class="meta"><span>${who}</span><span>${esc(r.time_str||fmtDay(r.timestamp))}</span>
+        <span>${r.chat_type==='group'?'群聊':'私聊'}</span></div>
+      <div style="margin-top:4px;font-size:13px;word-break:break-word">${snippet}</div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('[data-brfp]').forEach(n=>n.onclick=()=>{
+    openBrowseSession(n.dataset.brsk, parseInt(n.dataset.brpage), n.dataset.brfp);
+  });
+}
 
 /* ================= 异常记录 ================= */
 let abLastRecords = [];

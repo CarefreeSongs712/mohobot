@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -278,6 +279,40 @@ def test_loader_dedup_repushed_same_mid():
         data2 = MohobotData(root, cache_path=root / "c.json")
         assert data2.filtered_rows("bot_001/private/10001") == rows
         data2.flush_cache()
+
+
+def test_loader_search_content():
+    """内容搜索: 私聊/群合并会话命中, bot/类型过滤, 大小写不敏感, 短词拒绝。
+
+    index 与 filtered_rows 顺序一致 —— 内容搜索跳页定位的依据。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        data = MohobotData(root)
+
+        # 私聊命中, index 指向的就是该条
+        hits = data.search_content("今天天气")
+        assert len(hits) == 1
+        h = hits[0]
+        assert h["session_key"] == "bot_001/private/10001"
+        assert h["index"] == 0 and h["kind"] == "user" and h["speaker"] == "张三"
+        rows = data.filtered_rows(h["session_key"])
+        assert rows[h["index"]]["mid"] == h["message_id"]
+
+        # 群合并会话命中; bot 过滤按成员判断(群会话 bot_id=_merged)
+        hits = data.search_content("我是beta")
+        assert len(hits) == 1 and hits[0]["session_key"] == "_merged/group/20002"
+        assert hits[0]["bot_id"] == "_merged" and hits[0]["index"] == 4
+        assert len(data.search_content("我是beta", bot="bot_001")) == 1
+        assert len(data.search_content("大家好", bot="bot_002")) == 1
+        # 类型过滤
+        assert data.search_content("大家好", chat_type="private") == []
+        # ASCII 大小写不敏感(BETA 同时命中 我是beta / @beta 你好 两条)
+        hits = data.search_content("BETA")
+        assert {h["index"] for h in hits} == {3, 4}
+        # 少于 2 字拒绝
+        assert data.search_content("好") == []
 
 
 def test_loader_incremental_append_and_rewrite():
@@ -653,6 +688,12 @@ def _assert_full_flow(client, store) -> None:
         assert client.get("/api/abnormal", headers=_auth(tok)).json()["records"] == []
         detail5 = client.get("/api/session/" + sk, headers=_auth(tok)).json()
         assert detail5["abnormal_count"] == 0 and detail5["unreviewed"] == 1
+
+        # 内容搜索(API): 命中私聊消息; 短词返回空而不报错
+        s = client.get("/api/search?q=" + quote("天气"), headers=_auth(tok)).json()
+        assert s["total"] == 1 and s["results"][0]["session_key"] == "bot_001/private/10001"
+        assert client.get("/api/search?q=" + quote("天"), headers=_auth(tok)).json()["total"] == 0
+        assert client.get("/api/search").status_code == 401
 
 
 def test_api_pagination_anchor():

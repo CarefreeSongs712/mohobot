@@ -756,6 +756,78 @@ class MohobotData:
         with self._lock:
             return list(idx.rows)
 
+    def search_content(
+        self, q: str, bot: str = "", chat_type: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """按内容子串搜索全部入审消息(与审核界面同一数据集)。
+
+        数据都在内存(过滤后约几万行), 单次扫描毫秒级, 无需索引。
+        搜索范围 = 会话明细能展示的范围(群聊仅 bot 相关消息)。
+        返回按时间倒序的命中列表, 带条目在会话内的序号(index,
+        与 filtered_rows/enrich_entries 的顺序一致), 前端据此跳页定位;
+        群聊合并会话的 bot 过滤按行内 bot 归属判断。
+        """
+        q = (q or "").strip()
+        if len(q) < 2:
+            return []
+        ql = q.lower()
+        self.list_sessions()  # 确保文件索引已加载(幂等)
+        with self._lock:
+            info_map = {
+                s["session_key"]: s
+                for s in (self._scan_cache[1] if self._scan_cache else [])
+            }
+            out: list[dict[str, Any]] = []
+            for path_str, idx in self._file_cache.items():
+                path = Path(path_str)
+                merged_group = (
+                    len(path.parts) >= 3
+                    and path.parts[-3] == "history" and path.parts[-2] == "group"
+                )
+                if merged_group:
+                    ct, chat_id, bot_id = "group", path.stem, MERGED_BOT_ID
+                    sk = session_key(MERGED_BOT_ID, "group", chat_id)
+                    info = info_map.get(sk) or {}
+                    if bot and bot not in (info.get("bots") or []):
+                        continue
+                    if chat_type and ct != chat_type:
+                        continue
+                    rows = self._merged_rows(chat_id)
+                else:
+                    bot_id = path.parts[-3]
+                    ct, chat_id = path.parts[-2], path.stem
+                    if bot and bot_id != bot:
+                        continue
+                    if chat_type and ct != chat_type:
+                        continue
+                    sk = session_key(bot_id, ct, chat_id)
+                    rows = idx.rows
+                for i, row in enumerate(rows):
+                    pos = row["text"].lower().find(ql)
+                    if pos < 0:
+                        continue
+                    info = info_map.get(sk) or {}
+                    out.append({
+                        "session_key": sk,
+                        "display_name": info.get("display_name", chat_id),
+                        "bot_id": bot_id,
+                        "chat_type": ct,
+                        "chat_id": chat_id,
+                        "index": i,
+                        "kind": row["kind"],
+                        "speaker": row["nick"] if row["kind"] == "user" else "",
+                        "content": row["text"],
+                        "timestamp": row["time"],
+                        "time_str": format_ts(row["time"]),
+                        "message_id": row["mid"],
+                        "fingerprint": entry_identity(
+                            row["mid"],
+                            content_fingerprint(sk, row["kind"], row["time"], row["text"]),
+                        ),
+                    })
+        out.sort(key=lambda x: x["timestamp"], reverse=True)
+        return out[: max(1, int(limit))]
+
     # ── VLM 图片概括 ─────────────────────────────────────────
 
     def vlm_caption(self, image_url: str) -> str | None:
