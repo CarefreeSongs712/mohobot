@@ -57,6 +57,18 @@ class AutoReplyStore:
         await self._ensure()
         self._data["baselined"] = True
 
+    # ── 每说说自动回复计数(上限控制) ──────────────────────────
+
+    async def post_reply_count(self, post_key: str) -> int:
+        await self._ensure()
+        posts = self._data.setdefault("posts", {})
+        return int(posts.get(post_key, 0))
+
+    async def incr_post_reply(self, post_key: str) -> None:
+        await self._ensure()
+        posts = self._data.setdefault("posts", {})
+        posts[post_key] = int(posts.get(post_key, 0)) + 1
+
     async def save(self) -> None:
         await self._ensure()
         try:

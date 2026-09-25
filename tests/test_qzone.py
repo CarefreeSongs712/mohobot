@@ -471,19 +471,68 @@ def test_plugin_atme_feeds_candidates():
     own = Post(uin=111, tid="1", name="me", text=f"@meBot 你好")
     other = Post(uin=222, tid="2", name="friend", text=f"来玩 @meBot")
     plain = Post(uin=333, tid="3", name="c", text="没有@")
+    botpost = Post(uin=999, tid="5", name="bot", text=f"@meBot 别的bot")
     commented = Post(
         uin=444, tid="4", name="d", text="随便说说",
         comments=[
             Comment(uin=555, nickname="e", content=f"@meBot 带我一个", create_time=1, tid=9),
             Comment(uin=111, nickname="me", content=f"@meBot 自己", create_time=2, tid=8),
+            Comment(uin=999, nickname="bot", content=f"@meBot bot评论", create_time=3, tid=7),
         ],
     )
-    cands = plugin._atme_feeds_candidates([own, other, plain, commented], "@meBot", 111)
-    keys = [k for _, _, k in cands]
-    # 自己的说说(正文@)不算; 他人正文1条 + 评论1条(自己的评论不算)
+    cands = plugin._atme_feeds_candidates(
+        [own, other, plain, botpost, commented], "@meBot", 111, bot_qqs={999},
+    )
+    # 自己的说说/其它 bot 的说说与评论均跳过; 只剩 他人正文1条 + 他人评论1条
     assert len(cands) == 2
-    assert any(k.startswith("atmef:222:2:text") for k in keys)
-    assert any(k.startswith("atmef:444:4:555:9") for k in keys)
+    keys = [k for _, _, k in cands]
+    # 去重 key 统一按帖子(一次唤醒一次), 与 api 模式同空间
+    assert keys[0] == "atme:222:2"
+    assert keys[1] == "atme:444:4"
+
+
+async def test_plugin_post_reply_limit():
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        from qzone_core.auto_reply import AutoReplyStore
+        store = AutoReplyStore(Path(td) / "limit.json")
+        plugin.plugin_config["max_replies_per_post"] = 3
+        assert not await plugin._post_limit_reached(store, 1, "t")
+        for _ in range(3):
+            await store.incr_post_reply(plugin._post_key(1, "t"))
+        assert await plugin._post_limit_reached(store, 1, "t")
+        # 其它说说不受影响; 0=不限
+        assert not await plugin._post_limit_reached(store, 2, "u")
+        plugin.plugin_config["max_replies_per_post"] = 0
+        assert not await plugin._post_limit_reached(store, 1, "t")
+
+
+async def test_plugin_actor_blocked():
+    with tempfile.TemporaryDirectory() as td:
+        plugin = _fresh_plugin()
+        plugin._data_dir = td
+        # 伪造全局封禁名单(banall_list.json)
+        import json as _json
+        ban_dir = Path(td) / "ban"
+        ban_dir.mkdir(parents=True)
+        (ban_dir / "banall_list.json").write_text(
+            _json.dumps([{"uid": "555", "time": 0, "reason": "捣乱"}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # 普通 QQ: 不拦截
+        blocked, why = await plugin._actor_blocked(123456)
+        assert not blocked
+        # 封禁用户: 拦截
+        blocked, why = await plugin._actor_blocked(555)
+        assert blocked and "封禁" in why
+        # bot 之间不互动(需要 ws 注入)
+        class _BM:
+            all_bots = [type("B", (), {"qq": 2192362623})(), type("B", (), {"qq": 3831097597})()]
+        class _WS:
+            _bot_manager = _BM()
+        plugin._ws_server = _WS()
+        blocked, why = await plugin._actor_blocked(2192362623)
+        assert blocked and "bot" in why
 
 
 async def test_plugin_tick_disabled_noop():

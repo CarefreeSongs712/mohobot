@@ -109,6 +109,13 @@
     "slider": { "min": 0, "max": 604800, "step": 3600 },
     "default": 86400
   },
+  "max_replies_per_post": {
+    "description": "单条说说自动回复上限",
+    "type": "int",
+    "hint": "同一条说说下本 bot 最多自动回复多少次（0=不限）。被@与被评论共用计数",
+    "slider": { "min": 0, "max": 50, "step": 1 },
+    "default": 10
+  },
   "auto_reply_max_length": {
     "description": "生成回复最大长度（字）",
     "type": "int",

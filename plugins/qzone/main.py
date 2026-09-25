@@ -112,6 +112,7 @@ class Plugin:
         "scan_interval_sec": 300,           # 轮询间隔(秒)
         "scan_count": 10,                   # 每轮扫描自己最新说说条数
         "max_comment_age_sec": 86400,       # 只回复该时间内的评论(0=不限), 防止补回复积压旧评论
+        "max_replies_per_post": 10,         # 同一条说说下本 bot 自动回复上限(0=不限)
         "auto_reply_max_length": 60,        # 生成回复最大长度
         "auto_reply_prompt": _DEFAULT_REPLY_PROMPT,
         "auto_reply_fallback": "谢谢你的互动~",  # LLM 失败时的兜底文案({nick} 可用)
@@ -143,6 +144,8 @@ class Plugin:
         # 自动回复: per-bot 去重存储 + 登录/请求失败退避(到点前跳过该 bot)
         self._auto_stores: dict[str, AutoReplyStore] = {}
         self._auto_fail_until: dict[str, float] = {}
+        # 封禁名单存储(自动回复跳过被封用户; 与封禁系统共用 data/ban JSON)
+        self._ban_store = None
 
     # ── 框架注入 ──────────────────────────────────────────────
 
@@ -475,22 +478,28 @@ class Plugin:
         return f"selfc:{post.uin}:{post.tid}:{comment.uin}:{fallback}"
 
     @staticmethod
-    def _atme_feeds_candidates(posts: list[Post], keyword: str, self_uin: int):
+    def _atme_feeds_candidates(posts: list[Post], keyword: str, self_uin: int,
+                               bot_qqs: set[int] | None = None):
         """从动态流(好友说说)中提取 @bot 候选: 正文含关键词或评论含关键词。
 
         返回 [(post, comment_or_None, key)]; 关键词形如 "@昵称"。
+        自己/其它 bot 的说说与评论一律跳过(bot 之间不互动)。
         """
+        bots = bot_qqs if bot_qqs is not None else set()
         out: list[tuple[Post, object | None, str]] = []
         for post in posts:
             if int(post.uin) == int(self_uin):
                 continue  # 自己的说说交给评论监听处理
+            if int(post.uin) in bots:
+                continue  # 其它 bot 的说说不处理
             if keyword in post.text or keyword in post.rt_con:
-                out.append((post, None, f"atmef:{post.uin}:{post.tid}:text"))
+                out.append((post, None, f"atme:{post.uin}:{post.tid}"))
             for idx, c in enumerate(post.comments):
                 if keyword not in c.content or int(c.uin) == int(self_uin):
                     continue
-                fallback = c.tid or content_key(c.create_time, c.content[:50])
-                out.append((post, idx, f"atmef:{post.uin}:{post.tid}:{c.uin}:{fallback}"))
+                if int(c.uin) in bots:
+                    continue
+                out.append((post, idx, f"atme:{post.uin}:{post.tid}"))
         return out
 
     async def on_tick(self) -> None:
@@ -549,8 +558,16 @@ class Plugin:
         max_age = max(0, int(self._cfg("max_comment_age_sec", 86400)))
         import time as _time
         for post in posts:
+            if await self._post_limit_reached(store, post.uin, post.tid):
+                continue
             for idx, comment in enumerate(post.comments):
                 if int(comment.uin) == int(self_uin):
+                    continue
+                blocked, why = await self._actor_blocked(comment.uin)
+                if blocked:
+                    await store.mark_seen(self._comment_key(post, comment))
+                    await store.save()
+                    logger.debug(f"[qzone][{bot_id}] 跳过评论({why}): {comment.uin}")
                     continue
                 key = self._comment_key(post, comment)
                 if await store.is_seen(key):
@@ -568,6 +585,8 @@ class Plugin:
                         await service.reply_comment(post, idx, text)
                     else:
                         await service.comment_posts(post, text)
+                    await store.incr_post_reply(self._post_key(post.uin, post.tid))
+                    await store.save()
                     logger.info(
                         f"[qzone][{bot_id}] 自动回复评论: {post.tid} ← {comment.nickname}: {text}"
                     )
@@ -585,27 +604,46 @@ class Plugin:
             await self._monitor_atme_feeds(bot_id, api, service, self_uin)
 
     async def _monitor_atme_feeds(self, bot_id: str, api, service, self_uin: int) -> None:
-        """动态流扫描模式: 好友动态正文/评论里出现 @bot昵称 即视为被@。"""
+        """动态流扫描模式: 好友动态正文/评论里出现 @bot昵称 即视为被@。
+
+        去重按 (post_uin, post_tid): 同一条说说只处理一次(与 api 模式共用 key)。
+        """
         keyword = str(self._cfg("atme_keyword", "") or "").strip()
         if not keyword:
             keyword = f"@{self._bot_nickname(bot_id)}"
         resp = await api.get_recent_feeds()
         posts = QzoneParser.parse_recent_feeds(resp.data)
-        candidates = self._atme_feeds_candidates(posts, keyword, self_uin)
+        candidates = self._atme_feeds_candidates(
+            posts, keyword, self_uin, self._bot_qq_set(),
+        )
         if not candidates:
             return
         store = self._get_auto_store(bot_id)
+        seen_posts: set[str] = set()
         for post, comment_or_idx, key in candidates:
+            if key in seen_posts:
+                continue  # 同一条说说的多个候选只处理第一个
+            seen_posts.add(key)
             if await store.is_seen(key):
                 continue
             await store.mark_seen(key)
             await store.save()
+            if await self._post_limit_reached(store, post.uin, post.tid):
+                continue
+            blocked, why = await self._actor_blocked(
+                post.comments[int(comment_or_idx)].uin if comment_or_idx is not None else post.uin,
+            )
+            if blocked:
+                logger.debug(f"[qzone][{bot_id}] 跳过被@条目({why})")
+                continue
             if comment_or_idx is None:
                 # 说说正文里被 @ → 评论该说说
                 content = post.text or post.rt_con
                 text = await self._generate_auto_text(bot_id, post.name, content, post)
                 try:
                     await service.comment_posts(post, text)
+                    await store.incr_post_reply(self._post_key(post.uin, post.tid))
+                    await store.save()
                     logger.info(f"[qzone][{bot_id}] 自动回复被@(正文): {post.tid} ← {text}")
                 except Exception as e:
                     logger.error(f"[qzone][{bot_id}] 自动回复被@(正文)失败: {e}")
@@ -622,6 +660,8 @@ class Plugin:
                         await service.reply_comment(post, idx, text)
                     else:
                         await service.comment_posts(post, text)
+                    await store.incr_post_reply(self._post_key(post.uin, post.tid))
+                    await store.save()
                     logger.info(
                         f"[qzone][{bot_id}] 自动回复被@(评论): {post.tid} ← {comment.nickname}: {text}"
                     )
@@ -635,12 +675,14 @@ class Plugin:
         只回复含匹配词(默认 "@")的条目 —— 赞/访问/评论我的说说不含 @,
         评论我的说说由评论监听处理(避免双重回复); 条目没有 mood 链接
         (如访问主页)直接跳过。
+        去重按 (post_uin, post_tid): 同一条说说上的多次 @/动态只处理一次。
         """
         raw_items = await api.get_atme_list()
         items = parse_atme_items(raw_items)
         if not items:
             return
         keyword = str(self._cfg("atme_match_keyword", "@") or "").strip()
+        bot_qqs = self._bot_qq_set()
         store = self._get_auto_store(bot_id)
         for item in items:
             post_uin = item.get("post_uin")
@@ -649,17 +691,23 @@ class Plugin:
                 continue  # 无说说归属(访问主页等)
             if str(post_uin) == str(self_uin):
                 continue  # 自己的说说 → 评论监听负责
+            if int(post_uin) in bot_qqs:
+                continue  # 其它 bot 的说说不处理
             content = str(item.get("content") or "")
             if keyword and keyword not in content:
                 continue  # 赞/评论等不含 @ 的条目
-            key = (
-                f"atme:{post_uin}:{post_tid}:{item.get('uin')}:"
-                f"{item.get('time') or content_key(item.get('uin'), content[:50])}"
-            )
-            if await store.is_seen(key):
+            blocked, why = await self._actor_blocked(item.get("uin"))
+            if blocked:
+                logger.debug(f"[qzone][{bot_id}] 跳过被@条目({why}): {item.get('uin')}")
                 continue
+            key = f"atme:{post_uin}:{post_tid}"
+            if await store.is_seen(key):
+                continue  # 该说说已处理过(一次唤醒只回一次)
             await store.mark_seen(key)
             await store.save()
+            if await self._post_limit_reached(store, post_uin, post_tid):
+                logger.debug(f"[qzone][{bot_id}] 说说回复达上限, 跳过: {post_uin}/{post_tid}")
+                continue
             post = await self._fetch_post_detail(api, str(post_uin), str(post_tid))
             if post is None:
                 continue
@@ -667,6 +715,8 @@ class Plugin:
             text = await self._generate_auto_text(bot_id, nick, content, post)
             try:
                 await service.comment_posts(post, text)
+                await store.incr_post_reply(self._post_key(post_uin, post_tid))
+                await store.save()
                 logger.info(
                     f"[qzone][{bot_id}] 自动回复被@(api): {post_uin}/{post_tid} ← {text}"
                 )
@@ -719,3 +769,43 @@ class Plugin:
         inst = bm.get(bot_id) if bm is not None else None
         persona = (getattr(inst.config, "persona", "") or "").strip() if inst is not None else ""
         return persona
+
+    # ── 自动回复过滤(bot/封禁/每说说上限) ─────────────────────
+
+    def _bot_qq_set(self) -> set[int]:
+        """全部 bot(含自己)的 QQ 集合 — 自动回复跳过 bot 之间互动。"""
+        ws = self._ws_server
+        bm = getattr(ws, "_bot_manager", None) if ws is not None else None
+        if bm is None:
+            return set()
+        return {int(b.qq) for b in bm.all_bots if b.qq}
+
+    def _get_ban_store(self):
+        if self._ban_store is None:
+            from mohobot.ban import BanStore
+            self._ban_store = BanStore(data_dir=self._data_dir)
+        return self._ban_store
+
+    async def _actor_blocked(self, uin) -> tuple[bool, str]:
+        """互动者是否应跳过: 自己/其它 bot, 或封禁名单(私聊会话+全局)。"""
+        try:
+            uid = int(uin)
+        except (TypeError, ValueError):
+            return (False, "")
+        if uid in self._bot_qq_set():
+            return (True, "bot账号")
+        store = self._get_ban_store()
+        banned, reason = await store.is_banned(f"private:{uid}", str(uid))
+        if banned:
+            return (True, f"封禁名单({reason or '无理由'})")
+        return (False, "")
+
+    def _post_key(self, post_uin, post_tid) -> str:
+        return f"{post_uin}:{post_tid}"
+
+    async def _post_limit_reached(self, store: AutoReplyStore, post_uin, post_tid) -> bool:
+        """该说说下本 bot 的自动回复是否已达上限(0=不限)。"""
+        max_replies = max(0, int(self._cfg("max_replies_per_post", 10)))
+        if max_replies <= 0:
+            return False
+        return await store.post_reply_count(self._post_key(post_uin, post_tid)) >= max_replies
