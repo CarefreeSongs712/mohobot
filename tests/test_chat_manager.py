@@ -50,15 +50,20 @@ CURRENT_GROUP = 999001
 class FakeWS:
     """mock ws_server: 记录调用, 可配置群列表与指定失败的 action。"""
 
-    def __init__(self, groups=None, fail_actions=(), raise_on_send=False):
+    def __init__(self, groups=None, fail_actions=(), raise_on_send=False,
+                 fail_times=None):
         self.calls = []  # [(action, params)]
         self.groups = [] if groups is None else groups
         self.fail_actions = set(fail_actions)
         self.raise_on_send = raise_on_send
+        self.fail_times = dict(fail_times or {})  # action -> 剩余失败次数
 
     async def send_to_bot(self, bot_id, action, params=None, wait_response=False, timeout=10.0):
         self.calls.append((action, params or {}))
         if action in self.fail_actions:
+            return {"status": "failed", "retcode": 1, "message": "mock failure"}
+        if self.fail_times.get(action, 0) > 0:
+            self.fail_times[action] -= 1
             return {"status": "failed", "retcode": 1, "message": "mock failure"}
         if action == "get_group_list":
             return {"status": "ok", "retcode": 0, "data": self.groups}
@@ -407,8 +412,12 @@ async def test_other_commands_pass_through():
 
 
 async def test_global_triggers_declared():
-    """两个命令都声明为全局指令(群内多 bot 去重依据)。"""
-    assert set(Plugin.global_triggers) == {"查看聊天", "发送消息"}
+    """两个命令都声明为全局指令(群内多 bot 去重依据)。
+
+    必须带 / 前缀: 框架用 global_triggers 匹配整条消息文本(如 "/查看聊天 群号"),
+    不带斜杠则去重永远不命中, 多 bot 群里所有 bot 会各自执行一遍。
+    """
+    assert set(Plugin.global_triggers) == {"/查看聊天", "/发送消息"}
     print("[16] global_triggers 声明 OK")
 
 
@@ -432,6 +441,83 @@ async def test_view_includes_bot_sent_messages():
     print("[17] bot 自己发言计入记录 OK")
 
 
+async def test_view_strips_reply_segments():
+    """归档消息里的 reply 引用段被剔除。
+
+    被引用消息不在转发目标会话里, NapCat 会以 'message segment "reply" is
+    missing required or usable fields' 拒绝整批(生产实测的主要失败原因)。
+    """
+    lines = [{
+        "time": 1786185001, "self_id": 2192362623, "post_type": "message",
+        "message_type": "group", "sub_type": "normal", "message_id": 7,
+        "group_id": GROUP, "user_id": 11,
+        "message": [{"type": "reply", "data": {"id": "-758147829"}},
+                    {"type": "text", "data": {"text": "回复内容"}}],
+        "raw_message": "[CQ:reply,id=-758147829]回复内容",
+        "sender": {"user_id": 11, "nickname": "昵称", "card": ""},
+    }]
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_history(tmp, lines)
+        ws = FakeWS()
+        plugin = _make_plugin(tmp, ws)
+        await plugin.on_message(BOT, _group_event(f"/查看聊天 {GROUP} 1"), {})
+
+    nodes = ws.params_of("send_group_forward_msg")[0]["messages"]
+    assert nodes[0]["data"]["content"] == [{"type": "text", "data": {"text": "回复内容"}}], \
+        f"reply 段应被剔除: {nodes[0]['data']['content']}"
+    print("[18] reply 引用段剔除 OK")
+
+
+async def test_view_degrades_to_text_on_failure():
+    """图片 URL 过期导致整批失败 → 自动用纯文本降级版重试一次并成功。"""
+    lines = [{
+        "time": 1786185001, "self_id": 2192362623, "post_type": "message",
+        "message_type": "group", "sub_type": "normal", "message_id": 8,
+        "group_id": GROUP, "user_id": 12,
+        "message": [{"type": "image", "data": {"url": "https://expired/img.jpg",
+                                               "file": "img.image"}}],
+        "raw_message": "[CQ:image,url=https://expired/img.jpg]",
+        "sender": {"user_id": 12, "nickname": "发图人", "card": ""},
+    }]
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_history(tmp, lines)
+        ws = FakeWS(fail_times={"send_group_forward_msg": 1})
+        plugin = _make_plugin(tmp, ws)
+        handled, reply = await plugin.on_message(
+            BOT, _group_event(f"/查看聊天 {GROUP} 1"), {})
+
+    assert reply is None, f"降级成功应视为成功: {reply!r}"
+    forwarded = ws.params_of("send_group_forward_msg")
+    assert len(forwarded) == 2, f"首试 + 降级重试共两次, 实际 {len(forwarded)}"
+    assert forwarded[0]["messages"][0]["data"]["content"] == [
+        {"type": "image", "data": {"url": "https://expired/img.jpg", "file": "img.image"}}
+    ], f"首试应保留原始图片段: {forwarded[0]['messages'][0]['data']['content']}"
+    assert forwarded[1]["messages"][0]["data"]["content"] == [
+        {"type": "text", "data": {"text": "[图片]"}}], "降级版应把图片段换成占位文本"
+    print("[19] 图片过期降级重试 OK")
+
+
+async def test_view_reply_only_message_keeps_placeholder():
+    """只有 reply 段(剥掉后为空)的消息 → 占位文本兜底, 不产生空内容节点。"""
+    lines = [{
+        "time": 1786185001, "self_id": 2192362623, "post_type": "message",
+        "message_type": "group", "sub_type": "normal", "message_id": 9,
+        "group_id": GROUP, "user_id": 13,
+        "message": [{"type": "reply", "data": {"id": "-42"}}],
+        "raw_message": "[CQ:reply,id=-42]",
+        "sender": {"user_id": 13, "nickname": "引用者", "card": ""},
+    }]
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_history(tmp, lines)
+        ws = FakeWS()
+        plugin = _make_plugin(tmp, ws)
+        await plugin.on_message(BOT, _group_event(f"/查看聊天 {GROUP} 1"), {})
+
+    nodes = ws.params_of("send_group_forward_msg")[0]["messages"]
+    assert nodes[0]["data"]["content"] == [{"type": "text", "data": {"text": "[引用消息]"}}]
+    print("[20] 纯引用消息占位兜底 OK")
+
+
 # ── 独立运行 ──────────────────────────────────────────────────
 
 async def main():
@@ -452,6 +538,9 @@ async def main():
     await test_other_commands_pass_through()
     await test_global_triggers_declared()
     await test_view_includes_bot_sent_messages()
+    await test_view_strips_reply_segments()
+    await test_view_degrades_to_text_on_failure()
+    await test_view_reply_only_message_keeps_placeholder()
     print("\nALL CHAT_MANAGER TESTS PASSED")
 
 

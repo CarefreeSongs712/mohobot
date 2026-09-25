@@ -2,7 +2,9 @@
 
 命令(均仅全局管理员可用, 带 / 前缀; 群内多 bot 时只由一个 bot 响应):
 - /查看聊天 <QQ号|群号> [条数]  — 从 data/history 归档读最近条数(默认 20,
-  不足则全部; 含用户发言与 bot 自己发出的 message_sent), 合并转发到**当前会话**
+  不足则全部; 含用户发言与 bot 自己发出的 message_sent), 合并转发到**当前会话**。
+  转发前剥离 reply 引用段(目标会话无法解析, 会导致整批被拒); 图片/语音等
+  URL 过期导致整批失败时, 自动降级为纯文本占位重试一次
 - /发送消息 <QQ号|群号> <内容>  — 把纯文本发送到指定会话
 
 目标自动判定(群号与 QQ 号都是纯数字, 字面无法区分):
@@ -25,7 +27,7 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from chat_manager_core.records import build_nodes, forward_nodes, read_recent
+from chat_manager_core.records import forward_messages, read_recent
 from chat_manager_core.sender import send_plain_text
 from chat_manager_core.target import (
     Target,
@@ -49,8 +51,9 @@ _NO_PERMISSION = "❌ 你没有权限执行此操作。"
 class Plugin:
     """聊天记录查看与代发(/查看聊天、/发送消息, 仅管理员)。"""
 
-    # 群内多 bot 时只由一个 bot 响应(与 /help、/催麦等全局指令同机制)
-    global_triggers = set(COMMANDS.keys())
+    # 群内多 bot 时只由一个 bot 响应(与 /help、/status 等全局指令同机制)。
+    # 注意必须带 / 前缀 —— 框架用这些词去匹配整条消息文本(如 "/查看聊天 群号")
+    global_triggers = {"/查看聊天", "/发送消息"}
 
     info = {
         "commands": [
@@ -151,12 +154,11 @@ class Plugin:
         if dest is None:
             return "❌ 无法确定当前会话, 已取消转发。"
 
-        nodes = build_nodes(messages)
-        ok, failed = await forward_nodes(
-            self._ws_server, bot_id, nodes, dest, self._cfg("batch_size", 40),
+        ok, failed = await forward_messages(
+            self._ws_server, bot_id, messages, dest, self._cfg("batch_size", 40),
         )
         logger.info(
-            f"/查看聊天 {target.describe()} 最近 {len(nodes)} 条 → "
+            f"/查看聊天 {target.describe()} 最近 {len(messages)} 条 → "
             f"{dest.describe()}: {ok} 批成功, {failed} 批失败"
         )
         if failed and not ok:
