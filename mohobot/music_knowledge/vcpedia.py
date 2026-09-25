@@ -140,15 +140,19 @@ class AnubisClient:
                 "difficulty": difficulty}
 
     @staticmethod
-    def _solve_pow(random_data: str, difficulty: int, max_tries: int = 2_000_000) -> int:
-        """找 nonce 使 sha256(randomData + nonce) 以 difficulty 个 0 开头。"""
+    def _solve_pow(random_data: str, difficulty: int, max_tries: int = 2_000_000) -> tuple[int, str]:
+        """找 nonce 使 sha256(randomData + nonce) 以 difficulty 个 0 开头。
+
+        返回 (nonce, hash) —— Anubis 1.24+ 的 pass-challenge 要求 response
+        传中选哈希本身(浏览器 worker postMessage 的就是 {hash, nonce})。
+        """
         target = "0" * difficulty
         for nonce in range(1, max_tries + 1):
             digest = hashlib.sha256(
                 (random_data + str(nonce)).encode("utf-8")
             ).hexdigest()
             if digest.startswith(target):
-                return nonce
+                return nonce, digest
         raise RuntimeError("VCPedia: PoW 未能在限定次数内解出")
 
     def _fetch_cookie(self) -> None:
@@ -179,14 +183,18 @@ class AnubisClient:
             logger.warning(f"VCPedia: {e}, 放弃挑战(同步将失败)")
             sess.close()
             return
-        nonce = self._solve_pow(ch["randomData"], ch["difficulty"])
+        t0 = _time.time()
+        nonce, digest = self._solve_pow(ch["randomData"], ch["difficulty"])
 
         # 挑战过程中服务端会下发验证 cookie(Partitioned; SameSite=None), 保留到 pass 请求
         cookies = dict(sess.cookies)
+        # 浏览器端(main.mjs)的参数形态: response=中选哈希, redir="/"(无
+        # anubis_public_url 元素时 j() 固定返回根路径), elapsedTime=解题耗时 ms
+        elapsed_ms = max(1, int((_time.time() - t0) * 1000))
         pass_url = (
             f"{self.base_url}/.within.website/x/cmd/anubis/api/pass-challenge"
-            f"?id={quote(ch['id'])}&response=1&nonce={nonce}"
-            f"&redir={quote(challenge_url)}&elapsedTime={_time.time() * 1000:.0f}"
+            f"?id={quote(ch['id'])}&response={quote(digest)}&nonce={nonce}"
+            f"&redir={quote('/')}&elapsedTime={elapsed_ms}"
         )
         resp = sess.get(
             pass_url, timeout=self.timeout, allow_redirects=False,
