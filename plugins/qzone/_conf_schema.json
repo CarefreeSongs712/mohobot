@@ -134,5 +134,69 @@
     "type": "string",
     "hint": "LLM 不可用/生成失败时发送，{nick} 可用",
     "default": "谢谢你的互动~"
+  },
+  "auto_publish_enabled": {
+    "description": "主动发说说总开关",
+    "type": "bool",
+    "hint": "开启后按每日计划自动发说说（内容由 LLM 按 bot 人设生成）",
+    "default": false
+  },
+  "auto_publish_daily_count": {
+    "description": "每天发布条数",
+    "type": "int",
+    "hint": "每天在时间窗内随机抽取该数量的时刻发布（0=不发）",
+    "slider": { "min": 0, "max": 10, "step": 1 },
+    "default": 2
+  },
+  "auto_publish_window_start": {
+    "description": "允许发布起始时间",
+    "type": "string",
+    "hint": "HH:MM（北京时间）",
+    "default": "09:00"
+  },
+  "auto_publish_window_end": {
+    "description": "允许发布结束时间",
+    "type": "string",
+    "hint": "HH:MM（北京时间）",
+    "default": "22:30"
+  },
+  "auto_publish_min_gap_sec": {
+    "description": "相邻发布最小间隔（秒）",
+    "type": "int",
+    "hint": "同一天两条说说的最小间隔",
+    "slider": { "min": 600, "max": 28800, "step": 600 },
+    "default": 7200
+  },
+  "auto_publish_topic_ttl_sec": {
+    "description": "互动话题时效（秒）",
+    "type": "int",
+    "hint": "从互动记忆提炼的话题词超过该时长自动丢弃（默认 12 小时）",
+    "slider": { "min": 3600, "max": 172800, "step": 3600 },
+    "default": 43200
+  },
+  "auto_publish_topics": {
+    "description": "静态话题池（可叠加）",
+    "type": "list",
+    "hint": "逗号分隔。与互动话题池合并随机取用；互动记忆为空时的兜底素材",
+    "default": []
+  },
+  "auto_publish_max_length": {
+    "description": "说说字数上限",
+    "type": "int",
+    "hint": "生成说说的截断长度",
+    "slider": { "min": 40, "max": 300, "step": 10 },
+    "default": 120
+  },
+  "auto_publish_exclude_bots": {
+    "description": "排除的 bot",
+    "type": "list",
+    "hint": "bot_id 或 QQ 号，这些 bot 不参与主动发说说",
+    "default": []
+  },
+  "auto_publish_notify_admin": {
+    "description": "发布后通知管理员",
+    "type": "bool",
+    "hint": "每次主动发布成功后私聊通知全局管理员",
+    "default": false
   }
 }

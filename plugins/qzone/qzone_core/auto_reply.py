@@ -91,9 +91,14 @@ def render_reply_prompt(template: str, *, nick: str, content: str, post: str) ->
     return text
 
 
-def clean_reply_text(text: str, max_len: int) -> str:
-    """清洗 LLM 生成回复: 去引号/换行折叠/去尾句号/截断(参考 ultra _clean_short_reply)。"""
+def clean_reply_text(text: str, max_len: int, keep_tail: bool = False) -> str:
+    """清洗 LLM 生成文本: 去引号/换行折叠/截断。
+
+    keep_tail=False(评论回复): 另去尾部句号(短回复更口语);
+    keep_tail=True(说说正文): 保留结尾标点。
+    """
     cleaned = re.sub(r"[\s\u3000]+", " ", str(text or "")).strip()
     cleaned = cleaned.strip("\"'“”‘’`")
-    cleaned = cleaned.rstrip("。.")
+    if not keep_tail:
+        cleaned = cleaned.rstrip("。.")
     return cleaned[: max(1, int(max_len))]

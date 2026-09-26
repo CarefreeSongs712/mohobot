@@ -29,6 +29,7 @@ from loguru import logger
 from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent
 from mohobot.utils.cq_code import extract_image_urls, extract_plain_text
 
+from qzone_core.auto_publish import AutoPublishStore, build_daily_plan
 from qzone_core import (
     AutoReplyStore,
     LitePostService,
@@ -72,6 +73,7 @@ class Plugin:
         "/赞说说", "/点赞说说",
         "/重置QQCookies", "/重置cookies", "/重置qqcookies",
         "/与我相关",
+        "/发日常", "/发布记录",
     }
 
     info = {
@@ -84,6 +86,8 @@ class Plugin:
             {"name": "赞说说", "desc": "点赞说说: /赞说说 [@QQ] [序号/范围]", "admin": True},
             {"name": "重置QQCookies", "desc": "重置QQ空间登录态(管理员/私聊)", "admin": True},
             {"name": "与我相关", "desc": "查看「与我相关」接口原始响应(管理员/私聊, 调试用)", "admin": True},
+            {"name": "发日常", "desc": "立即主动发一条说说(管理员/私聊, 测试用)", "admin": True},
+            {"name": "发布记录", "desc": "查看主动发布计划与历史(管理员/私聊)", "admin": True},
         ],
     }
 
@@ -91,6 +95,7 @@ class Plugin:
     _ws_server = None
     _admin_ids: list[str] = []
     _llm_service = None
+    _emotion_manager = None
     _data_dir = "./data"
 
     _DEFAULTS = {
@@ -116,6 +121,17 @@ class Plugin:
         "auto_reply_max_length": 60,        # 生成回复最大长度
         "auto_reply_prompt": _DEFAULT_REPLY_PROMPT,
         "auto_reply_fallback": "谢谢你的互动~",  # LLM 失败时的兜底文案({nick} 可用)
+        # ── 主动发说说 ──
+        "auto_publish_enabled": False,
+        "auto_publish_daily_count": 2,      # 每天条数(0=不发)
+        "auto_publish_window_start": "09:00",
+        "auto_publish_window_end": "22:30",
+        "auto_publish_min_gap_sec": 7200,   # 相邻两条最小间隔
+        "auto_publish_topic_ttl_sec": 43200,  # 互动话题 12 小时过期
+        "auto_publish_topics": [],          # 静态话题池(可叠加, 兜底素材)
+        "auto_publish_max_length": 120,
+        "auto_publish_exclude_bots": [],    # 排除的 bot_id / QQ
+        "auto_publish_notify_admin": False,
     }
 
     # 命令别名表(小写): -> (handler 名, 需管理员)
@@ -135,6 +151,8 @@ class Plugin:
     for _alias in ("重置qqcookies", "重置cookies"):
         _COMMANDS[_alias] = ("reset_cookies", True)
     _COMMANDS["与我相关"] = ("atme_debug", True)
+    _COMMANDS["发日常"] = ("publish_daily", True)
+    _COMMANDS["发布记录"] = ("publish_log", True)
 
     def __init__(self):
         self.plugin_config: dict = dict(self._DEFAULTS)
@@ -146,6 +164,9 @@ class Plugin:
         self._auto_fail_until: dict[str, float] = {}
         # 封禁名单存储(自动回复跳过被封用户; 与封禁系统共用 data/ban JSON)
         self._ban_store = None
+        # 主动发说说: per-bot 计划/历史/话题池 + 失败退避
+        self._pub_stores: dict[str, AutoPublishStore] = {}
+        self._pub_fail_until: dict[str, float] = {}
 
     # ── 框架注入 ──────────────────────────────────────────────
 
@@ -161,6 +182,11 @@ class Plugin:
     def inject_llm_service(cls, llm_service) -> None:
         """框架注入 LLMService(看说说的图片分析用)。"""
         cls._llm_service = llm_service
+
+    @classmethod
+    def inject_emotion_manager(cls, emotion_manager) -> None:
+        """框架注入 EmotionManager(主动发说说的话题取材)。"""
+        cls._emotion_manager = emotion_manager
 
     @classmethod
     def inject_data_dir(cls, data_dir: str) -> None:
@@ -503,9 +529,11 @@ class Plugin:
         return out
 
     async def on_tick(self) -> None:
-        """周期任务: 逐 bot 轮询「自己说说被评论」与「被@」。"""
+        """周期任务: 逐 bot 轮询「自己说说被评论」「被@」与「主动发说说计划」。"""
+        publish_on = bool(self._cfg("auto_publish_enabled", False))
         if not (bool(self._cfg("comment_reply_enabled", False))
-                or bool(self._cfg("atme_reply_enabled", False))):
+                or bool(self._cfg("atme_reply_enabled", False))
+                or publish_on):
             return
         ws = self._ws_server
         bm = getattr(ws, "_bot_manager", None) if ws is not None else None
@@ -514,15 +542,25 @@ class Plugin:
         import time as _time
         for bot in list(bm.all_bots):
             bot_id = bot.bot_id
+            # 自动回复(独立退避)
             until = self._auto_fail_until.get(bot_id, 0.0)
-            if until and _time.monotonic() < until:
-                continue
-            try:
-                await self._auto_reply_once(bot_id)
-            except Exception as e:
-                # 登录失效/网络异常等: 退避 10 分钟再试, 避免每轮刷日志
-                self._auto_fail_until[bot_id] = _time.monotonic() + 600
-                logger.warning(f"[qzone][{bot_id}] 自动回复轮询失败, 10 分钟后重试: {e}")
+            if not (until and _time.monotonic() < until):
+                try:
+                    await self._auto_reply_once(bot_id)
+                except Exception as e:
+                    # 登录失效/网络异常等: 退避 10 分钟再试, 避免每轮刷日志
+                    self._auto_fail_until[bot_id] = _time.monotonic() + 600
+                    logger.warning(f"[qzone][{bot_id}] 自动回复轮询失败, 10 分钟后重试: {e}")
+            # 主动发说说(独立退避, 与回复互不影响)
+            if publish_on:
+                until = self._pub_fail_until.get(bot_id, 0.0)
+                if until and _time.monotonic() < until:
+                    continue
+                try:
+                    await self._auto_publish_tick(bot_id)
+                except Exception as e:
+                    self._pub_fail_until[bot_id] = _time.monotonic() + 600
+                    logger.warning(f"[qzone][{bot_id}] 主动发说说失败, 10 分钟后重试: {e}")
 
     async def _auto_reply_once(self, bot_id: str) -> None:
         comment_on = bool(self._cfg("comment_reply_enabled", False))
@@ -839,3 +877,225 @@ class Plugin:
         if max_replies <= 0:
             return False
         return await store.post_reply_count(self._post_key(post_uin, post_tid)) >= max_replies
+
+    # ══ 主动发说说 ══════════════════════════════════════════════
+
+    def _get_pub_store(self, bot_id: str) -> AutoPublishStore:
+        store = self._pub_stores.get(bot_id)
+        if store is None:
+            from pathlib import Path
+            store = AutoPublishStore(
+                Path(self._data_dir) / "plugins_data" / "qzone" / f"auto_publish_{bot_id}.json",
+            )
+            self._pub_stores[bot_id] = store
+        return store
+
+    def _bot_excluded_from_publish(self, bot_id: str) -> bool:
+        """排除名单(bot_id 或 QQ)命中则该 bot 不主动发说说。"""
+        exclude = {
+            str(x).strip() for x in (self._cfg("auto_publish_exclude_bots", []) or [])
+            if str(x).strip()
+        }
+        if not exclude:
+            return False
+        return bot_id in exclude or self._bot_qq(bot_id) in exclude
+
+    async def _auto_publish_tick(self, bot_id: str) -> None:
+        """检查当日计划: 到点的未完成条目触发发布。"""
+        if not bool(self._cfg("auto_publish_enabled", False)):
+            return
+        if self._bot_excluded_from_publish(bot_id):
+            return
+        count = max(0, int(self._cfg("auto_publish_daily_count", 2)))
+        if count <= 0:
+            return
+        from mohobot.utils.time_utils import format_utc8
+        store = self._get_pub_store(bot_id)
+        today = format_utc8("%Y-%m-%d")
+        created = await store.ensure_plan(today, build_daily_plan(
+            count,
+            str(self._cfg("auto_publish_window_start", "09:00")),
+            str(self._cfg("auto_publish_window_end", "22:30")),
+            int(self._cfg("auto_publish_min_gap_sec", 7200)),
+        ))
+        if created:
+            await store.save()
+            logger.info(f"[qzone][{bot_id}] 主动发布计划已生成: {store.plan().get('times')}")
+        due = await store.due_indices(format_utc8("%H:%M"))
+        if not due:
+            return
+        api, service = self._get_api(bot_id)
+        for i in due:
+            await store.mark_done(i)
+            await store.save()
+            try:
+                await self._auto_publish_once(bot_id, api, service)
+            except Exception as e:
+                logger.error(f"[qzone][{bot_id}] 主动发说说失败(计划 {i}): {e}")
+            await asyncio.sleep(random.uniform(2.0, 5.0))
+
+    async def _auto_publish_once(self, bot_id: str, api, service) -> Post:
+        """生成并发布一条说说; 返回 Post(失败抛异常)。"""
+        topic = await self._pick_topic(bot_id)
+        text = await self._generate_publish_text(bot_id, topic)
+        post = await service.publish_post(text=text)
+        from mohobot.utils.time_utils import format_utc8
+        store = self._get_pub_store(bot_id)
+        await store.add_history({
+            "time": format_utc8("%Y-%m-%d %H:%M"),
+            "text": text,
+            "tid": post.tid,
+        })
+        await store.save()
+        logger.info(f"[qzone][{bot_id}] 主动发布成功(tid={post.tid}): {text[:60]}")
+        if bool(self._cfg("auto_publish_notify_admin", False)):
+            await self._notify_admins(bot_id, f"【主动发布】{text[:100]}")
+        return post
+
+    async def _pick_topic(self, bot_id: str) -> str | None:
+        """取话题: 互动话题池(12h TTL, 来自情感系统记忆) + 静态池; 空则 None(自由发挥)。"""
+        store = self._get_pub_store(bot_id)
+        ttl = max(0, int(self._cfg("auto_publish_topic_ttl_sec", 43200)))
+        topics = store.valid_topics(ttl) if ttl > 0 else []
+        if not topics:
+            extracted = await self._extract_topics(bot_id)
+            if extracted:
+                await store.replace_topics(extracted)
+                await store.save()
+                topics = extracted
+                logger.info(f"[qzone][{bot_id}] 话题池已更新: {topics}")
+        topics = topics + [str(t).strip() for t in (self._cfg("auto_publish_topics", []) or [])
+                           if str(t).strip()]
+        return random.choice(topics) if topics else None
+
+    async def _extract_topics(self, bot_id: str) -> list[str]:
+        """从情感系统长期记忆提炼抽象话题词(不含任何具体内容)。
+
+        情感系统未启用/无记忆/LLM 失败 → 空列表(回退自由发挥)。
+        """
+        emotion = self._emotion_manager
+        llm = self._llm_service
+        if emotion is None or llm is None:
+            return []
+        try:
+            recs = emotion.recent_interactions(bot_id, 20)
+        except Exception as e:
+            logger.debug(f"[qzone][{bot_id}] 读取互动记忆失败: {e}")
+            return []
+        if not recs:
+            return []
+        lines = []
+        for r in recs[:15]:
+            user_msg = str(r.get("user_msg", "") or "")[:60]
+            ai_msg = str(r.get("ai_response", "") or "")[:40]
+            if user_msg:
+                lines.append(f"用户: {user_msg} / bot: {ai_msg}")
+        if not lines:
+            return []
+        prompt = (
+            "下面是这个QQ号与用户的近期互动记录。请从中提炼 3~6 个可以公开谈论的"
+            "抽象话题词(如: 月饼、考试、猫、天气)。\n"
+            "严格要求: 只输出话题词本身, 不得包含任何用户昵称、QQ号、对话原话片段、"
+            "可识别个人身份的信息或对话细节。\n"
+            '以 JSON 数组输出, 如 ["月饼","开学","猫"]。\n\n'
+            "互动记录:\n" + "\n".join(lines)
+        )
+        raw = await llm.complete_text(
+            prompt, system_prompt="你是话题提炼助手, 只输出 JSON 数组。",
+            max_tokens=200, temperature=0.3, module="qzone",
+        )
+        import json as _json
+        import re as _re
+        m = _re.search(r"\[[\s\S]*\]", raw or "")
+        if not m:
+            return []
+        try:
+            data = _json.loads(m.group(0))
+        except _json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(t).strip()[:12] for t in data if str(t).strip()][:6]
+
+    async def _generate_publish_text(self, bot_id: str, topic: str | None) -> str:
+        """生成说说正文(LLM+人设; 隐私禁令写死; 失败重试 1 次)。"""
+        max_len = max(20, int(self._cfg("auto_publish_max_length", 120)))
+        persona = self._bot_persona(bot_id)
+        system = (
+            f"你是QQ空间用户「{self._bot_nickname(bot_id)}」。{persona}\n"
+            f"你现在要发一条QQ空间说说。要求: 像真人的随手随想, 口语化, 自然;"
+            f"只输出说说正文本身, 不超过 {max_len} 字;"
+            f"不要引号、不要话题标签、不要 @任何人、不要自报身份。\n"
+            f"绝对禁止: 提及任何用户昵称/QQ号/聊天原话/能识别出具体某个人的信息。"
+            f"话题本身可以自然提到。"
+        )
+        from mohobot.utils.time_utils import format_utc8
+        hour = int(format_utc8("%H"))
+        period = ("清晨" if 5 <= hour < 9 else "上午" if 9 <= hour < 12
+                  else "午后" if 12 <= hour < 14 else "下午" if 14 <= hour < 18
+                  else "晚上" if 18 <= hour < 23 else "深夜")
+        weekday = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[
+            (int(format_utc8("%w")) + 6) % 7  # %w: 周日=0 → 转 周一=0
+        ]
+        time_hint = f"{period} {weekday}"
+        store = self._get_pub_store(bot_id)
+        recent = store.recent_texts(5)
+        recent_str = "；".join(recent) if recent else "（暂无）"
+        topic_str = f"围绕话题「{topic}」" if topic else "自由发挥一个日常小话题"
+        prompt = (
+            f"现在是{time_hint}。请{topic_str}写一条说说。\n"
+            f"你最近发过的内容(避免重复): {recent_str}"
+        )
+        for attempt in range(2):
+            if self._llm_service is None:
+                raw = ""
+            else:
+                raw = await self._llm_service.complete_text(
+                    prompt, system_prompt=system, max_tokens=max_len * 2 + 64,
+                    temperature=0.9, module="qzone",
+                )
+            text = clean_reply_text(raw, max_len, keep_tail=True)
+            if len(text) >= 2:
+                return text
+            logger.warning(f"[qzone][{bot_id}] 说说生成第 {attempt + 1} 次为空/过短")
+        raise RuntimeError("说说生成失败(LLM 返回空)")
+
+    async def _notify_admins(self, bot_id: str, text: str) -> None:
+        ws = self._ws_server
+        if ws is None:
+            return
+        for admin in self._admin_ids:
+            if not admin.isdigit():
+                continue
+            try:
+                await ws.send_private_msg(bot_id, int(admin), text)
+            except Exception as e:
+                logger.warning(f"[qzone][{bot_id}] 管理员通知失败({admin}): {e}")
+
+    async def _cmd_publish_daily(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
+        """管理员立即主动发一条(测试用, 不占当日计划)。"""
+        api, service = self._get_api(bot_id)
+        post = await self._auto_publish_once(bot_id, api, service)
+        return (True, f"已主动发布\n{post.to_str()}")
+
+    async def _cmd_publish_log(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
+        """查看当日计划与最近发布历史。"""
+        store = self._get_pub_store(bot_id)
+        plan = store.plan()
+        lines = []
+        times = plan.get("times") or []
+        if times:
+            done = plan.get("done") or []
+            parts = [
+                f"{t}{'✅' if i < len(done) and done[i] else '⬜'}"
+                for i, t in enumerate(times)
+            ]
+            lines.append(f"今日计划({plan.get('date')}): " + " ".join(parts))
+        else:
+            lines.append("今日暂无发布计划(开关未开或条数为 0)")
+        history = store._data.get("history") or []
+        if history:
+            lines.append("最近发布:")
+            for h in reversed(history[-5:]):
+                lines.append(f"  {h.get('time')} tid={h.get('tid')}: {str(h.get('text'))[:40]}")
+        return (True, "\n".join(lines))

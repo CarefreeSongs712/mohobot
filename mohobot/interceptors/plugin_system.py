@@ -48,6 +48,7 @@ class PluginSystem(Interceptor):
         self._bot_manager = None
         self._anysearch_client = None
         self._llm_service = None
+        self._emotion_manager = None
         self._admin_ids: set[str] = set()  # 全局管理员(封禁/插件命令共用)
         # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
         self._tick_tasks: list[Any] = []
@@ -174,7 +175,7 @@ class PluginSystem(Interceptor):
 
     # ── 运行时注入(热重载后自动重新注入) ────────────────────
 
-    def set_runtime_refs(self, ws_server=None, bot_manager=None, anysearch_client=None, llm_service=None) -> None:
+    def set_runtime_refs(self, ws_server=None, bot_manager=None, anysearch_client=None, llm_service=None, emotion_manager=None) -> None:
         """保存运行时引用, 供 load/reload 后注入插件。"""
         if ws_server is not None:
             self._ws_server = ws_server
@@ -184,6 +185,8 @@ class PluginSystem(Interceptor):
             self._anysearch_client = anysearch_client
         if llm_service is not None:
             self._llm_service = llm_service
+        if emotion_manager is not None:
+            self._emotion_manager = emotion_manager
 
     def apply_injections(self) -> None:
         """对已加载插件实例执行注入(ws_server / bot_manager / data_dir / anysearch / admins)。
@@ -213,6 +216,10 @@ class PluginSystem(Interceptor):
                 injector = getattr(inst.__class__, "inject_llm_service", None)
                 if injector:
                     injector(self._llm_service)
+            if self._emotion_manager is not None:
+                injector = getattr(inst.__class__, "inject_emotion_manager", None)
+                if injector:
+                    injector(self._emotion_manager)
             if self._task_supervisor is not None:
                 injector = getattr(inst.__class__, "inject_task_supervisor", None)
                 if injector:

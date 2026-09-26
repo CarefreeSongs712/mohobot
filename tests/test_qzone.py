@@ -730,5 +730,214 @@ async def test_plugin_atme_api_filter():
     assert replied == [(333, "def222", 1, "来啦来啦")]
 
 
+
+# ══ 主动发说说 ══════════════════════════════════════════════════
+
+from qzone_core.auto_publish import AutoPublishStore, build_daily_plan  # noqa: E402
+
+
+def test_build_daily_plan_basic():
+    for _ in range(20):
+        times = build_daily_plan(3, "09:00", "22:30", 7200)
+        assert len(times) == 3
+        mins = sorted(int(t[:2]) * 60 + int(t[3:]) for t in times)
+        assert all(9 * 60 <= m <= 22 * 60 + 30 for m in mins)
+        assert all(mins[i + 1] - mins[i] >= 120 for i in range(2))  # >= 7200s
+
+
+def test_build_daily_plan_small_window():
+    # 窗口只有 2 小时, 间隔 2 小时 → 最多 2 条(60/120+1)
+    times = build_daily_plan(5, "09:00", "11:00", 7200)
+    assert len(times) == 2
+    mins = [int(t[:2]) * 60 + int(t[3:]) for t in times]
+    assert mins[1] - mins[0] >= 120
+
+
+def test_build_daily_plan_edges():
+    assert build_daily_plan(0, "09:00", "22:30", 7200) == []
+    assert len(build_daily_plan(1, "09:00", "22:30", 7200)) == 1
+    # 非法时间回退默认窗
+    times = build_daily_plan(1, "xx", "yy", 0)
+    assert len(times) == 1
+
+
+async def test_pub_store_plan_and_history():
+    with tempfile.TemporaryDirectory() as td:
+        store = AutoPublishStore(Path(td) / "pub_bot_001.json")
+        created = await store.ensure_plan("2026-09-26", ["10:00", "15:00"])
+        assert created
+        await store.mark_done(0)
+        await store.save()
+        assert await store.due_indices("09:59") == []      # 未到点
+        assert await store.due_indices("15:00") == [1]     # 15:00 到点
+        # 同日不重建
+        store2 = AutoPublishStore(Path(td) / "pub_bot_001.json")
+        assert not await store2.ensure_plan("2026-09-26", ["11:00"])
+        assert await store2.due_indices("16:00") == [1]
+        # 跨日重建
+        assert await store2.ensure_plan("2026-09-27", ["09:30"])
+        assert await store2.due_indices("23:59") == [0]
+        # 历史上限 20
+        for i in range(25):
+            await store2.add_history({"time": f"t{i}", "text": f"x{i}", "tid": str(i)})
+        assert len(store2._data["history"]) == 20
+        assert store2.recent_texts(3) == ["x22", "x23", "x24"]  # 时间正序
+
+
+async def test_pub_store_topics_ttl():
+    with tempfile.TemporaryDirectory() as td:
+        import time as _time
+        store = AutoPublishStore(Path(td) / "topics.json")
+        await store.replace_topics(["月饼", "考试"])
+        assert store.valid_topics(43200) == ["月饼", "考试"]
+        # 伪造过期
+        store._data["topics"][0]["ts"] = _time.time() - 99999
+        assert store.valid_topics(43200) == ["考试"]
+
+
+async def test_pick_topic_extraction_and_fallback():
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        # 情感记忆 + LLM 提炼
+        class _FakeEmotion:
+            def recent_interactions(self, bot_id, limit=20):
+                return [{"user_msg": "今天吃了月饼", "ai_response": "好听", "timestamp": 1}]
+        class _FakeLLM:
+            calls = 0
+            async def complete_text(self, prompt, **kw):
+                _FakeLLM.calls += 1
+                assert "月饼" in prompt  # 记忆进入提炼 prompt
+                return '["月饼","开学"]'
+        plugin._emotion_manager = _FakeEmotion()
+        plugin._llm_service = _FakeLLM()
+        topic = await plugin._pick_topic("bot_001")
+        assert topic in ("月饼", "开学")
+        assert _FakeLLM.calls == 1
+        # 第二次: 池未过期 → 不再调用 LLM
+        topic2 = await plugin._pick_topic("bot_001")
+        assert topic2 in ("月饼", "开学")
+        assert _FakeLLM.calls == 1
+        # 无情感系统 → 无互动话题; 静态池兜底
+        plugin2 = _fresh_plugin()
+        plugin2._data_dir = td
+        plugin2.plugin_config["auto_publish_topics"] = ["旅行"]
+        assert await plugin2._pick_topic("bot_001") == "旅行"
+        # 什么都没有 → None(自由发挥)
+        plugin3 = _fresh_plugin()
+        plugin3._data_dir = tempfile.mkdtemp()
+        assert await plugin3._pick_topic("bot_001") is None
+
+
+async def test_generate_publish_text_clean():
+    class _FakeLLM:
+        async def complete_text(self, prompt, **kw):
+            return '"今天吃到超好吃的蛋黄月饼，幸福到转圈圈。"'
+    plugin = _fresh_plugin()
+    plugin._llm_service = _FakeLLM()
+    plugin.plugin_config["auto_publish_topics"] = ["美食"]
+    text = await plugin._generate_publish_text("bot_001", "美食")
+    assert text == "今天吃到超好吃的蛋黄月饼，幸福到转圈圈。"  # keep_tail 保留结尾标点
+
+
+async def test_generate_publish_text_fail_raises():
+    class _FakeLLM:
+        async def complete_text(self, prompt, **kw):
+            return ""
+    plugin = _fresh_plugin()
+    plugin._llm_service = _FakeLLM()
+    try:
+        await plugin._generate_publish_text("bot_001", None)
+        raise AssertionError("应当抛错")
+    except RuntimeError as e:
+        assert "生成失败" in str(e)
+
+
+class _PubFakeAPI:
+    def __init__(self):
+        self.session = None
+        self.published = []
+
+    async def get_atme_list(self):  # 未启用回复时不会被调
+        raise RuntimeError("should not be called")
+
+    class _S:
+        async def get_uin(self):
+            return 111
+    session = _S()
+
+    def __init__(self):
+        self.session = type("S", (), {"get_uin": staticmethod(lambda: asyncio.sleep(0, result=111))})()
+
+
+async def test_auto_publish_tick_end_to_end():
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        plugin.plugin_config["auto_publish_enabled"] = True
+        plugin.plugin_config["auto_publish_daily_count"] = 2
+        plugin.plugin_config["auto_publish_window_start"] = "00:00"
+        plugin.plugin_config["auto_publish_window_end"] = "23:59"
+        plugin.plugin_config["auto_publish_min_gap_sec"] = 0
+
+        class _FakeLLM:
+            async def complete_text(self, prompt, **kw):
+                return "今天天气不错，出去走走。"
+        plugin._llm_service = _FakeLLM()
+
+        published = []
+        class _FakeService:
+            async def publish_post(self, text=None, images=None):
+                published.append(text)
+                return Post(uin=111, tid=f"tid{len(published)}", name="b", text=text)
+
+        class _S:
+            async def get_uin(self):
+                return 111
+        api = type("A", (), {"session": type("S", (), {})()})()
+        api.session = _S()
+        plugin._apis["bot_001"] = api
+        plugin._services["bot_001"] = _FakeService()
+
+        # 预置当日计划: 一个已到点(00:01), 一个未来(23:59 之外不存在 → 用 23:59 但可能已过)
+        store = plugin._get_pub_store("bot_001")
+        from mohobot.utils.time_utils import format_utc8
+        today = format_utc8("%Y-%m-%d")
+        now_hhmm = format_utc8("%H:%M")
+        past = "00:01" if now_hhmm > "00:01" else "23:58"
+        future = "23:59" if now_hhmm <= "23:58" else "00:01"
+        await store.ensure_plan(today, [past, future])
+        await store.save()
+
+        await plugin._auto_publish_tick("bot_001")
+        assert len(published) == 1
+        assert published[0] == "今天天气不错，出去走走。"
+        hist = store._data["history"]
+        assert len(hist) == 1 and hist[0]["text"] == published[0]
+        # 已到点条目标记 done: 再 tick 不重复发布
+        await plugin._auto_publish_tick("bot_001")
+        assert len(published) == 1
+        # 排除名单生效
+        plugin.plugin_config["auto_publish_exclude_bots"] = ["bot_001"]
+        await store.ensure_plan(today, [past])  # 重建计划(同日不重建 → 手动重置)
+        store._data["plan"]["done"] = [False]
+        await plugin._auto_publish_tick("bot_001")
+        assert len(published) == 1
+
+
+async def test_cmd_publish_log_shape():
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        store = plugin._get_pub_store("bot_001")
+        await store.ensure_plan("2026-09-26", ["10:00"])
+        await store.mark_done(0)
+        await store.add_history({"time": "10:00", "text": "你好呀", "tid": "t1"})
+        ev = _private_event([{"type": "text", "data": {"text": "/发布记录"}}], user_id=3831097597)
+        handled, reply = await plugin.on_message("bot_001", ev, {})
+        assert handled is True
+        assert "10:00" in reply and "你好呀" in reply
+
+
 if __name__ == "__main__":
     asyncio.run(main())

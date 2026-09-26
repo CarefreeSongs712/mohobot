@@ -294,6 +294,7 @@ database:
 - **防限流**：请求最小间隔 + 随机抖动、429 指数退避、登录失效自动重登录；说说查询带 LRU+TTL 缓存（复用正文/图片，只刷新评论）
 - **自动回复**（LLM 生成，默认关）：① **自己说说被评论** — 周期扫描自己最新 N 条说说，新评论自动回复（有 tid 回评、无 tid 评论；首启基线不回复历史；只回复时限内的新评论）；② **被@自动回复** — 双模式：`feeds_scan`（默认，扫描好友动态流正文/评论中的 `@bot昵称`，开箱即用）或 `api`（调用「与我相关」内部接口，需配置 `atme_api_url`，支持 `{uin}` 占位；`/与我相关` 命令可查看接口原始响应用于适配解析）。回复由 chat 模型生成（system 带 bot 人设，提示词模板 `{nick}/{content}/{post}` 可配，失败降级固定文案），按 bot 去重持久化（`auto_reply_{bot_id}.json`），轮询失败退避 10 分钟
 - **配置**（WebUI 插件页可改、热生效）：`send_feedback` / `analyze_images_on_view_feed` / `feed_cache_max_size` / `feed_cache_ttl_seconds` / `timeout` / `request_interval` / `request_jitter` / `comment_reply_enabled` / `atme_reply_enabled` / `atme_mode` / `atme_api_url` / `scan_interval_sec` / `auto_reply_prompt` 等
+- **主动发说说**（`auto_publish_enabled`，默认关）：每天在时间窗（`auto_publish_window_start/end`）内随机抽 N 个时刻（`auto_publish_daily_count`，相邻最小间隔可配）由各 bot 用自己的人设发一条说说。话题来自**与用户的正式互动**——从情感系统长期记忆提炼抽象话题词（LLM，12h TTL 自动过期，`auto_publish_topic_ttl_sec` 可调），**绝不输出用户昵称/QQ/对话原话等具体内容**（隐私禁令写死在 system prompt）；无可用话题时回退自由发挥，静态话题池 `auto_publish_topics` 可叠加兜底。计划持久化（重启不重发）、最近 20 条历史作为去重素材、可排除指定 bot、发布后可私聊通知管理员。命令（管理员/私聊）：`/发日常` 立即发一条测试、`/发布记录` 查看计划与历史
 
 > 移植自 [astrbot_plugin_qzone_lite](https://github.com/Zhalslar/astrbot_plugin_qzone)（上游 Zhalslar/astrbot_plugin_qzone 的 Lite 裁剪版，GPL-3.0）。不迁移 LLM Tools；Cookies 由协议端自动获取（需 NapCat/LLOneBot 等支持 `get_cookies`），不再提供手动 cookies 配置；可选依赖 `json5`（缺失时降级 `json.loads` 解析响应）。
 

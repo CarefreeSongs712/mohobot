@@ -134,6 +134,14 @@ class MemorySystem:
             lines.append(f"重要时刻: {important_count}个")
         return "\n".join(lines)
 
+    def recent_records(self, bot_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """跨用户汇总最近互动记忆(按时间新→旧), 供插件取材(如主动发说说话题提炼)。"""
+        all_recs: list[InteractionRecord] = []
+        for records in self._memory.get(bot_id, {}).values():
+            all_recs.extend(records)
+        all_recs.sort(key=lambda r: r.timestamp)
+        return [r.to_dict() for r in all_recs[-max(1, int(limit)):]]
+
     def user_records(self, bot_id: str, user_key: str) -> list[dict[str, Any]]:
         """某用户的全部长期记忆(新→旧)。"""
         records = self._memory.get(bot_id, {}).get(user_key)

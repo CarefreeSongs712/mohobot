@@ -317,6 +317,10 @@ class EmotionManager:
             state = EmotionalState(user_key=user_key)
         return state
 
+    def recent_interactions(self, bot_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """该 bot 跨用户的最近长期互动记忆(新→旧, 正式互动才入库)。"""
+        return self._memory.recent_records(bot_id, limit)
+
     async def all_states(self, bot_id: str) -> dict[str, EmotionalState]:
         await self._store.ensure_loaded(bot_id)
         return self._store.all_states(bot_id)
