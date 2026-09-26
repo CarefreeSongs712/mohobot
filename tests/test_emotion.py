@@ -153,6 +153,83 @@ def test_smart_update_decision():
     assert needs and "强制更新" in reason
 
 
+def test_smart_gate_tightened():
+    """门控温和收紧: 单字"好"已删/bot 回复不计分/阈值 3(负面单个词仍触发)。"""
+    smart = SmartUpdateManager()
+    state = EmotionalState(user_key="u1")
+    import time as _t
+    now = _t.time()
+    for attr in ("last_attitude_update", "last_relationship_update"):
+        setattr(state.descriptions, attr, now)
+    state.last_force_update = now
+
+    # 寒暄不再触发: 无关键词命中("好"已出词表), 语气符号不单独计分
+    needs, _ = smart.should_update(state, "你好呀！今天过得好吗？", "你好呀~", force_interval=100)
+    assert not needs
+
+    # 单个 positive 词(+2)低于阈值 3 → 不触发; 叠加强语气(+2) → 触发
+    needs, _ = smart.should_update(state, "今天真开心", "嗯嗯", force_interval=100)
+    assert not needs
+    needs, reason = smart.should_update(state, "我真的非常开心！", "嗯嗯", force_interval=100)
+    assert needs and "积极" in reason
+
+    # 负面词 +3 单个即触发(强情绪保留)
+    needs, reason = smart.should_update(state, "我讨厌你", "别这样", force_interval=100)
+    assert needs and "负面" in reason
+
+    # bot 回复里的关键词不再计分: 用户消息干净 → 不触发
+    needs, _ = smart.should_update(state, "嗯", "好的呀,谢谢你,我真的很开心棒棒的！", force_interval=100)
+    assert not needs
+
+
+async def test_manager_frequency_cooldown():
+    """冷却门控: 轮数冷却 + 最小间隔(可配, 0=不限); 强情绪也受冷却约束。"""
+
+    class _FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def analyze_emotion(self, prompt, model=None):
+            self.calls += 1
+            return ('{"emotion_updates": {"favor": 1}, '
+                    '"relationship": "朋友", "attitude": "温和"}')
+
+    async def run():
+        tmp = tempfile.mkdtemp()
+        llm = _FakeLLM()
+        manager = EmotionManager(
+            data_dir=tmp,
+            config=_make_cfg(analysis_round_cooldown=2, min_interval_sec=180),
+            llm_service=llm, admins=[999],
+        )
+        assert EmotionConfig().keyword_threshold == 3
+        assert EmotionConfig().analysis_round_cooldown == 2
+        assert EmotionConfig().min_interval_sec == 180
+
+        # 第1轮(从未分析) → 分析
+        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
+        assert llm.calls == 1
+        # 第2轮: 不足 2 轮 → 跳过
+        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
+        assert llm.calls == 1
+        # 第3轮: 轮数够但 <180s → 跳过
+        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
+        assert llm.calls == 1
+        # 拨回 200s 前 → 两道门都过 → 分析
+        state = await manager.get_state("bot_001", "111")
+        import time as _t
+        state.last_force_update = _t.time() - 200
+        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
+        assert llm.calls == 2
+        # 0 = 不限
+        manager._cfg = _make_cfg(analysis_round_cooldown=0, min_interval_sec=0)
+        await manager.process_turn("bot_001", "111", "我真的非常讨厌你", "别这样嘛")
+        assert llm.calls == 3
+        await manager.shutdown()
+
+    await run()
+
+
 # ── 4. 情感专家 ───────────────────────────────────────────────
 
 async def test_expert_parse_and_clamp():

@@ -21,8 +21,9 @@ class SmartUpdateManager:
     """判断一轮对话是否需要调用情感分析 LLM。"""
 
     EMOTIONAL_KEYWORDS: dict[str, list[str]] = {
+        # 不收单字高频词(如"好") — "你好/好的/好不好"这类寒暄会让日常对话大量误触发
         "positive": ["喜欢", "爱", "开心", "高兴", "谢谢", "感谢", "感动",
-                     "温暖", "棒", "好", "不错", "可爱", "漂亮", "美丽"],
+                     "温暖", "棒", "不错", "可爱", "漂亮", "美丽"],
         "negative": ["讨厌", "恨", "生气", "愤怒", "伤心", "难过", "失望",
                      "烦", "滚", "傻", "笨", "蠢", "垃圾", "不愿意"],
         "intimate": ["想你", "想念", "关心", "担心", "在乎", "重要",
@@ -30,9 +31,16 @@ class SmartUpdateManager:
         "conflict": ["吵架", "争执", "不满", "抱怨", "批评", "指责", "反对", "不同意"],
     }
 
+    # 用户消息关键词权重(bot 回复不计分 — 分析对象是用户情感, bot 客套词会自触发)
+    _KEYWORD_WEIGHT = {"positive": 2, "negative": 3, "intimate": 2, "conflict": 3}
+    # 默认触发阈值(可被 EmotionConfig.keyword_threshold 覆盖):
+    # 3 = 单个 positive/intimate 词(+2)需叠加强语气或第二个词; 负面/冲突词(+3)单个即触发
+    DEFAULT_KEYWORD_THRESHOLD = 3
+
     INTENSITY_PATTERNS = {
-        "strong_positive": re.compile(r"(非常|特别|极其|太|真的)好|喜欢|爱|开心"),
-        "strong_negative": re.compile(r"(非常|特别|极其|太|真的)讨厌|恨|生气|烦"),
+        # 强语气 = 强调词(非常/太/真的...)修饰情感词; 不含独立词, 避免与关键词重复计分
+        "strong_positive": re.compile(r"(?:非常|特别|极其|太|真的)(?:好|喜欢|爱|开心)"),
+        "strong_negative": re.compile(r"(?:非常|特别|极其|太|真的)(?:讨厌|恨|生气|烦)"),
         "question": re.compile(r"[？?]"),
         "exclamation": re.compile(r"[！!]"),
         "emoticon_positive": re.compile(r"[:：][)）]|😊|😄|😍|🥰|🤗"),
@@ -41,7 +49,7 @@ class SmartUpdateManager:
 
     def should_update(
         self, state: EmotionalState, user_message: str, ai_response: str,
-        force_interval: int,
+        force_interval: int, keyword_threshold: int = DEFAULT_KEYWORD_THRESHOLD,
     ) -> tuple[bool, str]:
         """返回 (是否更新, 原因)。"""
         reasons: list[str] = []
@@ -51,8 +59,8 @@ class SmartUpdateManager:
         if max(emotions) - min(emotions) >= MAJOR_CHANGE:
             reasons.append("情感强度重大变化")
 
-        # 2. 关键词/语气分析
-        keyword = self._analyze_keywords(user_message, ai_response)
+        # 2. 关键词/语气分析(仅用户消息计分, 阈值可配)
+        keyword = self._analyze_keywords(user_message, keyword_threshold)
         if keyword["should_update"]:
             reasons.append(keyword["reason"])
 
@@ -70,10 +78,13 @@ class SmartUpdateManager:
 
         return (True, " | ".join(reasons)) if reasons else (False, "无明显情感变化")
 
-    def _analyze_keywords(self, user_message: str, ai_response: str) -> dict[str, Any]:
+    def _analyze_keywords(
+        self, user_message: str, threshold: int = DEFAULT_KEYWORD_THRESHOLD,
+    ) -> dict[str, Any]:
+        """用户消息关键词/语气分析(ai_response 参数已废弃, 保留兼容旧调用)。"""
         result: dict[str, Any] = {"should_update": False, "reason": ""}
         user_lower = (user_message or "").lower()
-        reply_lower = (ai_response or "").lower()
+        threshold = max(1, int(threshold))
 
         intensity = 0.0
         detected: set[str] = set()
@@ -81,13 +92,10 @@ class SmartUpdateManager:
             for kw in keywords:
                 if kw in user_lower:
                     detected.add(category)
-                    intensity += {"positive": 2, "negative": 3, "intimate": 2, "conflict": 3}[category]
-                if kw in reply_lower:
-                    detected.add(category)
-                    intensity += 1
+                    intensity += self._KEYWORD_WEIGHT[category]
 
         for name, pattern in self.INTENSITY_PATTERNS.items():
-            if pattern.search(user_message or "") or pattern.search(ai_response or ""):
+            if pattern.search(user_message or ""):
                 if "strong" in name:
                     intensity += 2
                 elif "emoticon" in name:
@@ -97,7 +105,7 @@ class SmartUpdateManager:
                 elif name == "exclamation":
                     intensity += 1
 
-        if intensity >= 2:
+        if intensity >= threshold:
             result["should_update"] = True
             if "negative" in detected and "conflict" in detected:
                 result["reason"] = "用户表达强烈负面情感和冲突"
