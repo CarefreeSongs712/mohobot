@@ -961,13 +961,12 @@ class MessageHandler:
             recent = await self._format_group_recent(bot_id, chat_id)
             if recent:
                 context.append({"role": "system", "content": recent})
-        # 环境感知(仅 LLM 请求, 不写入 context)
+        # 环境感知(仅 LLM 请求, 不写入 context): 特殊 role "perception",
+        # 由 llm_service 并入主系统提示, 不作为对话中的独立消息
+        # (实测独立 system 条目会被模型当成聊天内容议论)
         perception = self._perception_text.get((bot_id, chat_type, chat_id), "")
         if perception:
-            context.append({
-                "role": "system",
-                "content": f"【环境感知（系统提示，非用户消息）】\n{perception}",
-            })
+            context.append({"role": "perception", "content": perception})
         # 情感系统(仅 LLM 请求, 不写入 context): 对该用户的情感状态 + 语气指导
         if self._emotion is not None and event is not None:
             try:

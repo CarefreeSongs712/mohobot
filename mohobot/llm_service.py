@@ -1045,6 +1045,7 @@ class LLMService:
           5. Current time and input message
         """
         messages: list[dict[str, Any]] = []
+        perception_parts: list[str] = []
 
         # 1. System prompt
         persona = bot_config.persona if bot_config and bot_config.persona else "你是 Mohobot，一个有用的 AI 助手。"
@@ -1087,7 +1088,11 @@ class LLMService:
         for entry in context:
             role = entry.get("role", "user")
             content = entry.get("content", "")
-            if role == "summary":
+            if role == "perception":
+                # 环境感知: 并入主系统提示(不作为对话中的独立消息,
+                # 防止模型把它当成聊天内容向外议论)
+                perception_parts.append(content)
+            elif role == "summary":
                 # 上下文压缩产生的总结块: 作为 system 消息注入(早期对话浓缩)
                 messages.append({
                     "role": "system",
@@ -1104,6 +1109,9 @@ class LLMService:
                     "role": "user",
                     "content": f"[{role}]: {content}",
                 })
+
+        if perception_parts:
+            messages[0]["content"] += "\n\n【环境感知】\n" + "\n".join(perception_parts)
 
         # 3. Current time (UTC+8 北京时间, 不依赖系统时区)
         from mohobot.utils.time_utils import format_utc8
