@@ -966,7 +966,7 @@ class MessageHandler:
         if perception:
             context.append({
                 "role": "system",
-                "content": f"【环境感知】\n{perception}",
+                "content": f"【环境感知（系统提示，非用户消息）】\n{perception}",
             })
         # 情感系统(仅 LLM 请求, 不写入 context): 对该用户的情感状态 + 语气指导
         if self._emotion is not None and event is not None:

@@ -140,7 +140,7 @@ async def test_message_handler_injection():
     # legacy: _build_legacy_context 附加感知 system 段, 不写回文件
     context = await handler._build_legacy_context("bot_001", "group", "888888")
     sys_segs = [e for e in context if e.get("role") == "system"]
-    assert any("【环境感知】" in e.get("content", "") for e in sys_segs), context
+    assert any("【环境感知（系统提示，非用户消息）】" in e.get("content", "") for e in sys_segs), context
     on_disk = await handler._ctx_mgr.load_context("bot_001", "group", "888888")
     assert on_disk == [], "感知不应写入 context 文件"
 
