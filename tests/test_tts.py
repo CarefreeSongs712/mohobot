@@ -387,3 +387,104 @@ def test_sync_config_hot_update() -> None:
     assert svc._client._voice_id == "new_voice"
     assert svc._client._api_key == "sk-new"
     assert abs(svc._client._voice_setting["speed"] - 0.9) < 1e-9
+
+
+# ── 7. 模糊识别(空格/别名/方括号/纯标签) ──────────────────────
+
+
+def test_fuzzy_whitespace() -> None:
+    display, tts = strip_and_extract("你好呀。< tts >今天真开心< / tts >明天见。")
+    assert display == "你好呀。今天真开心明天见。"
+    assert tts == "今天真开心"
+    # 闭标签空格变体 </ tts >
+    display, tts = strip_and_extract("A< tts >读</ tts >B")
+    assert display == "A读B" and tts == "读"
+
+
+def test_fuzzy_aliases() -> None:
+    for open_tag, close_tag in (("<voice>", "</voice>"), ("<SPEECH>", "</SPEECH>"), ("<Say>", "</Say>")):
+        display, tts = strip_and_extract(f"前{open_tag}朗读内容{close_tag}后")
+        assert display == "前朗读内容后", (open_tag, display)
+        assert tts == "朗读内容"
+
+
+def test_fuzzy_brackets() -> None:
+    # 中文方括号
+    display, tts = strip_and_extract("前【tts】中文括号读【/tts】后")
+    assert display == "前中文括号读后" and tts == "中文括号读"
+    # ASCII 方括号(含空格)
+    display, tts = strip_and_extract("前[tts] ascii读[ /tts ]后")
+    assert display == "前 ascii读后" and tts == "ascii读"
+    # 大小写
+    display, tts = strip_and_extract("【TTS】大写【/TTS】")
+    assert tts == "大写"
+
+
+def test_fuzzy_attributes_not_tag() -> None:
+    """带属性的标签不算标签: 原样显示(游离闭标签仍被剥), 不进朗读。"""
+    display, tts = strip_and_extract('A<tts speed="2">属性</tts>B')
+    assert display == 'A<tts speed="2">属性B'
+    assert tts == ""
+
+
+def test_fuzzy_word_boundary_not_tag() -> None:
+    display, tts = strip_and_extract("<ttsx>不是标签</ttsx>")
+    assert display == "<ttsx>不是标签</ttsx>"
+    assert tts == ""
+
+
+def test_fuzzy_math_passthrough() -> None:
+    """正文中的 < > 不是标签, 原样保留; 后面的真标签照常识别。"""
+    display, tts = strip_and_extract("1 < 2 而且 3 > 2 <tts>读</tts>")
+    assert display == "1 < 2 而且 3 > 2 读"
+    assert tts == "读"
+
+
+def test_fuzzy_mismatched_close() -> None:
+    """开闭标签名不一致(如 <voice>...</tts>)也容忍收口。"""
+    display, tts = strip_and_extract("<voice>内容</tts>尾")
+    assert display == "内容尾" and tts == "内容"
+
+
+def test_fuzzy_empty_first_span_picks_next() -> None:
+    """空标注(只有空格)跳过, 取后面真正有内容的标注。"""
+    display, tts = strip_and_extract("< tts >   </ tts >真正的<tts>读我</tts>")
+    assert tts == "读我"
+    assert display == "   真正的读我"
+
+
+def test_fuzzy_orphan_close_dropped() -> None:
+    display, tts = strip_and_extract("前</ tts >中<tts>读</tts>后")
+    assert display == "前中读后" and tts == "读"
+
+
+def test_fuzzy_streaming_split_with_spaces() -> None:
+    """空格标签 + 方括号内容 跨 chunk 撕裂。"""
+    f = TTSMarkerFilter()
+    chunks = ["前文< t", "ts >读的", "话< / tts", " >后文"]
+    collected = ""
+    for c in chunks:
+        collected += f.feed(c)
+    rest, tts = f.finish()
+    assert (collected + rest) == "前文读的话后文"
+    assert tts == "读的话"
+
+
+def test_fuzzy_streaming_bracket_placeholder() -> None:
+    """正文里的 [图片] 等方括号占位不被误剥, 之后的真标签正常。"""
+    f = TTSMarkerFilter()
+    collected = f.feed("看[图片]啊")
+    rest, tts = f.finish()
+    assert (collected + rest) == "看[图片]啊" and tts == ""
+
+
+def test_fuzzy_streaming_math_never_flushes_wrong() -> None:
+    """数学式跨 chunk: 内容一个字符都不能丢。"""
+    f = TTSMarkerFilter()
+    chunks = ["a < b ", "和 c > d", " <tts>", "读", "</tts>"]
+    collected = ""
+    for c in chunks:
+        collected += f.feed(c)
+    rest, tts = f.finish()
+    assert (collected + rest) == "a < b 和 c > d 读"
+    assert tts == "读"
