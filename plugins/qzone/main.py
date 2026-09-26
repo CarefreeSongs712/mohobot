@@ -1002,7 +1002,7 @@ class Plugin:
         )
         raw = await llm.complete_text(
             prompt, system_prompt="你是话题提炼助手, 只输出 JSON 数组。",
-            max_tokens=200, temperature=0.3, module="qzone",
+            max_tokens=1024, temperature=0.3, module="qzone",
         )
         import json as _json
         import re as _re
@@ -1051,7 +1051,8 @@ class Plugin:
                 raw = ""
             else:
                 raw = await self._llm_service.complete_text(
-                    prompt, system_prompt=system, max_tokens=max_len * 2 + 64,
+                    prompt, system_prompt=system,
+                    max_tokens=max(2048, max_len * 2 + 64),
                     temperature=0.9, module="qzone",
                 )
             text = clean_reply_text(raw, max_len, keep_tail=True)
