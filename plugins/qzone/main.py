@@ -1001,11 +1001,15 @@ class Plugin:
         if not lines:
             return []
         prompt = (
-            "下面是这个QQ号与用户的近期互动记录。请从中提炼 3~6 个可以公开谈论的"
-            "抽象话题词(如: 月饼、考试、猫、天气)。\n"
-            "严格要求: 只输出话题词本身, 不得包含任何用户昵称、QQ号、对话原话片段、"
-            "可识别个人身份的信息或对话细节。\n"
-            '以 JSON 数组输出, 如 ["月饼","开学","猫"]。\n\n'
+            "下面是这个QQ号与用户的近期互动记录。请从中提炼 3~6 个可以公开谈论的话题, "
+            "每个话题必须同时给出它的日常侧面, 让内容具体不空洞。\n"
+            "格式: 每条形如 话题:角度, 角度从三类里选——"
+            "①具体争论/口味/偏好(如 月饼:蛋黄馅还是莲蓉馅好吃) "
+            "②具体场景/动作(如 猫:半夜跑酷吵醒人) "
+            "③可吐槽的点(如 上班:周一的闹钟最吓人)。\n"
+            '以 JSON 数组输出, 如 ["月饼:蛋黄馅还是莲蓉馅","猫:半夜跑酷","开学:假期作业写不完"]。\n'
+            "严格要求: 话题和角度都只能是日常事物与大众聊天场景, 不得包含任何用户昵称、QQ号、"
+            "对话原话片段、或能识别具体个人的信息; 角度不是该用户说过的具体话。\n"
             "互动记录:\n" + "\n".join(lines)
         )
         raw = await llm.complete_text(
@@ -1023,7 +1027,8 @@ class Plugin:
             return []
         if not isinstance(data, list):
             return []
-        return [str(t).strip()[:12] for t in data if str(t).strip()][:6]
+        # 条目形如 "话题:角度"(角度让生成更具体); 截 40 字防冗长
+        return [str(t).strip()[:40] for t in data if str(t).strip()][:6]
 
     async def _generate_publish_text(self, bot_id: str, topic: str | None) -> str:
         """生成说说正文(LLM+人设; 隐私禁令写死; 失败重试 1 次)。"""
@@ -1049,9 +1054,16 @@ class Plugin:
         store = self._get_pub_store(bot_id)
         recent = store.recent_texts(5)
         recent_str = "；".join(recent) if recent else "（暂无）"
-        topic_str = f"围绕话题「{topic}」" if topic else "自由发挥一个日常小话题"
+        if topic:
+            # 话题形如 "话题:角度" — 落到该角度上写, 内容才具体
+            topic_str = (
+                f"围绕话题「{topic}」写一条说说, 要落到「:」后面的那个具体侧面/场景上写, "
+                "不要只提话题词本身"
+            )
+        else:
+            topic_str = "自由发挥一个日常小话题, 带一个具体场景或吐槽点"
         prompt = (
-            f"现在是{time_hint}。请{topic_str}写一条说说。\n"
+            f"现在是{time_hint}。请{topic_str}。话题角度是大众都聊的日常话题, 不是任何具体的人说过的话。\n"
             f"你最近发过的内容(避免重复): {recent_str}"
         )
         for attempt in range(2):

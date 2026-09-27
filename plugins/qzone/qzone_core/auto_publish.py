@@ -178,5 +178,5 @@ class AutoPublishStore:
         await self._ensure()
         now = time.time()
         self._data["topics"] = [
-            {"topic": str(t)[:12], "ts": now} for t in topics if str(t).strip()
+            {"topic": str(t)[:40], "ts": now} for t in topics if str(t).strip()
         ][:10]
