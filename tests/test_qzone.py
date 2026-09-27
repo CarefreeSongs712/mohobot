@@ -939,5 +939,51 @@ async def test_cmd_publish_log_shape():
         assert "10:00" in reply and "你好呀" in reply
 
 
+
+async def test_publish_notifies_group():
+    """发布成功后向通知群发消息(含内容); 群号留空不发。"""
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        plugin.plugin_config["auto_publish_notify_group"] = "1070473353"
+
+        class _FakeLLM:
+            async def complete_text(self, prompt, **kw):
+                return "今天也是想摸鱼的一天。"
+        plugin._llm_service = _FakeLLM()
+        plugin.plugin_config["auto_publish_topics"] = ["摸鱼"]
+
+        published = []
+        class _FakeService:
+            async def publish_post(self, text=None, images=None):
+                published.append(text)
+                return Post(uin=111, tid="t9", name="b", text=text)
+
+        class _S:
+            async def get_uin(self):
+                return 111
+        api = type("A", (), {})()
+        api.session = _S()
+        plugin._apis["bot_001"] = api
+        plugin._services["bot_001"] = _FakeService()
+
+        group_msgs = []
+        class _WS:
+            async def send_group_msg(self, bot_id, group_id, message):
+                group_msgs.append((bot_id, group_id, message))
+        plugin._ws_server = _WS()
+
+        await plugin._auto_publish_once("bot_001", api, _FakeService())
+        assert len(group_msgs) == 1
+        bot_id, gid, msg = group_msgs[0]
+        assert gid == 1070473353
+        assert "新说说" in msg and "摸鱼的一天" in msg
+
+        # 群号留空 → 不发
+        plugin.plugin_config["auto_publish_notify_group"] = ""
+        await plugin._auto_publish_once("bot_001", api, _FakeService())
+        assert len(group_msgs) == 1
+
+
 if __name__ == "__main__":
     asyncio.run(main())

@@ -62,7 +62,7 @@ class _FakeWS:
             raise RuntimeError("forward failed")
         self.forwards.append((bot_id, group_id, nodes))
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.replies.append((bot_id, group_id, message))
 
 

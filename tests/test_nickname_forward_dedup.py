@@ -102,15 +102,15 @@ class ForwardWS:
         self.plain_calls = []
         self.fail_forward = fail_forward
 
-    async def send_group_forward_msg(self, bot_id, group_id, nodes):
+    async def send_group_forward_msg(self, bot_id, group_id, nodes, source: str = "auto"):
         if self.fail_forward:
             raise RuntimeError("client not support")
         self.forward_calls.append((bot_id, group_id, nodes))
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.plain_calls.append((bot_id, group_id, message))
 
-    async def send_private_msg(self, bot_id, user_id, message):
+    async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
         self.plain_calls.append((bot_id, user_id, message))
 
 

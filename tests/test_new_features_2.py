@@ -75,10 +75,10 @@ class BroadcastWS:
         self.api_calls = []
         self._bot_manager = None
 
-    async def send_private_msg(self, bot_id, user_id, message):
+    async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
         self.private.append((bot_id, user_id, message))
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.group.append((bot_id, group_id, message))
 
     async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
@@ -166,10 +166,10 @@ class BatchWS:
         self.calls.append((action, params))
         return {"status": "ok", "retcode": 0, "data": {}}
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.sent.append(("group", group_id, message))
 
-    async def send_private_msg(self, bot_id, user_id, message):
+    async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
         self.sent.append(("private", user_id, message))
 
 
@@ -237,7 +237,7 @@ async def test_forward_chunk_by_chars():
             self.forward_calls = []
             self._bot_manager = None
 
-        async def send_group_forward_msg(self, bot_id, group_id, nodes):
+        async def send_group_forward_msg(self, bot_id, group_id, nodes, source: str = "auto"):
             self.forward_calls.append((bot_id, group_id, nodes))
 
         async def send_to_bot(self, *a, **k):

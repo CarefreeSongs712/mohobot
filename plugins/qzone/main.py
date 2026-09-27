@@ -132,6 +132,7 @@ class Plugin:
         "auto_publish_max_length": 120,
         "auto_publish_exclude_bots": [],    # 排除的 bot_id / QQ
         "auto_publish_notify_admin": False,
+        "auto_publish_notify_group": "1070473353",  # 发布后通知群(空=不发)
     }
 
     # 命令别名表(小写): -> (handler 名, 需管理员)
@@ -948,6 +949,13 @@ class Plugin:
         })
         await store.save()
         logger.info(f"[qzone][{bot_id}] 主动发布成功(tid={post.tid}): {text[:60]}")
+        group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
+        if group.isdigit() and self._ws_server is not None:
+            try:
+                notice = f"📢 {self._bot_nickname(bot_id)} 发布了新说说：\n{text[:200]}"
+                await self._ws_server.send_group_msg(bot_id, int(group), notice)
+            except Exception as e:
+                logger.warning(f"[qzone][{bot_id}] 发布通知群消息失败: {e}")
         if bool(self._cfg("auto_publish_notify_admin", False)):
             await self._notify_admins(bot_id, f"【主动发布】{text[:100]}")
         return post

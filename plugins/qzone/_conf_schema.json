@@ -198,5 +198,11 @@
     "type": "bool",
     "hint": "每次主动发布成功后私聊通知全局管理员",
     "default": false
+  },
+  "auto_publish_notify_group": {
+    "description": "发布后通知群",
+    "type": "string",
+    "hint": "主动发布成功后由该 bot 在此群里发一条通知（含说说内容）；留空关闭",
+    "default": "1070473353"
   }
 }

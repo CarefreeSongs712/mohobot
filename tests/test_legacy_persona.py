@@ -56,7 +56,7 @@ async def test_stream_reply_passes_bot_config() -> None:
             self._bot_manager = bm
             self.sent = []
 
-        async def send_private_msg(self, bot_id, user_id, message):
+        async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
             self.sent.append(message)
 
     class SpyLLMService:

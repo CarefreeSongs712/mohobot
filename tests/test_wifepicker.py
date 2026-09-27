@@ -48,10 +48,10 @@ class FakeWS:
             return {"status": "ok", "retcode": 0, "data": {"group_name": "测试群"}}
         return {"status": "ok", "retcode": 0, "data": {}}
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.sent.append(("group", group_id, message))
 
-    async def send_private_msg(self, bot_id, user_id, message):
+    async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
         self.sent.append(("private", user_id, message))
 
     async def send_image(self, bot_id, chat_type, chat_id, image_path):

@@ -48,10 +48,10 @@ class PingWS:
     async def send_to_bot(self, bot_id, action, params, wait_response=False, timeout=10.0):
         return {"status": "ok", "retcode": 0, "data": {}}
 
-    async def send_group_msg(self, bot_id, group_id, message):
+    async def send_group_msg(self, bot_id, group_id, message, source: str = "auto"):
         self.replies.append(("group", group_id, message))
 
-    async def send_private_msg(self, bot_id, user_id, message):
+    async def send_private_msg(self, bot_id, user_id, message, source: str = "auto"):
         self.replies.append(("private", user_id, message))
 
 
