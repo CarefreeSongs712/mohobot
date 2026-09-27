@@ -48,7 +48,8 @@ SCAN_TTL = 5.0  # 会话列表扫描的短 TTL(秒)
 # 群聊合并会话的 bot 段固定值(session_key = "_merged/group/{群号}")
 MERGED_BOT_ID = "_merged"
 
-_ROW_FIELDS = ("kind", "mid", "uid", "nick", "text", "image_url", "time", "bot")
+_ROW_FIELDS = ("kind", "mid", "uid", "nick", "text", "image_url", "time", "bot",
+               "source")
 
 
 def session_key(bot_id: str, chat_type: str, chat_id: str) -> str:
@@ -198,8 +199,8 @@ class MohobotData:
     cache_path 传入时启用 sidecar 持久化(重启免冷解析)。
     """
 
-    # v5: 群聊 history 切换合并布局(history/group/{群号}.jsonl), 旧缓存作废
-    _CACHE_VERSION = 5
+    # v6: bot 发言增加 source 标记(llm/auto), 机械内容不参与审核; 旧缓存作废
+    _CACHE_VERSION = 6
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
@@ -484,6 +485,10 @@ class MohobotData:
             return None
 
         if kind == "assistant":
+            # 来源过滤: "auto"=命令/插件等机械内容(欢迎/禁言通知/点赞结果等),
+            # 不参与审核; "llm"=LLM 生成; 旧数据无标记 → 保留待审(历史兼容)。
+            if str(d.get("source") or "") == "auto":
+                return None
             if mid:
                 bot_mids.add(mid)
             sender = d.get("sender") or {}
@@ -491,9 +496,13 @@ class MohobotData:
             return {
                 "kind": "assistant", "mid": mid, "uid": "",
                 "nick": nick, "text": text, "image_url": image_url, "time": ts,
-                "bot": bot_id,
+                "bot": bot_id, "source": str(d.get("source") or ""),
             }
 
+        # 用户消息 — 指令(/开头, ping)是机械输入, 不参与审核
+        t = text.strip()
+        if t.startswith("/") or t.lower() == "ping":
+            return None
         # 用户消息 — 群聊需命中 @ 本 bot 或引用本 bot 发言
         if chat_type == "group":
             if not self._user_hits_bot(d.get("message"), self_id, bot_mids):
@@ -504,7 +513,7 @@ class MohobotData:
         return {
             "kind": "user", "mid": mid, "uid": uid,
             "nick": nick, "text": text, "image_url": image_url, "time": ts,
-            "bot": bot_id,
+            "bot": bot_id, "source": "",
         }
 
     @staticmethod
@@ -554,6 +563,11 @@ class MohobotData:
             return None
 
         if kind == "assistant":
+            # 来源过滤: "auto"=命令/插件等机械内容, 不参与审核;
+            # "llm"=LLM 生成; 旧数据无标记 → 保留待审(历史兼容)。
+            source = str(d.get("source") or "")
+            if source == "auto":
+                return None
             bot = str(d.get("bot_id") or "").strip()
             if not bot:
                 bot = self._bot_by_self_id(str(d.get("self_id") or "")) or "bot"
@@ -571,9 +585,13 @@ class MohobotData:
             return {
                 "kind": "assistant", "mid": mid, "uid": "",
                 "nick": nick, "text": text, "image_url": image_url, "time": ts,
-                "bot": bot,
+                "bot": bot, "source": source,
             }
 
+        # 用户消息 — 指令(/开头, ping)是机械输入, 不参与审核
+        t = text.strip()
+        if t.startswith("/") or t.lower() == "ping":
+            return None
         # 用户消息 — 群聊需 @ 某只 bot 或引用某只 bot 的发言
         hit_bot = self._user_hits_any_bot(d.get("message"), idx)
         if hit_bot is None:
@@ -584,7 +602,7 @@ class MohobotData:
         return {
             "kind": "user", "mid": mid, "uid": uid,
             "nick": nick, "text": text, "image_url": image_url, "time": ts,
-            "bot": hit_bot,
+            "bot": hit_bot, "source": "",
         }
 
     def _user_hits_any_bot(self, message: Any, idx: "_FileIndex") -> str | None:

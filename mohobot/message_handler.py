@@ -1167,7 +1167,7 @@ class MessageHandler:
                 ]
             else:
                 message = text
-            await self._send_message(bot_id, event, message)
+            await self._send_message(bot_id, event, message, source="llm")
         self._submit_tts(bot_id, event, tts_text)
         logger.debug(f"Single reply sent: {len(full_reply)} chars")
         return full_reply
@@ -1238,7 +1238,7 @@ class MessageHandler:
                 message = seg
             first_sent = True
 
-        await self._send_message(bot_id, event, message)
+        await self._send_message(bot_id, event, message, source="llm")
         return first_sent
 
     def _flush_ready_segments(self, buffer: str) -> dict:
@@ -1434,13 +1434,17 @@ class MessageHandler:
         await self._plugins.dispatch_meta(bot_id, event, raw)
 
     async def _send_message(
-        self, bot_id: str, event: MessageEvent, message: str | list[dict]
+        self, bot_id: str, event: MessageEvent, message: str | list[dict],
+        source: str = "auto",
     ) -> None:
-        """Send a message to the appropriate chat (private or group)."""
+        """Send a message to the appropriate chat (private or group).
+
+        source 写入归档行: "llm"=LLM 生成的回复, "auto"=命令/插件等机械内容。
+        """
         if isinstance(event, PrivateMessageEvent):
-            await self._ws.send_private_msg(bot_id, event.user_id, message)
+            await self._ws.send_private_msg(bot_id, event.user_id, message, source=source)
         elif isinstance(event, GroupMessageEvent):
-            await self._ws.send_group_msg(bot_id, event.group_id, message)
+            await self._ws.send_group_msg(bot_id, event.group_id, message, source=source)
 
     async def _send_reply(
         self, bot_id: str, event: MessageEvent, reply: str | list[dict]
@@ -1652,7 +1656,9 @@ class MessageHandler:
             ]
             if self._ws is None:
                 return False
-            await self._ws.send_group_forward_msg(bot_id, event.group_id, nodes)
+            await self._ws.send_group_forward_msg(
+                bot_id, event.group_id, nodes, source="llm",
+            )
             logger.debug(
                 f"合并转发回复 bot={bot_id} group={event.group_id} "
                 f"nodes={len(nodes)} (每块 {self._forward_chunk_chars} 字)"

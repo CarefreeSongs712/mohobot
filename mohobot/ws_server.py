@@ -253,6 +253,7 @@ class WSServer:
         self, bot_id: str, action: str, params: dict[str, Any],
         chat_type: str, chat_id: int | str,
         wait_response: bool = False, timeout: float = 10.0,
+        source: str = "auto",
     ) -> dict[str, Any] | None:
         """Send a message with echo tracking + bot speech archival.
 
@@ -260,6 +261,8 @@ class WSServer:
             1) 记录 message_id 到 BotInstance(引用回复检测);
             2) resolve 归档 future → 后台把这条 bot 发言以 message_sent
                事件写入 history JSONL(审核数据源)。
+        - source 标注发言来源("llm"=LLM 生成, "auto"=命令/插件等机械内容),
+          写入归档行供审核面板过滤。
         - wait_response=False(流式分段路径): 不等待, 保持发送速度;
         - wait_response=True: 等待并返回响应 dict(查询语义不变)。
         """
@@ -284,7 +287,7 @@ class WSServer:
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
         self._spawn_archive_task(self._archive_sent_message(
-            bot_id, chat_type, chat_id, action, params, future, echo,
+            bot_id, chat_type, chat_id, action, params, future, echo, source,
         ))
         if not wait_response:
             return None
@@ -314,7 +317,7 @@ class WSServer:
     async def _archive_sent_message(
         self, bot_id: str, chat_type: str, chat_id: int | str,
         action: str, params: dict[str, Any],
-        future: asyncio.Future, echo: str,
+        future: asyncio.Future, echo: str, source: str = "auto",
     ) -> None:
         """把一条 bot 发言以 message_sent 事件写入 history JSONL。
 
@@ -353,7 +356,9 @@ class WSServer:
         content = self._archive_content(action, params)
         if content is None:
             return
-        await self._write_archive_line(bot_id, chat_type, chat_id, message_id, content)
+        await self._write_archive_line(
+            bot_id, chat_type, chat_id, message_id, content, source,
+        )
 
     @staticmethod
     def _archive_content(action: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -394,13 +399,14 @@ class WSServer:
 
     async def _write_archive_line(
         self, bot_id: str, chat_type: str, chat_id: int | str,
-        message_id: str, content: list[dict[str, Any]],
+        message_id: str, content: list[dict[str, Any]], source: str = "auto",
     ) -> None:
         """写一条 message_sent 事件进 history JSONL(失败只记日志)。
 
         群聊写合并文件 data/history/group/{群号}.jsonl(与收到的群消息同文件,
         行内 bot_id 标注发言 bot); dual_write 开启时额外按旧布局
-        {bot_id}/group/ 归档一份(回滚保险)。
+        {bot_id}/group/ 归档一份(回滚保险)。source 标注来源:
+        "llm"=LLM 生成回复, "auto"=命令/插件等机械内容(审核面板据此过滤)。
         """
         instance = self._bot_manager.get(bot_id)
         bot_qq = instance.qq if instance else 0
@@ -413,6 +419,7 @@ class WSServer:
             "user_id": bot_qq,
             "message_id": message_id,
             "bot_id": bot_id,
+            "source": source,
             "message": content,
             "sender": {"user_id": bot_qq, "nickname": bot_nick, "card": ""},
         }
@@ -444,23 +451,25 @@ class WSServer:
         return writer
 
     async def send_group_msg(
-        self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]]
+        self, bot_id: str, group_id: int | str, message: str | list[dict[str, Any]],
+        source: str = "auto",
     ) -> None:
         """Send a group message via a specific bot (records message_id for reply detection)."""
         await self._send_tracked(
             bot_id, "send_group_msg",
             {"group_id": int(group_id), "message": message},
-            "group", group_id,
+            "group", group_id, source=source,
         )
 
     async def send_private_msg(
-        self, bot_id: str, user_id: int | str, message: str | list[dict[str, Any]]
+        self, bot_id: str, user_id: int | str, message: str | list[dict[str, Any]],
+        source: str = "auto",
     ) -> None:
         """Send a private message via a specific bot (records message_id)."""
         await self._send_tracked(
             bot_id, "send_private_msg",
             {"user_id": int(user_id), "message": message},
-            "private", user_id,
+            "private", user_id, source=source,
         )
 
     async def send_image(
@@ -485,7 +494,8 @@ class WSServer:
             await self.send_group_msg(bot_id, chat_id, message)
 
     async def send_group_forward_msg(
-        self, bot_id: str, group_id: int | str, nodes: list[dict[str, Any]]
+        self, bot_id: str, group_id: int | str, nodes: list[dict[str, Any]],
+        source: str = "auto",
     ) -> None:
         """发送合并转发消息(OneBot 扩展 API, NapCat 等客户端支持)。
 
@@ -496,7 +506,7 @@ class WSServer:
         await self._send_tracked(
             bot_id, "send_group_forward_msg",
             {"group_id": int(group_id), "messages": nodes},
-            "group", group_id,
+            "group", group_id, source=source,
         )
 
     # ── 用户昵称查询(供插件使用) ─────────────────────────────

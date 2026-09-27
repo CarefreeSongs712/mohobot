@@ -86,9 +86,27 @@ async def test_archive_on_echo():
             assert ev["message_id"] == "555"
             assert ev["sender"]["nickname"] == "天依"
             assert ev["message"][0]["data"]["text"] == "大家好"
+            assert ev["source"] == "auto", "默认来源=auto(机械内容)"
             # BotInstance 的发送追踪(引用回复检测)同时生效
             assert inst.is_my_message("group", 20002, 555)
             print("[1] echo message_id 归档 OK")
+        finally:
+            await ws.stop()
+
+
+async def test_archive_source_llm():
+    """source=llm 的发送(消息处理器 LLM 路径) → 归档行带 source=llm。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        ws, bm, inst = await _make_ws(tmp)
+        try:
+            task = asyncio.create_task(_deliver(bm, inst, 0, 556))
+            await ws.send_group_msg("bot_001", 20002, "这是 LLM 的回复", source="llm")
+            await task
+            await asyncio.sleep(0.05)
+            lines = _history_lines(tmp, "group", "20002")
+            assert len(lines) == 1 and lines[0]["source"] == "llm"
+            print("[1b] source=llm 归档 OK")
         finally:
             await ws.stop()
 

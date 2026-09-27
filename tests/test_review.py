@@ -315,6 +315,56 @@ def test_loader_search_content():
         assert data.search_content("好") == []
 
 
+def test_loader_source_filter():
+    """bot 发言 source 标记: auto(机械内容)不入审, llm/无标记(历史)保留;
+    用户指令(/开头, ping)不入审。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        path = root / "history" / "group" / "20002.jsonl"
+        extra = [
+            {"post_type": "message_sent", "message_type": "group", "time": 1700000200,
+             "self_id": 111, "group_id": 20002, "message_id": "GB-AUTO", "bot_id": "bot_001",
+             "source": "auto", "sender": {"user_id": 111, "nickname": "天依"},
+             "message": [{"type": "text", "data": {"text": "【welcome】新好友: x(1)"}}]},
+            {"post_type": "message_sent", "message_type": "group", "time": 1700000201,
+             "self_id": 111, "group_id": 20002, "message_id": "GB-LLM", "bot_id": "bot_001",
+             "source": "llm", "sender": {"user_id": 111, "nickname": "天依"},
+             "message": [{"type": "text", "data": {"text": "这是 LLM 的回复"}}]},
+            {"post_type": "message", "message_type": "group", "time": 1700000202,
+             "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-CMD",
+             "bot_id": "bot_001", "sender": {"card": "张三", "user_id": 10001},
+             "message": [{"type": "text", "data": {"text": "/clear"}}]},
+            {"post_type": "message", "message_type": "group", "time": 1700000203,
+             "self_id": 111, "group_id": 20002, "user_id": 10001, "message_id": "M-107",
+             "bot_id": "bot_001", "sender": {"card": "张三", "user_id": 10001},
+             "message": [{"type": "at", "data": {"qq": "111"}},
+                         {"type": "text", "data": {"text": "@bot 说话"}}]},
+        ]
+        with open(path, "a", encoding="utf-8") as f:
+            for e in extra:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.utime(path, (2200000000, 2200000000))
+        data = MohobotData(root)
+        rows = data.filtered_rows("_merged/group/20002")
+        mids = [r["mid"] for r in rows]
+        assert "GB-AUTO" not in mids, "auto 机械内容不入审"
+        assert "M-CMD" not in mids, "用户指令不入审"
+        assert "GB-LLM" in mids and "M-107" in mids, "llm 回复与用户消息保留"
+        assert "GB-1" in mids, "无标记的历史 bot 发言保留待审"
+        assert len(rows) == 8
+        # 用户 ping 不入审(私聊)
+        ppath = root / "history" / "bot_001" / "private" / "10001.jsonl"
+        ping = {"post_type": "message", "message_type": "private", "time": 1700005001,
+                "self_id": 111, "user_id": 10001, "message_id": "M-PING",
+                "sender": {"user_id": 10001, "nickname": "张三"},
+                "message": [{"type": "text", "data": {"text": "ping"}}]}
+        with open(ppath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ping, ensure_ascii=False) + "\n")
+        os.utime(ppath, (2200000000, 2200000000))
+        assert all(r["mid"] != "M-PING" for r in data.filtered_rows("bot_001/private/10001"))
+
+
 def test_loader_incremental_append_and_rewrite():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
