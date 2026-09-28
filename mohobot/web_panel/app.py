@@ -478,6 +478,12 @@ class WebPanel:
                         "history_dual_write"):
                 if key in data:
                     setattr(cfg, key, data[key])
+            # LLM 排除群(整数列表, 清洗为合法群号)
+            if "llm_excluded_groups" in data:
+                cfg.llm_excluded_groups = [
+                    int(g) for g in (data["llm_excluded_groups"] or [])
+                    if str(g).strip().isdigit()
+                ]
 
             cfg.save(self._config_path)
             # 热同步上下文压缩配置(立即生效, 无需重启)

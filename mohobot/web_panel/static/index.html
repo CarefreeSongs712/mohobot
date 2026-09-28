@@ -1040,6 +1040,7 @@ async function loadConfigPage() {
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🛡 管理员</div>' +
       formField('admins', '管理员 QQ(逗号分隔)', (globalConfigCache.admins || []).join(','), { hint: '可执行 /ban、插件管理命令(如 /群列表 /退群)的管理员 QQ 号' }) +
+      formField('llm_excluded_groups', 'LLM 排除群(逗号分隔)', (globalConfigCache.llm_excluded_groups || []).join(','), { hint: '这些群号内 bot 不做 LLM 聊天回复(@/引用/ping 均静默), 插件与命令不受影响; 保存立即生效' }) +
       '<hr style="border-color:var(--border);margin:14px 0">' +
       '<div class="card-title">🚫 封禁系统</div>' +
       checkField('ban.enabled', '启用封禁功能', globalConfigCache.ban?.enabled, '被禁用户的全部消息将被静默忽略') +
@@ -1192,6 +1193,8 @@ async function saveGlobalConfig() {
     },
     // 顶层 admins(封禁/插件命令共用管理员) — 必须与后端 data["admins"] 对齐
     admins: (document.getElementById('cfg-admins')?.value || '')
+      .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
+    llm_excluded_groups: (document.getElementById('cfg-llm_excluded_groups')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
     usage_excluded_models: (document.getElementById('cfg-usage_excluded_models')?.value || '')
       .split(',').map(s => s.trim()).filter(Boolean),

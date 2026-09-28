@@ -212,12 +212,29 @@ class TTSConfig:
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
 
 
+def _int_list(value) -> list[int]:
+    """宽松解析整数列表: 接受 list[str|int] 逗号分隔字符串; 忽略非整数字符串。"""
+    if isinstance(value, str):
+        value = [p for p in value.split(",")]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        s = str(item).strip()
+        if s.isdigit():
+            out.append(int(s))
+    return out
+
+
 @dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     admins: list[int] = field(default_factory=list)  # 全局管理员 QQ 号(封禁/插件命令共用)
     # 用量统计排除的模型: 这些模型的调用不计入 WebUI 用量统计(记录仍落盘, 重启生效)
     usage_excluded_models: list[str] = field(default_factory=list)
+    # LLM 排除群: 这些群号内 bot 不做 LLM 聊天回复(@/引用/ping 均静默), 插件与
+    # 命令不受影响(WebPanel 保存 setattr 同一实例, 天然热生效)
+    llm_excluded_groups: list[int] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
@@ -313,6 +330,7 @@ class GlobalConfig:
                 str(m).strip() for m in (raw.get("usage_excluded_models") or [])
                 if str(m).strip()
             ],
+            llm_excluded_groups=_int_list(raw.get("llm_excluded_groups")),
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8060),
@@ -507,6 +525,7 @@ class GlobalConfig:
             },
             "admins": list(self.admins),
             "usage_excluded_models": list(self.usage_excluded_models),
+            "llm_excluded_groups": list(self.llm_excluded_groups),
             "ban": {
                 "enabled": self.ban.enabled,
             },
@@ -629,6 +648,7 @@ class GlobalConfig:
             },
             "admins": list(self.admins),
             "usage_excluded_models": list(self.usage_excluded_models),
+            "llm_excluded_groups": list(self.llm_excluded_groups),
             "ban": {
                 "enabled": self.ban.enabled,
             },

@@ -202,6 +202,21 @@ class MessageHandler:
             self._writer_registry[file_path] = JSONLWriter(file_path)
         return self._writer_registry[file_path]
 
+    def _group_llm_excluded(self, group_id) -> bool:
+        """该群是否在 LLM 排除名单(llm_excluded_groups): 命中则不做 LLM 聊天回复。
+
+        配置读取自 GlobalConfig 实例 — WebPanel 保存用 setattr 改同一实例,
+        天然热生效, 无需同步钩子。
+        """
+        cfg = getattr(self, "_global_config", None)
+        if cfg is None:
+            return False
+        excluded = getattr(cfg, "llm_excluded_groups", None) or []
+        try:
+            return int(group_id) in excluded
+        except (TypeError, ValueError):
+            return False
+
     async def _should_respond_to_group(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """Check if the bot should respond in a group setting.
 
@@ -410,6 +425,13 @@ class MessageHandler:
                 if response:
                     await self._send_reply(bot_id, event, response)
                 return
+
+        # ── LLM 排除群: 名单内的群不做 LLM 聊天回复, ping 也静默 ──
+        # (位于拦截器链之后: 插件命令/内置命令/封禁已正常处理完, 只拦 LLM 链路;
+        # 配置读取自 GlobalConfig 实例, WebPanel 保存后天然热生效)
+        if isinstance(event, GroupMessageEvent) and self._group_llm_excluded(event.group_id):
+            logger.info(f"LLM excluded group {event.group_id}: skip LLM reply (bot={bot_id})")
+            return
 
         # ── ping/PONG: 去除首尾空白后完全匹配(忽略大小写), 群聊不 @ 也回复 ──
         # (群 gate 已放行 ping; 被 ban 用户已被拦截链过滤)
