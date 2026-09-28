@@ -1009,7 +1009,8 @@ class Plugin:
             "③可吐槽的点(如 上班:周一的闹钟最吓人)。\n"
             '以 JSON 数组输出, 如 ["月饼:蛋黄馅还是莲蓉馅","猫:半夜跑酷","开学:假期作业写不完"]。\n'
             "严格要求: 话题和角度都只能是日常事物与大众聊天场景, 不得包含任何用户昵称、QQ号、"
-            "对话原话片段、或能识别具体个人的信息; 角度不是该用户说过的具体话。\n"
+            "对话原话片段、或能识别具体个人的信息; 角度不是该用户说过的具体话; "
+            "角度里不要出现具体钟点/日期/星期(如 凌晨三点、周一晚上)。\n"
             "互动记录:\n" + "\n".join(lines)
         )
         raw = await llm.complete_text(
@@ -1039,18 +1040,10 @@ class Plugin:
             f"你现在要发一条QQ空间说说。要求: 像真人的随手随想, 口语化, 自然;"
             f"只输出说说正文本身, 不超过 {max_len} 字;"
             f"不要引号、不要话题标签、不要 @任何人、不要自报身份。\n"
-            f"绝对禁止: 提及任何用户昵称/QQ号/聊天原话/能识别出具体某个人的信息。"
+            f"绝对禁止: 提及任何用户昵称/QQ号/聊天原话/能识别出具体某个人的信息; "
+            f"不要提及任何时间/日期/时段/星期(如 周一晚上、凌晨三点、下午、现在)。"
             f"话题本身可以自然提到。"
         )
-        from mohobot.utils.time_utils import format_utc8
-        hour = int(format_utc8("%H"))
-        period = ("清晨" if 5 <= hour < 9 else "上午" if 9 <= hour < 12
-                  else "午后" if 12 <= hour < 14 else "下午" if 14 <= hour < 18
-                  else "晚上" if 18 <= hour < 23 else "深夜")
-        weekday = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[
-            (int(format_utc8("%w")) + 6) % 7  # %w: 周日=0 → 转 周一=0
-        ]
-        time_hint = f"{period} {weekday}"
         store = self._get_pub_store(bot_id)
         recent = store.recent_texts(5)
         recent_str = "；".join(recent) if recent else "（暂无）"
@@ -1063,7 +1056,8 @@ class Plugin:
         else:
             topic_str = "自由发挥一个日常小话题, 带一个具体场景或吐槽点"
         prompt = (
-            f"现在是{time_hint}。请{topic_str}。话题角度是大众都聊的日常话题, 不是任何具体的人说过的话。\n"
+            f"请{topic_str}。话题角度是大众都聊的日常话题, 不是任何具体的人说过的话; "
+            f"内容里不要出现任何时间/时段/星期。\n"
             f"你最近发过的内容(避免重复): {recent_str}"
         )
         for attempt in range(2):
