@@ -184,6 +184,9 @@ class GroupMessageEvent(MessageEvent):
         handled in message_handler via sent-message tracking.
         """
         if isinstance(self_id, str):
+            # bot 断线后 bot_qq 兜底是内部编号(如 bot_006), 非数字 → 不可能被 @
+            if not self_id.isdigit():
+                return False
             self_id = int(self_id)
         if isinstance(self.message, list):
             for seg in self.message:

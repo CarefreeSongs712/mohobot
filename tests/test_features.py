@@ -150,6 +150,24 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
+def test_is_mentioned_non_numeric_self_id():
+    """bot 断线后 bot_qq 兜底为内部编号(bot_006) — is_mentioned 不应抛 ValueError。"""
+    from mohobot.models.onebot import GroupMessageEvent, Sender
+
+    ev = GroupMessageEvent(
+        time=0, self_id=0, post_type="message",
+        sender=Sender(user_id=2940987046),
+        message=[{"type": "at", "data": {"qq": "123456"}},
+                 {"type": "text", "data": {"text": "你好"}}],
+    )
+    # 非数字 self_id(bot 断线兜底) → False 而非 ValueError
+    assert ev.is_mentioned("bot_006") is False
+    # 正常路径不回归
+    assert ev.is_mentioned(123456) is True
+    assert ev.is_mentioned("123456") is True
+    assert ev.is_mentioned(999) is False
+
+
 async def test_praise_daily_limit_cache() -> None:
     """点赞: 当日上限缓存后不再调用 API。"""
     # 独立模块名加载, 避免覆盖 sys.modules["main"]
