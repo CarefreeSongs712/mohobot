@@ -10,7 +10,7 @@ LLM 回复中的朗读标注标签在实际输出里常有变体, 解析端统�
 
 解析语义(与旧版一致):
 - 标签本身剥除, 标注内容仍显示;
-- 收集第一个非空标注内容供 TTS 合成(多标注取第一个非空);
+- 收集全部非空标注合并为一条语音(多段标注按出现顺序拼接);
 - 未闭合时内容到结尾(容错忘写闭标签);
 - 游离闭标签丢弃。
 
@@ -20,9 +20,6 @@ LLM 回复中的朗读标注标签在实际输出里常有变体, 解析端统�
 from __future__ import annotations
 
 import re
-
-# 句末边界(超长标注截断用): 读到第一个句末标点为止
-_SENTENCE_BOUNDARY = "。！？!?…\n"
 
 # 标签匹配: 三种括号家族 × 可选 / 闭前缀 × 别名(大小写不敏感), 纯标签无属性
 _TAG_RE = re.compile(
@@ -36,17 +33,14 @@ _CLOSE_DELIM = {"<": ">", "[": "]", "【": "】"}
 # 纯标签最长 </ speech > = 11 字符; 扣留超过该长度仍未成标签 → 按正文放行
 _MAX_TAG_HOLD = 12
 
-
 def _is_close_tag(tag_text: str) -> bool:
     """/ 前缀 = 闭标签(纯标签内不会有其它 /)。"""
     return "/" in tag_text
-
 
 def _first_delim(text: str) -> int | None:
     """第一个疑似标签起始定界符的位置; 无则 None。"""
     idxs = [i for i in (text.find(d) for d in _OPEN_DELIMS) if i != -1]
     return min(idxs) if idxs else None
-
 
 def _held_is_decided(held: str) -> bool:
     """以定界符开头的扣留段是否已可判定"不是标签"。
@@ -59,31 +53,16 @@ def _held_is_decided(held: str) -> bool:
         return True
     return len(held) > _MAX_TAG_HOLD
 
+def normalize_tts_content(content: str) -> str:
+    """规范化单段朗读文本: 仅去首尾空白(不截断, 朗读字数不限)。"""
+    return content.strip()
 
-def normalize_tts_content(content: str, max_chars: int = 20) -> str:
-    """规范化朗读文本: 去首尾空白; 超过 max_chars 时读到第一个句末标点,
-    无句末标点则硬截到 max_chars(防止无标点长文本无限朗读)。
-    """
-    text = content.strip()
-    if len(text) <= max_chars:
-        return text
-    for i, ch in enumerate(text):
-        if ch in _SENTENCE_BOUNDARY:
-            cut = i + 1
-            return text[:cut].strip() if cut > 0 else text
-    return text[:max_chars]
+def _pick_tts_text(spans: list[str]) -> str:
+    """合并全部非空标注为一条朗读文本(多段按出现顺序, 空行分隔)。"""
+    parts = [s.strip() for s in spans if s.strip()]
+    return "\n".join(parts)
 
-
-def _pick_tts_text(spans: list[str], max_chars: int) -> str:
-    """第一个非空标注(空标注如 < tts >  </ tts > 跳过, 取后面真正的标注)。"""
-    for s in spans:
-        norm = normalize_tts_content(s, max_chars)
-        if norm:
-            return norm
-    return ""
-
-
-def strip_and_extract(text: str, max_chars: int = 20) -> tuple[str, str]:
+def strip_and_extract(text: str) -> tuple[str, str]:
     """非流式全文处理: 剥除所有可识别标签(含变体)。
 
     返回 (显示文本, 朗读文本) — 显示文本=剥掉标签后的全文(标注内容仍显示),
@@ -117,14 +96,13 @@ def strip_and_extract(text: str, max_chars: int = 20) -> tuple[str, str]:
     display.append(text[pos:])
     if in_tts:
         spans.append(text[span_start:])
-    return "".join(display), _pick_tts_text(spans, max_chars)
-
+    return "".join(display), _pick_tts_text(spans)
 
 class TTSMarkerFilter:
     """流式标签过滤器(模糊识别)。
 
     用法:
-        f = TTSMarkerFilter(max_chars=20)
+        f = TTSMarkerFilter()
         for chunk in stream:
             display = f.feed(chunk)   # 可安全发出的显示文本(可能为空)
         rest, tts_text = f.finish()   # 流结束: 剩余显示文本 + 朗读文本
@@ -134,8 +112,7 @@ class TTSMarkerFilter:
     (不丢字符), 判定为标签则剥除。扣留有界(纯标签 ≤ 12 字符)。
     """
 
-    def __init__(self, max_chars: int = 20):
-        self._max_chars = max_chars
+    def __init__(self):
         self._buf = ""
         self._spans: list[str] = []      # 已闭合的完整标注
         self._cur_span: list[str] = []   # 当前(未闭合)标注的内容分片累积
@@ -154,7 +131,7 @@ class TTSMarkerFilter:
         内容同样计入朗读文本且仍显示; 扣留中的疑似标签按正文放行。
         """
         out = self._drain(final=True)
-        return out, _pick_tts_text(self._spans, self._max_chars)
+        return out, _pick_tts_text(self._spans)
 
     # ── 内部 ─────────────────────────────────────────────────
 

@@ -20,7 +20,6 @@ from mohobot.models.config import BotConfig, GlobalConfig, TTSConfig
 from mohobot.models.onebot import GroupMessageEvent, Sender
 from mohobot.utils.tts_marker import (
     TTSMarkerFilter,
-    normalize_tts_content,
     strip_and_extract,
 )
 
@@ -72,22 +71,20 @@ def test_filter_unclosed_tag() -> None:
     assert tts == "忘记闭合的话"
 
 
-def test_filter_multiple_spans_take_first() -> None:
+def test_filter_multiple_spans_joined() -> None:
+    """多段标注按出现顺序合并为一条朗读文本。"""
     f = TTSMarkerFilter()
     f.feed("<tts>第一句</tts>中间<tts>第二句</tts>")
     _, tts = f.finish()
-    assert tts == "第一句"
+    assert tts == "第一句\n第二句"
 
 
-def test_normalize_truncate_at_punctuation() -> None:
-    assert normalize_tts_content("短句") == "短句"
-    # 超过 20 字 → 截到第一个句末标点(含标点)
-    long_text = "这是一段特别长的标注内容已经超过了二十个字的限制。后面不该被读"
-    result = normalize_tts_content(long_text)
-    assert result == "这是一段特别长的标注内容已经超过了二十个字的限制。"
-    # 无标点 → 硬截 20
-    no_punct = "啊" * 30
-    assert normalize_tts_content(no_punct) == "啊" * 20
+def test_no_length_limit() -> None:
+    """标注不限字数: 长内容完整保留不截断。"""
+    long_text = "这是一段特别长的标注内容，早就超过了原来二十字的限制，但现在是完整朗读的，甚至可以把整条回复都标注上。"
+    display, tts = strip_and_extract(f"前<tts>{long_text}</tts>后")
+    assert display == f"前{long_text}后"
+    assert tts == long_text
 
 
 def test_strip_and_extract() -> None:
