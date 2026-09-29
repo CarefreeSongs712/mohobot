@@ -202,7 +202,20 @@
   "auto_publish_notify_group": {
     "description": "发布后通知群",
     "type": "string",
-    "hint": "主动发布成功后由该 bot 在此群里发一条通知（含说说内容）；留空关闭",
+    "hint": "主动发布成功后由该 bot 在此群里发一条通知（含说说内容）；留空关闭。审核预览也发在此群",
     "default": "1070473353"
+  },
+  "auto_publish_review": {
+    "description": "先审后发",
+    "type": "bool",
+    "hint": "开启后每日计划的说说先发预览到通知群，管理员 /说说过审 <编号> 通过后才真正发布（/发日常 不走审核）；超时自动通过",
+    "default": true
+  },
+  "auto_publish_review_timeout_sec": {
+    "description": "审核超时（秒）",
+    "type": "int",
+    "hint": "预览发出后超过该时长未审 → 自动通过发布",
+    "slider": { "min": 300, "max": 86400, "step": 300 },
+    "default": 7200
   }
 }

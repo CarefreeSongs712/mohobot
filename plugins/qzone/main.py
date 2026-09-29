@@ -29,7 +29,7 @@ from loguru import logger
 from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent
 from mohobot.utils.cq_code import extract_image_urls, extract_plain_text
 
-from qzone_core.auto_publish import AutoPublishStore, build_daily_plan
+from qzone_core.auto_publish import AutoPublishStore, ReviewStore, build_daily_plan
 from qzone_core import (
     AutoReplyStore,
     LitePostService,
@@ -51,6 +51,14 @@ from qzone_core.utils import (
 
 # 群聊长文本(>=600 字)改用合并转发, 与框架 _send_reply 阈值一致
 _FORWARD_MIN_LEN = 600
+
+
+class _PendingReview(Exception):
+    """说说已进入待审核队列(非错误; 用于让计划流程安静结束)。"""
+
+    def __init__(self, item_id: int):
+        super().__init__(f"pending review #{item_id}")
+        self.item_id = item_id
 
 # 自动回复提示词默认模板({nick}/{content}/{post} 占位符)
 _DEFAULT_REPLY_PROMPT = (
@@ -74,6 +82,7 @@ class Plugin:
         "/重置QQCookies", "/重置cookies", "/重置qqcookies",
         "/与我相关",
         "/发日常", "/发布记录",
+        "/说说过审", "/说说驳回",
     }
 
     info = {
@@ -88,6 +97,8 @@ class Plugin:
             {"name": "与我相关", "desc": "查看「与我相关」接口原始响应(管理员/私聊, 调试用)", "admin": True},
             {"name": "发日常", "desc": "立即主动发一条说说(管理员/私聊, 测试用)", "admin": True},
             {"name": "发布记录", "desc": "查看主动发布计划与历史(管理员/私聊)", "admin": True},
+            {"name": "说说过审", "desc": "通过待审说说: /说说过审 <编号>(管理员, 通知群内)", "admin": True},
+            {"name": "说说驳回", "desc": "驳回待审说说: /说说驳回 <编号>(管理员, 通知群内)", "admin": True},
         ],
     }
 
@@ -133,6 +144,8 @@ class Plugin:
         "auto_publish_exclude_bots": [],    # 排除的 bot_id / QQ
         "auto_publish_notify_admin": False,
         "auto_publish_notify_group": "1070473353",  # 发布后通知群(空=不发)
+        "auto_publish_review": True,          # 先审后发(预览到通知群, 管理员指令放行)
+        "auto_publish_review_timeout_sec": 7200,  # 超时自动通过(秒)
     }
 
     # 命令别名表(小写): -> (handler 名, 需管理员)
@@ -154,6 +167,8 @@ class Plugin:
     _COMMANDS["与我相关"] = ("atme_debug", True)
     _COMMANDS["发日常"] = ("publish_daily", True)
     _COMMANDS["发布记录"] = ("publish_log", True)
+    _COMMANDS["说说过审"] = ("review_approve", True)
+    _COMMANDS["说说驳回"] = ("review_reject", True)
 
     def __init__(self):
         self.plugin_config: dict = dict(self._DEFAULTS)
@@ -168,6 +183,8 @@ class Plugin:
         # 主动发说说: per-bot 计划/历史/话题池 + 失败退避
         self._pub_stores: dict[str, AutoPublishStore] = {}
         self._pub_fail_until: dict[str, float] = {}
+        # 先审后发: 审核队列(全局一份, 惰性初始化)
+        self._review_store: ReviewStore | None = None
 
     # ── 框架注入 ──────────────────────────────────────────────
 
@@ -348,11 +365,16 @@ class Plugin:
             return (False, None)
         action, need_admin = entry
 
-        # 管理员命令: 群聊内一律静默忽略(不处理, 不回复)
+        # 管理员命令: 群聊内一律静默忽略(不处理, 不回复)。
+        # 例外: 说说审核指令 — 管理员在通知群内可用(审核场景就在群里)。
         if need_admin:
+            is_review_cmd = action in ("review_approve", "review_reject")
             if isinstance(event, GroupMessageEvent):
-                return (True, None)
-            if not self._is_admin(event):
+                if not self._is_admin(event):
+                    return (True, None)  # 群内非管理员静默
+                if not is_review_cmd:
+                    return (True, None)  # 其它管理员命令仍群聊忽略
+            elif not self._is_admin(event):
                 return (True, "该指令仅管理员可用, 且仅限私聊。")
 
         handler = getattr(self, f"_cmd_{action}")
@@ -562,6 +584,11 @@ class Plugin:
                 except Exception as e:
                     self._pub_fail_until[bot_id] = _time.monotonic() + 600
                     logger.warning(f"[qzone][{bot_id}] 主动发说说失败, 10 分钟后重试: {e}")
+                # 审核超时扫描(群内最小 bot 执行, 避免多 bot 重复)
+                try:
+                    await self._review_expiry_tick(bot_id)
+                except Exception as e:
+                    logger.warning(f"[qzone][{bot_id}] 审核超时扫描失败: {e}")
 
     async def _auto_reply_once(self, bot_id: str) -> None:
         comment_on = bool(self._cfg("comment_reply_enabled", False))
@@ -931,14 +958,51 @@ class Plugin:
             await store.save()
             try:
                 await self._auto_publish_once(bot_id, api, service)
+            except _PendingReview as pr:
+                logger.info(f"[qzone][{bot_id}] 说说 #{pr.item_id} 进入待审核队列")
             except Exception as e:
                 logger.error(f"[qzone][{bot_id}] 主动发说说失败(计划 {i}): {e}")
             await asyncio.sleep(random.uniform(2.0, 5.0))
 
+    def _get_review_store(self) -> ReviewStore:
+        if self._review_store is None:
+            from pathlib import Path
+            self._review_store = ReviewStore(
+                Path(self._data_dir) / "plugins_data" / "qzone" / "review_queue.json",
+            )
+        return self._review_store
+
     async def _auto_publish_once(self, bot_id: str, api, service) -> Post:
-        """生成并发布一条说说; 返回 Post(失败抛异常)。"""
+        """生成一条说说并发布(或先进审核队列)。
+
+        审核模式(_auto_publish_review)下入队+群预览并抛 _PendingReview;
+        直发模式返回 Post。失败抛其它异常。
+        """
         topic = await self._pick_topic(bot_id)
         text = await self._generate_publish_text(bot_id, topic)
+        if bool(self._cfg("auto_publish_review", True)):
+            review = self._get_review_store()
+            item_id = await review.add(bot_id, text, topic)
+            await review.save()
+            timeout_h = max(1, int(self._cfg("auto_publish_review_timeout_sec", 7200))) // 3600
+            preview = (
+                f"📝【说说待审 #{item_id}】{self._bot_nickname(bot_id)}\n"
+                f"{text[:300]}\n"
+                f"✅ /说说过审 {item_id}   ❌ /说说驳回 {item_id}\n"
+                f"(超时 {timeout_h} 小时未审将自动通过)"
+            )
+            group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
+            if group.isdigit() and self._ws_server is not None:
+                try:
+                    await self._ws_server.send_group_msg(bot_id, int(group), preview)
+                except Exception as e:
+                    logger.warning(f"[qzone][{bot_id}] 审核预览发送失败: {e}")
+            logger.info(f"[qzone][{bot_id}] 说说已入队待审(#{item_id}): {text[:60]}")
+            raise _PendingReview(item_id)
+        return await self._do_publish(bot_id, api, service, text)
+
+    async def _do_publish(self, bot_id: str, api, service, text: str) -> Post:
+        """真正发布 + 历史 + 群/管理员通知; 返回 Post(失败抛异常)。"""
         post = await service.publish_post(text=text)
         from mohobot.utils.time_utils import format_utc8
         store = self._get_pub_store(bot_id)
@@ -1088,9 +1152,11 @@ class Plugin:
                 logger.warning(f"[qzone][{bot_id}] 管理员通知失败({admin}): {e}")
 
     async def _cmd_publish_daily(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
-        """管理员立即主动发一条(测试用, 不占当日计划)。"""
+        """管理员立即主动发一条(测试用, 不占当日计划, 不走审核直发)。"""
         api, service = self._get_api(bot_id)
-        post = await self._auto_publish_once(bot_id, api, service)
+        topic = await self._pick_topic(bot_id)
+        post_text = await self._generate_publish_text(bot_id, topic)
+        post = await self._do_publish(bot_id, api, service, post_text)
         return (True, f"已主动发布\n{post.to_str()}")
 
     async def _cmd_publish_log(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
@@ -1114,3 +1180,91 @@ class Plugin:
             for h in reversed(history[-5:]):
                 lines.append(f"  {h.get('time')} tid={h.get('tid')}: {str(h.get('text'))[:40]}")
         return (True, "\n".join(lines))
+
+    async def _review_expiry_tick(self, bot_id: str) -> None:
+        """审核超时扫描: 到期未审的条目自动通过发布。
+
+        只由通知群内最小 bot_id 执行(避免多 bot 重复扫描/发布)。
+        """
+        if not bool(self._cfg("auto_publish_review", True)):
+            return
+        review = self._get_review_store()
+        ttl = max(60, int(self._cfg("auto_publish_review_timeout_sec", 7200)))
+        expired = review.expired(ttl)
+        if not expired:
+            return
+        ws = self._ws_server
+        bm = getattr(ws, "_bot_manager", None) if ws is not None else None
+        if bm is not None:
+            group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
+            if group.isdigit():
+                min_bot = bm.min_bot_for_group(int(group))
+                if min_bot is not None and min_bot != bot_id:
+                    return
+        for item in expired:
+            if review.set_status(item["id"], "publishing") is None:
+                continue
+            await review.save()
+            await self._publish_reviewed_item(item, reason="超时自动通过")
+
+    def _notify_group_id(self) -> int | None:
+        group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
+        return int(group) if group.isdigit() else None
+
+    async def _publish_reviewed_item(self, item: dict, *, reason: str) -> None:
+        """发布一条已通过审核的说说(审核指令/超时自动通过共用)。"""
+        bot_id = str(item.get("bot_id"))
+        text = str(item.get("text") or "")
+        gid = self._notify_group_id()
+        try:
+            api, service = self._get_api(bot_id)
+            await self._do_publish(bot_id, api, service, text)
+            if gid is not None and self._ws_server is not None:
+                try:
+                    await self._ws_server.send_group_msg(
+                        bot_id, gid, f"✅ #{item['id']} 已{reason}并发布"
+                    )
+                except Exception as e:
+                    logger.warning(f"[qzone] 审核结果通知失败: {e}")
+        except Exception as e:
+            logger.error(f"[qzone] 审核条目发布失败(#{item['id']}): {e}")
+            if gid is not None and self._ws_server is not None:
+                try:
+                    await self._ws_server.send_group_msg(
+                        bot_id, gid, f"⚠️ #{item['id']} 发布失败: {e}"
+                    )
+                except Exception:
+                    pass
+
+    async def _cmd_review_approve(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
+        """/说说过审 <编号> — 通过并立即发布。"""
+        tokens = text.split()
+        if len(tokens) < 2 or not tokens[1].lstrip("#").isdigit():
+            return (True, "用法: /说说过审 <编号>")
+        item_id = int(tokens[1].lstrip("#"))
+        review = self._get_review_store()
+        item = review.get(item_id)
+        if item is None:
+            return (True, f"#{item_id} 不存在")
+        if review.set_status(item_id, "publishing") is None:
+            return (True, f"#{item_id} 已处理过(当前状态: {item.get('status')})")
+        await review.save()
+        await self._publish_reviewed_item(item, reason="审核通过")
+        return (True, None)
+
+    async def _cmd_review_reject(self, bot_id: str, event, text: str) -> tuple[bool, str | None]:
+        """/说说驳回 <编号> — 驳回丢弃。"""
+        tokens = text.split()
+        if len(tokens) < 2 or not tokens[1].lstrip("#").isdigit():
+            return (True, "用法: /说说驳回 <编号>")
+        item_id = int(tokens[1].lstrip("#"))
+        review = self._get_review_store()
+        item = review.set_status(item_id, "rejected")
+        if item is None:
+            got = review.get(item_id)
+            if got is None:
+                return (True, f"#{item_id} 不存在")
+            return (True, f"#{item_id} 已处理过(当前状态: {got.get('status')})")
+        await review.save()
+        logger.info(f"[qzone] 说说已驳回(#{item_id}): {item.get('text', '')[:50]}")
+        return (True, f"#{item_id} 已驳回，内容丢弃")

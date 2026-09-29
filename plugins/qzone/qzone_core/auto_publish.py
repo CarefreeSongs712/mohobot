@@ -180,3 +180,78 @@ class AutoPublishStore:
         self._data["topics"] = [
             {"topic": str(t)[:40], "ts": now} for t in topics if str(t).strip()
         ][:10]
+
+
+class ReviewStore:
+    """说说审核队列(全局一份, 持久化): 编号递增, 状态流转 pending→published/rejected。
+
+    存 data/plugins_data/qzone/review_queue.json:
+      {"next_id": 4, "items": [{"id", "bot_id", "text", "topic", "ts", "status"}]}
+    items 截 100 条(只留近期, 编号继续递增不回绕)。
+    """
+
+    _ITEMS_MAX = 100
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._data: dict = {}
+        self._loaded = False
+
+    async def _ensure(self) -> None:
+        if self._loaded:
+            return
+        data = await json_read(self._path)
+        self._data = data if isinstance(data, dict) else {}
+        self._data.setdefault("next_id", 1)
+        items = self._data.get("items")
+        self._data["items"] = items if isinstance(items, list) else []
+        self._loaded = True
+
+    async def save(self) -> None:
+        await self._ensure()
+        try:
+            await json_write(self._path, self._data)
+        except Exception as e:
+            logger.warning(f"[qzone] 审核队列保存失败: {e}")
+
+    async def add(self, bot_id: str, text: str, topic: str | None) -> int:
+        """入队一条待审说说, 返回编号。"""
+        await self._ensure()
+        item = {
+            "id": int(self._data.get("next_id", 1)),
+            "bot_id": bot_id,
+            "text": text,
+            "topic": topic,
+            "ts": time.time(),
+            "status": "pending",
+        }
+        self._data["next_id"] = item["id"] + 1
+        items = self._data.setdefault("items", [])
+        items.append(item)
+        if len(items) > self._ITEMS_MAX:
+            del items[: len(items) - self._ITEMS_MAX]
+        return item["id"]
+
+    def get(self, item_id: int) -> dict | None:
+        return next(
+            (i for i in self._data.get("items", []) if i.get("id") == item_id), None
+        )
+
+    def set_status(self, item_id: int, status: str) -> dict | None:
+        """流转状态(pending→published/rejected); 返回条目, 不存在/非 pending 返回 None。"""
+        item = self.get(item_id)
+        if item is None or item.get("status") != "pending":
+            return None
+        item["status"] = status
+        return item
+
+    def pending(self) -> list[dict]:
+        return [i for i in self._data.get("items", []) if i.get("status") == "pending"]
+
+    def expired(self, ttl_sec: float) -> list[dict]:
+        """pending 且超过 ttl 的条目(超时自动通过)。"""
+        now = time.time()
+        return [
+            i for i in self.pending()
+            if now - float(i.get("ts") or 0) >= ttl_sec
+        ]

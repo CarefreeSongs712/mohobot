@@ -875,6 +875,7 @@ async def test_auto_publish_tick_end_to_end():
     with tempfile.TemporaryDirectory() as td:
         plugin._data_dir = td
         plugin.plugin_config["auto_publish_enabled"] = True
+        plugin.plugin_config["auto_publish_review"] = False  # 直发模式
         plugin.plugin_config["auto_publish_daily_count"] = 2
         plugin.plugin_config["auto_publish_window_start"] = "00:00"
         plugin.plugin_config["auto_publish_window_end"] = "23:59"
@@ -946,6 +947,7 @@ async def test_publish_notifies_group():
     with tempfile.TemporaryDirectory() as td:
         plugin._data_dir = td
         plugin.plugin_config["auto_publish_notify_group"] = "1070473353"
+        plugin.plugin_config["auto_publish_review"] = False  # 直发模式
 
         class _FakeLLM:
             async def complete_text(self, prompt, **kw):
@@ -983,6 +985,187 @@ async def test_publish_notifies_group():
         plugin.plugin_config["auto_publish_notify_group"] = ""
         await plugin._auto_publish_once("bot_001", api, _FakeService())
         assert len(group_msgs) == 1
+
+
+
+# ══ 先审后发 ════════════════════════════════════════════════════
+
+from qzone_core.auto_publish import ReviewStore  # noqa: E402
+
+
+async def test_review_store_flow():
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "review_queue.json")
+        id1 = await store.add("bot_001", "内容一", "火锅")
+        id2 = await store.add("bot_002", "内容二", None)
+        assert id2 == id1 + 1
+        assert [i["id"] for i in store.pending()] == [id1, id2]
+        # 状态流转: 只能从 pending 出发
+        item = store.set_status(id1, "publishing")
+        assert item and item["bot_id"] == "bot_001"
+        assert store.set_status(id1, "rejected") is None  # 非 pending 不可再流转
+        store.set_status(id2, "rejected")
+        await store.save()
+        assert store.pending() == []
+        # 持久化 + 编号继续递增
+        store2 = ReviewStore(Path(td) / "review_queue.json")
+        id3 = await store2.add("bot_003", "内容三", None)
+        assert id3 == id2 + 1
+        assert store2.get(id1)["text"] == "内容一"
+        # 不存在
+        assert store2.get(999) is None
+
+
+async def test_review_expiry():
+    import time as _time
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "r.json")
+        old_id = await store.add("bot_001", "旧内容", None)
+        store._data["items"][0]["ts"] = _time.time() - 9999
+        new_id = await store.add("bot_002", "新内容", None)
+        expired = store.expired(7200)
+        assert [i["id"] for i in expired] == [old_id]
+
+
+class _ReviewTestEnv:
+    """端到端审核测试环境: fake api/service/ws/llm + 真实 ReviewStore。"""
+
+    def __init__(self, plugin, td):
+        self.group_msgs = []
+        self.published = []
+        plugin._data_dir = td
+        plugin.plugin_config["auto_publish_enabled"] = True
+        plugin.plugin_config["auto_publish_review"] = True
+        plugin.plugin_config["auto_publish_notify_group"] = "1070473353"
+        plugin.plugin_config["auto_publish_topics"] = ["美食"]
+
+        class _FakeLLM:
+            async def complete_text(self, prompt, **kw):
+                return "今天想吃火锅，毛肚必须七上八下。"
+        plugin._llm_service = _FakeLLM()
+
+        class _S:
+            async def get_uin(self):
+                return 111
+        self.api = type("A", (), {})()
+        self.api.session = _S()
+        plugin._apis["bot_001"] = self.api
+
+        class _FakeService:
+            published: list = []
+
+            async def publish_post(self, text=None, images=None):
+                self.published.append(text)
+                return Post(uin=111, tid=f"tid{len(self.published)}", name="b", text=text)
+        self.service = _FakeService()
+        plugin._services["bot_001"] = self.service
+
+        msgs = self.group_msgs
+        class _WS:
+            async def send_group_msg(self, bot_id, group_id, message):
+                msgs.append((bot_id, group_id, message))
+            _bot_manager = None
+        self.ws = _WS()
+        plugin._ws_server = self.ws
+
+    @property
+    def previews(self):
+        return [m for _, _, m in self.group_msgs if "待审" in m]
+
+    @property
+    def notices(self):
+        return [m for _, _, m in self.group_msgs if "新说说" in m]
+
+
+async def test_review_flow_end_to_end():
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        env = _ReviewTestEnv(plugin, td)
+
+        from mohobot_plugin_qzone import _PendingReview
+        # 计划触发: 不直接发布而是入队+群预览
+        try:
+            await plugin._auto_publish_once("bot_001", env.api, env.service)
+            raise AssertionError("应抛 _PendingReview")
+        except _PendingReview as pr:
+            assert pr.item_id == 1
+        assert not env.service.published  # 未真正发布
+        assert len(env.previews) == 1
+        assert "待审 #1" in env.previews[0] and "/说说过审 1" in env.previews[0]
+
+        # 驳回 → 丢弃
+        handled, reply = await plugin._cmd_review_reject("bot_001", None, "/说说驳回 1")
+        assert handled and reply and "已驳回" in reply
+        assert not env.service.published
+
+        # 再入队一条 → 通过 → 发布 + 📢 通知
+        try:
+            await plugin._auto_publish_once("bot_001", env.api, env.service)
+        except _PendingReview:
+            pass
+        assert len(env.previews) == 2
+        handled, reply = await plugin._cmd_review_approve("bot_001", None, "/说说过审 2")
+        assert handled and reply is None  # 已在群里报, 无需私聊回复
+        assert len(env.service.published) == 1
+        assert env.service.published[0] == "今天想吃火锅，毛肚必须七上八下。"
+        assert len(env.notices) == 1 and "新说说" in env.notices[0]
+
+        # 重复通过 → 提示已处理
+        handled, reply = await plugin._cmd_review_approve("bot_001", None, "/说说过审 2")
+        assert handled and "已处理过" in reply
+        assert len(env.service.published) == 1
+
+
+async def test_review_expiry_auto_approve():
+    import time as _time
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        env = _ReviewTestEnv(plugin, td)
+        from mohobot_plugin_qzone import _PendingReview  # noqa: F401
+        # 预置一条已超时的待审
+        store = plugin._get_review_store()
+        item_id = await store.add("bot_001", "超时的内容", None)
+        store._data["items"][0]["ts"] = _time.time() - 99999
+        await store.save()
+
+        await plugin._review_expiry_tick("bot_001")
+        assert len(env.service.published) == 1
+        assert env.service.published[0] == "超时的内容"
+        # 状态流转完成, 不会重复发布
+        await plugin._review_expiry_tick("bot_001")
+        assert len(env.service.published) == 1
+
+
+async def test_review_command_routing():
+    """群内: 管理员可用审核指令, 非管理员静默; 私聊非管理员提示。"""
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        admin_ev = _group_event([{"type": "text", "data": {"text": "/说说过审 1"}}],
+                                user_id=3831097597)
+        handled, reply = await plugin.on_message("bot_001", admin_ev, {})
+        assert handled is True and reply and "不存在" in reply  # 管理员群内可用
+        non_admin_ev = _group_event([{"type": "text", "data": {"text": "/说说过审 1"}}],
+                                    user_id=111)
+        handled, reply = await plugin.on_message("bot_001", non_admin_ev, {})
+        assert handled is True and reply is None  # 群内非管理员静默
+        pv = _private_event([{"type": "text", "data": {"text": "/说说过审"}}], user_id=3831097597)
+        handled, reply = await plugin.on_message("bot_001", pv, {})
+        assert handled is True and "用法" in reply
+
+
+async def test_publish_daily_bypasses_review():
+    """/发日常 直发, 不进审核队列。"""
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        env = _ReviewTestEnv(plugin, td)
+        handled, reply = await plugin._cmd_publish_daily("bot_001", None, "/发日常")
+        assert handled and "已主动发布" in reply
+        assert len(env.service.published) == 1
+        assert not env.previews  # 没有预览
+        assert len(env.notices) == 1  # 有发布成功通知
+        review = plugin._get_review_store()
+        assert review.pending() == []
 
 
 if __name__ == "__main__":
