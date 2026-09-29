@@ -449,7 +449,7 @@ class CommandHandler(Interceptor):
             chat_type, chat_id = "group", str(event.group_id)
         else:
             chat_type, chat_id = "private", str(event.user_id)
-        from mohobot.services.minimax_tts import TTSJob
+        from mohobot.services.tts import TTSJob
         accepted = self._tts.submit(TTSJob(
             bot_id=bot_id, chat_type=chat_type, chat_id=chat_id,
             text=text, source="command",

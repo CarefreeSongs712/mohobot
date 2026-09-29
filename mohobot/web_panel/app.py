@@ -751,6 +751,27 @@ class WebPanel:
             logger.info(f"Web panel: TTS config updated ({[k for k in data if k != 'api_key']})")
             return {"status": "ok", "note": note}
 
+        @app.post("/api/tts/test")
+        async def tts_test(request: Request, body: ConfigUpdateRequest):
+            """面板「测试合成」: 直调后端合成一段文本(绕过队列), 返回延迟与可播放音频。"""
+            await _require_auth(request)
+            if self._tts_service is None:
+                raise HTTPException(status_code=400, detail="TTS 未启用(tts.enabled=false)")
+            text = str((body.data or {}).get("text", "") or "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="文本不能为空")
+            if len(text) > 200:
+                raise HTTPException(status_code=400, detail="测试文本限 200 字以内")
+            try:
+                result = await self._tts_service.test_synthesize(text)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"测试合成异常: {e}")
+            logger.info(
+                f"Web panel: TTS test synth ok={result.get('ok')} "
+                f"({result.get('latency_ms')}ms, {result.get('format')})"
+            )
+            return result
+
         # ── 4. Plugins (插件管理) ────────────────────────────
 
         @app.get("/api/plugins")

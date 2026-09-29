@@ -365,24 +365,35 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
 
   <!-- 3.5 TTS 语音 -->
   <div class="page" id="page-tts">
-    <h2>🔊 TTS 语音（MiniMax）</h2>
-    <div class="subtitle">云端合成（t2a_v2）· 单飞行队列监控 · 配置保存即热生效（队列上限除外）</div>
+    <h2>🔊 TTS 语音</h2>
+    <div class="subtitle">可切换后端（自建 HTTP / MiniMax）· 单飞行队列监控 · 配置保存即热生效（队列上限除外）</div>
 
     <div class="card">
       <div class="card-title">🎚️ 服务与队列状态</div>
       <div id="tts-status" class="stat-label">⏳ 加载中…</div>
       <div class="small" style="color:var(--text-dim);margin-top:8px">
-        单飞行串行：逐条调用 MiniMax API（按字符计费）；队列满丢弃最新。本页打开时每 5 秒自动刷新状态。音色需先在 MiniMax 侧克隆好（voice_id），每 bot 可在 Bot 配置里用不同音色覆盖。
+        单飞行串行合成，队列满丢弃最新。本页打开时每 5 秒自动刷新状态。自建 HTTP 后端：服务端 wav → 本地 ffmpeg 转 mp3 后发送（NapCat 兼容性已验证），ffmpeg 不可用自动降级发 wav。MiniMax 后端（保留仅下线）：音色需先在 MiniMax 侧克隆好（voice_id）。
       </div>
     </div>
 
     <div class="card">
-      <div class="card-title">📤 合成配置（MiniMax API）</div>
+      <div class="card-title">📤 合成配置</div>
       <div id="tts-send-form"></div>
       <button class="btn" onclick="saveTtsConfig()">保存配置</button>
       <div class="small" style="color:var(--text-dim);margin-top:6px">
-        API Key 留空保持原值；保存后除「等待队列上限」需重启外，其余立即热生效。
+        API Key 留空保持原值；保存后除「等待队列上限」需重启外，其余立即热生效（含后端切换）。
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🧪 测试合成（绕过队列直调后端）</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="tts-test-text" value="你好呀，这是一段测试语音。" maxlength="200"
+          style="flex:1;min-width:240px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <button class="btn" id="tts-test-btn" onclick="ttsTestSynthesize()">▶ 测试合成</button>
+      </div>
+      <div class="hint" id="tts-test-result" style="margin-top:8px"></div>
+      <audio id="tts-test-audio" controls style="display:none;width:100%;margin-top:8px"></audio>
     </div>
   </div>
 
@@ -1142,7 +1153,7 @@ async function loadBotConfig() {
       `<div class="form-row"><label>TTS 语音</label>
         <label class="switch"><input type="checkbox" id="cfg-tts_enabled" ${b.tts_enabled ? 'checked' : ''}><span class="slider"></span></label>
         <div class="hint">开启后该 bot 的 LLM 回复可带朗读标注、并响应 /tts 指令(MiniMax API 等在 TTS 板块配置); 修改后需重启生效</div></div>` +
-      formField('tts_voice_id', 'TTS 音色 ID（留空用全局）', b.tts_voice_id, { hint: '该 bot 专属的 MiniMax 克隆音色 voice_id; 留空用 TTS 板块的全局音色' }) +
+      formField('tts_voice_id', 'TTS 音色 ID（留空用全局）', b.tts_voice_id, { hint: '仅 MiniMax 后端生效的克隆音色; 自建 HTTP 后端音色由服务端固定, 此字段忽略' }) +
       textareaField('keyword_replies_json', '关键词回复（JSON）', JSON.stringify(b.keyword_replies || {}, null, 2), '格式: {"关键词": "回复内容"}');
   } catch (e) { showToast('加载 Bot 配置失败: ' + e.message, false); }
 }
@@ -1306,7 +1317,7 @@ async function saveModels() {
   } catch (e) { showToast('保存失败: ' + e.message, false); }
 }
 
-// ═══════════════ 3.5 TTS 语音(MiniMax) ═══════════════
+// ═══════════════ 3.5 TTS 语音(可切换后端) ═══════════════
 let ttsConfigCache = null;
 let ttsRefreshTimer = null;
 
@@ -1339,43 +1350,61 @@ async function ttsRefreshStatus() {
   const enabled = s.tts_enabled
     ? '<span style="color:var(--green)">● 已启用</span>'
     : '<span style="color:var(--text-dim)">○ 未启用</span>';
+  const backendName = s.backend === 'minimax' ? 'MiniMax 云端' : '自建 HTTP';
   const cfgOk = s.configured
     ? '<span style="color:var(--green)">配置完整</span>'
-    : `<span style="color:var(--yellow)">配置不全</span>（API Key ${s.api_key_set ? '✓' : '✗'} / 全局音色 ${s.voice_id_set ? '✓' : '✗'}）`;
+    : `<span style="color:var(--yellow)">配置不全</span>（API Key ${s.api_key_set ? '✓' : '✗'}` +
+      (s.backend === 'minimax' ? ` / 全局音色 ${s.voice_id_set ? '✓' : '✗'}）` : '）');
   const cur = s.current ? `${s.current.source}·${s.current.bot_id}: ${s.current.text}` : '无';
   document.getElementById('tts-status').innerHTML =
-    `<div class="stat-label">${enabled} · ${cfgOk} · API: ${s.base_url || '(未配置)'}</div>` +
-    `<div class="stat-label" style="margin-top:6px">当前合成: ${cur}</div>` +
+    `<div class="stat-label">${enabled} · 后端: ${backendName} · ${cfgOk}</div>` +
+    `<div class="stat-label" style="margin-top:6px">服务地址: ${s.base_url || '(未配置)'}</div>` +
+    `<div class="stat-label">当前合成: ${cur}</div>` +
     `<div class="stat-label">队列: ${s.queued} / ${s.queue_maxsize === 0 ? '—' : s.queue_maxsize}</div>` +
     `<div class="stat-label">累计: 成功 ${s.stats.done} · 失败 ${s.stats.failed} · 丢弃 ${s.stats.dropped} · 字符 ${s.stats.chars}</div>`;
 }
 
 function renderTtsSendForm(cfg) {
+  const isMini = cfg.backend === 'minimax';
+  const mmHint = isMini ? '' : '（仅 backend=minimax 时生效）';
   document.getElementById('tts-send-form').innerHTML =
     checkField('tts.enabled', '启用 TTS', cfg.enabled, '全局开关(服务在启动时创建); 每个 bot 还需在 Bot 配置里单独开启 tts_enabled') +
-    formField('tts.api_key', 'API Key (留空保持原值)', '', { type: 'password', hint: 'MiniMax API Key; 当前 Key 不会回填，只有输入新值才会更新；也可用环境变量 MOHOBOT_MINIMAX_API_KEY' }) +
-    formField('tts.base_url', 'API 地址', cfg.base_url, { hint: '国内站 https://api.minimax.cn / 国际站 https://api.minimaxi.com' }) +
-    formField('tts.model', '模型', cfg.model, { hint: 'speech-2.8-hd(音质优先) / speech-2.8-turbo(更快更便宜)' }) +
-    formField('tts.voice_id', '全局音色 ID', cfg.voice_id, { hint: 'MiniMax 克隆音色(如 ltyclone01); 每 bot 可在 Bot 配置里覆盖' }) +
-    formField('tts.speed', '语速', cfg.speed, { hint: '1.0 为原速' }) +
-    formField('tts.vol', '音量', cfg.vol, { hint: '1.0 为默认音量' }) +
-    formField('tts.pitch', '音调', cfg.pitch, { hint: '0 为默认; 正升负降' }) +
-    formField('tts.sample_rate', '采样率', cfg.sample_rate, { hint: '默认 32000' }) +
-    formField('tts.bitrate', '码率', cfg.bitrate, { hint: '默认 128000' }) +
-    formField('tts.format', '音频格式', cfg.format, { hint: 'mp3(默认)' }) +
-    formField('tts.timeout', '合成超时(秒)', cfg.timeout, { hint: '云端同步合成一般几秒, 默认 60' }) +
+    selectField('tts.backend', '合成后端', cfg.backend, ['http', 'minimax'],
+      'http=自建 HTTP 服务(text→wav, 本地 ffmpeg 转 mp3); minimax=MiniMax 云端(保留仅下线), 切换保存即热生效') +
+    formField('tts.api_key', 'API Key / Bearer Token (留空保持原值)', '', { type: 'password', hint: '自建服务为 Bearer token; MiniMax 为 API Key; 也可用环境变量 MOHOBOT_TTS_API_KEY' }) +
+    formField('tts.base_url', '服务地址', cfg.base_url, { hint: '自建: http://IP:9890; MiniMax: https://api.minimax.cn' }) +
+    formField('tts.timeout', '合成超时(秒)', cfg.timeout, { hint: '自建实测 0.5~1.5 秒, 默认 60' }) +
+    checkField('tts.convert_to_mp3', 'ffmpeg 转 mp3 后发送', cfg.convert_to_mp3, '仅 http 后端: 服务端 wav → 本地 mp3(NapCat 兼容性已验证); 关闭则直接发 wav; ffmpeg 不可用自动降级 wav') +
     formField('tts.queue_maxsize', '等待队列上限', cfg.queue_maxsize, { hint: '单飞行串行, 队列满丢最新; 修改需重启生效' }) +
     formField('tts.cmd_max_chars', '/tts 文本上限(字)', cfg.cmd_max_chars, { hint: '非管理员使用 /tts 的文本长度上限(默认 30)' }) +
     formField('tts.cmd_cooldown', '/tts 冷却(秒)', cfg.cmd_cooldown, { hint: '非管理员两次 /tts 的最小间隔(默认 120), 管理员不受限' }) +
-    textareaField('tts.tts_prompt_template', '标注提示词模板', cfg.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认');
+    textareaField('tts.tts_prompt_template', '标注提示词模板', cfg.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认') +
+    '<hr style="border-color:var(--border);margin:14px 0">' +
+    '<div class="card-title" style="font-size:15px">MiniMax 后端参数 ' + (isMini ? '' : '<span style="color:var(--text-dim);font-size:12px">（当前未启用）</span>') + '</div>' +
+    formField('tts.model', '模型', cfg.model, { hint: 'speech-2.8-hd(音质优先) / speech-2.8-turbo(更快更便宜)' + mmHint }) +
+    formField('tts.voice_id', '全局音色 ID', cfg.voice_id, { hint: 'MiniMax 克隆音色(如 ltyclone01); 每 bot 可在 Bot 配置里覆盖' + mmHint }) +
+    formField('tts.speed', '语速', cfg.speed, { hint: '1.0 为原速' + mmHint }) +
+    formField('tts.vol', '音量', cfg.vol, { hint: '1.0 为默认音量' + mmHint }) +
+    formField('tts.pitch', '音调', cfg.pitch, { hint: '0 为默认; 正升负降' + mmHint }) +
+    formField('tts.sample_rate', '采样率', cfg.sample_rate, { hint: '默认 32000' + mmHint }) +
+    formField('tts.bitrate', '码率', cfg.bitrate, { hint: '默认 128000' + mmHint }) +
+    formField('tts.format', '音频格式', cfg.format, { hint: 'mp3(默认)' + mmHint });
 }
 
 async function saveTtsConfig() {
   const num = (id, def) => { const el = document.getElementById(id); if (!el) return def; const v = parseFloat(el.value); return isNaN(v) ? def : v; };
   const data = {
     enabled: document.getElementById('cfg-tts.enabled')?.checked ?? false,
+    backend: document.getElementById('cfg-tts.backend')?.value || 'http',
     api_key: document.getElementById('cfg-tts.api_key')?.value || '',
-    base_url: document.getElementById('cfg-tts.base_url')?.value?.trim() || 'https://api.minimax.cn',
+    base_url: document.getElementById('cfg-tts.base_url')?.value?.trim() || 'http://127.0.0.1:9890',
+    timeout: num('cfg-tts.timeout', 60),
+    convert_to_mp3: document.getElementById('cfg-tts.convert_to_mp3')?.checked ?? true,
+    queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
+    cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
+    cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
+    tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
+    // MiniMax 后端参数(仅 backend=minimax 时生效, 原样回传保持)
     model: document.getElementById('cfg-tts.model')?.value?.trim() || 'speech-2.8-hd',
     voice_id: document.getElementById('cfg-tts.voice_id')?.value?.trim() || '',
     speed: num('cfg-tts.speed', 1.0),
@@ -1384,11 +1413,6 @@ async function saveTtsConfig() {
     sample_rate: parseInt(document.getElementById('cfg-tts.sample_rate').value) || 32000,
     bitrate: parseInt(document.getElementById('cfg-tts.bitrate').value) || 128000,
     format: document.getElementById('cfg-tts.format')?.value?.trim() || 'mp3',
-    timeout: num('cfg-tts.timeout', 60),
-    queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
-    cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
-    cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
-    tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
   };
   try {
     const r = await apiJSON('/api/tts/config', { method: 'PUT', body: { data } });
@@ -1396,6 +1420,32 @@ async function saveTtsConfig() {
     await ttsLoadConfig();  // 重拉回显(掩码)
     await ttsRefreshStatus();
   } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function ttsTestSynthesize() {
+  const btn = document.getElementById('tts-test-btn');
+  const result = document.getElementById('tts-test-result');
+  const audio = document.getElementById('tts-test-audio');
+  const text = document.getElementById('tts-test-text').value.trim();
+  if (!text) { showToast('请输入测试文本', false); return; }
+  btn.disabled = true;
+  result.textContent = '⏳ 合成中…';
+  audio.style.display = 'none';
+  try {
+    const r = await apiJSON('/api/tts/test', { method: 'POST', body: { data: { text } } });
+    if (!r.ok) {
+      result.innerHTML = `<span style="color:var(--red)">✗ 合成失败（${r.latency_ms}ms）</span> — ${r.error || '见服务日志'}`;
+    } else {
+      result.innerHTML = `<span style="color:var(--green)">✓ ${r.latency_ms}ms · ${r.format} · ${(r.size / 1024).toFixed(0)}KB · 计费字符 ${r.chars}</span>`;
+      audio.src = 'data:audio/' + (r.format === 'mp3' ? 'mpeg' : 'wav') + ';base64,' + r.audio_b64;
+      audio.style.display = 'block';
+      audio.play().catch(() => {});
+    }
+  } catch (e) {
+    result.innerHTML = `<span style="color:var(--red)">✗ 请求失败: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ═══════════════ 4. Plugins ═══════════════

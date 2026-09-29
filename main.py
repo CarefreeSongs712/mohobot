@@ -144,22 +144,24 @@ class MohobotApplication:
 
         self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
 
-        # TTS 语音合成(MiniMax t2a_v2 云端 API)。
+        # TTS 语音合成(可切换后端: 自建 HTTP 服务 / MiniMax 云端)。
         # tts.enabled 未开启/初始化失败 → 降级为 None(正常聊天不受影响)。
         self._tts_service = None
         if self._config.tts.enabled and self._config.tts.base_url:
             try:
-                from mohobot.services.minimax_tts import TTSService
+                from mohobot.services.tts import TTSService
                 self._tts_service = TTSService(
                     self._config.tts,
                     task_supervisor=self._task_supervisor,
                     usage_recorder=self._usage_recorder,
                 )
                 if not self._config.tts.api_key:
-                    logger.warning("TTS 已启用但未配置 api_key(MOHOBOT_MINIMAX_API_KEY 或 tts.api_key), 合成将失败")
-                if not self._config.tts.voice_id:
-                    logger.warning("TTS 已启用但未配置全局 voice_id(tts.voice_id)")
-                logger.info(f"TTS 服务已创建: {self._config.tts.base_url} (model={self._config.tts.model})")
+                    logger.warning("TTS 已启用但未配置 api_key(MOHOBOT_TTS_API_KEY 或 tts.api_key), 合成将失败")
+                if self._config.tts.backend == "minimax" and not self._config.tts.voice_id:
+                    logger.warning("TTS(minimax 后端)已启用但未配置全局 voice_id(tts.voice_id)")
+                logger.info(
+                    f"TTS 服务已创建: backend={self._config.tts.backend} {self._config.tts.base_url}"
+                )
             except Exception as e:
                 self._tts_service = None
                 logger.warning(f"TTS 服务初始化失败, 已降级: {e}")

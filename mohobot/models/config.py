@@ -176,16 +176,28 @@ class EmotionConfig:
 
 @dataclass
 class TTSConfig:
-    """TTS 语音合成配置(MiniMax t2a_v2 云端 API)。
+    """TTS 语音合成配置(可切换后端: 自建 HTTP 服务 / MiniMax 云端)。
 
-    音色为 MiniMax 克隆音色(voice_id, 一次性克隆动作在 MiniMax 侧完成):
-    全局默认 voice_id, 每 bot 可用 BotConfig.tts_voice_id 覆盖(留空用全局)。
-    队列/热同步语义同前: 除 queue_maxsize(重启生效)外, 其余字段经
-    TTSService.sync_config 原位热同步(WebUI 保存即生效)。
+    backend="http"(默认): 自建 HTTP 合成服务(POST {base_url}/tts,
+    Bearer 鉴权, {"text":...} → wav 字节流), 本地 ffmpeg 转 mp3 后发送。
+    backend="minimax": MiniMax t2a_v2 云端合成(保留仅下线, 改 backend 即切回),
+    音色为 MiniMax 克隆音色, 全局 voice_id + 每 bot BotConfig.tts_voice_id 覆盖。
+
+    队列/热同步语义: 除 queue_maxsize(重启生效)外, 其余字段经
+    TTSService.sync_config 原位热同步(WebUI 保存即生效, 含后端切换)。
     """
     enabled: bool = False
-    base_url: str = "https://api.minimax.cn"   # 国内站; 国际站 https://api.minimaxi.com
-    api_key: str = ""                          # MOHOBOT_MINIMAX_API_KEY 环境变量兜底
+    # http = 自建 HTTP 服务(默认); minimax = MiniMax 云端(保留仅下线)
+    backend: str = "http"
+    base_url: str = "http://127.0.0.1:9890"
+    api_key: str = ""                          # Bearer token; MOHOBOT_TTS_API_KEY 环境变量兜底
+    # 单飞行队列: 串行合成控费控速, 队列满时丢最新(新请求直接放弃)
+    queue_maxsize: int = 16
+    timeout: int = 60                # 单次合成超时(秒)
+    # http 后端: 服务端返回 wav, 本地 ffmpeg 转 mp3 后发送(NapCat 兼容性已验证;
+    # ffmpeg 不可用/转换失败自动降级发原始 wav)。仅 http 后端生效。
+    convert_to_mp3: bool = True
+    # ── 以下仅 backend=minimax 时生效 ─────────────────────────
     model: str = "speech-2.8-hd"               # speech-2.8-hd / speech-2.8-turbo
     voice_id: str = ""                         # 全局默认音色(如 ltyclone01)
     speed: float = 1.0
@@ -194,9 +206,6 @@ class TTSConfig:
     sample_rate: int = 32000
     bitrate: int = 128000
     format: str = "mp3"
-    # 单飞行队列: 串行合成控费控速, 队列满时丢最新(新请求直接放弃)
-    queue_maxsize: int = 16
-    timeout: int = 60                # 单次合成超时(秒); 云端同步合成一般几秒
     # LLM 自动朗读的系统提示词模板(开启 TTS 的 bot 注入)
     tts_prompt_template: str = (
         "\n\n语音标注规则：如果你想说一句适合朗读出来的话（例如问候、感叹、俏皮话），"
@@ -415,8 +424,14 @@ class GlobalConfig:
             ),
             tts=TTSConfig(
                 enabled=bool(tts_raw.get("enabled", False)),
-                base_url=str(tts_raw.get("base_url", "https://api.minimax.cn") or "https://api.minimax.cn"),
+                backend=(str(tts_raw.get("backend", "http") or "http").strip().lower()
+                         if str(tts_raw.get("backend", "http") or "http").strip().lower() in ("http", "minimax")
+                         else "http"),
+                base_url=str(tts_raw.get("base_url", "http://127.0.0.1:9890") or "http://127.0.0.1:9890"),
                 api_key=str(tts_raw.get("api_key", "") or ""),
+                queue_maxsize=max(1, int(tts_raw.get("queue_maxsize", 16))),
+                timeout=max(5, int(tts_raw.get("timeout", 60))),
+                convert_to_mp3=bool(tts_raw.get("convert_to_mp3", True)),
                 model=str(tts_raw.get("model", "speech-2.8-hd") or "speech-2.8-hd"),
                 voice_id=str(tts_raw.get("voice_id", "") or ""),
                 speed=float(tts_raw.get("speed", 1.0)),
@@ -425,8 +440,6 @@ class GlobalConfig:
                 sample_rate=int(tts_raw.get("sample_rate", 32000)),
                 bitrate=int(tts_raw.get("bitrate", 128000)),
                 format=str(tts_raw.get("format", "mp3") or "mp3"),
-                queue_maxsize=max(1, int(tts_raw.get("queue_maxsize", 16))),
-                timeout=max(5, int(tts_raw.get("timeout", 60))),
                 tts_prompt_template=(
                     str(tts_raw.get("tts_prompt_template", "") or "").strip()
                     or TTSConfig().tts_prompt_template
@@ -548,8 +561,12 @@ class GlobalConfig:
             },
             "tts": {
                 "enabled": self.tts.enabled,
+                "backend": self.tts.backend,
                 "base_url": self.tts.base_url,
                 "api_key": self.tts.api_key,
+                "queue_maxsize": self.tts.queue_maxsize,
+                "timeout": self.tts.timeout,
+                "convert_to_mp3": self.tts.convert_to_mp3,
                 "model": self.tts.model,
                 "voice_id": self.tts.voice_id,
                 "speed": self.tts.speed,
@@ -558,8 +575,6 @@ class GlobalConfig:
                 "sample_rate": self.tts.sample_rate,
                 "bitrate": self.tts.bitrate,
                 "format": self.tts.format,
-                "queue_maxsize": self.tts.queue_maxsize,
-                "timeout": self.tts.timeout,
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
@@ -671,8 +686,12 @@ class GlobalConfig:
             },
             "tts": {
                 "enabled": self.tts.enabled,
+                "backend": self.tts.backend,
                 "base_url": self.tts.base_url,
                 "api_key": self.tts.api_key,
+                "queue_maxsize": self.tts.queue_maxsize,
+                "timeout": self.tts.timeout,
+                "convert_to_mp3": self.tts.convert_to_mp3,
                 "model": self.tts.model,
                 "voice_id": self.tts.voice_id,
                 "speed": self.tts.speed,
@@ -681,8 +700,6 @@ class GlobalConfig:
                 "sample_rate": self.tts.sample_rate,
                 "bitrate": self.tts.bitrate,
                 "format": self.tts.format,
-                "queue_maxsize": self.tts.queue_maxsize,
-                "timeout": self.tts.timeout,
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,

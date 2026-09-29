@@ -19,7 +19,7 @@
 - **Web 管理面板** — FastAPI + SSE 实时日志流、文件系统浏览器、配置在线编辑、统计看板
 - **可配置拦截器** — 指令拦截（`/` 开头）、关键词拦截（预设回复）
 - **私聊自动回复过滤** — QQ 自动回复（`[自动回复]` 前缀，或同一用户连续 3 条相同文本且间隔 < 5 分钟）静默忽略：不回复、不记上下文，归档保留（全局开关，默认开）
-- **TTS 语音（MiniMax 云端 API）** — LLM 回复自动朗读（模型自标 `<tts>` 句）+ `/tts` 指令直读，per-bot 克隆音色覆盖，单飞行队列、队列满丢最新，合成失败降级纯文本，字符计费入用量统计
+- **TTS 语音（可切换后端）** — 自建 HTTP 合成（默认）/ MiniMax 云端（仅下线）；LLM 回复自动朗读（模型自标 `<tts>` 句，模糊识别容错）+ `/tts` 指令直读，单飞行队列、队列满丢最新，失败降级纯文本，字符计费入用量统计
 
 ## 🏗️ 技术栈
 
@@ -324,41 +324,47 @@ music_knowledge:
     category: "Category:洛天依歌曲"
 ```
 
-## 🔊 TTS 语音（MiniMax 云端 API）
+## 🔊 TTS 语音（可切换后端：自建 HTTP / MiniMax）
 
-基于 [MiniMax](https://www.minimaxi.com/) `t2a_v2` 同步合成接口（音色为 MiniMax 克隆音色，克隆动作在 MiniMax 侧一次性完成）把文字转成语音发送。两条通路：
+把文字转成语音发送，支持两种合成后端（`tts.backend` 配置切换，WebUI 保存即热切换）：
 
-- **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注一句适合朗读的话（可省略，尽量 ≤20 字；超长时截到第一个句末标点，多标注取第一个，忘写闭标签自动容错）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后取出标注句经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。
+- **`http`（默认，当前启用）**：自建 HTTP 合成服务 —— `POST {base_url}/tts`（Bearer 鉴权，`{"text": ...}`）→ wav 字节流，本地 ffmpeg 转 mp3 后发送（NapCat 兼容性已验证；ffmpeg 不可用/转换失败自动降级发原始 wav）。
+- **`minimax`（保留仅下线）**：MiniMax `t2a_v2` 云端合成，音色为 MiniMax 克隆音色（voice_id），全局默认 + 每 bot `tts_voice_id` 覆盖（仅此后端生效；http 后端音色由服务端固定）。
+
+两条通路（与后端无关）：
+
+- **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注一句适合朗读的话（可省略，尽量 ≤20 字；超长时截到第一个句末标点，多标注取第一个非空，忘写闭标签自动容错）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后取出标注句经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。标签支持**模糊识别**：`< tts >` 空格、`<voice>/<speech>/<say>` 别名（大小写不敏感）、`【tts】/[tts]` 方括号；带属性或 `<ttsx>` 等不误判，正文 `a < b` 原样透传。
 - **`/tts <文本>` 指令**（群聊多 bot 由 bot_id 最小者响应）：文本直接转语音；非管理员限 30 字 + 120 秒冷却（全局配置可改），管理员不限。
 
-**并发与计费**：全局 FIFO 队列单飞行串行（控费控速）；队列满（上限可配，默认 16）**丢弃最新**请求。每次成功合成把 `usage_characters` 记入用量统计（`module="tts"`，按 bot 维度），WebUI 用量页可见。
+**并发与用量**：全局 FIFO 队列单飞行串行；队列满（上限可配，默认 16）**丢弃最新**请求。每次成功合成把字符数记入用量统计（`module="tts"`，按 bot 维度），WebUI 用量页可见。
 
-**音色粒度**：全局默认 `voice_id`，每 bot 可用 BotConfig `tts_voice_id` 覆盖（留空用全局）——不同 bot 可以用不同克隆音色。
+**WebUI「🔊 TTS 语音」独立板块**：服务与队列状态（后端/配置完整度/当前合成/队列深度/成功·失败·丢弃·字符计数，5 秒自动刷新）+ 合成配置表单（后端切换、API Key 掩码、超时、mp3 转码开关、队列上限、指令限制、标注提示词模板、MiniMax 参数组）+ **测试合成**按钮（绕过队列直调后端，显示延迟并可在浏览器试听）。
 
-**WebUI「🔊 TTS 语音」独立板块**（与模型配置同级）：服务与队列状态（配置完整度/当前合成/队列深度/成功·失败·丢弃·字符计数，5 秒自动刷新）+ 合成配置表单（API Key 掩码、模型、音色、语速/音量/音调、采样率/码率/格式、超时、队列上限、指令限制、标注提示词模板）。保存后除队列上限外**全部热生效**。
-
-**配置**（WebUI 独立板块可编辑；API Key 也可用环境变量 `MOHOBOT_MINIMAX_API_KEY` 兜底）：
+**配置**（WebUI 独立板块可编辑；API Key/Token 也可用环境变量 `MOHOBOT_TTS_API_KEY` 兜底）：
 
 ```yaml
 tts:
   enabled: true
-  base_url: "https://api.minimax.cn"   # 国内站; 国际站 https://api.minimaxi.com
-  api_key: "你的 MiniMax API Key"       # 或环境变量 MOHOBOT_MINIMAX_API_KEY
-  model: "speech-2.8-hd"               # speech-2.8-hd / speech-2.8-turbo
-  voice_id: "ltyclone01"               # 全局默认克隆音色
+  backend: "http"                      # http=自建服务(默认); minimax=云端(仅下线)
+  base_url: "http://127.0.0.1:9890"    # 自建服务地址
+  api_key: "Bearer token"              # 或环境变量 MOHOBOT_TTS_API_KEY
+  convert_to_mp3: true                 # http 后端: wav → 本地 ffmpeg 转 mp3
+  queue_maxsize: 16
+  timeout: 60
+  cmd_max_chars: 30
+  cmd_cooldown: 120
+  # ── 以下仅 backend=minimax 时生效 ──
+  model: "speech-2.8-hd"
+  voice_id: "ltyclone01"
   speed: 1.0
   vol: 1.0
   pitch: 0
   sample_rate: 32000
   bitrate: 128000
   format: "mp3"
-  queue_maxsize: 16
-  timeout: 60
-  cmd_max_chars: 30
-  cmd_cooldown: 120
 ```
 
-实现在 `mohobot/services/minimax_tts.py`（t2a_v2 客户端 + 队列）、`mohobot/utils/tts_marker.py`（流式 `<tts>` 标记剥离）。
+实现在 `mohobot/services/tts.py`（HttpTTSClient + 可切换后端的 TTSService + ffmpeg 转码）、`mohobot/services/minimax_tts.py`（MiniMax 客户端，保留仅下线）、`mohobot/utils/tts_marker.py`（流式标签模糊剥离）。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 

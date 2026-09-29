@@ -204,7 +204,7 @@ def test_minimax_client_configured() -> None:
 
 
 def test_tts_queue_drop_newest() -> None:
-    from mohobot.services.minimax_tts import TTSJob, TTSService
+    from mohobot.services.tts import TTSJob, TTSService
 
     cfg = TTSConfig(enabled=True, queue_maxsize=2)
     svc = TTSService(cfg)  # 不 start worker, 只测队列
@@ -244,7 +244,7 @@ def _make_event(user_id: int = 10001, group_id: int = 20001) -> GroupMessageEven
 
 def _make_handler(bot_cfg: BotConfig, tts_cfg: TTSConfig, admins=None):
     from mohobot.interceptors.command_handler import CommandHandler
-    from mohobot.services.minimax_tts import TTSService
+    from mohobot.services.tts import TTSService
 
     ws = FakeWS(bot_cfg)
     svc = TTSService(tts_cfg)  # 不 start worker
@@ -371,22 +371,21 @@ def test_tts_config_roundtrip() -> None:
 
 def test_sync_config_hot_update() -> None:
     """TTSService.sync_config: 字段原位拷入运行对象 + 客户端参数热同步。"""
-    from mohobot.services.minimax_tts import TTSService
+    from mohobot.services.tts import TTSService
 
     new_cfg = TTSConfig(
-        enabled=True, base_url="https://api.minimaxi.com", api_key="sk-new",
-        model="speech-2.8-turbo", voice_id="new_voice", speed=0.9,
+        enabled=True, base_url="http://10.0.0.9:9890", api_key="tok-new",
+        timeout=90, convert_to_mp3=False,
     )
-    svc = TTSService(TTSConfig())  # 旧 cfg(默认): 已构造 client
+    svc = TTSService(TTSConfig())  # 旧 cfg(默认 http): 已构造 client
     svc.sync_config(new_cfg)
-    assert svc.cfg.base_url == new_cfg.base_url
-    assert svc.cfg.voice_id == "new_voice"
-    assert svc.cfg.api_key == "sk-new"
-    # 客户端参数已热同步
-    assert svc._client._model == "speech-2.8-turbo"
-    assert svc._client._voice_id == "new_voice"
-    assert svc._client._api_key == "sk-new"
-    assert abs(svc._client._voice_setting["speed"] - 0.9) < 1e-9
+    assert svc.cfg.base_url == "http://10.0.0.9:9890"
+    assert svc.cfg.api_key == "tok-new"
+    assert svc.cfg.convert_to_mp3 is False
+    # http 客户端参数已原位热同步
+    assert svc._client._base_url == "http://10.0.0.9:9890"
+    assert svc._client._api_key == "tok-new"
+    assert svc._client._timeout == 90.0
 
 
 # ── 7. 模糊识别(空格/别名/方括号/纯标签) ──────────────────────
@@ -488,3 +487,147 @@ def test_fuzzy_streaming_math_never_flushes_wrong() -> None:
     rest, tts = f.finish()
     assert (collected + rest) == "a < b 和 c > d 读"
     assert tts == "读"
+
+
+# ── 8. 自建 HTTP 后端(http)与后端切换 ─────────────────────────
+
+
+async def test_http_client_ok() -> None:
+    import httpx
+    from mohobot.services.tts import HttpTTSClient
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["auth"] = request.headers.get("authorization", "")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=b"RIFFxxxxwavdata")
+
+    factory = lambda **kw: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), timeout=kw.get("timeout", 5)
+    )
+    c = HttpTTSClient("http://127.0.0.1:9890", "tok-abc", timeout=30, http_client_factory=factory)
+    audio, chars = await c.synthesize("你好", voice_id="ignored")
+    assert audio == b"RIFFxxxxwavdata"
+    assert chars == len("你好")
+    assert captured["path"] == "/tts"
+    assert captured["auth"] == "Bearer tok-abc"
+    assert captured["body"] == {"text": "你好"}
+    await c.close()
+
+
+async def test_http_client_errors() -> None:
+    import httpx
+    from mohobot.services.tts import HttpTTSClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "错" in body.get("text", ""):
+            return httpx.Response(401, text="unauthorized")
+        if "json" in body.get("text", ""):
+            # 200 但返回 JSON 错误体 → 不当音频
+            return httpx.Response(200, json={"error": "boom"})
+        if "空" in body.get("text", ""):
+            return httpx.Response(200, content=b"")
+        return httpx.Response(200, content=b"RIFFok")
+
+    factory = lambda **kw: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), timeout=kw.get("timeout", 5)
+    )
+    c = HttpTTSClient("http://127.0.0.1:9890", "tok", http_client_factory=factory)
+    for text in ("错误文本", "json错误体", "空响应"):
+        audio, chars = await c.synthesize(text)
+        assert audio is None and chars == 0, text
+    audio, chars = await c.synthesize("正常")
+    assert audio == b"RIFFok"
+    await c.close()
+
+
+def test_backend_selection_and_hot_switch() -> None:
+    """TTSService 按 cfg.backend 构造客户端; sync_config 热切换后端。"""
+    from mohobot.services.minimax_tts import MinimaxTTSClient
+    from mohobot.services.tts import HttpTTSClient, TTSService
+
+    svc = TTSService(TTSConfig(backend="http"))
+    assert isinstance(svc._client, HttpTTSClient)
+    # 切到 minimax
+    svc.sync_config(TTSConfig(backend="minimax", voice_id="v1"))
+    assert isinstance(svc._client, MinimaxTTSClient)
+    assert svc.cfg.backend == "minimax"
+    # 切回 http
+    svc.sync_config(TTSConfig(backend="http", base_url="http://10.0.0.9:9890"))
+    assert isinstance(svc._client, HttpTTSClient)
+    assert svc._client._base_url == "http://10.0.0.9:9890"
+
+
+def test_tts_config_backend_roundtrip() -> None:
+    cfg = GlobalConfig()
+    cfg.tts = TTSConfig(
+        enabled=True, backend="http", base_url="http://180.171.52.55:9890",
+        api_key="tok-xyz", convert_to_mp3=False,
+    )
+    with tempfile.TemporaryDirectory(prefix="tts_be_") as tmp:
+        path = Path(tmp) / "global.yaml"
+        cfg.save(path)
+        loaded = GlobalConfig.load(path)
+    assert loaded.tts.backend == "http"
+    assert loaded.tts.base_url == "http://180.171.52.55:9890"
+    assert loaded.tts.api_key == "tok-xyz"
+    assert loaded.tts.convert_to_mp3 is False
+    # 非法 backend 回落 http
+    cfg2 = GlobalConfig()
+    cfg2.tts = TTSConfig(backend="http")
+    with tempfile.TemporaryDirectory(prefix="tts_be2_") as tmp:
+        path = Path(tmp) / "global.yaml"
+        cfg2.save(path)
+        text = path.read_text(encoding="utf-8").replace("backend: http", "backend: bogus")
+        path.write_text(text, encoding="utf-8")
+        loaded2 = GlobalConfig.load(path)
+    assert loaded2.tts.backend == "http"
+
+
+async def test_worker_mp3_convert_fallback() -> None:
+    """worker: 转码成功发 mp3 字节; 转码失败降级发原始 wav。"""
+    from mohobot.services.tts import TTSJob, TTSService
+
+    class FakeClient:
+        def __init__(self, audio):
+            self.audio = audio
+        def sync_config(self, cfg): pass
+        async def synthesize(self, text, voice_id=None):
+            return self.audio, len(text)
+        async def close(self): pass
+
+    sent = []
+    class FakeWS:
+        async def send_group_msg(self, bot_id, chat_id, msg):
+            sent.append(msg)
+
+    svc = TTSService(TTSConfig(enabled=True, convert_to_mp3=True))
+    svc.set_ws(FakeWS())
+
+    async def fake_to_mp3(wav):
+        return b"MP3BYTES" if wav == b"WAVSRC" else None
+
+    svc._to_mp3 = fake_to_mp3
+
+    # 转码成功
+    svc._client = FakeClient(b"WAVSRC")
+    await svc._process(TTSJob("b", "group", "1", "hi"))
+    f = sent[-1][0]["data"]["file"]
+    assert f.startswith("base64://")
+    import base64 as b64mod
+    assert b64mod.b64decode(f[len("base64://"):]) == b"MP3BYTES"
+
+    # 转码失败 → 降级 wav
+    svc._to_mp3 = lambda wav: _none_async(wav)
+    await svc._process(TTSJob("b", "group", "1", "hi"))
+    f = sent[-1][0]["data"]["file"]
+    assert b64mod.b64decode(f[len("base64://"):]) == b"WAVSRC"
+    assert svc.stats["done"] == 2
+
+def _none_async(wav):
+    async def inner():
+        return None
+    return inner()

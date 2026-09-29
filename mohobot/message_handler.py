@@ -1214,7 +1214,7 @@ class MessageHandler:
         """
         if not tts_text or not self._tts_active(bot_id):
             return
-        from mohobot.services.minimax_tts import TTSJob
+        from mohobot.services.tts import TTSJob
         if isinstance(event, GroupMessageEvent):
             chat_type, chat_id = "group", str(event.group_id)
         else:
