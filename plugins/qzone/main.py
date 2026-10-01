@@ -1198,14 +1198,15 @@ class Plugin:
         if bm is not None:
             group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
             if group.isdigit():
-                min_bot = bm.min_bot_for_group(int(group))
-                if min_bot is not None and min_bot != bot_id:
-                    return
+                bots = bm.bots_in_group(int(group))
+                if bots and bot_id != bots[0]:
+                    return  # 只由通知群内(排序)首个在线 bot 扫描, 避免重复
         for item in expired:
             if review.set_status(item["id"], "publishing") is None:
                 continue
             await review.save()
             await self._publish_reviewed_item(item, reason="超时自动通过")
+            await asyncio.sleep(random.uniform(3.0, 6.0))  # 积压补发时错开, 防风控/刷屏
 
     def _notify_group_id(self) -> int | None:
         group = str(self._cfg("auto_publish_notify_group", "") or "").strip()
