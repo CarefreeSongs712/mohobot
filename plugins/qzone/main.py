@@ -1187,12 +1187,15 @@ class Plugin:
         只由通知群内最小 bot_id 执行(避免多 bot 重复扫描/发布)。
         """
         if not bool(self._cfg("auto_publish_review", True)):
+            logger.info(f"[qzone][{bot_id}] 审核扫描: 开关关闭, 跳过")
             return
         review = self._get_review_store()
         ttl = max(60, int(self._cfg("auto_publish_review_timeout_sec", 7200)))
         expired = review.expired(ttl)
         if not expired:
+            logger.info(f"[qzone][{bot_id}] 审核扫描: 无超时条目(pending={len(review.pending())})")
             return
+        logger.info(f"[qzone][{bot_id}] 审核扫描: {len(expired)} 条超时, 准备补发")
         ws = self._ws_server
         bm = getattr(ws, "_bot_manager", None) if ws is not None else None
         if bm is not None:
