@@ -1190,6 +1190,7 @@ class Plugin:
             logger.debug(f"[qzone][{bot_id}] 审核扫描: 开关关闭, 跳过")
             return
         review = self._get_review_store()
+        await review.ensure()
         ttl = max(60, int(self._cfg("auto_publish_review_timeout_sec", 7200)))
         expired = review.expired(ttl)
         if not expired:
@@ -1247,6 +1248,7 @@ class Plugin:
             return (True, "用法: /说说过审 <编号>")
         item_id = int(tokens[1].lstrip("#"))
         review = self._get_review_store()
+        await review.ensure()
         item = review.get(item_id)
         if item is None:
             return (True, f"#{item_id} 不存在")
@@ -1263,6 +1265,7 @@ class Plugin:
             return (True, "用法: /说说驳回 <编号>")
         item_id = int(tokens[1].lstrip("#"))
         review = self._get_review_store()
+        await review.ensure()
         item = review.set_status(item_id, "rejected")
         if item is None:
             got = review.get(item_id)

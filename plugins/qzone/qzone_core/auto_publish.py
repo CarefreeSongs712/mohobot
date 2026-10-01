@@ -214,6 +214,10 @@ class ReviewStore:
         except Exception as e:
             logger.warning(f"[qzone] 审核队列保存失败: {e}")
 
+    async def ensure(self) -> None:
+        """公开加载入口 — 同步读方法(get/pending/expired/set_status)前必须先调用。"""
+        await self._ensure()
+
     async def add(self, bot_id: str, text: str, topic: str | None) -> int:
         """入队一条待审说说, 返回编号。"""
         await self._ensure()
