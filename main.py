@@ -168,7 +168,8 @@ class MohobotApplication:
 
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
-            data_dir=self._config.data_dir,
+            # 绝对路径: 插件内 data 目录按进程 cwd 解析, 启动 cwd 不对会读错文件
+            data_dir=str(Path(self._config.data_dir).resolve()),
         )
         self._plugin_system.set_task_supervisor(self._task_supervisor)
         self._plugin_system.set_song_matcher(self._song_matcher)
