@@ -154,6 +154,7 @@ class WebPanel:
         restart_callback=None,
         emotion_manager=None,
         tts_service=None,
+        config_update_callback=None,
     ):
         self._host = host
         self._port = port
@@ -192,6 +193,7 @@ class WebPanel:
         self._restart_callback = restart_callback
         self._emotion_manager = emotion_manager
         self._tts_service = tts_service
+        self._config_update_callback = config_update_callback
 
         self._app = FastAPI(title="Mohobot Web Panel")
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
@@ -210,6 +212,14 @@ class WebPanel:
 
         # Forward loguru messages to SSE subscribers (best-effort)
         self._install_log_sink()
+
+    async def _sync_runtime_config(self, config) -> None:
+        if self._config_update_callback is not None:
+            await self._config_update_callback(config)
+        elif self._llm_service is not None:
+            sync = getattr(self._llm_service, "sync_config", None)
+            if sync is not None:
+                await sync(config)
 
     # ── Log forwarding to SSE ─────────────────────────────────
 
@@ -303,6 +313,15 @@ class WebPanel:
                 finally:
                     await audit_logger.close()
             return response
+
+        @app.middleware("http")
+        async def authenticate_api(request: Request, call_next):
+            if (request.url.path.startswith("/api/")
+                    and request.url.path not in {"/api/login", "/api/logs/stream"}
+                    and request.method != "OPTIONS"):
+                if not await _verify_token(request):
+                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            return await call_next(request)
 
         @app.post("/api/login")
         async def login(req: LoginRequest):
@@ -486,6 +505,7 @@ class WebPanel:
                 ]
 
             cfg.save(self._config_path)
+            await self._sync_runtime_config(cfg)
             # 热同步上下文压缩配置(立即生效, 无需重启)
             if self._context_manager is not None:
                 self._context_manager.set_trim_config(
@@ -571,6 +591,7 @@ class WebPanel:
 
         @app.post("/api/bots/{bot_id}/unbind")
         async def unbind_bot_qq(bot_id: str, request: Request):
+            await _require_auth(request)
             bot_id = self._safe_id(bot_id, "bot_id")
             if not self._bot_manager:
                 raise HTTPException(status_code=500, detail="Bot 管理器不可用")
@@ -684,6 +705,7 @@ class WebPanel:
                 cfg.llm.models = [str(m).strip() for m in data["models"] if str(m).strip()]
 
             cfg.save(self._config_path)
+            await self._sync_runtime_config(cfg)
             logger.info("Web panel: LLM model config updated")
             return {"status": "ok"}
 
@@ -742,6 +764,7 @@ class WebPanel:
                     continue
                 setattr(cfg.tts, f.name, _coerce(data[f.name], f))
             cfg.save(self._config_path)
+            await self._sync_runtime_config(cfg)
             note = ""
             if self._tts_service is not None:
                 # 原位热同步(与 main 持有的 GlobalConfig.tts 同一对象):

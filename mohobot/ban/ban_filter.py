@@ -1,10 +1,8 @@
 """封禁拦截器 — 静默拦截被禁用户消息 + 管理员封禁命令。
 
-放拦截链最前(在命令/关键词/插件之前), 被禁用户的所有消息
-(普通聊天/命令/插件触发)一律静默丢弃。
-命令(仅 admins 可执行): /ban /ban-all /pass /pass-all
-  /dec-ban /dec-ban-all /dec-pass /dec-pass-all /ban-reset /banlist
-  /ban-enable /ban-disable /ban-help
+消息管线在归档后先调用 precheck, 在观察钩子/感知/合并回复/图片/LLM 前
+静默丢弃被禁用户的消息(包括无文本消息)。封禁命令留给原拦截链执行:
+管理命令仅 admins 可执行, banlist/ban-help 对所有人公开。
 """
 
 from __future__ import annotations
@@ -114,6 +112,30 @@ class BanInterceptor(Interceptor):
             return f"group:{event.group_id}"
         return f"private:{event.user_id}"
 
+    # ── 消息策略(不执行命令) ───────────────────────────────────
+
+    def is_ban_command(self, event: MessageEvent) -> bool:
+        """识别封禁系统命令; 权限校验仍由 intercept 负责。"""
+        cmd_name, _ = self._parse_command(self._extract_text(event))
+        return cmd_name in BAN_COMMANDS
+
+    async def precheck(self, event: MessageEvent) -> bool:
+        """归档后检查是否应静默丢弃, 无文本消息也查名单。
+
+        所有已识别的封禁命令沿用原例外: 管理员可管理, 查询/帮助公开,
+        非管理员管理操作由原拦截链返回权限拒绝; 此处不产生回复或执行动作。
+        """
+        if not self._enabled or self.is_ban_command(event):
+            return False
+        session = self._session_key(event)
+        banned, reason = await self._store.is_banned(session, str(event.user_id))
+        if banned:
+            logger.debug(
+                f"屏蔽被禁用户消息: user={event.user_id} "
+                f"session={session} reason={reason}"
+            )
+        return banned
+
     # ── 入口 ───────────────────────────────────────────────────
 
     async def intercept(
@@ -121,12 +143,11 @@ class BanInterceptor(Interceptor):
         bot_id: str,
         event: MessageEvent,
         raw_event: dict[str, Any],
+        *,
+        check_ban: bool = True,
     ) -> tuple[bool, str | list[dict[str, Any]] | None]:
-        text = self._extract_text(event)
-        if not text:
-            return (False, None)
-
-        cmd_name, rest = self._parse_command(text)
+        """执行封禁命令; 已 precheck 的消息可跳过重复名单查询。"""
+        cmd_name, rest = self._parse_command(self._extract_text(event))
 
         # 1. 封禁命令(管理员执行; 查询类 banlist/ban-help 所有人可用)
         if cmd_name in BAN_COMMANDS:
@@ -140,17 +161,9 @@ class BanInterceptor(Interceptor):
             )
             return (True, reply)
 
-        # 2. 被禁用户 → 静默拦截
-        if self._enabled:
-            banned, reason = await self._store.is_banned(
-                self._session_key(event), str(event.user_id)
-            )
-            if banned:
-                logger.debug(
-                    f"屏蔽被禁用户消息: user={event.user_id} "
-                    f"session={self._session_key(event)} reason={reason}"
-                )
-                return (True, None)
+        # 2. 独立调用仍检查封禁; 消息管线已在前段完成 precheck。
+        if check_ban and await self.precheck(event):
+            return (True, None)
 
         return (False, None)
 

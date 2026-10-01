@@ -102,10 +102,10 @@ async def test_handler_concurrent_messages() -> None:
             self._bot_manager = bm
             self.sent = []
 
-        async def send_group_msg(self, bot_id, group_id, message):
+        async def send_group_msg(self, bot_id, group_id, message, **kw):
             self.sent.append((bot_id, group_id, message))
 
-        async def send_private_msg(self, bot_id, user_id, message):
+        async def send_private_msg(self, bot_id, user_id, message, **kw):
             self.sent.append((bot_id, user_id, message))
 
         async def send_to_bot(self, *a, **kw):

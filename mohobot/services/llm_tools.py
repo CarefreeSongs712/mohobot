@@ -32,6 +32,10 @@ class LLMToolRegistry:
             raise ValueError(f"duplicate LLM tool: {name}")
         self._tools[name] = tool
 
+    def contains(self, name: str) -> bool:
+        """Return whether a plugin registered this exact tool name."""
+        return name in self._tools
+
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema for tool in self._tools.values()]
 
@@ -40,9 +44,12 @@ class LLMToolRegistry:
         if tool is None:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
         try:
-            args = json.loads(arguments) if isinstance(arguments, str) and arguments else (arguments or {})
-            if not isinstance(args, dict):
-                return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except json.JSONDecodeError:
+            return json.dumps({"error": "工具参数必须是有效的 JSON"}, ensure_ascii=False)
+        if not isinstance(args, dict):
+            return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
+        try:
             result = tool.handler(**args)
             if inspect.isawaitable(result):
                 result = await result

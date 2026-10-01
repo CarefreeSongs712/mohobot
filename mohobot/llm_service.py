@@ -9,6 +9,7 @@ import asyncio
 import os
 import time
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -16,7 +17,7 @@ import aiofiles
 from loguru import logger
 from openai import AsyncOpenAI
 
-from mohobot.models.config import GlobalConfig, BotConfig
+from mohobot.models.config import GlobalConfig, BotConfig, LLMConfig
 from mohobot.models.onebot import (
     GroupMessageEvent,
     MessageEvent,
@@ -163,6 +164,11 @@ def _hardcoded_persona(bot_id: str, user_id: int) -> str | None:
 class LLMService:
     """LLM interaction service with prompt assembly and vision support."""
 
+    # Reserved even when disabled/unadvertised: plugins cannot replace built-ins.
+    _BUILTIN_TOOL_NAMES = frozenset({
+        "get_current_time", "get_group_member_info", "anysearch_search",
+    })
+
     def __init__(self, global_config: GlobalConfig, image_cache=None, usage_recorder: UsageRecorder | None = None,
                  song_annotator=None):
         self._cfg = global_config
@@ -176,51 +182,11 @@ class LLMService:
         # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
         # 在发送给 LLM 前把歌曲信息注入用户消息下方(不写入 context)。
         self._song_annotator = song_annotator
-        self._available = False
-
-        api_key = self._cfg.llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
-        vision_key = self._cfg.llm.vision_api_key or os.environ.get("MOHOBOT_VISION_API_KEY", "") or api_key
-        # 情感分析(二次 LLM): 独立密钥可配, 留空回退 chat 客户端
-        emotion_key = self._cfg.llm.emotion_api_key or os.environ.get("MOHOBOT_EMOTION_API_KEY", "")
-
-        # Initialize chat client (lazy init — allow empty key for testing)
-        if api_key:
-            self._chat_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=self._cfg.llm.chat_base_url,
-            )
-            self._available = True
-        else:
-            self._chat_client = None
+        self._retired_clients: list[AsyncOpenAI] = []
+        identities, clients = self._prepare_clients(self._cfg.llm, [])
+        self._install_clients(self._cfg.llm, identities, clients)
+        if not self._available:
             logger.warning("LLM chat API key not configured — LLM calls will fail")
-
-        # Initialize vision client (can be same or different provider)
-        if vision_key and vision_key != api_key:
-            self._vision_client = AsyncOpenAI(
-                api_key=vision_key,
-                base_url=self._cfg.llm.vision_base_url or self._cfg.llm.chat_base_url,
-            )
-        elif self._chat_client:
-            self._vision_client = self._chat_client
-        else:
-            self._vision_client = None
-
-        # 视觉能力可用性: 有 key(含环境变量/回退 chat key)且配置了视觉模型。
-        # 注意: 不能用 self._cfg.llm.vision_api_key 判断——env 变量/回退会被漏掉。
-        self._vision_available = bool(
-            vision_key and self._cfg.llm.vision_model and self._vision_client
-        )
-
-        # 情感分析客户端(独立密钥/地址可配, 缺省复用 chat 客户端)
-        if emotion_key and emotion_key != api_key:
-            self._emotion_client = AsyncOpenAI(
-                api_key=emotion_key,
-                base_url=self._cfg.llm.emotion_base_url or self._cfg.llm.chat_base_url,
-            )
-        elif self._chat_client:
-            self._emotion_client = self._chat_client
-        else:
-            self._emotion_client = None
 
         # System prompt building blocks
         self._tools_schemas: list[dict] = [
@@ -230,27 +196,6 @@ class LLMService:
                     "name": "get_current_time",
                     "description": "获取当前日期和时间",
                     "parameters": {"type": "object", "properties": {}},
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_group_member_info",
-                    "description": "获取群成员信息",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "group_id": {
-                                "type": "integer",
-                                "description": "群号",
-                            },
-                            "user_id": {
-                                "type": "integer",
-                                "description": "QQ 号",
-                            },
-                        },
-                        "required": ["group_id", "user_id"],
-                    },
                 },
             },
             {
@@ -272,13 +217,6 @@ class LLMService:
             },
         ]
 
-        # 插件声明的只读歌曲工具
-        try:
-            from mohobot.services.llm_tools import registry
-            self._tools_schemas.extend(registry.schemas())
-        except Exception as e:
-            logger.warning(f"歌曲工具注册失败: {e}")
-
         # Anysearch 实时联网搜索(未配置 key 时工具自动移除)
         from mohobot.anysearch import AnySearchClient
         self._anysearch_client: AnySearchClient | None = None
@@ -292,17 +230,90 @@ class LLMService:
             self._tools_schemas = [t for t in self._tools_schemas
                                    if t["function"]["name"] != "anysearch_search"]
 
+    @staticmethod
+    def _provider_identities(llm: LLMConfig) -> dict[str, tuple[str, str] | None]:
+        """Resolve keys/URLs, including env and chat fallbacks, for each role."""
+        chat_key = llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
+        vision_key = llm.vision_api_key or os.environ.get("MOHOBOT_VISION_API_KEY", "") or chat_key
+        emotion_key = llm.emotion_api_key or os.environ.get("MOHOBOT_EMOTION_API_KEY", "") or chat_key
+        return {
+            "chat": (chat_key, llm.chat_base_url) if chat_key else None,
+            "vision": (vision_key, llm.vision_base_url or llm.chat_base_url) if vision_key else None,
+            "emotion": (emotion_key, llm.emotion_base_url or llm.chat_base_url) if emotion_key else None,
+        }
+
+    def _prepare_clients(
+        self, llm: LLMConfig, created: list[AsyncOpenAI],
+    ) -> tuple[dict[str, tuple[str, str] | None], dict[str, AsyncOpenAI | None]]:
+        """Build all new clients before publishing; reuse only matching key/URL pairs."""
+        identities = self._provider_identities(llm)
+        reusable = {}
+        for role, identity in getattr(self, "_client_identities", {}).items():
+            client = getattr(self, f"_{role}_client", None)
+            if identity is not None and client is not None:
+                reusable[identity] = client
+        clients = {}
+        for role, identity in identities.items():
+            if identity is None:
+                clients[role] = None
+                continue
+            if identity not in reusable:
+                client = AsyncOpenAI(api_key=identity[0], base_url=identity[1])
+                created.append(client)
+                reusable[identity] = client
+            clients[role] = reusable[identity]
+        return identities, clients
+
+    def _install_clients(self, llm: LLMConfig, identities: dict, clients: dict) -> None:
+        self._client_identities = identities
+        self._chat_client = clients["chat"]
+        self._vision_client = clients["vision"]
+        self._emotion_client = clients["emotion"]
+        self._available = self._chat_client is not None
+        self._vision_available = bool(llm.vision_model and self._vision_client is not None)
+
+    async def sync_config(self, config: GlobalConfig) -> None:
+        """Hot-update only shared config.llm; retire replaced clients until close().
+
+        Model/temperature changes reuse providers. Client construction failure leaves
+        the current LLM config and clients untouched, and closes unpublished clients.
+        """
+        llm = deepcopy(config.llm)
+        created: list[AsyncOpenAI] = []
+        try:
+            identities, clients = self._prepare_clients(llm, created)
+        except Exception:
+            await self._close_clients(created)
+            raise
+
+        # No await in this publication block: config and client references move together.
+        retired = getattr(self, "_retired_clients", [])
+        retained_ids = {id(client) for client in clients.values() if client is not None}
+        retired_ids = {id(client) for client in retired}
+        for role in ("chat", "vision", "emotion"):
+            old = getattr(self, f"_{role}_client", None)
+            if old is not None and id(old) not in retained_ids and id(old) not in retired_ids:
+                retired.append(old)
+                retired_ids.add(id(old))
+        self._cfg.llm = llm
+        self._retired_clients = retired
+        self._install_clients(llm, identities, clients)
+
     def _current_tools_schemas(self) -> list[dict]:
-        """Return built-in plus schemas registered by loaded plugins."""
+        """Advertise executable tools; reserved built-in names always win conflicts."""
+        tools = [
+            tool for tool in self._tools_schemas
+            if tool["function"]["name"] != "get_group_member_info"
+            and (tool["function"]["name"] != "anysearch_search"
+                 or getattr(self, "_anysearch_client", None) is not None)
+        ]
         try:
             from mohobot.services.llm_tools import registry
-            names = {tool["function"]["name"] for tool in self._tools_schemas}
-            return self._tools_schemas + [
-                tool for tool in registry.schemas()
-                if tool["function"]["name"] not in names
-            ]
-        except Exception:
-            return self._tools_schemas
+            names = self._BUILTIN_TOOL_NAMES | {tool["function"]["name"] for tool in tools}
+            tools.extend(tool for tool in registry.schemas() if tool["function"]["name"] not in names)
+        except Exception as exc:
+            logger.warning(f"LLM plugin tool schemas unavailable: {exc}")
+        return tools
 
     async def chat(
         self,
@@ -537,7 +548,7 @@ class LLMService:
                 ],
             })
             for idx, tc_data in sorted(tool_calls_buffer.items()):
-                args_str = tc_data.get("arguments", "{}") or "{}"
+                args_str = tc_data.get("arguments", "{}")
                 result = await self._execute_tool(tc_data["function_name"], args_str)
                 messages.append({
                     "role": "tool",
@@ -1261,16 +1272,13 @@ class LLMService:
     async def _execute_tool(self, func_name: str, args_json: str) -> str:
         """Execute a tool/function call and return the result."""
         try:
-            args = json.loads(args_json) if args_json else {}
-        except json.JSONDecodeError:
-            args = {}
+            args = json.loads(args_json)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "工具参数必须是有效的 JSON"}, ensure_ascii=False)
+        if not isinstance(args, dict):
+            return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
 
-        if func_name.startswith("song_"):
-            from mohobot.services.llm_tools import registry
-            return await registry.execute(func_name, args)
-        if func_name.startswith("song_"):
-            from mohobot.services.llm_tools import registry
-            return await registry.execute(func_name, args_json)
+        # Built-ins win name conflicts, including unadvertised compatibility stubs.
         if func_name == "get_current_time":
             from mohobot.utils.time_utils import format_utc8
             return format_utc8("%Y-%m-%d %H:%M:%S")
@@ -1287,16 +1295,36 @@ class LLMService:
                 return await self._anysearch_client.safe_search(query, max_results=5)
             except Exception as e:
                 return json.dumps({"error": f"搜索失败: {e}"}, ensure_ascii=False)
-        else:
-            return json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
+        from mohobot.services.llm_tools import registry
+        if registry.contains(func_name):
+            return await registry.execute(func_name, args)
+        return json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
+
+    @staticmethod
+    async def _close_clients(clients: list) -> None:
+        """Attempt each distinct client once, even if another client fails to close."""
+        seen = set()
+        for client in clients:
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.warning(f"LLM client close failed: {exc}")
 
     async def close(self) -> None:
-        """Close the HTTP clients."""
-        if self._chat_client:
-            await self._chat_client.close()
-        if self._vision_client and self._vision_client is not self._chat_client:
-            await self._vision_client.close()
-        if self._emotion_client and self._emotion_client is not self._chat_client:
-            await self._emotion_client.close()
-        if self._owns_usage_recorder:
-            await self._usage_recorder.close()
+        """Close current and retired HTTP clients once, deduplicating shared roles."""
+        clients = list(getattr(self, "_retired_clients", []))
+        self._retired_clients = []
+        for role in ("chat", "vision", "emotion"):
+            clients.append(getattr(self, f"_{role}_client", None))
+            setattr(self, f"_{role}_client", None)
+        self._available = False
+        self._vision_available = False
+        self._client_identities = {}
+        await self._close_clients(clients)
+        recorder = getattr(self, "_usage_recorder", None)
+        if getattr(self, "_owns_usage_recorder", False) and recorder is not None:
+            self._owns_usage_recorder = False
+            await recorder.close()

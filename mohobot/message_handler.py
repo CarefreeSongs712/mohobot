@@ -3,9 +3,9 @@
 Flow:
   1. Receive raw OneBot event
   2. Archive to history/ (JSONL)
-  3. Classify: notice/meta → plugin hooks; message → process
-  4. Group gate: only respond if @mentioned, replied-to, or command
-  5. Interceptors run (commands → keywords → plugins)
+  3. Classify: notice/request/meta keep their existing dispatch paths
+  4. Message ban precheck → perception/merged reply/observe → group gate
+  5. Interceptors run in registered order (ban commands keep their exceptions)
   6. Context load → LLM streaming → reply-quote first chunk → subsequent chunks
   7. Save context after streaming completes
 """
@@ -20,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from mohobot.ban.ban_filter import BanInterceptor
 from mohobot.models.onebot import (
     Event,
     GroupMessageEvent,
@@ -39,9 +40,9 @@ class MessageHandler:
     Flow:
       1. Receive raw OneBot event
       2. Archive to history/ (JSONL raw event log)
-      3. Classify: notice/meta → plugin hooks; message → process
-      4. Group gate: only respond if @mentioned, replied-to, or command
-      5. Interceptors run (commands → keywords → plugins)
+      3. Classify: notice/request/meta keep their existing dispatch paths
+      4. Message ban precheck → perception/merged reply/observe → group gate
+      5. Interceptors run in registered order (ban commands keep their exceptions)
       6. Legacy path: Context load → LLM streaming → reply-quote first chunk
       7. Save context after reply completes
     """
@@ -68,7 +69,8 @@ class MessageHandler:
         self._data_dir = data_dir
         self._interceptors: list = []  # Ordered list of interceptors
         self._command_handler = None  # CommandHandler 引用(set_interceptors 时捕获)
-        self._global_config = global_config  # GlobalConfig(戳回复等全局配置读取)
+        self._ban_interceptor = None  # BanInterceptor 引用(归档后只做消息策略检查)
+        self._global_config = global_config  # 与 main/WS/LLM 共用, sync_config 原位更新
         self._writer_registry: dict[str, JSONLWriter] = {}
         # 群合并归档的 message_id 去重窗口: {group_id: OrderedDict[mid, None]}
         self._group_mid_window: dict[Any, OrderedDict] = {}
@@ -87,13 +89,7 @@ class MessageHandler:
         if reply_config is None:
             from mohobot.models.config import ReplyConfig
             reply_config = ReplyConfig()
-        self._segment_reply = reply_config.segment_reply
-        self._seg_min_len = reply_config.segment_min_len
-        self._seg_max_len = reply_config.segment_max_len
-        self._seg_delay_min = reply_config.segment_delay_min
-        self._seg_delay_max = reply_config.segment_delay_max
-        self._reply_quote = reply_config.reply_quote
-        self._stream = reply_config.stream
+        self._sync_reply_config(reply_config)
 
         # Image rate-limiting: track last image time per (bot_id, user_id)
         self._last_image_time: dict[str, float] = {}
@@ -116,9 +112,71 @@ class MessageHandler:
         # (仅内存; 连续 REPEAT_LIMIT 条相同文本且相邻间隔 < REPEAT_WINDOW 秒判定为自动回复)
         self._repeat_state: dict[tuple[str, int], dict] = {}
 
+    def _sync_reply_config(self, reply_config) -> None:
+        """更新构造时复制的回复参数(不能只更新 GlobalConfig.reply)。"""
+        self._segment_reply = reply_config.segment_reply
+        self._seg_min_len = reply_config.segment_min_len
+        self._seg_max_len = reply_config.segment_max_len
+        self._seg_delay_min = reply_config.segment_delay_min
+        self._seg_delay_max = reply_config.segment_delay_max
+        self._reply_quote = reply_config.reply_quote
+        self._stream = reply_config.stream
+
+    def sync_config(self, config) -> None:
+        """由 main 在配置保存后同步运行配置; 保持已有共享对象的身份。
+
+        若传入重新加载的 GlobalConfig, 将字段原位复制到共享对象, 而不是
+        替换 _global_config 引用; 同时刷新回复参数、最近消息上限及命令权限。
+        """
+        shared = getattr(self, "_global_config", None)
+        if shared is None:
+            self._global_config = shared = config
+        elif shared is not config:
+            for name, value in vars(config).items():
+                setattr(shared, name, value)
+
+        reply_config = getattr(shared, "reply", None)
+        if reply_config is not None:
+            self._sync_reply_config(reply_config)
+        self._group_recent_count = max(
+            0, int(getattr(shared, "group_recent_msgs_count", 10))
+        )
+        buffers = getattr(self, "_group_recent_msgs", None)
+        if buffers is not None:
+            if self._group_recent_count == 0:
+                buffers.clear()
+            else:
+                for buf in buffers.values():
+                    del buf[:-self._group_recent_count]
+
+        admins = getattr(shared, "admins", None)
+        command_handler = getattr(self, "_command_handler", None)
+        if command_handler is not None and admins is not None:
+            # CommandHandler 无 sync_config; _is_admin 按字符串查询 set[str]。
+            command_handler._admins = {str(a) for a in admins}
+        ban_interceptor = self._get_ban_interceptor()
+        if ban_interceptor is not None:
+            ban_interceptor.sync_config(
+                enabled=getattr(getattr(shared, "ban", None), "enabled", None),
+                admins=admins,
+            )
+
+    def _get_ban_interceptor(self) -> BanInterceptor | None:
+        """取消息策略拦截器; 兼容 __new__ 构造且只设置拦截链的最小桩。"""
+        interceptor = getattr(self, "_ban_interceptor", None)
+        if interceptor is not None:
+            return interceptor
+        return next(
+            (i for i in getattr(self, "_interceptors", [])
+             if isinstance(i, BanInterceptor)), None
+        )
+
     def set_interceptors(self, interceptors: list) -> None:
         """Set the ordered interceptor chain."""
         self._interceptors = interceptors
+        self._ban_interceptor = next(
+            (i for i in interceptors if isinstance(i, BanInterceptor)), None
+        )
         # 保留 CommandHandler 引用(合并回复按 bot 逐个执行内置命令用)
         from mohobot.interceptors.command_handler import CommandHandler
         self._command_handler = next(
@@ -205,8 +263,8 @@ class MessageHandler:
     def _group_llm_excluded(self, group_id) -> bool:
         """该群是否在 LLM 排除名单(llm_excluded_groups): 命中则不做 LLM 聊天回复。
 
-        配置读取自 GlobalConfig 实例 — WebPanel 保存用 setattr 改同一实例,
-        天然热生效, 无需同步钩子。
+        配置读取自共享 GlobalConfig 实例; 保存后需通过 main 调用 sync_config
+        原位同步, 不能假定 WebPanel 重新加载/保存的配置就是该共享实例。
         """
         cfg = getattr(self, "_global_config", None)
         if cfg is None:
@@ -303,8 +361,8 @@ class MessageHandler:
     _AUTO_REPLY_REPEAT_WINDOW = 300.0  # 秒
 
     def _ignore_auto_reply_enabled(self) -> bool:
-        """开关读取自 GlobalConfig(WebPanel 保存 setattr 同一实例, 天然热生效)。"""
-        return bool(getattr(self._global_config, "ignore_auto_reply", True))
+        """从共享 GlobalConfig 读取开关; main 保存配置后用 sync_config 同步。"""
+        return bool(getattr(getattr(self, "_global_config", None), "ignore_auto_reply", True))
 
     def _is_auto_reply(self, bot_id: str, event: PrivateMessageEvent) -> bool:
         """判定私聊消息是否自动回复(仅私聊路径调用)。
@@ -341,6 +399,15 @@ class MessageHandler:
             f"type={event.message_type}, text='{text_preview}'"
         )
 
+        # 归档已在 handle_event 完成: 在任何观察/感知/合并/图片/LLM 前统一封禁。
+        # 这里只判断消息策略, 不执行命令; 封禁命令跳过旁路消费后交原拦截链。
+        ban_interceptor = self._get_ban_interceptor()
+        if ban_interceptor is not None and await ban_interceptor.precheck(event):
+            return
+        ban_command = (
+            ban_interceptor is not None and ban_interceptor.is_ban_command(event)
+        )
+
         # ── 私聊自动回复过滤: 命中即静默丢弃(不回复/不写上下文/不入库/不走插件) ──
         # 归档已在 handle_event Step 1 落盘(history 保留)。
         if isinstance(event, PrivateMessageEvent) and self._ignore_auto_reply_enabled():
@@ -360,7 +427,7 @@ class MessageHandler:
 
         # ── 环境感知: 每次消息刷新缓存(时间/节假日/农历/节气/群聊环境) ──
         # 供 LLM 回复请求注入, 不写入 context
-        if self._plugins is not None:
+        if not ban_command and self._plugins is not None:
             try:
                 chat_type = self._get_chat_type(event)
                 chat_id = self._get_chat_id(event)
@@ -372,7 +439,7 @@ class MessageHandler:
 
         # ── 群聊多 bot 合并回复指令: 群内多 bot 时只由随机选中的一个 bot 发合并转发 ──
         # (节点发送者署名为各 bot, 内容为各 bot 对该指令的回复, 避免逐条刷屏)
-        if isinstance(event, GroupMessageEvent):
+        if not ban_command and isinstance(event, GroupMessageEvent):
             try:
                 if await self._try_merged_group_reply(bot_id, event, raw):
                     return
@@ -382,7 +449,7 @@ class MessageHandler:
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
         # 插件明确消费时发送回复并结束; 否则继续正常流程。
-        if self._plugins is not None:
+        if not ban_command and self._plugins is not None:
             try:
                 observed_handled, observed_reply = await self._plugins.dispatch_observed(
                     bot_id, event, raw
@@ -396,7 +463,7 @@ class MessageHandler:
 
         # ── Group gate: only respond if @mentioned, replied-to, or command ──
         if isinstance(event, GroupMessageEvent):
-            if not await self._should_respond_to_group(bot_id, event):
+            if not ban_command and not await self._should_respond_to_group(bot_id, event):
                 logger.debug(f"Skipping group message (not mentioned): user={event.user_id}")
                 return
             # ── 全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复 ──
@@ -405,7 +472,7 @@ class MessageHandler:
                 return
 
         # ── Private chat image rate-limiting ──
-        if isinstance(event, PrivateMessageEvent):
+        if not ban_command and isinstance(event, PrivateMessageEvent):
             if await self._check_image_rate_limit(bot_id, event, raw):
                 # Strip images from the message so LLM only sees text
                 if isinstance(event.message, list):
@@ -416,11 +483,18 @@ class MessageHandler:
 
         # ── 图片引用归一化: NapCat 群聊图片常只有 file 文件名/路径而无 url,
         # 通过 OneBot get_image API 换取 base64 → data URI(视觉描述/多模态可用)
-        await self._normalize_image_segments(bot_id, event)
+        # 封禁命令无需取图; 多 bot 去重必须已完成, 才能进入原拦截链执行。
+        if not ban_command:
+            await self._normalize_image_segments(bot_id, event)
 
-        # ── Run interceptor chain ──
+        # ── Run interceptor chain (保持注册顺序, 不前移整条链) ──
         for interceptor in self._interceptors:
-            handled, response = await interceptor.intercept(bot_id, event, raw)
+            if interceptor is ban_interceptor:
+                handled, response = await interceptor.intercept(
+                    bot_id, event, raw, check_ban=False,
+                )
+            else:
+                handled, response = await interceptor.intercept(bot_id, event, raw)
             if handled:
                 if response:
                     await self._send_reply(bot_id, event, response)
@@ -428,13 +502,13 @@ class MessageHandler:
 
         # ── LLM 排除群: 名单内的群不做 LLM 聊天回复, ping 也静默 ──
         # (位于拦截器链之后: 插件命令/内置命令/封禁已正常处理完, 只拦 LLM 链路;
-        # 配置读取自 GlobalConfig 实例, WebPanel 保存后天然热生效)
+        # 从共享 GlobalConfig 读取; main 保存后通过 sync_config 原位同步)
         if isinstance(event, GroupMessageEvent) and self._group_llm_excluded(event.group_id):
             logger.info(f"LLM excluded group {event.group_id}: skip LLM reply (bot={bot_id})")
             return
 
         # ── ping/PONG: 去除首尾空白后完全匹配(忽略大小写), 群聊不 @ 也回复 ──
-        # (群 gate 已放行 ping; 被 ban 用户已被拦截链过滤)
+        # (群 gate 已放行 ping; 被 ban 用户已被前段 precheck 过滤)
         if self._is_ping_text(event):
             await self._send_reply(bot_id, event, "PONG")
             return
@@ -1528,7 +1602,11 @@ class MessageHandler:
                 gt = getattr(inst.__class__, "global_triggers", None)
                 if isinstance(gt, (set, list, tuple)):
                     triggers.update(str(t) for t in gt)
-        is_global = text.startswith(self._GLOBAL_COMMAND_PREFIXES)
+        ban_interceptor = self._get_ban_interceptor()
+        is_global = (
+            (ban_interceptor is not None and ban_interceptor.is_ban_command(event))
+            or text.startswith(self._GLOBAL_COMMAND_PREFIXES)
+        )
         if not is_global:
             # 精确匹配 + 命令+空格参数的前缀匹配(如 "/点歌 白鸟" 命中 "/点歌")
             for t in triggers:

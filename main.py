@@ -106,8 +106,10 @@ class MohobotApplication:
             self._song_matcher = None
             self._song_info_service = None
 
+        self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
         self._llm_service = LLMService(
             global_config=self._config,
+            image_cache=self._image_cache,
             usage_recorder=self._usage_recorder,
             song_annotator=self._make_song_annotator(),
         )
@@ -141,8 +143,6 @@ class MohobotApplication:
             except Exception as e:
                 self._emotion_manager = None
                 logger.warning(f"情感系统初始化失败, 已降级: {e}")
-
-        self._image_cache = ImageCache(cache_dir=f"{self._config.data_dir}/cache")
 
         # TTS 语音合成(可切换后端: 自建 HTTP 服务 / MiniMax 云端)。
         # tts.enabled 未开启/初始化失败 → 降级为 None(正常聊天不受影响)。
@@ -296,6 +296,7 @@ class MohobotApplication:
                 restart_callback=self.restart,
                 emotion_manager=self._emotion_manager,
                 tts_service=self._tts_service,
+                config_update_callback=self.sync_config,
             )
             # Start web panel in background
             self._web_panel_task = self._task_supervisor.create_task(
@@ -377,6 +378,31 @@ class MohobotApplication:
             logger.info(f"审核面板已拉起: 端口 {port} (独立进程, 日志 review/panel.log)")
         except Exception as e:
             logger.warning(f"审核面板拉起失败: {e}")
+
+    async def sync_config(self, config: GlobalConfig) -> None:
+        """Apply mutable settings without replacing shared configuration references."""
+        from copy import deepcopy
+        from dataclasses import fields, is_dataclass
+
+        if self._config is None:
+            return
+        if self._llm_service is not None:
+            await self._llm_service.sync_config(config)
+        for field in fields(config):
+            if field.name == "llm":
+                continue
+            value = getattr(config, field.name)
+            current = getattr(self._config, field.name)
+            if is_dataclass(current):
+                for nested in fields(current):
+                    setattr(current, nested.name, deepcopy(getattr(value, nested.name)))
+            else:
+                setattr(self._config, field.name, deepcopy(value))
+        if self._message_handler is not None:
+            self._message_handler.sync_config(self._config)
+        if self._tts_service is not None:
+            self._tts_service.sync_config(config.tts)
+        logger.info("Runtime configuration synchronized")
 
     async def restart(self) -> None:
         """Restart the service in-process: shutdown then re-startup."""
