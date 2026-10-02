@@ -1,0 +1,119 @@
+{
+  "pages": {
+    "dashboard": {
+      "actions": {
+        "edit_approve": "Изменить и одобрить",
+        "save_only": "Только сохранить",
+        "save_and_approve": "Сохранить и одобрить",
+        "characters": "Персонажи",
+        "assign_character": "Назначить персонажа",
+        "open_navigation": "Открыть меню"
+      },
+      "modal": {
+        "edit_pending": "Изменить стикер на модерации",
+        "character_manager": "Персонажи",
+        "batch_character": "Назначить персонажа"
+      },
+      "messages": {
+        "no_preview": "Нет предпросмотра",
+        "loading_original": "Загрузка оригинала…"
+      },
+      "labels": {
+        "hash": "Хеш"
+      },
+      "alerts": {
+        "pending_saved": "Изменения на модерации сохранены."
+      },
+      "themes": {
+        "title": "Тема",
+        "auto": "Как у хоста",
+        "dark": "Тёмное золото",
+        "light": "Светлая",
+        "minecraft": "Minecraft",
+        "fallout": "Fallout 4",
+        "group_original": "Оригинал",
+        "group_game": "Игровой инвентарь",
+        "save_hint": "Выбор сохранится как тема по умолчанию.",
+        "saved_default": "По умолчанию"
+      },
+      "fields": {
+        "category": "Категория",
+        "scope": "Область действия",
+        "use_count": "Использований",
+        "last_used": "Последнее использование",
+        "favorite": "Избранное",
+        "origin": "Происхождение",
+        "description": "Описание",
+        "tags": "Теги",
+        "scenes": "Когда слать",
+        "created_at": "Время добавления",
+        "target_category": "Целевая категория",
+        "target_scope": "Целевая область",
+        "image_meta": "Изображение",
+        "added": "Способ добавления",
+        "reviewed_at": "Проверено",
+        "source": "URL источника",
+        "add_method_auto": "Автосбор",
+        "add_method_manual": "Вручную",
+        "add_method_llm": "Через LLM",
+        "add_method_api": "Через API",
+        "add_method_external": "Внешний импорт",
+        "add_method_unknown": "Неизвестно",
+        "source_channel_pack": "Набор мемов",
+        "source_channel_github": "GitHub",
+        "source_channel_http_json": "JSON API",
+        "character": "Персонаж",
+        "overlay_text": "Текст на картинке",
+        "id": "ID"
+      },
+      "characters": {
+        "title": "Персонажи",
+        "all": "Все персонажи",
+        "unassigned": "Общая библиотека",
+        "hint": "Персонажей назначаете вы. VLM их не распознаёт.",
+        "manage": "Персонажи",
+        "bar_hint": "Фильтр по персонажу. Управление персонажами — кнопка справа."
+      },
+      "empty": {
+        "no_characters": "Персонажей пока нет."
+      },
+      "placeholders": {
+        "character_key": "Ключ (например neurosama)",
+        "character_name": "Имя (например Neuro-sama)",
+        "overlay_text": "Текст на меме"
+      },
+      "confirm": {
+        "delete_character": "Удалить персонажа {key}? Стикеры останутся, метка снимется."
+      },
+      "sources": {
+        "title": "Внешние источники",
+        "copy_title": "Безопасная локальная копия",
+        "copy_hint": "Изображения проверяются, дедуплицируются и копируются в этот плагин; исходные файлы не изменяются.",
+        "pack": "Импортировать набор",
+        "pack_hint": "ZIP / экспорт .meme-pack",
+        "github": "Репозиторий мемов GitHub",
+        "api": "Внешний JSON-каталог",
+        "preflight": "Предпросмотр",
+        "checking": "Проверка источника…",
+        "format_title": "Поддерживаемый формат набора",
+        "format_hint": "Рекомендуется AstrBot Meme Pack v2: manifest.json + memes/; semantic_metadata.json поддерживается. Также принимаются ZIP с PNG/JPG/GIF/WEBP/BMP; previews/ пропускается.",
+        "license": "Лицензия",
+        "attribution": "Авторство",
+        "capacity_note": "Внешние копии используют отдельный защищённый класс хранения.",
+        "auto_map": "Автосопоставление",
+        "review": "Сначала отправить на проверку",
+        "scope": "Область",
+        "assign_character": "Назначить персонажа набору",
+        "character_placeholder": "Ключ существующего или нового персонажа",
+        "character_hint": "Существующий ключ будет переиспользован; новый создаётся при импорте.",
+        "import": "Импорт",
+        "sync": "Синхронизация",
+        "import_job": "Задание импорта",
+        "available": "Доступные источники",
+        "empty": "Зарегистрированных источников нет.",
+        "forget": "Забыть",
+        "forget_confirm": "Забыть этот источник? Импортированные изображения останутся в библиотеке."
+      }
+    }
+  }
+}

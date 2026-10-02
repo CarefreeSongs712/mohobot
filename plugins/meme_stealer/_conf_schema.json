@@ -1,0 +1,387 @@
+{
+  "steal_meme": {
+    "type": "bool",
+    "default": false,
+    "description": "【偷图】开启表情包偷取",
+    "hint": "开启后监听聊天中的表情包，由视觉模型一次完成内容审核与语义标注后入库。需先配置视觉模型。群里只有 @ 或引用不影响偷图，所有消息都会被观察。也可用 /meme on、/meme off 开关。"
+  },
+  "steal_mode": {
+    "type": "string",
+    "default": "probability",
+    "description": "【偷图】偷图模式",
+    "hint": "probability = 概率模式：每次收到表情包按下方概率决定是否偷取；cooldown = 冷却模式：两次偷取之间至少间隔 30 秒。"
+  },
+  "steal_chance": {
+    "type": "float",
+    "default": 0.3,
+    "description": "【偷图】偷图概率",
+    "hint": "0~1。0 从不偷，1 每次都偷，建议 0.2~0.5。仅概率模式生效；库存超过软上限后会在此基础上继续衰减。",
+    "slider": {
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    }
+  },
+  "audit_required": {
+    "type": "bool",
+    "default": false,
+    "description": "【偷图】自动偷取需人工审核",
+    "hint": "关闭（默认）：视觉模型审核通过即入库。开启：自动偷取的图片先进入 WebUI 的「待审核」区，人工通过后才入库。"
+  },
+  "steal_pool_capacity": {
+    "type": "int",
+    "default": 200,
+    "description": "【偷图】待审核池软上限",
+    "hint": "仅在开启人工审核时生效。待审核数量超过此值后按软上限规则逐步降低采纳率。",
+    "slider": {
+      "min": 10,
+      "max": 2000,
+      "step": 10
+    }
+  },
+  "vlm_context_sender_messages": {
+    "type": "int",
+    "default": 5,
+    "description": "【偷图】标注时附带的发送者消息数",
+    "hint": "视觉模型标注时附带图片发送者此前的消息条数（群聊中只补充不在群消息窗口里的部分），仅帮助理解图片含义，不会写进描述。0 关闭。",
+    "slider": {
+      "min": 0,
+      "max": 50,
+      "step": 1
+    }
+  },
+  "vlm_context_group_messages": {
+    "type": "int",
+    "default": 15,
+    "description": "【偷图】标注时附带的群聊消息数",
+    "hint": "群聊中，视觉模型标注时附带图片发出前的最近群消息条数。聊天记录只在内存中缓存，插件重启后从空开始；本 bot 自己的回复不会出现在里面。0 关闭。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "auto_send_meme": {
+    "type": "bool",
+    "default": true,
+    "description": "【发送】允许会话模型随聊配表情包",
+    "hint": "开启后，bot 要回复的消息按下方概率（同一会话 20 秒冷却）在本轮请求里附带选图提示，会话模型可自行调用 search_meme / send_meme 选图。提示只进本轮请求，不写入对话上下文。也可用 /meme auto_on、/meme auto_off 开关。"
+  },
+  "meme_chance": {
+    "type": "float",
+    "default": 0.2,
+    "description": "【发送】提示配表情包的概率",
+    "hint": "0~1。会话模型仍可自行决定不发；用户主动要表情包时不受此概率限制。",
+    "slider": {
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    }
+  },
+  "meme_candidate_count": {
+    "type": "int",
+    "default": 5,
+    "description": "【发送】每次搜索返回的候选数",
+    "hint": "search_meme 按语义相似度返回给会话模型挑选的候选数。越多越容易挑到合适的，但工具结果越长。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    }
+  },
+  "meme_send_delay": {
+    "type": "float",
+    "default": 1.0,
+    "description": "【发送】回复后延迟（秒）",
+    "hint": "会话模型选好的表情在本条回复全部发出后再等待多久发送。0 表示立即发送。"
+  },
+  "auto_meme_cancel_on_new_message": {
+    "type": "bool",
+    "default": true,
+    "description": "【发送】新消息取消待发送表情",
+    "hint": "开启后，同一会话有新消息到达时取消该 bot 上一轮还没发出的表情，避免旧回复配新图。"
+  },
+  "send_meme_as_qq_sticker": {
+    "type": "bool",
+    "default": true,
+    "description": "【发送】以 QQ 表情包形式发送",
+    "hint": "开启后按自定义表情展示（OneBot 图片段 sub_type=1，NapCat 支持）；关闭后按普通图片发送。"
+  },
+  "send_meme_as_gif": {
+    "type": "bool",
+    "default": false,
+    "description": "【发送】统一转成 GIF 发送",
+    "hint": "开启后发送前统一转为 GIF；关闭时按原文件格式发送。高频发送大图/动图时会有较高瞬时内存占用。"
+  },
+  "vision_model": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】视觉模型",
+    "hint": "用于图片审核与标注的多模态模型名。留空使用 mohobot 全局配置的 llm.vision_model。"
+  },
+  "vision_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】视觉模型接口地址",
+    "hint": "OpenAI 兼容接口地址，如 https://dashscope.aliyuncs.com/compatible-mode/v1。留空沿用 mohobot 全局视觉模型的地址与密钥。"
+  },
+  "vision_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】视觉模型 API Key",
+    "hint": "仅在填写了上面的接口地址时使用；留空地址时自动使用 mohobot 全局密钥（llm.vision_api_key → MOHOBOT_VISION_API_KEY → chat 密钥）。注意：插件配置在面板中明文显示。"
+  },
+  "enable_embedding_search": {
+    "type": "bool",
+    "default": true,
+    "description": "【模型】启用嵌入向量检索",
+    "hint": "语义检索和冗余淘汰依赖文本嵌入（图上文字 + 描述 + 标签 + 适用场景）。未配置嵌入模型时检索降级为关键词（BM25），淘汰退回按使用次数和入库时间。"
+  },
+  "embedding_model": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】嵌入模型",
+    "hint": "OpenAI 兼容 /embeddings 接口的模型名，如 text-embedding-v4、BAAI/bge-m3。mohobot 没有全局嵌入模型，必须在这里填写才能启用语义检索。更换模型后旧向量会自动清空并在后台重建。"
+  },
+  "embedding_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】嵌入模型接口地址",
+    "hint": "留空沿用 mohobot 全局 llm.chat_base_url 与 chat 密钥。"
+  },
+  "embedding_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】嵌入模型 API Key",
+    "hint": "仅在填写了上面的接口地址时使用。"
+  },
+  "embedding_dimensions": {
+    "type": "int",
+    "default": 0,
+    "description": "【模型】嵌入向量维度",
+    "hint": "0 使用模型默认维度。只有支持 dimensions 参数的模型（如 text-embedding-3、text-embedding-v3/v4）才需要填写。"
+  },
+  "meme_query_rewrite": {
+    "type": "bool",
+    "default": false,
+    "description": "【模型】检索前用小模型改写描述",
+    "hint": "开启后，会话模型传给 search_meme 的描述先由小模型改写成表情库的标注风格再检索，可能提高命中率，但每次搜索多一次模型调用。"
+  },
+  "meme_query_rewrite_model": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】改写用小模型",
+    "hint": "留空使用 mohobot 全局 llm.chat_model。建议填写轻量模型以降低延迟。"
+  },
+  "meme_query_rewrite_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】改写模型接口地址",
+    "hint": "留空沿用 mohobot 全局 llm.chat_base_url 与 chat 密钥。"
+  },
+  "meme_query_rewrite_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "【模型】改写模型 API Key",
+    "hint": "仅在填写了上面的接口地址时使用。"
+  },
+  "send_target_whitelist": {
+    "type": "list",
+    "default": [],
+    "description": "【名单】发表情白名单",
+    "hint": "逗号分隔，格式 group:群号 或 user:QQ号。非空时仅名单内目标允许发送表情包。也可用 /meme group send wl add <目标> 管理。"
+  },
+  "send_target_blacklist": {
+    "type": "list",
+    "default": [],
+    "description": "【名单】发表情黑名单",
+    "hint": "逗号分隔，格式 group:群号 或 user:QQ号。与白名单同时生效时按下方优先级判定。"
+  },
+  "send_target_filter_mode": {
+    "type": "string",
+    "default": "whitelist_first",
+    "description": "【名单】发表情名单优先级",
+    "hint": "whitelist_first = 白名单优先（命中白名单即允许，否则再查黑名单）；blacklist_first = 黑名单优先（命中黑名单即拒绝，否则再查白名单）。"
+  },
+  "steal_target_whitelist": {
+    "type": "list",
+    "default": [],
+    "description": "【名单】偷表情白名单",
+    "hint": "逗号分隔，格式 group:群号 或 user:QQ号。非空时仅名单内目标允许自动偷取。"
+  },
+  "steal_target_blacklist": {
+    "type": "list",
+    "default": [],
+    "description": "【名单】偷表情黑名单",
+    "hint": "逗号分隔，格式 group:群号 或 user:QQ号。"
+  },
+  "steal_target_filter_mode": {
+    "type": "string",
+    "default": "whitelist_first",
+    "description": "【名单】偷表情名单优先级",
+    "hint": "whitelist_first = 白名单优先；blacklist_first = 黑名单优先。"
+  },
+  "max_reg_num": {
+    "type": "int",
+    "default": 100,
+    "description": "【存储】通用表情库软上限",
+    "hint": "只计算未收藏、未指定角色的普通表情。超过后偷图采纳率按 (上限/当前数量)^k 衰减；定时任务只淘汰语义冗余且少用的表情，没有冗余时允许超过上限。",
+    "slider": {
+      "min": 10,
+      "max": 2000,
+      "step": 10
+    }
+  },
+  "soft_limit_exponent": {
+    "type": "float",
+    "default": 2.0,
+    "description": "【存储】软上限衰减指数 k",
+    "hint": "超过上限后采纳率 = 原概率 × (上限/当前数量)^k。k 越大衰减越快。",
+    "slider": {
+      "min": 0,
+      "max": 6,
+      "step": 0.5
+    }
+  },
+  "soft_limit_min_chance": {
+    "type": "float",
+    "default": 0.02,
+    "description": "【存储】软上限采纳率下限",
+    "hint": "衰减后的采纳率不会低于此值，保证始终能收到新表情。0 表示库存很大时近似停止偷取。",
+    "slider": {
+      "min": 0,
+      "max": 0.5,
+      "step": 0.01
+    }
+  },
+  "eviction_radius": {
+    "type": "float",
+    "default": 0.0,
+    "description": "【存储】冗余淘汰半径 r0",
+    "hint": "在嵌入向量空间中统计每张表情半径 r0 内的相似表情数。0 表示自动取全库最近邻距离的中位数。可在 WebUI「语义空间」中拖动查看并保存。"
+  },
+  "eviction_min_neighbors": {
+    "type": "int",
+    "default": 3,
+    "description": "【存储】冗余判定邻居数 K",
+    "hint": "半径 r0 内至少有 K 张其他表情才算冗余；只淘汰冗余且使用率不高于中位数的表情。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    }
+  },
+  "eviction_grace_days": {
+    "type": "int",
+    "default": 7,
+    "description": "【存储】新表情保护天数",
+    "hint": "入库未满该天数的表情不参与淘汰。",
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    }
+  },
+  "custom_meme_classification_prompt": {
+    "type": "text",
+    "default": "",
+    "description": "【提示词】视觉模型审核+标注提示词",
+    "hint": "留空使用插件自带提示词（prompts.json）。占位符 {chat_context} 指定聊天记录插入位置，缺省时追加在末尾。输出需包含 approved 字段，否则不做内容审核。"
+  },
+  "meme_hint_prompt": {
+    "type": "text",
+    "default": "",
+    "description": "【提示词】配表情提示词",
+    "hint": "通过门控时附带在本轮请求里的提示。留空使用插件自带提示词。占位符：{search_tool}、{send_tool}、{candidate_count}。"
+  },
+  "meme_query_rewrite_prompt": {
+    "type": "text",
+    "default": "",
+    "description": "【提示词】检索改写提示词",
+    "hint": "开启检索改写时使用。留空使用插件自带提示词。占位符：{description}（会话模型的描述）、{user_message}（用户本轮消息）。"
+  },
+  "external_sources_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "【外部源】启用外部表情包源",
+    "hint": "允许在 WebUI 从 Meme Pack 资源包、GitHub 资源包仓库和外部 JSON API 预检并导入。图片都会复制进本插件目录。"
+  },
+  "external_source_allow_http": {
+    "type": "bool",
+    "default": false,
+    "description": "【外部源】允许明文 HTTP 外部源",
+    "hint": "默认仅允许 HTTPS，并阻止回环、内网、链路本地和保留地址。仅在完全可信的隔离网络中开启。"
+  },
+  "external_source_default_review": {
+    "type": "bool",
+    "default": false,
+    "description": "【外部源】外部导入默认进入待审核池",
+    "hint": "开启后外部源图片先进入待审核区；关闭时经格式、体积和像素校验后直接入库。导入界面可逐次覆盖。"
+  },
+  "external_source_max_items": {
+    "type": "int",
+    "default": 2000,
+    "description": "【外部源】单个外部源最大图片数",
+    "hint": "预检和单次同步最多处理的图片数量（1~20000）。"
+  },
+  "external_source_max_image_bytes": {
+    "type": "int",
+    "default": 33554432,
+    "description": "【外部源】单图字节上限",
+    "hint": "默认 32 MiB。下载和解包都会在写入前检查。"
+  },
+  "external_source_max_archive_bytes": {
+    "type": "int",
+    "default": 1073741824,
+    "description": "【外部源】资源包压缩体积上限",
+    "hint": "默认 1 GiB。"
+  },
+  "external_source_max_uncompressed_bytes": {
+    "type": "int",
+    "default": 4294967296,
+    "description": "【外部源】资源包解压体积上限",
+    "hint": "默认 4 GiB；预检会累计 ZIP 成员声明大小并拦截压缩炸弹。"
+  },
+  "external_source_max_pixels": {
+    "type": "int",
+    "default": 40000000,
+    "description": "【外部源】单图最大像素数",
+    "hint": "宽 × 高的上限，默认 4000 万像素。"
+  },
+  "webui_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "【WebUI】启用表情包管理页面",
+    "hint": "在独立端口提供表情包管理页面（浏览、编辑、审核、外部源导入、语义空间）。必须同时设置下方密码才会启动。保存即生效。"
+  },
+  "webui_host": {
+    "type": "string",
+    "default": "127.0.0.1",
+    "description": "【WebUI】监听地址",
+    "hint": "默认只允许本机访问。需要从其他机器访问时改为 0.0.0.0，并建议放在 HTTPS 反向代理之后。"
+  },
+  "webui_port": {
+    "type": "int",
+    "default": 9092,
+    "description": "【WebUI】监听端口",
+    "hint": "mohobot 自身面板默认 9090、审核面板 9091，请避开已占用的端口。"
+  },
+  "webui_password": {
+    "type": "string",
+    "default": "",
+    "description": "【WebUI】登录密码",
+    "hint": "留空则不启动 WebUI。修改后已登录的会话立即失效。"
+  },
+  "webui_theme": {
+    "type": "string",
+    "default": "auto",
+    "description": "【WebUI】默认主题",
+    "hint": "auto（跟随系统）/ dark（暗色鎏金）/ light（亮色）/ minecraft（我的世界）/ fallout（辐射 4）。页面内切换后以页面保存的主题为准。"
+  },
+  "sim_weight_preset": {
+    "type": "string",
+    "default": "balanced",
+    "description": "【检索】文字距离融合预设",
+    "hint": "语义向量不可用、退回关键词检索时使用：balanced（均衡）/ keyword（关键词优先）/ semantic（语义优先）/ strict（严格匹配）。"
+  }
+}
