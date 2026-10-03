@@ -2,6 +2,9 @@
 
 import io
 import json
+import asyncio
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,8 +39,26 @@ class FakePersonaService:
         self.session_persona_id = "persona_002"
         self.updates = []
         self.bindings = []
+        self.list_calls = 0
+        self.options_calls = 0
+        self.get_calls = []
+        self.invalidations = 0
+        self.lock = asyncio.Lock()
+
+    def invalidate_references(self):
+        self.invalidations += 1
+
+    def get_persona(self, pid):
+        self.get_calls.append(pid)
+        item = self.items.get(pid)
+        return dict(item, created="now", updated="now") if item else None
+
+    async def list_persona_options(self):
+        self.options_calls += 1
+        return [dict(p, created="now", updated="now") for p in self.items.values()]
 
     async def list_personas(self):
+        self.list_calls += 1
         return [dict(p, created="now", updated="now", reference_count=len(self.refs.get(pid, [])))
                 for pid, p in self.items.items()]
 
@@ -110,7 +131,8 @@ class PersonaWebUITests(unittest.TestCase):
 
     def test_auth_all_persona_routes(self):
         paths = [
-            ("GET", "/api/personas", None), ("POST", "/api/personas", {"name": "x", "content": "y"}),
+            ("GET", "/api/personas", None), ("GET", "/api/personas/options", None),
+            ("POST", "/api/personas", {"name": "x", "content": "y"}),
             ("GET", "/api/personas/persona_002", None),
             ("GET", "/api/personas/persona_002/references", None),
             ("PUT", "/api/personas/persona_002", {"name": "x", "content": "y"}),
@@ -121,6 +143,73 @@ class PersonaWebUITests(unittest.TestCase):
             with self.subTest(method=method, path=path):
                 self.assertEqual(self.client.request(method, path, json=body).status_code, 401)
         self.assertEqual(len(self.service.items), 2)
+        self.assertEqual(self.service.list_calls, 0)
+        self.assertEqual(self.service.options_calls, 0)
+        self.assertEqual(self.service.get_calls, [])
+
+    def test_options_cached_full_presets_without_reference_scan(self):
+        with patch.object(self.service, "list_personas", AsyncMock(side_effect=AssertionError("no list scan"))), \
+             patch.object(self.service, "list_references", AsyncMock(side_effect=AssertionError("no reference scan"))):
+            r = self.client.get("/api/personas/options")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(r.json()), 2)
+        self.assertEqual(r.json()[1]["content"], "测试正文")
+        self.assertIn("created", r.json()[0])
+        self.assertNotIn("reference_count", r.json()[0])
+        self.assertEqual(self.service.get_calls, [], "fixed route must precede dynamic ID route")
+        self.assertEqual(self.service.options_calls, 1)
+        # Existing management route continues to include default reference counts.
+        self.assertEqual(self.client.get("/api/personas").json()[1]["reference_count"], 1)
+
+    def test_crud_existence_uses_get_not_list(self):
+        with patch.object(self.service, "list_personas", AsyncMock(side_effect=AssertionError("no list scan"))):
+            self.assertEqual(self.client.get("/api/personas/persona_002").status_code, 200)
+            self.assertEqual(self.client.get("/api/personas/persona_002/references").status_code, 200)
+            self.assertEqual(self.client.put("/api/personas/persona_002", json={"name": "new", "content": "body"}).status_code, 200)
+            self.assertEqual(self.client.delete("/api/personas/persona_002").status_code, 409)
+            self.assertEqual(self.client.get("/api/personas/persona_999").status_code, 404)
+            r = self.client.post("/api/personas", json={"name": "new", "content": "body"})
+            self.assertEqual(self.client.delete("/api/personas/" + r.json()["id"]).status_code, 200)
+        self.assertIn("persona_002", self.service.get_calls)
+        self.assertEqual(self.service.list_calls, 0)
+
+    def test_list_validation_failure_is_actionable_503_options_still_available(self):
+        with patch.object(self.service, "list_personas", AsyncMock(side_effect=ValueError("引用索引损坏"))):
+            r = self.client.get("/api/personas")
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertIn("引用索引损坏", r.json()["detail"])
+            self.assertEqual(self.client.get("/api/personas/options").status_code, 200)
+        with patch.object(self.service, "list_persona_options", AsyncMock(side_effect=ValueError("缓存不可用"))):
+            r = self.client.get("/api/personas/options")
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertIn("缓存不可用", r.json()["detail"])
+        with patch.object(self.service, "list_references", AsyncMock(side_effect=ValueError("引用索引损坏"))):
+            self.assertEqual(self.client.get("/api/personas/persona_002/references").status_code, 503)
+
+    def test_reference_cache_invalidated_after_external_mutations(self):
+        self.bots.create_bot = lambda **_: SimpleNamespace(bot_id="bot_003")
+        self.assertEqual(self.client.post("/api/bots", json={"data": {}}).status_code, 200)
+        self.assertEqual(self.service.invalidations, 1)
+        self.context.delete_session = AsyncMock(return_value=True)
+        path = "/api/contexts/bot_001/private/123/session/main"
+        self.assertEqual(self.client.delete(path).status_code, 200)
+        self.assertEqual(self.service.invalidations, 2)
+        self.context.delete_session.return_value = False
+        self.assertEqual(self.client.delete(path).status_code, 400)
+        self.assertEqual(self.service.invalidations, 2)
+        self.context.maintenance_lock = asyncio.Lock()
+        with patch.object(self.panel, "_cleanup_data", return_value=0):
+            r = self.client.post("/api/data/cleanup", json={"data": {"password": "test-pass", "scope": {"bots": "all", "dirs": ["contexts"]}}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.service.invalidations, 3)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("contexts/bot_001/temp.json", "{}")
+        with patch.object(self.panel, "_restore_persona_data", AsyncMock(return_value=1)):
+            r = self.client.post("/api/data/restore", files={"file": ("temp.zip", archive.getvalue(), "application/zip")},
+                                 data={"password": "test-pass", "scope": json.dumps({"bots": "all", "dirs": ["contexts"]})})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.service.invalidations, 4)
 
     def test_crud_auto_id_and_body_validation(self):
         for body in ({"name": " ", "content": "x"}, {"name": "x", "content": "\n"}):
@@ -200,6 +289,197 @@ class PersonaWebUITests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(cfg.nickname, "after")
         self.assertEqual(self.client.get("/api/personas").status_code, 503)
+
+    def test_persona_frontend_native_mock_loading_retry_and_request_generations(self):
+        """Execute actual inline functions with native Node + minimal DOM; no browser/server."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node is required for native frontend regression")
+        html = (Path(__file__).resolve().parent.parent / "mohobot/web_panel/static/index.html").read_text(encoding="utf-8")
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        harness = r'''
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => input += chunk);
+process.stdin.on('end', async () => {
+  try {
+    const source = JSON.parse(input);
+    new vm.Script(source); // Syntax check entire production inline script.
+    const section = source.slice(source.indexOf('// ═══════════════ Shared personas'), source.indexOf('// ═══════════════ 3. Models'));
+    const botLoader = source.slice(source.indexOf('let botConfigGeneration = 0;'), source.indexOf('async function saveGlobalConfig'));
+    const botSaver = source.slice(source.indexOf('async function saveBotConfig'), source.indexOf('// ═══════════════ Shared personas'));
+    class Element {
+      constructor(value = '') { this.value = value; this.dataset = {}; this.disabled = false; this.children = []; this.options = []; this._html = ''; this._text = ''; }
+      set textContent(v) { this._text = v; this.children = []; }
+      get textContent() { return this._text; }
+      set innerHTML(v) { this._html = v; }
+      get innerHTML() { return this._html; }
+      replaceChildren() { this.options = []; this.value = ''; }
+      add(option) { this.options.push(option); if (this.options.length === 1) this.value = option.value; }
+      appendChild(child) { this.children.push(child); }
+      addEventListener(name, fn) { this[name] = fn; }
+      querySelectorAll() { return []; }
+    }
+    const elements = {};
+    for (const id of ['config-bot-select', 'config-bot-form', 'config-bot-save', 'cfg-persona_id', 'cfg-persona-preview', 'cfg-persona-status', 'cfg-nickname', 'persona-list', 'persona-list-status', 'persona-references']) elements[id] = new Element();
+    elements['config-bot-select'].value = 'bot_001';
+    elements['config-bot-form'].dataset.botId = 'bot_001';
+    elements['cfg-persona_id'].dataset.initialId = 'persona_002';
+    elements['cfg-persona_id'].disabled = true;
+    elements['config-bot-save'].disabled = true;
+    elements['cfg-nickname'].value = 'unsaved nickname';
+    const calls = [];
+    const queue = [];
+    const toasts = [];
+    const context = vm.createContext({
+      console, document: { getElementById: id => elements[id], createElement: () => new Element(), querySelector: () => ({ click() {} }) },
+      Option: function(text, value) { this.text = text; this.value = value; },
+      AbortSignal: { timeout: ms => ({ timeoutMs: ms }) },
+      api: async (path, options = {}) => { calls.push({ path, options }); if (!queue.length) throw new Error('unexpected request ' + path); const data = await queue.shift()(path, options); return data?.mockResponse ? data.response : { ok: true, status: 200, json: async () => data }; },
+      apiJSON: async (path, options = {}) => { calls.push({ path, options }); if (!queue.length) throw new Error('unexpected request ' + path); return await queue.shift()(path, options); },
+      showToast: (...args) => toasts.push(args), esc: v => String(v).replace(/[<>&"']/g, '_'),
+      formField: () => '', textareaField: () => '', confirm: () => true,
+    });
+    vm.runInContext('let pageRequestGeneration = 0; let botConfigCache = null;', context);
+    vm.runInContext(botLoader + botSaver + section, context);
+    const presets = [
+      { id: 'persona_001', name: 'default', content: 'default body', reference_count: 0 },
+      { id: 'persona_002', name: 'test', content: 'test body', reference_count: 1 },
+    ];
+    const fail = () => Promise.reject(new Error('offline'));
+    const ok = data => () => Promise.resolve(data);
+    const deferred = () => { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; };
+    const run = js => vm.runInContext(js, context);
+
+    // Empty initial load cannot save; failure persists, retry uses saved initial ID.
+    await run('saveBotConfig()');
+    assert.equal(calls.length, 0);
+    queue.push(fail);
+    await run('refreshPersonaChoices()');
+    assert.equal(calls[0].path, '/api/personas/options');
+    assert.equal(calls[0].options.signal.timeoutMs, 10000);
+    assert.equal(elements['cfg-persona_id'].disabled, true);
+    assert.equal(elements['config-bot-save'].disabled, true);
+    assert.match(elements['cfg-persona-status'].textContent, /offline/);
+    assert.equal(elements['cfg-persona-status'].children.length, 1);
+    queue.push(ok(presets));
+    await elements['cfg-persona-status'].children[0].click();
+    assert.equal(elements['cfg-persona_id'].value, 'persona_002');
+    assert.equal(elements['config-bot-save'].disabled, false);
+    assert.equal(elements['cfg-persona-preview'].value, 'test body');
+    assert.equal(elements['cfg-nickname'].value, 'unsaved nickname');
+    queue.push(fail);
+    await run('refreshPersonaChoices()');
+    assert.equal(elements['cfg-persona_id'].value, 'persona_002');
+    assert.equal(elements['cfg-persona_id'].disabled, false);
+    assert.match(elements['cfg-persona-status'].textContent, /已保留/);
+
+    // Later refresh wins; late error also must not overwrite current success.
+    const oldOptions = deferred();
+    queue.push(() => oldOptions.promise, ok([{ ...presets[1], content: 'new body' }]));
+    const oldRequest = run('refreshPersonaChoices()');
+    await run('refreshPersonaChoices()');
+    oldOptions.resolve(presets);
+    await oldRequest;
+    assert.equal(elements['cfg-persona-preview'].value, 'new body');
+    const pageOptions = deferred();
+    queue.push(() => pageOptions.promise);
+    const abandonedOptions = run('refreshPersonaChoices()');
+    run('++pageRequestGeneration');
+    pageOptions.resolve(presets);
+    await abandonedOptions;
+    assert.equal(elements['cfg-persona-preview'].value, 'new body');
+
+    // Normal management load: one list read, reuse returned items for Bot dropdown.
+    calls.length = 0;
+    queue.push(ok(presets));
+    assert.equal(await run('loadPersonasPage()'), true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, '/api/personas');
+    assert.equal(calls[0].options.signal.timeoutMs, 15000);
+    assert.match(elements['persona-list'].innerHTML, /缓存/);
+    assert.match(elements['persona-list'].innerHTML, /被引用，禁止删除（缓存统计）/);
+    assert.equal(elements['cfg-persona-preview'].value, 'test body');
+    assert.equal(elements['cfg-nickname'].value, 'unsaved nickname');
+    const oldList = deferred();
+    queue.push(() => oldList.promise, ok([{ ...presets[1], name: 'newer list' }]));
+    const oldListRequest = run('loadPersonasPage()');
+    await run('loadPersonasPage()');
+    oldList.resolve(presets);
+    await oldListRequest;
+    assert.match(elements['persona-list'].innerHTML, /newer list/);
+    const pageList = deferred();
+    queue.push(() => pageList.promise);
+    const abandonedList = run('loadPersonasPage()');
+    run('++pageRequestGeneration');
+    pageList.resolve(presets);
+    await abandonedList;
+    assert.match(elements['persona-list'].innerHTML, /newer list/);
+
+    // Failed reference statistics still display cached editable presets, not fake zero.
+    calls.length = 0;
+    queue.push(fail, ok(presets));
+    assert.equal(await run('loadPersonasPage()'), false);
+    assert.deepEqual(calls.map(c => c.path), ['/api/personas', '/api/personas/options']);
+    assert.match(elements['persona-list-status'].textContent, /引用统计暂不可用/);
+    assert.match(elements['persona-list'].innerHTML, /未知/);
+    assert.match(elements['persona-list'].innerHTML, /data-action="delete" disabled/);
+    queue.push(fail, fail);
+    await run('loadPersonasPage()');
+    assert.match(elements['persona-list-status'].textContent, /缓存选项也不可用/);
+    assert.equal(elements['persona-list-status'].children.length, 1);
+    const timeout = Object.assign(new Error('timeout'), { name: 'TimeoutError' });
+    queue.push(() => Promise.reject(timeout));
+    await run('refreshPersonaChoices()');
+    assert.match(elements['cfg-persona-status'].textContent, /请求超时（10 秒）/);
+    queue.push(ok({ mockResponse: true, response: { ok: true, status: 200, json: async () => { throw timeout; } } }));
+    await run('refreshPersonaChoices()');
+    assert.match(elements['cfg-persona-status'].textContent, /请求超时（10 秒）/);
+    queue.push(ok({ mockResponse: true, response: { ok: false, status: 503, json: async () => ({ detail: 'service unavailable' }) } }));
+    await run('refreshPersonaChoices()');
+    assert.match(elements['cfg-persona-status'].textContent, /service unavailable/);
+
+    // References have loading + permanent error/retry and ignore old IDs/pages.
+    const refs = deferred();
+    queue.push(() => refs.promise);
+    const refRequest = run("viewPersonaReferences('persona_001')");
+    assert.match(elements['persona-references'].textContent, /正在加载/);
+    refs.resolve({ references: [] });
+    await refRequest;
+    assert.match(elements['persona-references'].innerHTML, /无引用/);
+    queue.push(fail);
+    await run("viewPersonaReferences('persona_001')");
+    assert.match(elements['persona-references'].textContent, /引用加载失败/);
+    queue.push(ok({ references: [] }));
+    await elements['persona-references'].children[0].click();
+    const oldRefs = deferred();
+    queue.push(() => oldRefs.promise, ok({ references: [] }));
+    const oldRefRequest = run("viewPersonaReferences('persona_001')");
+    await run("viewPersonaReferences('persona_002')");
+    oldRefs.resolve({ references: [] });
+    await oldRefRequest;
+    assert.match(elements['persona-references'].innerHTML, /persona_002/);
+
+    // Fast Bot switch: old config cannot recreate old form/options.
+    const oldBot = deferred();
+    queue.push(() => oldBot.promise, ok({ bot_id: 'bot_002', persona_id: 'persona_001' }), ok(presets));
+    const oldBotRequest = run('loadBotConfig()');
+    elements['config-bot-select'].value = 'bot_002';
+    await run('loadBotConfig()');
+    oldBot.resolve({ bot_id: 'bot_001', persona_id: 'persona_002' });
+    await oldBotRequest;
+    assert.equal(elements['config-bot-form'].dataset.botId, 'bot_002');
+    assert.equal(run('botConfigCache.bot_id'), 'bot_002');
+    assert.equal(queue.length, 0);
+    console.log('Native persona frontend regressions passed');
+  } catch (error) { console.error(error); process.exitCode = 1; }
+});
+'''
+        result = subprocess.run([node, "-e", harness], input=json.dumps(script), text=True, encoding="utf-8",
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_audit_omits_persona_content_and_query(self):
         self.client.post("/api/personas?content=do-not-log&name=do-not-log", json={"name": "secret name", "content": "secret body"})

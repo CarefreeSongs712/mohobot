@@ -5,6 +5,7 @@ Resolution is a synchronous cache read; writes publish only after atomic replace
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -54,6 +55,8 @@ class PersonaService:
         self.lock = _get_lock(str(self.path.absolute()) + ".service")
         self._library: dict = {"version": 1, "next_id": 2, "personas": []}
         self._cache: dict[str, dict] = {}
+        self._references_cache: tuple[float, list[dict]] | None = None
+        self._references_ttl = 30.0
 
     @staticmethod
     def _text(name, content) -> tuple[str, str]:
@@ -98,6 +101,10 @@ class PersonaService:
             _atomic_json(self.path, data)
         self._library = copy.deepcopy(data)
         self._cache = {item["id"]: copy.deepcopy(item) for item in data["personas"]}
+        self.invalidate_references()
+
+    def invalidate_references(self) -> None:
+        self._references_cache = None
 
     async def startup(self) -> None:
         async with self.lock:
@@ -169,6 +176,10 @@ class PersonaService:
             raise PersonaNotFoundError(f"人设不存在: {persona_id}")
         return record
 
+    async def list_persona_options(self) -> list[dict]:
+        """Read a published snapshot without waiting for reference scans or storage."""
+        return copy.deepcopy(self._library["personas"])
+
     async def list_personas(self) -> list[dict]:
         async with self.lock:
             references = await self._all_references_unlocked()
@@ -200,24 +211,66 @@ class PersonaService:
             await self._publish(data)
             return copy.deepcopy(record)
 
-    async def _all_references_unlocked(self) -> list[dict]:
+    def _scan_references(self) -> list[dict]:
         references = []
         for cfg in self._bot_manager.list_bot_configs():
             references.append({"type": "bot", "bot_id": cfg.bot_id,
                                "nickname": cfg.nickname, "persona_id": cfg.persona_id or DEFAULT_PERSONA_ID})
-        # Include inactive sessions and orphaned bot contexts: bindings remain data
-        # references until the session is explicitly deleted/cleared.
+        # Read only the fields needed for references. Old indices must not be migrated
+        # by a list request; safety-critical callers still reject unreadable bindings.
         base = self._data_dir / "contexts"
-        if base.exists():
-            for path in sorted(base.glob("*/private/*/session_index.json")):
-                bot_id, user_id = path.parent.parent.parent.name, path.parent.name
-                index = await self._context_manager.read_existing_session_index(bot_id, "private", user_id)
-                for session in (index or {}).get("sessions", []):
-                    if session.get("persona_id"):
-                        references.append({"type": "session", "bot_id": bot_id, "user_id": user_id,
-                                           "session_id": session["id"], "name": session.get("name", session["id"]),
-                                           "persona_id": session["persona_id"]})
+        for path in sorted(base.glob("*/private/*/session_index.json")):
+            try:
+                index = json.loads(path.read_text(encoding="utf-8"))
+                sessions = index.get("sessions") if isinstance(index, dict) else None
+                if not isinstance(sessions, list):
+                    raise ValueError("sessions 字段非法")
+                seen = set()
+                for session in sessions:
+                    if not isinstance(session, dict):
+                        raise ValueError("session 字段非法")
+                    sid = session.get("id")
+                    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid) or sid in seen:
+                        raise ValueError("session ID 非法或重复")
+                    seen.add(sid)
+                    pid = session.get("persona_id", "")
+                    if not isinstance(pid, str) or (pid and not re.fullmatch(r"persona_\d{3,}", pid)):
+                        raise ValueError("人设引用非法")
+                    if pid:
+                        references.append({
+                            "type": "session", "bot_id": path.parent.parent.parent.name,
+                            "user_id": path.parent.name, "session_id": sid,
+                            "name": session.get("name", sid), "persona_id": pid,
+                        })
+            except (OSError, ValueError) as exc:
+                relative = path.relative_to(self._data_dir)
+                raise ValueError(f"无法检查人设引用: {relative} ({exc})") from exc
         return references
+
+    async def _all_references_unlocked(self, *, force: bool = False) -> list[dict]:
+        cached = self._references_cache
+        if not force and cached is not None and cached[0] > time.monotonic():
+            return copy.deepcopy(cached[1])
+        # Service writes already hold self.lock; one worker scan serves queued reads.
+        async with self._context_manager.maintenance_lock:
+            scan = asyncio.create_task(asyncio.to_thread(self._scan_references))
+            try:
+                references = await asyncio.shield(scan)
+            except asyncio.CancelledError:
+                # Cancelling to_thread doesn't stop its reads. Drain even repeated
+                # cancellation before a restore can replace the worker's files.
+                while not scan.done():
+                    try:
+                        await asyncio.shield(scan)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not scan.cancelled():
+                    scan.exception()
+                raise
+        self._references_cache = (time.monotonic() + self._references_ttl, references)
+        return copy.deepcopy(references)
 
     async def list_references(self, persona_id: str) -> list[dict]:
         async with self.lock:
@@ -227,7 +280,7 @@ class PersonaService:
     async def delete_persona(self, persona_id: str) -> None:
         async with self.lock:
             self._require_persona(persona_id)
-            references = [r for r in await self._all_references_unlocked() if r["persona_id"] == persona_id]
+            references = [r for r in await self._all_references_unlocked(force=True) if r["persona_id"] == persona_id]
             if references or persona_id == DEFAULT_PERSONA_ID:
                 raise PersonaInUseError("人设正在使用或为系统默认，不能删除", references)
             data = copy.deepcopy(self._library)
@@ -284,6 +337,7 @@ class PersonaService:
                 instance = self._bot_manager.get(bot_id)
                 if instance is not None:
                     instance.config = cfg
+            self.invalidate_references()
             return cfg
 
     def resolve_bot(self, bot_config: BotConfig) -> dict:
@@ -321,12 +375,14 @@ class PersonaService:
             cfg, user_id, session_id = self._session_args(bot_id, user_id, session_id)
             self._require_persona(persona_id)
             session = await self._context_manager.set_session_persona(bot_id, "private", user_id, session_id, persona_id)
+            self.invalidate_references()
             return self._binding_result(cfg, user_id, session)
 
     async def clear_session_binding(self, bot_id: str, user_id: str, session_id: str) -> dict:
         async with self.lock:
             cfg, user_id, session_id = self._session_args(bot_id, user_id, session_id)
             session = await self._context_manager.set_session_persona(bot_id, "private", user_id, session_id, "")
+            self.invalidate_references()
             return self._binding_result(cfg, user_id, session)
 
     async def get_session_binding(self, bot_id: str, user_id: str, session_id: str) -> dict:
@@ -362,7 +418,7 @@ class PersonaService:
         validated = self._validate_library(data)
         identifiers = {p["id"] for p in validated["personas"]}
         replaced = set(replaced_context_bots)
-        referenced = {r["persona_id"] for r in await self._all_references_unlocked()
+        referenced = {r["persona_id"] for r in await self._all_references_unlocked(force=True)
                       if r["type"] != "session" or r["bot_id"] not in replaced}
         referenced.update(identifier for identifier in extra_persona_ids if identifier)
         missing = referenced - identifiers

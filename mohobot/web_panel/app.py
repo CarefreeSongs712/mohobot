@@ -584,6 +584,8 @@ class WebPanel:
             nickname = str(data.get("nickname", "") or "")
             qq = int(data.get("qq", 0) or 0)
             cfg = self._bot_manager.create_bot(nickname=nickname, qq=qq)
+            if self._persona_service is not None:
+                self._persona_service.invalidate_references()
             logger.info(f"Web panel: bot created {cfg.bot_id}")
             return {"status": "ok", "bot_id": cfg.bot_id}
 
@@ -665,10 +667,10 @@ class WebPanel:
         async def _existing_persona(persona_id: str):
             persona_id = self._safe_id(persona_id, "persona_id")
             service = _persona_service()
-            for item in await service.list_personas():
-                if item["id"] == persona_id:
-                    return item
-            raise HTTPException(status_code=404, detail=f"人设不存在: {persona_id}")
+            item = service.get_persona(persona_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail=f"人设不存在: {persona_id}")
+            return item
 
         def _persona_input(body: PersonaWriteRequest):
             if not body.name.strip() or not body.content.strip():
@@ -678,7 +680,19 @@ class WebPanel:
         @app.get("/api/personas")
         async def list_personas(request: Request):
             await _require_auth(request)
-            return await _persona_service().list_personas()
+            try:
+                return await _persona_service().list_personas()
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=f"人设引用暂不可统计，人设选项仍可使用: {exc}")
+
+        # 固定路径必须位于 /{persona_id} 之前；下拉只读缓存，不扫描引用。
+        @app.get("/api/personas/options")
+        async def persona_options(request: Request):
+            await _require_auth(request)
+            try:
+                return await _persona_service().list_persona_options()
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=f"人设选项暂不可用: {exc}")
 
         @app.post("/api/personas")
         async def create_persona(request: Request, body: PersonaWriteRequest):
@@ -698,7 +712,10 @@ class WebPanel:
         async def persona_references(persona_id: str, request: Request):
             await _require_auth(request)
             await _existing_persona(persona_id)
-            return {"references": await _persona_service().list_references(persona_id)}
+            try:
+                return {"references": await _persona_service().list_references(persona_id)}
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=f"人设引用暂不可统计: {exc}")
 
         @app.put("/api/personas/{persona_id}")
         async def update_persona(persona_id: str, request: Request, body: PersonaWriteRequest):
@@ -1031,6 +1048,8 @@ class WebPanel:
             )
             if not ok:
                 raise HTTPException(status_code=400, detail="无法删除该会话")
+            if self._persona_service is not None:
+                self._persona_service.invalidate_references()
             return {"status": "ok"}
 
         @app.post("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session/{session_id}/reset")
@@ -1288,6 +1307,8 @@ class WebPanel:
                     zf.extractall(tmp_dir)
 
                 restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
+                if "contexts" in dir_set and self._persona_service is not None:
+                    self._persona_service.invalidate_references()
             except HTTPException:
                 raise
             except ValueError as e:
@@ -1321,6 +1342,8 @@ class WebPanel:
                     removed = self._cleanup_data(bot_list, dir_set)
             else:
                 removed = self._cleanup_data(bot_list, dir_set)
+            if "contexts" in dir_set and self._persona_service is not None:
+                self._persona_service.invalidate_references()
             # 清理封禁数据后同步刷新拦截器缓存
             if "ban" in dir_set and self._ban_store is not None:
                 try:

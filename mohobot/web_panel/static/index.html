@@ -323,7 +323,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
           <button class="btn" onclick="bindBotPrompt()">🔗 绑定 QQ</button>
         </div>
         <div id="config-bot-form"></div>
-        <button class="btn" onclick="saveBotConfig()">保存 Bot 配置</button>
+        <button class="btn" id="config-bot-save" onclick="saveBotConfig()" disabled>保存 Bot 配置</button>
         <div id="unbound-list" style="margin-top:12px"></div>
       </div>
     </div>
@@ -338,6 +338,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div class="card-title">人设列表</div>
         <button class="btn small" onclick="editPersona()">新建人设</button>
         <button class="btn small secondary" onclick="loadPersonasPage()">刷新列表</button>
+        <div class="hint" id="persona-list-status" style="margin-top:8px" role="status"></div>
         <div id="persona-list" style="margin-top:12px"></div>
       </div>
       <div class="card">
@@ -686,9 +687,15 @@ function logout() {
 }
 
 // ═══════════════ Navigation ═══════════════
+let pageRequestGeneration = 0;
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
     const previousPage = document.querySelector('.nav-item.active')?.dataset.page;
+    ++pageRequestGeneration;
+    ++personaChoicesGeneration;
+    ++personasPageGeneration;
+    ++personaReferencesGeneration;
+    ++botConfigGeneration;
     document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     item.classList.add('active');
@@ -1052,9 +1059,13 @@ function selectField(name, label, value, options, hint = '') {
 }
 
 async function loadConfigPage() {
+  const pageGeneration = pageRequestGeneration;
   try {
-    globalConfigCache = await apiJSON('/api/config');
-    botListCache = await apiJSON('/api/bots');
+    const globalConfig = await apiJSON('/api/config');
+    const botsResult = await apiJSON('/api/bots');
+    if (pageGeneration !== pageRequestGeneration) return;
+    globalConfigCache = globalConfig;
+    botListCache = botsResult;
 
     document.getElementById('config-global-form').innerHTML =
       '<hr style="border-color:var(--border);margin:14px 0">' +
@@ -1160,12 +1171,19 @@ async function unbindBotPrompt() {
   } catch (e) { showToast('解绑失败: ' + e.message, false); }
 }
 
+let botConfigGeneration = 0;
 async function loadBotConfig() {
   const botId = document.getElementById('config-bot-select').value;
+  const generation = ++botConfigGeneration;
+  const pageGeneration = pageRequestGeneration;
+  ++personaChoicesGeneration;
+  document.getElementById('config-bot-save').disabled = true;
   if (!botId) return;
   try {
-    botConfigCache = await apiJSON(`/api/bots/${botId}/config`);
-    const b = botConfigCache;
+    const b = await apiJSON(`/api/bots/${botId}/config`);
+    if (generation !== botConfigGeneration || pageGeneration !== pageRequestGeneration ||
+        botId !== document.getElementById('config-bot-select').value) return;
+    botConfigCache = b;
     document.getElementById('config-bot-form').innerHTML =
       `<div class="form-row"><label>Bot ID(内部标识)</label><input type="text" value="${b.bot_id}" readonly style="background:var(--bg2)"></div>` +
       formField('nickname', '昵称', b.nickname) +
@@ -1173,8 +1191,9 @@ async function loadBotConfig() {
         ? `<div class="form-row"><label>绑定 QQ</label><input type="text" value="${b.qq}" readonly style="background:var(--bg2)">
              <button class="btn btn-sm" onclick="unbindBotPrompt()" style="margin-left:8px">解绑</button></div>`
         : '<div class="hint" style="margin:6px 0">⚠️ 未绑定 QQ — 点击上方"🔗 绑定 QQ"</div>') +
-      '<div class="form-row"><label for="cfg-persona_id">默认人设</label><select id="cfg-persona_id" onchange="updateBotPersonaPreview()"></select>' +
-      '<button class="btn small secondary" onclick="refreshPersonaChoices()">刷新人设</button></div>' +
+      '<div class="form-row"><label for="cfg-persona_id">默认人设</label><select id="cfg-persona_id" onchange="updateBotPersonaPreview()" disabled></select>' +
+      '<button class="btn small secondary" onclick="refreshPersonaChoices()">刷新 / 重试人设</button></div>' +
+      '<div class="hint" id="cfg-persona-status" role="status">正在加载人设选项…</div>' +
       '<div class="form-row"><label for="cfg-persona-preview">正文（只读）</label><textarea id="cfg-persona-preview" rows="8" readonly></textarea></div>' +
       '<div class="hint">共享人设修改后下轮生效；<button class="btn small secondary" onclick="openPersonaPage()">前往人设管理</button></div>' +
       textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(touch_replies)') +
@@ -1188,8 +1207,13 @@ async function loadBotConfig() {
         <div class="hint">开启后该 bot 的 LLM 回复可带朗读标注、并响应 /tts 指令(MiniMax API 等在 TTS 板块配置); 修改后需重启生效</div></div>` +
       formField('tts_voice_id', 'TTS 音色 ID（留空用全局）', b.tts_voice_id, { hint: '仅 MiniMax 后端生效的克隆音色; 自建 HTTP 后端音色由服务端固定, 此字段忽略' }) +
       textareaField('keyword_replies_json', '关键词回复（JSON）', JSON.stringify(b.keyword_replies || {}, null, 2), '格式: {"关键词": "回复内容"}');
-    await refreshPersonaChoices(b.persona_id || 'persona_001');
-  } catch (e) { showToast('加载 Bot 配置失败: ' + e.message, false); }
+    document.getElementById('config-bot-form').dataset.botId = botId;
+    document.getElementById('cfg-persona_id').dataset.initialId = b.persona_id || 'persona_001';
+    await refreshPersonaChoices();
+  } catch (e) {
+    if (generation === botConfigGeneration && pageGeneration === pageRequestGeneration)
+      showToast('加载 Bot 配置失败: ' + e.message, false);
+  }
 }
 
 async function saveGlobalConfig() {
@@ -1253,6 +1277,12 @@ async function saveGlobalConfig() {
 async function saveBotConfig() {
   const botId = document.getElementById('config-bot-select').value;
   if (!botId) return;
+  const selected = document.getElementById('cfg-persona_id');
+  if (document.getElementById('config-bot-form').dataset.botId !== botId ||
+      !selected || selected.dataset.ready !== 'true' || !personaCache.some(p => p.id === selected.value)) {
+    showToast('人设选项尚未成功加载或选择无效，请刷新 / 重试后再保存', false);
+    return;
+  }
   const data = {
     nickname: document.getElementById('cfg-nickname').value,
     persona_id: document.getElementById('cfg-persona_id').value,
@@ -1277,6 +1307,35 @@ async function saveBotConfig() {
 // ═══════════════ Shared personas ═══════════════
 let personaCache = [];
 let personaChoicesGeneration = 0;
+let personasPageGeneration = 0;
+let personaReferencesGeneration = 0;
+let personaEditorGeneration = 0;
+
+// 只为人设读取设超时；失败信息留在对应控件，不依赖瞬时 toast。
+async function personaReadJSON(path, timeoutMs = 15000) {
+  try {
+    const res = await api(path, { signal: AbortSignal.timeout(timeoutMs) });
+    // 不吞掉 response body 的 AbortError/TimeoutError，否则超时会误作成功空数据。
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+    return data;
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError')
+      throw new Error(`请求超时（${timeoutMs / 1000} 秒），请重试`);
+    throw e;
+  }
+}
+
+function personaHint(el, message, retry) {
+  el.textContent = message;
+  if (retry) {
+    const button = document.createElement('button');
+    button.className = 'btn small secondary';
+    button.textContent = '重试';
+    button.addEventListener('click', retry);
+    el.appendChild(button);
+  }
+}
 
 function openPersonaPage() {
   document.querySelector('.nav-item[data-page="personas"]').click();
@@ -1288,50 +1347,106 @@ function updateBotPersonaPreview() {
   if (!selected || !preview) return;
   const p = personaCache.find(item => item.id === selected.value);
   preview.value = p ? p.content : '所选人设不存在，请选择有效人设';
+  document.getElementById('config-bot-save').disabled = selected.dataset.ready !== 'true' || !p ||
+    document.getElementById('config-bot-form').dataset.botId !== document.getElementById('config-bot-select').value;
+}
+
+function updateBotChoices(items, initialId) {
+  personaCache = items;
+  const selected = document.getElementById('cfg-persona_id');
+  if (!selected) return;
+  // 仅更新人设控件；其余未保存 Bot 表单值保持原样。
+  const id = initialId ?? (selected.value || selected.dataset.initialId);
+  selected.replaceChildren();
+  items.forEach(p => selected.add(new Option(p.name + ' (' + p.id + ')', p.id)));
+  if (id && !items.some(p => p.id === id)) selected.add(new Option('人设不存在 (' + id + ')', id));
+  if (id) selected.value = id;
+  selected.dataset.ready = 'true';
+  selected.disabled = !items.length;
+  const valid = items.some(p => p.id === selected.value);
+  personaHint(document.getElementById('cfg-persona-status'), valid ? '人设选项已加载' :
+    '所选人设不存在或列表为空，请选择有效人设或重试', valid ? null : () => refreshPersonaChoices());
+  updateBotPersonaPreview();
 }
 
 async function refreshPersonaChoices(initialId) {
   const selected = document.getElementById('cfg-persona_id');
+  const botId = document.getElementById('config-bot-select').value;
+  if (!selected || document.getElementById('config-bot-form').dataset.botId !== botId) return;
   const generation = ++personaChoicesGeneration;
+  const botGeneration = botConfigGeneration;
+  const pageGeneration = pageRequestGeneration;
+  const current = () => generation === personaChoicesGeneration && botGeneration === botConfigGeneration &&
+    pageGeneration === pageRequestGeneration && botId === document.getElementById('config-bot-select').value &&
+    selected === document.getElementById('cfg-persona_id');
+  personaHint(document.getElementById('cfg-persona-status'), '正在加载人设选项…');
+  if (selected.dataset.ready !== 'true') selected.disabled = true;
   try {
-    const items = await apiJSON('/api/personas');
-    if (generation !== personaChoicesGeneration) return;
-    personaCache = items;
-    // 仅更新人设控件；其余未保存 Bot 表单值保持原样。
-    if (selected && selected === document.getElementById('cfg-persona_id')) {
-      const id = initialId ?? selected.value;
-      selected.replaceChildren();
-      items.forEach(p => selected.add(new Option(p.name + ' (' + p.id + ')', p.id)));
-      if (id && !items.some(p => p.id === id)) selected.add(new Option('人设不存在 (' + id + ')', id));
-      if (id) selected.value = id;
-      updateBotPersonaPreview();
-    }
-  } catch (e) { showToast('刷新人设失败: ' + e.message, false); }
+    const items = await personaReadJSON('/api/personas/options', 10000);
+    if (!current()) return;
+    updateBotChoices(items, initialId);
+  } catch (e) {
+    if (!current()) return;
+    // 快速刷新失败保留已有选择；首次失败仍禁止保存，重试成功才放行。
+    personaHint(document.getElementById('cfg-persona-status'), '人设选项加载失败: ' + e.message +
+      (selected.dataset.ready === 'true' ? '；已保留当前选择。' : '；暂不可保存 Bot 配置。'), () => refreshPersonaChoices());
+  }
+}
+
+function renderPersonaList(items, referencesKnown = true) {
+  personaCache = items;
+  const el = document.getElementById('persona-list');
+  el.innerHTML = '<div class="hint">引用数为缓存展示（最多 30 秒）；删除时服务器重新检查引用。</div>' +
+    '<table><thead><tr><th>名称 / 编号</th><th>引用数（缓存）</th><th>操作</th></tr></thead><tbody>' +
+    items.map(p => `<tr data-persona-id="${esc(p.id)}"><td>${esc(p.name)}<div class="hint">${esc(p.id)}</div></td>
+      <td>${esc(referencesKnown ? p.reference_count ?? '未知' : '未知')}</td><td>
+      <button class="btn small secondary" data-action="edit">编辑</button>
+      <button class="btn small secondary" data-action="references">查看引用</button>
+      <button class="btn small danger" data-action="delete" ${p.id === 'persona_001' || !referencesKnown || p.reference_count > 0 ? 'disabled' : ''}>删除</button>
+      ${p.id === 'persona_001' ? '<div class="hint">默认人设不可删除</div>' : !referencesKnown ? '<div class="hint">引用统计失败，请重试后删除</div>' : p.reference_count > 0 ? '<div class="hint">被引用，禁止删除（缓存统计）</div>' : ''}</td></tr>`).join('') + '</tbody></table>';
+  el.querySelectorAll('button[data-action]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.closest('tr').dataset.personaId;
+    if (btn.dataset.action === 'edit') editPersona(id);
+    else if (btn.dataset.action === 'references') viewPersonaReferences(id);
+    else deletePersona(id);
+  }));
 }
 
 async function loadPersonasPage() {
+  const generation = ++personasPageGeneration;
+  const pageGeneration = pageRequestGeneration;
+  const botGeneration = botConfigGeneration;
+  const choicesGeneration = ++personaChoicesGeneration;
+  const current = () => generation === personasPageGeneration && pageGeneration === pageRequestGeneration;
+  const status = document.getElementById('persona-list-status');
+  personaHint(status, '正在加载人设列表和引用统计…');
   try {
-    personaCache = await apiJSON('/api/personas');
-    const el = document.getElementById('persona-list');
-    el.innerHTML = '<table><thead><tr><th>名称 / 编号</th><th>引用数</th><th>操作</th></tr></thead><tbody>' +
-      personaCache.map(p => `<tr data-persona-id="${esc(p.id)}"><td>${esc(p.name)}<div class="hint">${esc(p.id)}</div></td>
-        <td>${esc(p.reference_count ?? 0)}</td><td>
-        <button class="btn small secondary" data-action="edit">编辑</button>
-        <button class="btn small secondary" data-action="references">查看引用</button>
-        <button class="btn small danger" data-action="delete" ${p.id === 'persona_001' || p.reference_count > 0 ? 'disabled' : ''}>删除</button>
-        ${p.id === 'persona_001' ? '<div class="hint">默认人设不可删除</div>' : p.reference_count > 0 ? '<div class="hint">被引用，禁止删除</div>' : ''}</td></tr>`).join('') + '</tbody></table>';
-    el.querySelectorAll('button[data-action]').forEach(btn => btn.addEventListener('click', () => {
-      const id = btn.closest('tr').dataset.personaId;
-      if (btn.dataset.action === 'edit') editPersona(id);
-      else if (btn.dataset.action === 'references') viewPersonaReferences(id);
-      else deletePersona(id);
-    }));
-    // 刷新人设下拉不重载整个配置页。
-    await refreshPersonaChoices();
-  } catch (e) { showToast('加载人设失败: ' + e.message, false); }
+    const items = await personaReadJSON('/api/personas');
+    if (!current()) return false;
+    renderPersonaList(items);
+    // 同一响应直接刷新下拉，不再请求 list 或 options。
+    if (botGeneration === botConfigGeneration && choicesGeneration === personaChoicesGeneration) updateBotChoices(items);
+    personaHint(status, items.length ? `已加载 ${items.length} 个人设` : '暂无人设，请新建');
+    return true;
+  } catch (e) {
+    if (!current()) return false;
+    personaHint(status, '人设列表 / 引用统计加载失败: ' + e.message + '；正在尝试读取缓存人设…', () => loadPersonasPage());
+    try {
+      const items = await personaReadJSON('/api/personas/options', 10000);
+      if (!current()) return false;
+      renderPersonaList(items, false);
+      if (botGeneration === botConfigGeneration && choicesGeneration === personaChoicesGeneration) updateBotChoices(items);
+      personaHint(status, '引用统计暂不可用: ' + e.message + '；已显示缓存人设，可编辑；删除暂不可用。', () => loadPersonasPage());
+    } catch (optionsError) {
+      if (!current()) return false;
+      personaHint(status, '人设列表加载失败: ' + e.message + '；缓存选项也不可用: ' + optionsError.message, () => loadPersonasPage());
+    }
+    return false;
+  }
 }
 
 function editPersona(id = '') {
+  ++personaEditorGeneration;
   const p = personaCache.find(item => item.id === id);
   document.getElementById('persona-editor-title').textContent = p ? '编辑人设' : '新建人设';
   document.getElementById('persona-editor-id').value = p ? p.id : '';
@@ -1347,16 +1462,25 @@ async function savePersona() {
   const status = document.getElementById('persona-editor-status');
   if (!name || !content.trim()) { status.textContent = '名称和正文不能为空'; return; }
   const btn = document.getElementById('persona-save');
+  const pageGeneration = pageRequestGeneration;
+  const editorGeneration = personaEditorGeneration;
   btn.disabled = true;
   try {
     const p = await apiJSON('/api/personas' + (id ? '/' + encodeURIComponent(id) : ''), {
       method: id ? 'PUT' : 'POST', body: { name, content },
     });
-    await loadPersonasPage();
-    editPersona(p.id);
-    status.textContent = '已保存；所有引用将在下一轮对话使用新正文';
+    if (pageGeneration !== pageRequestGeneration) return;
+    const loaded = await loadPersonasPage();
+    if (pageGeneration !== pageRequestGeneration || editorGeneration !== personaEditorGeneration) return;
+    if (loaded) editPersona(p.id);
+    status.textContent = loaded ? '已保存；所有引用将在下一轮对话使用新正文' : '已保存；列表刷新失败，请重试刷新列表';
     showToast('人设已保存，下轮对话生效');
-  } catch (e) { status.textContent = '保存失败: ' + e.message; showToast(status.textContent, false); }
+  } catch (e) {
+    if (pageGeneration === pageRequestGeneration && editorGeneration === personaEditorGeneration) {
+      status.textContent = '保存失败: ' + e.message;
+      showToast(status.textContent, false);
+    }
+  }
   finally { btn.disabled = false; }
 }
 
@@ -1373,25 +1497,43 @@ function renderPersonaReferences(id, refs, message = '') {
 }
 
 async function viewPersonaReferences(id) {
+  const generation = ++personaReferencesGeneration;
+  const pageGeneration = pageRequestGeneration;
+  const current = () => generation === personaReferencesGeneration && pageGeneration === pageRequestGeneration;
+  const el = document.getElementById('persona-references');
+  personaHint(el, '正在加载人设 ' + id + ' 的引用位置…');
   try {
-    const r = await apiJSON('/api/personas/' + encodeURIComponent(id) + '/references');
+    const r = await personaReadJSON('/api/personas/' + encodeURIComponent(id) + '/references');
+    if (!current()) return;
     renderPersonaReferences(id, r.references || []);
-  } catch (e) { showToast('查看引用失败: ' + e.message, false); }
+  } catch (e) {
+    if (!current()) return;
+    personaHint(el, '引用加载失败: ' + e.message, () => viewPersonaReferences(id));
+  }
 }
 
 async function deletePersona(id) {
-  if (!confirm('删除人设 ' + id + '？此操作不可恢复')) return;
+  if (!confirm('删除人设 ' + id + '？服务器将重新检查引用，此操作不可恢复')) return;
+  const pageGeneration = pageRequestGeneration;
+  const editorGeneration = personaEditorGeneration;
+  const referenceGeneration = ++personaReferencesGeneration;
   try {
     const res = await api('/api/personas/' + encodeURIComponent(id), { method: 'DELETE' });
     const r = await res.json();
+    if (pageGeneration !== pageRequestGeneration) return;
     if (!res.ok) {
-      if (res.status === 409) renderPersonaReferences(id, r.references || [], r.detail);
+      if (res.status === 409 && referenceGeneration === personaReferencesGeneration)
+        renderPersonaReferences(id, r.references || [], r.detail);
       throw new Error(r.detail || '删除失败');
     }
-    if (document.getElementById('persona-editor-id').value === id) editPersona();
+    if (editorGeneration === personaEditorGeneration && document.getElementById('persona-editor-id').value === id) editPersona();
+    if (referenceGeneration === personaReferencesGeneration)
+      personaHint(document.getElementById('persona-references'), '人设已删除；请选择其他人设查看引用');
     showToast('人设已删除');
     await loadPersonasPage();
-  } catch (e) { showToast(e.message, false); }
+  } catch (e) {
+    if (pageGeneration === pageRequestGeneration) showToast(e.message, false);
+  }
 }
 
 // ═══════════════ 3. Models ═══════════════
