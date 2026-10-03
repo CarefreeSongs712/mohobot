@@ -135,7 +135,7 @@ class BotManager:
         if not self._bots_dir.exists():
             return None
         for entry in sorted(self._bots_dir.iterdir()):
-            if not entry.is_dir():
+            if not entry.is_dir() or not (entry / "config.json").is_file():
                 continue
             cfg = BotConfig.load(entry / "config.json")
             if cfg.bot_id and str(cfg.qq) == qq_str:
@@ -159,7 +159,7 @@ class BotManager:
         if not self._bots_dir.exists():
             return result
         for entry in sorted(self._bots_dir.iterdir()):
-            if not entry.is_dir():
+            if not entry.is_dir() or not (entry / "config.json").is_file():
                 continue
             cfg = BotConfig.load(entry / "config.json")
             if cfg.bot_id:
@@ -251,7 +251,7 @@ class BotManager:
         if not self._bots_dir.exists():
             return
         for entry in sorted(self._bots_dir.iterdir()):
-            if not entry.is_dir():
+            if not entry.is_dir() or not (entry / "config.json").is_file():
                 continue
             cfg = BotConfig.load(entry / "config.json")
             if cfg.bot_id and cfg.bot_id != exclude_bot_id and str(cfg.qq) == qq_str:

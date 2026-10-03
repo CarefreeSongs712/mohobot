@@ -326,7 +326,8 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 |---|---|
 | `data/history/group/{群号}.jsonl` | 群聊合并归档（跨 bot 共享一个文件，写入时按 message_id 近期窗口去重，行内 `bot_id` 标注接收/发送 bot） |
 | `data/history/{bot_id}/private/{QQ}.jsonl` | 私聊原始事件归档（不同 bot 与同一用户的私聊是不同对话，不合并） |
-| `data/bots/{bot_id}/config.json` | per-bot 配置 |
+| `data/personas/personas.json` | 共享人设预设（系统编号、名称、正文） |
+| `data/bots/{bot_id}/config.json` | per-bot 配置（`persona_id` 引用预设） |
 | `data/cache/images/` + `data/cache/image_cache_map.json` | 图片缓存 + phash 映射 |
 | `data/ban/{ban_list,banall_list,pass_list,passall_list}.json` | 封禁名单 |
 | `data/emotion/{bot_id}/{user_states,memory}.json` | 情感状态与长期记忆 |
@@ -373,7 +374,17 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
 | 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
 
-`BotConfig`（`data/bots/{bot_id}/config.json`）：`bot_id / qq / nickname / persona / enabled / touch_replies / chat_model_override / vision_model_override / tts_enabled / tts_voice_id / command_prefix / keyword_replies`。
+`BotConfig`（`data/bots/{bot_id}/config.json`）：`bot_id / qq / nickname / persona_id / enabled / touch_replies / chat_model_override / vision_model_override / tts_enabled / tts_voice_id / command_prefix / keyword_replies`。旧 `persona` 仅作已有配置迁移输入，不再是页面中独立编辑的人设。
+
+#### 人设库与解析
+
+`PersonaService` 是应用共享实例，在 BotManager 旧目录迁移后、插件和网络启动前加载。预设库为 `data/personas/personas.json`，编号系统生成且不复用，名称与正文可编辑。首次将既有 bot 文本人设导入预设并绑定，修改前备份 bot 配置；同文复用、重复启动幂等。特殊 bot＋用户的源码硬编码规则已删除，不迁移为额外绑定。
+
+私聊的 `session_index.json` 在 session 元数据中保存 `persona_id`；不存在覆盖则继承 bot 默认。解析顺序是 session → bot → 系统默认，群聊和 QQ空间仅解析 bot 默认。CRUD、引用检查和绑定写入经过同一个服务锁，使用中的预设禁止删除，正文不进入上下文。锁顺序为 service → context maintenance → chat → file_store 路径锁。上下文恢复与清理参与维护互斥，避免进行中的追加或压缩跨越目录替换；联合恢复按替换后的引用检查，库及目录失败时回滚，恢复的私聊 generation 重新生成。维护锁只覆盖短时存储操作，总结 LLM 请求仍在锁外。预设 JSON 损坏必须报错，不能静默重置；持久化采用临时文件替换，缓存只在写成功后发布。
+
+主聊天捕获 session ID、不可复用的 generation、bot 配置与人设正文快照，三种回复路径及工具续轮共用本轮快照。上下文读取和写回显式指定捕获的 session；切换 active 不影响在途回复，删除或重建同名 session 后旧回复不落盘。清空消息不清人设引用，删除 session 才移除。
+
+新增 `/persona` 为全局管理员命令，明确指定 `bot_id 用户QQ session_id`；支持 `list/sessions/set/get/clear`，群多 bot 去重，不隐式创建或切换目标会话。面板「人设管理」CRUD 和 bot 下拉共用服务；对话详情只读显示实际人设来源。所有引用在下一轮读取最新正文，在途请求不被编辑改变。具体用法见 README「人设预设与私聊专属人设」。
 
 **bot_id 与 QQ 分离**：`bot_id` 是自动编号内部标识（`bot_001`…，`next_bot_id` 取最大号 +1，零填充 3 位）；`qq=0` 表示未绑定；**QQ 唯一绑定**（`bind_qq` 会先从其他 bot 解绑）。新 QQ 连进来默认不分配 bot，需在面板创建/绑定。
 
@@ -396,7 +407,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 
 - **嵌套段字段**（如 `reply.stream`）：跳过第 5 步 —— `PUT /api/config` 对 `reply/ban/emotion/tts/interceptor/web_panel` 走通用 `hasattr` 循环。
 - **`llm.*`**：不经 `/api/config`，走独立端点 `PUT /api/models`。
-- **per-bot 字段**：改 `BotConfig` 的 dataclass / `load` / `to_dict` 三处即可，`update_bot_config` 是通用 `hasattr` 循环，**无需**白名单；前端加在 `loadBotConfig()` / `saveBotConfig()`。
+- **per-bot 字段**：改 `BotConfig` 的 dataclass / `load` / `to_dict`，页面在 `loadBotConfig()` / `saveBotConfig()`。配置写入经 `PersonaService.update_bot_config`，`persona_id` 需要有效预设，身份及旧内联 `persona` 不允许通过通用表单修改。
 - **`server` / `database` / `log_dir` / `data_dir` / `plugins_dir`**：故意不给 WebUI 编辑（服务端路径），`GET /api/config` 会 `pop("server")`。
 
 ### 5.3 环境变量
@@ -878,7 +889,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 5. **`config.log_dir` 是死配置**：`main.py:547` 硬编码 `setup_logger(log_dir="./logs")`，配了没用。
 6. **`json_write` 非原子**（就地截断，非 temp+rename），崩溃可能留半截文件。
 7. **`app.py:265` 的 `hmac.compare_digest(token, token)` 是自我比较的空操作**，误导性代码（实际靠 dict 查找 + 过期判断）。
-8. **`_HARDCODED_PERSONAS` 有拼写异常键** `38310975970`（多一位数字），几乎肯定是 10 位 QQ 的笔误。
+8. **旧 `_HARDCODED_PERSONAS` 与特殊用户强制覆盖已删除**：运行人设统一解析私聊 session、bot 和系统默认，不再存在源码中不可配置的特殊待遇。
 9. **`plugins/feed/` 是空目录残留**（只有 `__pycache__`），加载器静默跳过。
 
 **文档与代码漂移**

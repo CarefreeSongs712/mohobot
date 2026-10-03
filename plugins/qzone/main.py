@@ -860,11 +860,19 @@ class Plugin:
         return text or clean_reply_text(fallback_tpl.replace("{nick}", nick), max_len)
 
     def _bot_persona(self, bot_id: str) -> str:
+        """每次从共享 LLMService 解析 bot 默认人设, 不读取私聊会话覆盖。"""
         ws = self._ws_server
         bm = getattr(ws, "_bot_manager", None) if ws is not None else None
         inst = bm.get(bot_id) if bm is not None else None
-        persona = (getattr(inst.config, "persona", "") or "").strip() if inst is not None else ""
-        return persona
+        if inst is None:
+            return ""
+        resolver = getattr(self._llm_service, "resolve_bot_persona", None)
+        if callable(resolver):
+            resolved = resolver(inst.config)
+            return (resolved.get("content") or "").strip()
+        # 兼容未提供解析方法的旧插件独立测试/fake LLM;
+        # 正式 LLMService 始终使用上面的共享预设解析(包括空内容)。
+        return (getattr(inst.config, "persona", "") or "").strip()
 
     # ── 自动回复过滤(bot/封禁/每说说上限) ─────────────────────
 

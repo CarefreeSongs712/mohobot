@@ -61,8 +61,10 @@ class MessageHandler:
         song_matcher=None,
         emotion_manager=None,
         tts_service=None,
+        persona_service=None,
     ):
         self._ws = ws_server
+        self._persona_service = persona_service
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._plugins = plugin_system
@@ -516,6 +518,18 @@ class MessageHandler:
         # ── LLM path ──
         chat_type = self._get_chat_type(event)
         chat_id = self._get_chat_id(event)
+        session = None
+        reply_options = None
+        persona_service = getattr(self, "_persona_service", None)
+        if persona_service is not None:
+            from copy import deepcopy
+            session = await self._ctx_mgr.capture_session(bot_id, chat_type, chat_id)
+            bot_config = deepcopy(self._bot_config(bot_id))
+            persona = persona_service.resolve(bot_config, session.get("persona_id", ""))
+            reply_options = {
+                "bot_config": bot_config,
+                "persona_content": persona["content"],
+            }
 
         # ── Legacy path: streaming with reply-quote ──
         # Load session context (+ 群聊最近消息临时注入, 不写回 context 文件)
@@ -528,7 +542,9 @@ class MessageHandler:
             except Exception as e:
                 logger.debug(f"引用消息解析失败: {e}")
                 quote_display = ""
-        context = await self._build_legacy_context(bot_id, chat_type, chat_id, event)
+        context = await self._build_legacy_context(
+            bot_id, chat_type, chat_id, event, session=session,
+        )
         if quote_display:
             context.append({
                 "role": "system",
@@ -536,7 +552,12 @@ class MessageHandler:
             })
 
         # Stream response — split by punctuation + length (标点符号+长度分隔法)
-        full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
+        if reply_options is None:
+            full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
+        else:
+            full_reply = await self._stream_llm_reply(
+                bot_id, event, context, raw, reply_options=reply_options,
+            )
 
         # Save context after streaming completes
         if full_reply.strip():
@@ -554,8 +575,10 @@ class MessageHandler:
                 "content": full_reply,
                 "timestamp": int(time_module.time()),
             }
+            session_options = ({"session_id": session["id"], "generation": session["generation"]}
+                               if session is not None else {})
             await self._ctx_mgr.append_context(
-                bot_id, chat_type, chat_id, [user_msg, ai_msg],
+                bot_id, chat_type, chat_id, [user_msg, ai_msg], **session_options,
             )
             # history → 数据库 (SQLite)
             self._persist_legacy_turn(
@@ -1044,14 +1067,16 @@ class MessageHandler:
         return "【群聊最近消息】\n" + "\n".join(lines)
 
     async def _build_legacy_context(
-        self, bot_id: str, chat_type: str, chat_id: str, event=None,
+        self, bot_id: str, chat_type: str, chat_id: str, event=None, *, session=None,
     ) -> list[dict]:
         """加载会话上下文, 群聊时临时附加最近消息段 + 环境感知段。
 
         附加的 system 条目不写回 context 文件, 不参与上下文压缩总结。
         event 供情感系统注入当前用户的好感度/态度块。
         """
-        context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
+        session_options = ({"session_id": session["id"], "generation": session["generation"]}
+                           if session is not None else {})
+        context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id, **session_options)
         context = list(context)
         if chat_type == "group":
             recent = await self._format_group_recent(bot_id, chat_id)
@@ -1150,7 +1175,7 @@ class MessageHandler:
     # 引文前文字的合法边界(比普通分段多允许 冒号/破折号, 如 "那就唱副歌吧：")
     _QUOTE_PREFIX_BOUNDARY = "。！？!?…；;，,、：:—\n"
 
-    async def _stream_llm_reply(self, bot_id, event, context, raw) -> str:
+    async def _stream_llm_reply(self, bot_id, event, context, raw, *, reply_options=None) -> str:
         """Generate and send the LLM reply per the configured behavior.
 
         - stream=True:    逐 token 流式接收
@@ -1160,9 +1185,10 @@ class MessageHandler:
         - reply_quote:    首条回复是否引用触发消息
         Returns the display reply text (TTS 标签已剥除, 用于 context save)。
         """
+        options = reply_options if reply_options is not None else {"bot_config": self._bot_config(bot_id)}
         if not self._segment_reply:
             # Non-segmented: collect everything, send as ONE message at the end
-            return await self._send_single_reply(bot_id, event, context, raw)
+            return await self._send_single_reply(bot_id, event, context, raw, reply_options=options)
 
         # Non-streaming path: single blocking call, then segment & send
         if not self._stream:
@@ -1171,7 +1197,7 @@ class MessageHandler:
                 event=event,
                 context=context,
                 raw_event=raw,
-                bot_config=self._bot_config(bot_id),
+                **options,
             )
             full_reply = reply_text or ""
             tts_text = ""
@@ -1195,7 +1221,7 @@ class MessageHandler:
             event=event,
             context=context,
             raw_event=raw,
-            bot_config=self._bot_config(bot_id),
+            **options,
         ):
             if chunk:
                 if tts_filter is not None:
@@ -1232,19 +1258,20 @@ class MessageHandler:
         )
         return full_reply
 
-    async def _send_single_reply(self, bot_id, event, context, raw) -> str:
+    async def _send_single_reply(self, bot_id, event, context, raw, *, reply_options=None) -> str:
         """Non-segmented path: wait for full reply (streaming or not), send once.
 
         With stream=True the chunks are still consumed incrementally (so the
         LLM call isn't wasted) but only the final assembled text is sent.
         """
+        options = reply_options if reply_options is not None else {"bot_config": self._bot_config(bot_id)}
         full_reply = ""
         async for chunk, _ in self._llm.chat_stream(
             bot_id=bot_id,
             event=event,
             context=context,
             raw_event=raw,
-            bot_config=self._bot_config(bot_id),
+            **options,
         ):
             if chunk:
                 full_reply += chunk
@@ -1569,7 +1596,7 @@ class MessageHandler:
     _forward_min_len = 600
 
     # 框架内置全局指令(/ 前缀, 群内多 bot 只由随机选中的一个 bot 回复)
-    _GLOBAL_COMMANDS = {"/help", "/tts"}
+    _GLOBAL_COMMANDS = {"/help", "/tts", "/persona"}
     # 前缀匹配的全局指令(带参数的命令): 封禁系统 /ban /pass /dec-* 系列
     _GLOBAL_COMMAND_PREFIXES = ("/ban", "/pass", "/dec-")
 
@@ -1604,7 +1631,8 @@ class MessageHandler:
                     triggers.update(str(t) for t in gt)
         ban_interceptor = self._get_ban_interceptor()
         is_global = (
-            (ban_interceptor is not None and ban_interceptor.is_ban_command(event))
+            text.split(maxsplit=1)[0].lower() in self._GLOBAL_COMMANDS
+            or (ban_interceptor is not None and ban_interceptor.is_ban_command(event))
             or text.startswith(self._GLOBAL_COMMAND_PREFIXES)
         )
         if not is_global:

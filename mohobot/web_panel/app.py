@@ -76,6 +76,14 @@ class BotConfigUpdateRequest(BaseModel):
     data: dict[str, Any]
 
 
+class PersonaWriteRequest(BaseModel):
+    name: str
+    content: str
+
+    class Config:
+        extra = "forbid"  # 编号由服务自动分配，禁止客户端写入。
+
+
 class PluginToggleRequest(BaseModel):
     name: str
     enabled: bool
@@ -155,6 +163,7 @@ class WebPanel:
         emotion_manager=None,
         tts_service=None,
         config_update_callback=None,
+        persona_service=None,
     ):
         self._host = host
         self._port = port
@@ -194,6 +203,7 @@ class WebPanel:
         self._emotion_manager = emotion_manager
         self._tts_service = tts_service
         self._config_update_callback = config_update_callback
+        self._persona_service = persona_service
 
         self._app = FastAPI(title="Mohobot Web Panel")
         self._log_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
@@ -299,7 +309,11 @@ class WebPanel:
         async def audit_mutations(request: Request, call_next):
             response = await call_next(request)
             if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {"/api/login"}:
-                details = {k: v for k, v in request.query_params.items() if k.lower() not in {"token", "password"}}
+                # 人设审计仅记录方法、路径与结果；即使 query 放正文也不保存。
+                details = {} if request.url.path.startswith("/api/personas") else {
+                    k: v for k, v in request.query_params.items()
+                    if k.lower() not in {"token", "password", "persona", "content"}
+                }
                 from mohobot.services.audit import AuditLogger
                 audit_logger = AuditLogger(str(self._data_dir))
                 try:
@@ -616,6 +630,14 @@ class WebPanel:
             await _require_auth(request)
             from mohobot.models.config import BotConfig
             bot_id = self._safe_id(bot_id, "bot_id")
+            if self._persona_service is not None:
+                try:
+                    await self._persona_service.update_bot_config(bot_id, body.data)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                logger.info(f"Web panel: bot {bot_id} config updated")
+                return {"status": "ok"}
+            # 兼容未注入服务的旧调用；正式入口始终经共享服务写配置。
             config_path = self._data_dir / "bots" / bot_id / "config.json"
             cfg = BotConfig.load(config_path)
             data = body.data
@@ -631,6 +653,85 @@ class WebPanel:
                     inst.config = cfg
 
             logger.info(f"Web panel: bot {bot_id} config updated")
+            return {"status": "ok"}
+
+        # ── Shared persona presets ──────────────────────────
+
+        def _persona_service():
+            if self._persona_service is None:
+                raise HTTPException(status_code=503, detail="人设服务不可用")
+            return self._persona_service
+
+        async def _existing_persona(persona_id: str):
+            persona_id = self._safe_id(persona_id, "persona_id")
+            service = _persona_service()
+            for item in await service.list_personas():
+                if item["id"] == persona_id:
+                    return item
+            raise HTTPException(status_code=404, detail=f"人设不存在: {persona_id}")
+
+        def _persona_input(body: PersonaWriteRequest):
+            if not body.name.strip() or not body.content.strip():
+                raise HTTPException(status_code=400, detail="名称和正文不能为空")
+            return body.name.strip(), body.content
+
+        @app.get("/api/personas")
+        async def list_personas(request: Request):
+            await _require_auth(request)
+            return await _persona_service().list_personas()
+
+        @app.post("/api/personas")
+        async def create_persona(request: Request, body: PersonaWriteRequest):
+            await _require_auth(request)
+            name, content = _persona_input(body)
+            try:
+                return await _persona_service().create_persona(name, content)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+        @app.get("/api/personas/{persona_id}")
+        async def get_persona(persona_id: str, request: Request):
+            await _require_auth(request)
+            return await _existing_persona(persona_id)
+
+        @app.get("/api/personas/{persona_id}/references")
+        async def persona_references(persona_id: str, request: Request):
+            await _require_auth(request)
+            await _existing_persona(persona_id)
+            return {"references": await _persona_service().list_references(persona_id)}
+
+        @app.put("/api/personas/{persona_id}")
+        async def update_persona(persona_id: str, request: Request, body: PersonaWriteRequest):
+            await _require_auth(request)
+            await _existing_persona(persona_id)
+            name, content = _persona_input(body)
+            try:
+                return await _persona_service().update_persona(persona_id, name, content)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+        @app.delete("/api/personas/{persona_id}")
+        async def delete_persona(persona_id: str, request: Request):
+            await _require_auth(request)
+            await _existing_persona(persona_id)
+            service = _persona_service()
+            if persona_id == "persona_001":
+                return JSONResponse(status_code=409, content={
+                    "detail": "默认人设 persona_001 不可删除",
+                    "references": await service.list_references(persona_id),
+                })
+            try:
+                await service.delete_persona(persona_id)
+            except Exception as exc:
+                # 保留服务原子删除检查；无需导入尚未加载的人设异常类。
+                if hasattr(exc, "references"):
+                    return JSONResponse(status_code=409, content={
+                        "detail": "人设仍被引用，解除以下引用后才能删除",
+                        "references": exc.references,
+                    })
+                if isinstance(exc, ValueError):
+                    raise HTTPException(status_code=400, detail=str(exc))
+                raise
             return {"status": "ok"}
 
         # ── 3. Models (模型配置) ─────────────────────────────
@@ -879,9 +980,31 @@ class WebPanel:
             await _require_auth(request)
             if not self._context_manager:
                 return None
-            return await self._context_manager.get_session(
+            session = await self._context_manager.get_session(
                 bot_id, chat_type, chat_id, session_id
             )
+            if session is None or self._persona_service is None:
+                return session
+            result = dict(session)
+            if chat_type == "private":
+                try:
+                    binding = await self._persona_service.get_session_binding(bot_id, chat_id, session_id)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                result.update({key: binding.get(key) for key in ("effective", "persona_id", "bot_persona_id")})
+            else:
+                # 群聊只展示 Bot 默认人设，绝不读取私聊绑定。
+                cfg = None
+                if self._bot_manager is not None:
+                    inst = self._bot_manager.get(bot_id)
+                    cfg = inst.config if inst else next((
+                        item for item in self._bot_manager.list_bot_configs()
+                        if item.bot_id == bot_id
+                    ), None)
+                if cfg is not None:
+                    result.update(effective=self._persona_service.resolve_bot(cfg),
+                                  persona_id=None, bot_persona_id=getattr(cfg, "persona_id", "persona_001"))
+            return result
 
         @app.post("/api/contexts/{bot_id}/{chat_type}/{chat_id}/session")
         async def create_session(
@@ -1026,7 +1149,7 @@ class WebPanel:
 
         # ── 8. Data management (数据管理: 备份/恢复/清理) ──────
 
-        DATA_SCOPES = {"cache", "history", "contexts", "ban"}
+        DATA_SCOPES = {"cache", "history", "contexts", "ban", "personas"}
 
         def _parse_data_scope(scope: Any) -> tuple[list[str] | None, set[str]]:
             """解析范围: 返回 (bots 列表或 None=全部, dirs 集合)。"""
@@ -1037,8 +1160,6 @@ class WebPanel:
                 bot_list: list[str] | None = None
             elif isinstance(bots_raw, list):
                 bot_list = [self._safe_id(str(b), "bot_id") for b in bots_raw if str(b)]
-                if not bot_list:
-                    raise HTTPException(status_code=400, detail="未选择任何 Bot")
             else:
                 raise HTTPException(status_code=400, detail="bots 参数无效")
             dirs_raw = scope.get("dirs")
@@ -1046,7 +1167,9 @@ class WebPanel:
                 raise HTTPException(status_code=400, detail="dirs 参数无效")
             dir_set = {str(d) for d in dirs_raw} & DATA_SCOPES
             if not dir_set:
-                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts/ban)")
+                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts/ban/personas)")
+            if bot_list == [] and not (dir_set & {"personas", "cache", "ban"}):
+                raise HTTPException(status_code=400, detail="未选择任何 Bot")
             return bot_list, dir_set
 
         def _collect_data_files(
@@ -1069,6 +1192,14 @@ class WebPanel:
                     for f in ban_dir.rglob("*"):
                         if f.is_file():
                             files.append((f"ban/{f.relative_to(ban_dir).as_posix()}", f))
+
+            if "personas" in dir_set:
+                # 全局共享库，不随 Bot 范围过滤。
+                persona_dir = root / "personas"
+                if persona_dir.exists():
+                    for f in persona_dir.rglob("*"):
+                        if f.is_file():
+                            files.append((f"personas/{f.relative_to(persona_dir).as_posix()}", f))
 
             for d in ("history", "contexts"):
                 if d not in dir_set:
@@ -1148,13 +1279,19 @@ class WebPanel:
                     # zip slip 防护: 拒绝包含绝对路径/.. 的成员
                     for member in zf.namelist():
                         target = (tmp_dir / member).resolve()
-                        if not str(target).startswith(str(tmp_dir.resolve())) or ".." in member.split("/"):
+                        try:
+                            target.relative_to(tmp_dir.resolve())
+                        except ValueError:
+                            raise HTTPException(status_code=400, detail="备份文件包含非法路径")
+                        if ".." in member.replace("\\", "/").split("/"):
                             raise HTTPException(status_code=400, detail="备份文件包含非法路径")
                     zf.extractall(tmp_dir)
 
-                restored = self._restore_from(tmp_dir, bot_list, dir_set)
+                restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
             except HTTPException:
                 raise
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"恢复失败: {e}")
             finally:
@@ -1179,7 +1316,11 @@ class WebPanel:
             if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
-            removed = self._cleanup_data(bot_list, dir_set)
+            if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
+                async with self._persona_service.lock, self._context_manager.maintenance_lock:
+                    removed = self._cleanup_data(bot_list, dir_set)
+            else:
+                removed = self._cleanup_data(bot_list, dir_set)
             # 清理封禁数据后同步刷新拦截器缓存
             if "ban" in dir_set and self._ban_store is not None:
                 try:
@@ -1357,10 +1498,98 @@ class WebPanel:
 
     # ── 数据管理辅助 ──────────────────────────────────────────
 
+    async def _restore_persona_data(
+        self, tmp_dir: Path, bot_list: list[str] | None, dir_set: set[str],
+    ) -> int:
+        service = self._persona_service
+        source = tmp_dir / "personas" / "personas.json"
+        if service is None:
+            if "personas" in dir_set:
+                raise ValueError("人设服务未配置，无法安全恢复人设库")
+            return self._restore_from(tmp_dir, bot_list, dir_set)
+        async with service.lock:
+            library = (json.loads(source.read_text(encoding="utf-8"))
+                       if "personas" in dir_set and source.is_file()
+                       else json.loads(service.path.read_text(encoding="utf-8")))
+            extra_ids = []
+            if "contexts" in dir_set:
+                import uuid
+                contexts = tmp_dir / "contexts"
+                for index_path in contexts.glob("*/private/*/session_index.json"):
+                    if bot_list is not None and index_path.parent.parent.parent.name not in bot_list:
+                        continue
+                    index = json.loads(index_path.read_text(encoding="utf-8"))
+                    sessions = index.get("sessions") if isinstance(index, dict) else None
+                    if not isinstance(sessions, list):
+                        raise ValueError("备份会话索引格式非法")
+                    seen = set()
+                    for item in sessions:
+                        sid = item.get("id") if isinstance(item, dict) else None
+                        if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid) or sid in seen:
+                            raise ValueError("备份包含非法或重复 session ID")
+                        seen.add(sid)
+                        pid = item.get("persona_id", "")
+                        if not isinstance(pid, str):
+                            raise ValueError("备份会话人设引用格式非法")
+                        if pid:
+                            extra_ids.append(pid)
+                        item["generation"] = uuid.uuid4().hex
+                        item["persona_id"] = pid
+                    if index.get("active") not in seen:
+                        raise ValueError("备份活动会话不存在")
+                    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+            context_source = tmp_dir / "contexts"
+            replaced = {p.name for p in context_source.iterdir()
+                        if p.is_dir() and (bot_list is None or p.name in bot_list)} if (
+                            "contexts" in dir_set and context_source.exists()) else set()
+            validated = await service.validate_restore(
+                library, extra_ids, replaced_context_bots=replaced,
+            )
+            targets = []
+            for directory in ("cache", "ban"):
+                if directory in dir_set and (tmp_dir / directory).is_dir():
+                    targets.append(self._data_dir / directory)
+            for directory in ("history", "contexts"):
+                base = tmp_dir / directory
+                if directory in dir_set and base.is_dir():
+                    targets.extend(self._data_dir / directory / p.name for p in base.iterdir()
+                                   if p.is_dir() and (bot_list is None or p.name in bot_list))
+            import copy
+            old_library = copy.deepcopy(service._library)
+            restore_library = "personas" in dir_set and source.is_file()
+            # A restore is exclusive with all context mutations, including new chats.
+            async with self._context_manager.maintenance_lock:
+                with tempfile.TemporaryDirectory(prefix="mohobot_restore_rollback_") as rollback:
+                    saved = []
+                    for i, target in enumerate(targets):
+                        backup = Path(rollback) / str(i)
+                        existed = target.exists()
+                        if existed:
+                            shutil.copytree(target, backup)
+                        saved.append((target, backup, existed))
+                    published = False
+                    try:
+                        if restore_library:
+                            await service._publish(validated)
+                            published = True
+                        restored = self._restore_from(tmp_dir, bot_list, dir_set - {"personas"})
+                    except BaseException:
+                        for target, backup, existed in saved:
+                            if target.exists():
+                                shutil.rmtree(target)
+                            if existed:
+                                shutil.copytree(backup, target)
+                        if published:
+                            await service._publish(old_library)
+                        raise
+                    return restored + int(restore_library)
+
     def _restore_from(
         self, tmp_dir: Path, bot_list: list[str] | None, dir_set: set[str],
     ) -> int:
         """把解压出的备份覆盖到 data 目录(先清空目标再复制)。返回文件数。"""
+        if "personas" in dir_set:
+            raise ValueError("人设库必须经共享服务校验后恢复")
         restored = 0
         root = self._data_dir
 
@@ -1409,6 +1638,8 @@ class WebPanel:
         self, bot_list: list[str] | None, dir_set: set[str],
     ) -> int:
         """删除选定范围的数据。返回移除的文件数。"""
+        if "personas" in dir_set:
+            raise HTTPException(status_code=400, detail="人设库不能批量清理；请在人设管理页逐个删除，确保没有引用")
         removed = 0
         root = self._data_dir
 

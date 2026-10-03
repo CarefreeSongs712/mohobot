@@ -231,6 +231,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item active" data-page="dashboard"><span class="icon">📊</span> 数据总览</div>
     <div class="nav-item" data-page="usage"><span class="icon">📈</span> 用量统计</div>
     <div class="nav-item" data-page="config"><span class="icon">⚙️</span> 配置文件</div>
+    <div class="nav-item" data-page="personas"><span class="icon">P</span> 人设管理</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
@@ -326,6 +327,30 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div id="unbound-list" style="margin-top:12px"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Shared personas -->
+  <div class="page" id="page-personas">
+    <h2>人设管理</h2>
+    <div class="subtitle">全局共享预设；修改后所有引用在下一轮对话生效，私聊专属绑定由管理员指令管理</div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">人设列表</div>
+        <button class="btn small" onclick="editPersona()">新建人设</button>
+        <button class="btn small secondary" onclick="loadPersonasPage()">刷新列表</button>
+        <div id="persona-list" style="margin-top:12px"></div>
+      </div>
+      <div class="card">
+        <div class="card-title" id="persona-editor-title">新建人设</div>
+        <div class="form-row"><label for="persona-editor-id">编号（自动分配）</label><input id="persona-editor-id" readonly placeholder="保存后自动编号"></div>
+        <div class="form-row"><label for="persona-editor-name">名称（必填）</label><input id="persona-editor-name" required></div>
+        <div class="form-row"><label for="persona-editor-content">正文（必填）</label><textarea id="persona-editor-content" rows="10" required></textarea></div>
+        <button class="btn" id="persona-save" onclick="savePersona()">保存人设</button>
+        <button class="btn secondary" onclick="editPersona()">新建 / 取消编辑</button>
+        <div class="hint" id="persona-editor-status" style="margin-top:8px" role="status"></div>
+      </div>
+    </div>
+    <div class="card"><div class="card-title">引用位置</div><div id="persona-references">选择人设的“查看引用”</div></div>
   </div>
 
   <!-- 3. Models -->
@@ -663,6 +688,7 @@ function logout() {
 // ═══════════════ Navigation ═══════════════
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
+    const previousPage = document.querySelector('.nav-item.active')?.dataset.page;
     document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     item.classList.add('active');
@@ -672,7 +698,11 @@ document.querySelectorAll('.nav-item').forEach(item => {
     switch (item.dataset.page) {
       case 'dashboard': loadDashboard(); break;
       case 'usage': loadUsageStats(); break;
-      case 'config': loadConfigPage(); break;
+      case 'config':
+        if (previousPage === 'personas' && document.getElementById('cfg-persona_id')) refreshPersonaChoices();
+        else loadConfigPage();
+        break;
+      case 'personas': loadPersonasPage(); break;
       case 'models': loadModels(); break;
       case 'tts': loadTtsPage(); break;
       case 'plugins': loadPlugins(); break;
@@ -1143,7 +1173,10 @@ async function loadBotConfig() {
         ? `<div class="form-row"><label>绑定 QQ</label><input type="text" value="${b.qq}" readonly style="background:var(--bg2)">
              <button class="btn btn-sm" onclick="unbindBotPrompt()" style="margin-left:8px">解绑</button></div>`
         : '<div class="hint" style="margin:6px 0">⚠️ 未绑定 QQ — 点击上方"🔗 绑定 QQ"</div>') +
-      textareaField('persona', '人设（System Prompt）', b.persona, '定义机器人的性格与行为') +
+      '<div class="form-row"><label for="cfg-persona_id">默认人设</label><select id="cfg-persona_id" onchange="updateBotPersonaPreview()"></select>' +
+      '<button class="btn small secondary" onclick="refreshPersonaChoices()">刷新人设</button></div>' +
+      '<div class="form-row"><label for="cfg-persona-preview">正文（只读）</label><textarea id="cfg-persona-preview" rows="8" readonly></textarea></div>' +
+      '<div class="hint">共享人设修改后下轮生效；<button class="btn small secondary" onclick="openPersonaPage()">前往人设管理</button></div>' +
       textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(touch_replies)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
@@ -1155,6 +1188,7 @@ async function loadBotConfig() {
         <div class="hint">开启后该 bot 的 LLM 回复可带朗读标注、并响应 /tts 指令(MiniMax API 等在 TTS 板块配置); 修改后需重启生效</div></div>` +
       formField('tts_voice_id', 'TTS 音色 ID（留空用全局）', b.tts_voice_id, { hint: '仅 MiniMax 后端生效的克隆音色; 自建 HTTP 后端音色由服务端固定, 此字段忽略' }) +
       textareaField('keyword_replies_json', '关键词回复（JSON）', JSON.stringify(b.keyword_replies || {}, null, 2), '格式: {"关键词": "回复内容"}');
+    await refreshPersonaChoices(b.persona_id || 'persona_001');
   } catch (e) { showToast('加载 Bot 配置失败: ' + e.message, false); }
 }
 
@@ -1221,7 +1255,7 @@ async function saveBotConfig() {
   if (!botId) return;
   const data = {
     nickname: document.getElementById('cfg-nickname').value,
-    persona: document.getElementById('cfg-persona').value,
+    persona_id: document.getElementById('cfg-persona_id').value,
     touch_replies: (document.getElementById('cfg-touch_replies')?.value || '')
       .split('\n').map(s => s.trim()).filter(Boolean),
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
@@ -1238,6 +1272,126 @@ async function saveBotConfig() {
     await apiJSON(`/api/bots/${botId}/config`, { method: 'PUT', body: { data } });
     showToast('Bot 配置已保存');
   } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+// ═══════════════ Shared personas ═══════════════
+let personaCache = [];
+let personaChoicesGeneration = 0;
+
+function openPersonaPage() {
+  document.querySelector('.nav-item[data-page="personas"]').click();
+}
+
+function updateBotPersonaPreview() {
+  const selected = document.getElementById('cfg-persona_id');
+  const preview = document.getElementById('cfg-persona-preview');
+  if (!selected || !preview) return;
+  const p = personaCache.find(item => item.id === selected.value);
+  preview.value = p ? p.content : '所选人设不存在，请选择有效人设';
+}
+
+async function refreshPersonaChoices(initialId) {
+  const selected = document.getElementById('cfg-persona_id');
+  const generation = ++personaChoicesGeneration;
+  try {
+    const items = await apiJSON('/api/personas');
+    if (generation !== personaChoicesGeneration) return;
+    personaCache = items;
+    // 仅更新人设控件；其余未保存 Bot 表单值保持原样。
+    if (selected && selected === document.getElementById('cfg-persona_id')) {
+      const id = initialId ?? selected.value;
+      selected.replaceChildren();
+      items.forEach(p => selected.add(new Option(p.name + ' (' + p.id + ')', p.id)));
+      if (id && !items.some(p => p.id === id)) selected.add(new Option('人设不存在 (' + id + ')', id));
+      if (id) selected.value = id;
+      updateBotPersonaPreview();
+    }
+  } catch (e) { showToast('刷新人设失败: ' + e.message, false); }
+}
+
+async function loadPersonasPage() {
+  try {
+    personaCache = await apiJSON('/api/personas');
+    const el = document.getElementById('persona-list');
+    el.innerHTML = '<table><thead><tr><th>名称 / 编号</th><th>引用数</th><th>操作</th></tr></thead><tbody>' +
+      personaCache.map(p => `<tr data-persona-id="${esc(p.id)}"><td>${esc(p.name)}<div class="hint">${esc(p.id)}</div></td>
+        <td>${esc(p.reference_count ?? 0)}</td><td>
+        <button class="btn small secondary" data-action="edit">编辑</button>
+        <button class="btn small secondary" data-action="references">查看引用</button>
+        <button class="btn small danger" data-action="delete" ${p.id === 'persona_001' || p.reference_count > 0 ? 'disabled' : ''}>删除</button>
+        ${p.id === 'persona_001' ? '<div class="hint">默认人设不可删除</div>' : p.reference_count > 0 ? '<div class="hint">被引用，禁止删除</div>' : ''}</td></tr>`).join('') + '</tbody></table>';
+    el.querySelectorAll('button[data-action]').forEach(btn => btn.addEventListener('click', () => {
+      const id = btn.closest('tr').dataset.personaId;
+      if (btn.dataset.action === 'edit') editPersona(id);
+      else if (btn.dataset.action === 'references') viewPersonaReferences(id);
+      else deletePersona(id);
+    }));
+    // 刷新人设下拉不重载整个配置页。
+    await refreshPersonaChoices();
+  } catch (e) { showToast('加载人设失败: ' + e.message, false); }
+}
+
+function editPersona(id = '') {
+  const p = personaCache.find(item => item.id === id);
+  document.getElementById('persona-editor-title').textContent = p ? '编辑人设' : '新建人设';
+  document.getElementById('persona-editor-id').value = p ? p.id : '';
+  document.getElementById('persona-editor-name').value = p ? p.name : '';
+  document.getElementById('persona-editor-content').value = p ? p.content : '';
+  document.getElementById('persona-editor-status').textContent = '';
+}
+
+async function savePersona() {
+  const id = document.getElementById('persona-editor-id').value;
+  const name = document.getElementById('persona-editor-name').value.trim();
+  const content = document.getElementById('persona-editor-content').value;
+  const status = document.getElementById('persona-editor-status');
+  if (!name || !content.trim()) { status.textContent = '名称和正文不能为空'; return; }
+  const btn = document.getElementById('persona-save');
+  btn.disabled = true;
+  try {
+    const p = await apiJSON('/api/personas' + (id ? '/' + encodeURIComponent(id) : ''), {
+      method: id ? 'PUT' : 'POST', body: { name, content },
+    });
+    await loadPersonasPage();
+    editPersona(p.id);
+    status.textContent = '已保存；所有引用将在下一轮对话使用新正文';
+    showToast('人设已保存，下轮对话生效');
+  } catch (e) { status.textContent = '保存失败: ' + e.message; showToast(status.textContent, false); }
+  finally { btn.disabled = false; }
+}
+
+function renderPersonaReferences(id, refs, message = '') {
+  const el = document.getElementById('persona-references');
+  // 引用字段来自服务，全部作为文本展示，绝不插入未转义名称/内容。
+  const heading = `<div>${esc(message || ('人设 ' + id + ' 的引用位置'))}</div>`;
+  const rows = refs.map(ref => {
+    if (!ref || typeof ref !== 'object') return `<li>${esc(ref)}</li>`;
+    if (ref.type === 'bot') return `<li>Bot：${esc(ref.nickname || ref.bot_id)} <span class="hint">(${esc(ref.bot_id)})</span></li>`;
+    return `<li>私聊：Bot ${esc(ref.bot_id)}，用户 ${esc(ref.user_id)}，会话 ${esc(ref.name || ref.session_id)} <span class="hint">(${esc(ref.session_id)})</span></li>`;
+  });
+  el.innerHTML = heading + (rows.length ? '<ul>' + rows.join('') + '</ul>' : '<div class="hint">无引用</div>');
+}
+
+async function viewPersonaReferences(id) {
+  try {
+    const r = await apiJSON('/api/personas/' + encodeURIComponent(id) + '/references');
+    renderPersonaReferences(id, r.references || []);
+  } catch (e) { showToast('查看引用失败: ' + e.message, false); }
+}
+
+async function deletePersona(id) {
+  if (!confirm('删除人设 ' + id + '？此操作不可恢复')) return;
+  try {
+    const res = await api('/api/personas/' + encodeURIComponent(id), { method: 'DELETE' });
+    const r = await res.json();
+    if (!res.ok) {
+      if (res.status === 409) renderPersonaReferences(id, r.references || [], r.detail);
+      throw new Error(r.detail || '删除失败');
+    }
+    if (document.getElementById('persona-editor-id').value === id) editPersona();
+    showToast('人设已删除');
+    await loadPersonasPage();
+  } catch (e) { showToast(e.message, false); }
 }
 
 // ═══════════════ 3. Models ═══════════════
@@ -1707,21 +1861,27 @@ async function loadSessionDetail(sessionId) {
     const s = await apiJSON(`/api/contexts/${bot_id}/${chat_type}/${chat_id}/session/${sessionId}`);
     if (!s) { el.innerHTML = '<div class="conv-empty">会话不存在</div>'; return; }
     const msgs = s.messages || [];
+    const effective = s.effective;
+    const personaInfo = effective ? `<div class="hint" style="padding:8px 12px">实际人设：
+      ${chat_type === 'group' ? '群聊 · Bot 默认' : s.persona_id ? '私聊专属' : '继承 Bot 默认'} ·
+      ${esc(effective.name)} (${esc(effective.id)})
+      <details><summary>只读正文</summary><pre style="white-space:pre-wrap">${esc(effective.content)}</pre></details>
+      <span>绑定由管理员指令管理；人设编辑后下轮生效</span></div>` : '';
     el.innerHTML = `<div class="conv-actions">
-      <b style="padding:4px 6px">${s.name}</b>
+      <b style="padding:4px 6px">${esc(s.name)}</b>
       <span style="flex:1"></span>
       <button class="btn small secondary" onclick="resetCurrentSession()">重置</button>
       <button class="btn small danger" onclick="deleteCurrentSession()">删除</button>
-    </div>
+    </div>${personaInfo}
     <div class="conv-msgs">` +
-    msgs.map((m, i) => {
+    (msgs.map((m, i) => {
       const role = m.role || 'user';
       const isAssistant = role === 'assistant';
       return `<div class="conv-msg ${isAssistant ? 'assistant' : 'user'}">
         <div class="role-tag"><span>${esc(role)}</span><span class="edit-btn" onclick="editMessage(${i}, this)">✏️ 编辑</span></div>
         <div class="msg-content">${esc(String(m.content || ''))}</div>
       </div>`;
-    }).join('') || '<div class="conv-empty">会话为空</div>' +
+    }).join('') || '<div class="conv-empty">会话为空</div>') +
     `</div>`;
   } catch (e) { showToast('加载会话内容失败: ' + e.message, false); }
 }
@@ -2151,7 +2311,9 @@ async function renderDataScope() {
     '<label style="margin-right:10px"><input type="checkbox" id="ds-cache" checked> 缓存(cache)</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-history" checked> 聊天历史(history)</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-personas" checked> 人设库(personas，全局共享)</label>' +
     '<label><input type="checkbox" id="ds-ban" checked> 封禁名单(ban)</label></div>' +
+    '<div class="hint">人设支持全局备份；清理会保留人设库，请在管理页逐个删除。恢复人设须校验引用。</div>' +
     (bots.length
       ? `<div class="form-row"><label>Bot 范围</label>
          <label style="margin-right:10px"><input type="checkbox" id="ds-all" checked onchange="dsToggleAll(this)"> 全部</label>` +
@@ -2169,6 +2331,7 @@ function dsScope() {
   if (document.getElementById('ds-cache')?.checked) dirs.push('cache');
   if (document.getElementById('ds-history')?.checked) dirs.push('history');
   if (document.getElementById('ds-contexts')?.checked) dirs.push('contexts');
+  if (document.getElementById('ds-personas')?.checked) dirs.push('personas');
   if (document.getElementById('ds-ban')?.checked) dirs.push('ban');
   let bots = 'all';
   const allBtn = document.getElementById('ds-all');
@@ -2220,13 +2383,15 @@ async function restoreData() {
 
 async function cleanupData() {
   const scope = dsScope();
-  if (!scope.dirs.length) { showToast('请至少选择一个数据范围', false); return; }
-  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！')) return;
+  const preservedPersonas = scope.dirs.includes('personas');
+  scope.dirs = scope.dirs.filter(dir => dir !== 'personas');
+  if (!scope.dirs.length) { showToast('人设库不能批量清理，请在人设管理页逐个删除', false); return; }
+  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！' + (preservedPersonas ? '\n人设库将保留，不会清理。' : ''))) return;
   const pwd = prompt('输入管理员密码确认清理:');
   if (pwd === null) return;
   try {
     const r = await apiJSON('/api/data/cleanup', { method: 'POST', body: { data: { password: pwd, scope } } });
-    showToast(`清理完成: 移除 ${r.removed} 个文件`);
+    showToast(`清理完成: 移除 ${r.removed} 个文件${preservedPersonas ? '；人设库已保留' : ''}`);
   } catch (e) { showToast('清理失败: ' + e.message, false); }
 }
 

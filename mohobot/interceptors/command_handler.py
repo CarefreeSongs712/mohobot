@@ -7,6 +7,7 @@ to context_manager and llm_service / ws_server as appropriate.
 from __future__ import annotations
 
 import re
+import shlex
 import time as _time
 from typing import Any
 
@@ -23,12 +24,13 @@ class CommandHandler(Interceptor):
     UNKNOWN_CMD_COOLDOWN = 3600
 
     def __init__(self, context_manager, llm_service, ws_server, plugin_system=None,
-                 emotion_manager=None, tts_service=None, admins=None):
+                 emotion_manager=None, tts_service=None, admins=None, persona_service=None):
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._ws = ws_server
         self._plugin_system = plugin_system
         self._tts = tts_service
+        self._persona_service = persona_service
         self._admins: set[str] = {str(a) for a in (admins or [])}
         # Command registry: {name: (handler_func, help_text)}
         # help_text format: "<用途说明> | 用法: /cmd ..."
@@ -39,6 +41,7 @@ class CommandHandler(Interceptor):
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
             "tts":    (self._cmd_tts,     "语音合成 | 用法: /tts <文本>(非管理员限30字)"),
+            "persona": (self._cmd_persona, "私聊会话人设管理 (仅全局管理员) | " + self._PERSONA_USAGE),
         }
         # 情感系统命令(未启用时 emotion_manager 为 None, 不注册)
         if emotion_manager is not None:
@@ -250,6 +253,87 @@ class CommandHandler(Interceptor):
 
         return f"未知子命令: {sub}"
 
+    # ── 人设预设(仅全局管理员, 显式私聊目标) ──────────────────
+
+    _PERSONA_USAGE = (
+        "用法:\n"
+        "/persona list\n"
+        "/persona sessions <bot_id> <QQ>\n"
+        "/persona set <bot_id> <QQ> <session_id> <persona_id>\n"
+        "/persona get <bot_id> <QQ> <session_id>\n"
+        "/persona clear <bot_id> <QQ> <session_id>"
+    )
+
+    @staticmethod
+    def _persona_summary(binding: dict) -> str:
+        """只展示标识和实际来源, 不把私设正文带入命令回复。"""
+        effective = binding.get("effective") or {}
+        name = effective.get("name") or "未命名人设"
+        persona_id = effective.get("id") or "无预设"
+        source = effective.get("source") or "unknown"
+        source_label = {"session": "私聊会话覆盖", "bot": "bot 默认"}.get(source, source)
+        return f"生效人设: {name} [{persona_id}]\n来源: {source_label} ({source})"
+
+    async def _cmd_persona(
+        self, bot_id: str, event: MessageEvent, args: list[str]
+    ) -> str:
+        """管理显式 bot+QQ+sid 的私聊覆盖; 不操作上下文或情感数据。"""
+        if not self._is_admin(event):
+            return "该指令仅全局管理员可用。"
+        if self._persona_service is None:
+            return "人设服务未启用。"
+        # intercept 保留其它命令的 maxsplit=2 行为; persona 再分解剩余参数。
+        try:
+            tokens = shlex.split(" ".join(args))
+        except ValueError as e:
+            return f"人设命令参数错误: {e}\n{self._PERSONA_USAGE}"
+        expected = {"list": 1, "sessions": 3, "set": 5, "get": 4, "clear": 4}
+        sub = tokens[0].lower() if tokens else ""
+        if sub not in expected or len(tokens) != expected[sub] or any(not t for t in tokens):
+            return self._PERSONA_USAGE
+
+        service = self._persona_service
+        try:
+            if sub == "list":
+                personas = await service.list_personas()
+                if not personas:
+                    return "暂无人设预设。"
+                return "人设预设:\n" + "\n".join(
+                    f"  {p['name']} [{p['id']}]" for p in personas
+                )
+
+            target_bot, user_id = tokens[1:3]
+            if sub == "sessions":
+                result = await service.list_user_sessions(target_bot, user_id)
+                sessions = result.get("sessions") or []
+                header = f"私聊目标: bot={target_bot}, QQ={user_id}"
+                if not sessions:
+                    return f"{header}\n暂无会话。"
+                active = result.get("active")
+                lines = [header, f"当前会话: {active or '无'}"]
+                for session in sessions:
+                    marker = " (当前)" if session["id"] == active else ""
+                    lines.append(f"  {session.get('name', '')} [{session['id']}]{marker}")
+                return "\n".join(lines)
+
+            session_id = tokens[3]
+            if sub == "set":
+                await service.bind_session(target_bot, user_id, session_id, tokens[4])
+                action = "已设置私聊会话人设覆盖。"
+            elif sub == "clear":
+                await service.clear_session_binding(target_bot, user_id, session_id)
+                action = "已清除私聊会话人设覆盖，使用 bot 默认。"
+            else:
+                action = "私聊会话人设查询。"
+            binding = await service.get_session_binding(target_bot, user_id, session_id)
+            return (
+                f"{action}\n私聊目标: bot={target_bot}, QQ={user_id}, session={session_id}\n"
+                f"{self._persona_summary(binding)}"
+            )
+        except ValueError as e:
+            # bot/用户/会话/预设存在性和 ID 安全校验统一交给服务。
+            return f"人设命令失败: {e}"
+
     async def _cmd_forget(
         self, bot_id: str, event: MessageEvent, args: list[str]
     ) -> str | None:
@@ -308,7 +392,7 @@ class CommandHandler(Interceptor):
             if name == "help":
                 continue  # help 本身在标题下方说明
             desc = help_text.split("|")[0].strip()
-            builtin.append({"name": name, "desc": desc, "admin": False})
+            builtin.append({"name": name, "desc": desc, "admin": name == "persona"})
         sections.append({"title": "系统", "commands": builtin})
 
         # 封禁管理(管理员)

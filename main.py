@@ -28,6 +28,7 @@ from mohobot.llm_service import LLMService
 from mohobot.services.usage import UsageRecorder
 from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig
+from mohobot.persona_service import PersonaService
 from mohobot.services.task_supervisor import TaskSupervisor
 from mohobot.utils.logger import setup_logger
 from mohobot.web_panel.app import WebPanel
@@ -43,6 +44,7 @@ class MohobotApplication:
         self._bot_manager: BotManager | None = None
         self._ws_server: WSServer | None = None
         self._context_manager: ContextManager | None = None
+        self._persona_service: PersonaService | None = None
         self._llm_service: LLMService | None = None
         self._image_cache: ImageCache | None = None
         self._message_handler: MessageHandler | None = None
@@ -79,6 +81,10 @@ class MohobotApplication:
         # 旧格式迁移: data/bots/{qq} (无 bot_id) → 自动编号 bot_id 目录
         self._bot_manager.migrate_legacy_bots()
         self._context_manager = ContextManager(data_dir=self._config.data_dir)
+        self._persona_service = PersonaService(
+            self._config.data_dir, self._bot_manager, self._context_manager,
+        )
+        await self._persona_service.startup()
         self._usage_recorder = UsageRecorder(self._config.data_dir)
 
         # 全局歌曲知识库(识别 + LLM 前注入)。
@@ -112,6 +118,7 @@ class MohobotApplication:
             image_cache=self._image_cache,
             usage_recorder=self._usage_recorder,
             song_annotator=self._make_song_annotator(),
+            persona_service=self._persona_service,
         )
         # 上下文 AI 总结压缩: 注入总结回调 + trim/时间压缩配置(WebUI 保存后可热同步)
         self._context_manager.set_summarizer(self._llm_service.summarize_context)
@@ -218,6 +225,7 @@ class MohobotApplication:
             song_matcher=self._song_matcher,
             emotion_manager=self._emotion_manager,
             tts_service=self._tts_service,
+            persona_service=self._persona_service,
         )
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
@@ -236,6 +244,7 @@ class MohobotApplication:
             plugin_system=self._plugin_system,
             emotion_manager=self._emotion_manager,
             tts_service=self._tts_service,
+            persona_service=self._persona_service,
             admins=self._config.admins,
         )
         keyword_filter = KeywordFilter()
@@ -296,6 +305,7 @@ class MohobotApplication:
                 restart_callback=self.restart,
                 emotion_manager=self._emotion_manager,
                 tts_service=self._tts_service,
+                persona_service=self._persona_service,
                 config_update_callback=self.sync_config,
             )
             # Start web panel in background

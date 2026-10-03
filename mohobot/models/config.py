@@ -734,7 +734,8 @@ class BotConfig:
     bot_id: str = ""  # 内部标识(自动编号), 决定数据目录名
     qq: int = 0       # 绑定的 QQ 号 (0 = 未绑定)
     nickname: str = ""
-    persona: str = "你是 Mohobot，一个有用的 AI 助手。"  # System prompt
+    persona: str = ""  # Legacy text, read only for preset migration
+    persona_id: str = "persona_001"  # Stable shared preset reference
     enabled: bool = True
     touch_replies: list[str] = field(default_factory=list)  # 戳一戳固定回复(空=用全局/默认)
 
@@ -761,12 +762,17 @@ class BotConfig:
         import json
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("bot配置必须是JSON对象")
+        if not isinstance(raw.get("persona", ""), str) or not isinstance(raw.get("persona_id", ""), str):
+            raise ValueError("bot persona/persona_id必须是字符串")
 
         return cls(
             bot_id=raw.get("bot_id", ""),
             qq=raw.get("qq", 0),
             nickname=raw.get("nickname", ""),
-            persona=raw.get("persona", "你是 Mohobot，一个有用的 AI 助手。"),
+            persona=raw.get("persona", ""),
+            persona_id=raw.get("persona_id", ""),
             enabled=raw.get("enabled", True),
             touch_replies=list(raw.get("touch_replies", []) or []),
             chat_model_override=raw.get("chat_model_override", ""),
@@ -783,8 +789,19 @@ class BotConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         import json
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+        import os
+        import tempfile
+        # Synchronous callers cannot await file_store locks; replace atomically.
+        fd, temporary = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for web panel editing)."""
@@ -793,6 +810,7 @@ class BotConfig:
             "qq": self.qq,
             "nickname": self.nickname,
             "persona": self.persona,
+            "persona_id": self.persona_id,
             "enabled": self.enabled,
             "touch_replies": list(self.touch_replies),
             "chat_model_override": self.chat_model_override,

@@ -14,12 +14,23 @@ from __future__ import annotations
 
 import json
 import time
+import re
+import uuid
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from mohobot.file_store import json_read, json_update, json_write
+from mohobot.file_store import _get_lock, json_read, json_update, json_write
+
+
+def _chat_locked(method):
+    @wraps(method)
+    async def locked(self, bot_id, chat_type, chat_id, *args, **kwargs):
+        async with self.maintenance_lock, self.chat_lock(bot_id, chat_type, chat_id):
+            return await method(self, bot_id, chat_type, chat_id, *args, **kwargs)
+    return locked
 
 
 class ContextManager:
@@ -43,6 +54,7 @@ class ContextManager:
         min_interval_hours: int = 24,
     ):
         self._data_dir = data_dir
+        self.maintenance_lock = _get_lock(str(Path(data_dir).absolute() / "contexts") + ".maintenance")
         # 异步总结回调: async (entries: list[dict]) -> str | None
         self._summarizer = summarizer
         self._summary_enabled = summary_enabled
@@ -103,22 +115,106 @@ class ContextManager:
     ) -> Path:
         return self._context_base(bot_id, chat_type) / chat_id / f"{session_id}.json"
 
+    def chat_lock(self, bot_id: str, chat_type: str, chat_id: str):
+        """Shared per-chat transaction lock (also used by PersonaService)."""
+        path = self._session_index_path(bot_id, chat_type, chat_id)
+        return _get_lock(str(path.absolute()) + ".chat")
+
+    @staticmethod
+    def _new_session(session_id: str, name: str) -> dict:
+        return {"id": session_id, "name": name, "created": int(time.time()),
+                "generation": uuid.uuid4().hex, "persona_id": ""}
+
     # ── Session Index ─────────────────────────────────────────
 
-    async def _load_session_index(
-        self, bot_id: str, chat_type: str, chat_id: str
-    ) -> dict[str, Any]:
-        """Load the session index, creating a default if none exists."""
+    async def _read_index_unlocked(self, bot_id, chat_type, chat_id, *, create=False):
         path = self._session_index_path(bot_id, chat_type, chat_id)
         data = await json_read(path)
         if data is None:
-            # Create default session
-            data = {
-                "sessions": [{"id": "sess_main", "name": "默认会话", "created": int(time.time())}],
-                "active": "sess_main",
-            }
+            if path.exists():
+                raise ValueError("会话索引为空或损坏")
+            if not create:
+                return None
+            data = {"sessions": [self._new_session("sess_main", "默认会话")],
+                    "active": "sess_main"}
+            await json_write(path, data)
+        if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+            raise ValueError("会话索引格式非法")
+        if not isinstance(data.get("active"), str):
+            raise ValueError("会话索引active格式非法")
+        changed = False
+        seen = set()
+        for session in data["sessions"]:
+            if (not isinstance(session, dict) or not isinstance(session.get("id"), str)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]+", session["id"])):
+                raise ValueError("会话索引含非法会话")
+            if session["id"] in seen:
+                raise ValueError("会话索引含重复ID")
+            seen.add(session["id"])
+            if "generation" not in session:
+                session["generation"] = uuid.uuid4().hex
+                changed = True
+            elif (not isinstance(session["generation"], str)
+                  or not re.fullmatch(r"[0-9a-f]{32}", session["generation"])):
+                raise ValueError("会话generation必须是UUID")
+            if "persona_id" not in session:
+                session["persona_id"] = ""
+                changed = True
+            elif (not isinstance(session["persona_id"], str)
+                  or (session["persona_id"] and not re.fullmatch(r"persona_[0-9]{3,}", session["persona_id"]))):
+                raise ValueError("会话persona_id格式非法")
+        if not seen or data["active"] not in seen:
+            raise ValueError("会话索引active不存在")
+        if changed:
             await json_write(path, data)
         return data
+
+    @_chat_locked
+    async def _load_session_index(self, bot_id: str, chat_type: str, chat_id: str) -> dict[str, Any]:
+        return await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
+
+    @_chat_locked
+    async def read_existing_session_index(self, bot_id: str, chat_type: str, chat_id: str) -> dict | None:
+        """Read an existing index; never create a chat or switch its active session."""
+        return await self._read_index_unlocked(bot_id, chat_type, chat_id)
+
+    async def _metadata_unlocked(self, bot_id, chat_type, chat_id, session_id=None, generation=None, *, create=False):
+        if chat_type == "group":
+            metadata = {"id": "main", "name": "群聊默认会话", "generation": "group-main", "persona_id": ""}
+            if session_id not in (None, "main") or generation not in (None, "group-main"):
+                return None
+            return metadata
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=create)
+        if index is None:
+            return None
+        session_id = session_id if session_id is not None else index.get("active", "sess_main")
+        metadata = next((s for s in index["sessions"] if s["id"] == session_id), None)
+        if metadata is None or (generation is not None and generation != metadata["generation"]):
+            return None
+        return dict(metadata)
+
+    @_chat_locked
+    async def capture_session(self, bot_id: str, chat_type: str, chat_id: str) -> dict:
+        metadata = await self._metadata_unlocked(bot_id, chat_type, chat_id, create=True)
+        if metadata is None:
+            raise ValueError("当前活动会话不存在")
+        return {key: metadata[key] for key in ("id", "generation", "persona_id")}
+
+    async def get_private_session_metadata(self, bot_id: str, user_id: str, session_id: str) -> dict | None:
+        async with self.maintenance_lock, self.chat_lock(bot_id, "private", user_id):
+            return await self._metadata_unlocked(bot_id, "private", user_id, session_id)
+
+    @_chat_locked
+    async def set_session_persona(self, bot_id: str, chat_type: str, chat_id: str, session_id: str, persona_id: str) -> dict:
+        if chat_type != "private":
+            raise ValueError("只有私聊会话允许覆盖人设")
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id)
+        metadata = next((s for s in (index or {}).get("sessions", []) if s["id"] == session_id), None)
+        if metadata is None:
+            raise ValueError("会话不存在")
+        metadata["persona_id"] = persona_id
+        await self._save_session_index(bot_id, chat_type, chat_id, index)
+        return dict(metadata)
 
     async def _save_session_index(
         self, bot_id: str, chat_type: str, chat_id: str, data: dict
@@ -129,64 +225,44 @@ class ContextManager:
 
     # ── Context CRUD ───────────────────────────────────────────
 
+    @_chat_locked
     async def load_context(
-        self, bot_id: str, chat_type: str, chat_id: str
+        self, bot_id: str, chat_type: str, chat_id: str, *,
+        session_id: str | None = None, generation: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Load the current active session context."""
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
-        active_id = index.get("active", "sess_main")
-
-        if chat_type == "group":
-            # Group always uses main.json
-            path = self._session_file_path(bot_id, chat_type, chat_id, "main")
-        else:
-            path = self._session_file_path(bot_id, chat_type, chat_id, active_id)
-
-        data = await json_read(path)
-        if data is None:
+        """Read the captured session, or the active session for legacy callers."""
+        metadata = await self._metadata_unlocked(
+            bot_id, chat_type, chat_id, session_id, generation,
+            create=session_id is None and generation is None,
+        )
+        if metadata is None:
             return []
-        if isinstance(data, list):
-            return data
-        return []
+        data = await json_read(self._session_file_path(bot_id, chat_type, chat_id, metadata["id"]))
+        return data if isinstance(data, list) else []
 
     async def append_context(
-        self,
-        bot_id: str,
-        chat_type: str,
-        chat_id: str,
-        entries: list[dict[str, Any]],
-    ) -> None:
-        """Append entries to the active session context.
-
-        使用 json_update 原子读改写,避免并发 append 丢失更新。
-        追加后检查轮数: 满 trim_at_rounds 轮时触发压缩 —— 待总结头部 = 最早的
-        trim_remove_rounds 轮 ∪ 超过 summary_age_hours 的旧对话(取更长前缀),
-        即"满轮时顺带把 3h 前的旧对话一并压缩"。
-        """
-        if chat_type == "group":
-            session_id = "main"
-        else:
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
-            session_id = index.get("active", "sess_main")
-
-        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-
-        def _append(data):
-            context = data if isinstance(data, list) else []
-            context.extend(entries)
-            return context
-
-        await json_update(path, _append, default=[])
-
-        # 压缩检查(读最新, 锁外做 AI 总结)
-        if self._trim_at_rounds > 0:
-            context = await json_read(path)
-            if isinstance(context, list) and context:
-                rounds = self._count_rounds(context)
-                if rounds >= self._trim_at_rounds:
-                    await self._compact(
-                        path, context, head=self._head_for_compaction(context)
-                    )
+        self, bot_id: str, chat_type: str, chat_id: str,
+        entries: list[dict[str, Any]], *,
+        session_id: str | None = None, generation: str | None = None,
+    ) -> bool:
+        """Append only to the captured generation; deletion never revives files."""
+        async with self.maintenance_lock, self.chat_lock(bot_id, chat_type, chat_id):
+            metadata = await self._metadata_unlocked(
+                bot_id, chat_type, chat_id, session_id, generation,
+                create=session_id is None and generation is None,
+            )
+            if metadata is None:
+                return False
+            path = self._session_file_path(bot_id, chat_type, chat_id, metadata["id"])
+            def _append(data):
+                context = data if isinstance(data, list) else []
+                return context + entries
+            context = await json_update(path, _append, default=[])
+        # Slow summarization runs outside the chat lock; merge revalidates generation.
+        if context and self._count_rounds(context) >= self._trim_at_rounds:
+            await self._compact(path, context, head=self._head_for_compaction(context),
+                                expected_generation=metadata["generation"])
+        return True
 
     # ── 时间压缩(旧对话判定) ────────────────────────────────
 
@@ -268,6 +344,7 @@ class ContextManager:
     async def _compact(
         self, path: Path, context: list[dict],
         head: list[dict] | None = None, trim_on_failure: bool = True,
+        expected_generation: str | None = None,
     ) -> bool:
         """压缩: 总结 head(缺省为最早的 trim_remove_rounds 轮) → 总结块插入最前。
 
@@ -313,7 +390,12 @@ class ContextManager:
             changed[0] = True  # 总结失败/关闭: 直接裁剪(仅满轮路径)
             return rest
 
-        await json_update(path, _merge, default=[])
+        bot_id, chat_type, chat_id = path.parent.parent.parent.name, path.parent.parent.name, path.parent.name
+        async with self.maintenance_lock, self.chat_lock(bot_id, chat_type, chat_id):
+            metadata = await self._metadata_unlocked(bot_id, chat_type, chat_id, path.stem, expected_generation)
+            if metadata is None or not path.exists():
+                return False
+            await json_update(path, _merge, default=[])
         if changed[0]:
             logger.info(
                 f"上下文压缩: 移除 {len(head)} 条, "
@@ -336,13 +418,12 @@ class ContextManager:
         """
         if not self._summary_enabled:
             return False
-        if chat_type == "group":
-            session_id = "main"
-        else:
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
-            session_id = index.get("active", "sess_main")
-        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-        context = await json_read(path)
+        async with self.maintenance_lock, self.chat_lock(bot_id, chat_type, chat_id):
+            metadata = await self._metadata_unlocked(bot_id, chat_type, chat_id, create=True)
+            if metadata is None:
+                return False
+            path = self._session_file_path(bot_id, chat_type, chat_id, metadata["id"])
+            context = await json_read(path)
         if not isinstance(context, list) or not context:
             return False
 
@@ -363,7 +444,8 @@ class ContextManager:
                     last_ts_f = 0.0
                 if last_ts_f > 0 and (now - last_ts_f) < self._min_interval_hours * 3600:
                     return False
-        return await self._compact(path, context, head=head, trim_on_failure=False)
+        return await self._compact(path, context, head=head, trim_on_failure=False,
+                                   expected_generation=metadata["generation"])
 
     async def sweep_all_sessions(self) -> int:
         """扫描全部会话做时间压缩(群聊 main + 私聊当前活动会话), 返回触发数。"""
@@ -393,6 +475,7 @@ class ContextManager:
             logger.info(f"周期时间压缩完成: {done} 个会话")
         return done
 
+    @_chat_locked
     async def clear_context(
         self, bot_id: str, chat_type: str, chat_id: str
     ) -> None:
@@ -400,12 +483,13 @@ class ContextManager:
         if chat_type == "group":
             session_id = "main"
         else:
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
             session_id = index.get("active", "sess_main")
 
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
         await json_write(path, [])
 
+    @_chat_locked
     async def forget_last_n(
         self, bot_id: str, chat_type: str, chat_id: str, n: int
     ) -> int:
@@ -415,7 +499,7 @@ class ContextManager:
         if chat_type == "group":
             session_id = "main"
         else:
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
             session_id = index.get("active", "sess_main")
 
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
@@ -433,24 +517,27 @@ class ContextManager:
 
     # ── Session Switching (Private Only) ──────────────────────
 
+    @_chat_locked
     async def list_sessions(
         self, bot_id: str, chat_type: str, chat_id: str
     ) -> list[dict[str, Any]]:
         """List all sessions for a user."""
         if chat_type == "group":
-            return [{"id": "main", "name": "群聊默认会话"}]
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
+            return [await self._metadata_unlocked(bot_id, chat_type, chat_id)]
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
         return index.get("sessions", [])
 
+    @_chat_locked
     async def get_active_session_id(
         self, bot_id: str, chat_type: str, chat_id: str
     ) -> str:
         """Get the currently active session ID."""
         if chat_type == "group":
             return "main"
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
         return index.get("active", "sess_main")
 
+    @_chat_locked
     async def create_session(
         self, bot_id: str, chat_type: str, chat_id: str, name: str
     ) -> str:
@@ -458,7 +545,7 @@ class ContextManager:
         if chat_type == "group":
             return "main"  # Groups don't support multi-session
 
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
         sessions = index.get("sessions", [])
 
         # Generate next session ID
@@ -468,11 +555,7 @@ class ContextManager:
             n += 1
         session_id = f"sess_{n:03d}"
 
-        sessions.append({
-            "id": session_id,
-            "name": name,
-            "created": int(time.time()),
-        })
+        sessions.append(self._new_session(session_id, name))
         index["sessions"] = sessions
         index["active"] = session_id
         await self._save_session_index(bot_id, chat_type, chat_id, index)
@@ -484,6 +567,7 @@ class ContextManager:
         logger.info(f"Created session {session_id} ('{name}') for {chat_type}:{chat_id}")
         return session_id
 
+    @_chat_locked
     async def switch_session(
         self, bot_id: str, chat_type: str, chat_id: str, session_id: str
     ) -> bool:
@@ -491,7 +575,7 @@ class ContextManager:
         if chat_type == "group":
             return session_id == "main"
 
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
         sessions = index.get("sessions", [])
 
         if not any(s["id"] == session_id for s in sessions):
@@ -502,6 +586,7 @@ class ContextManager:
         logger.info(f"Switched to session {session_id} for {chat_type}:{chat_id}")
         return True
 
+    @_chat_locked
     async def delete_session(
         self, bot_id: str, chat_type: str, chat_id: str, session_id: str
     ) -> bool:
@@ -509,12 +594,14 @@ class ContextManager:
         if chat_type == "group":
             return False
 
-        index = await self._load_session_index(bot_id, chat_type, chat_id)
+        index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
         sessions = index.get("sessions", [])
 
         if session_id == "sess_main":
             return False  # Cannot delete default session
 
+        if not any(s["id"] == session_id for s in sessions):
+            return False
         new_sessions = [s for s in sessions if s["id"] != session_id]
         if len(new_sessions) < 1:
             return False  # Must keep at least one session
@@ -529,8 +616,9 @@ class ContextManager:
 
         # Delete the context file
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-        if path.exists():
-            path.unlink()
+        async with _get_lock(str(path.absolute())):
+            if path.exists():
+                path.unlink()
 
         logger.info(f"Deleted session {session_id} for {chat_type}:{chat_id}")
         return True
@@ -559,6 +647,7 @@ class ContextManager:
                 })
         return result
 
+    @_chat_locked
     async def get_session(
         self, bot_id: str, chat_type: str, chat_id: str, session_id: str | None = None
     ) -> dict[str, Any] | None:
@@ -566,7 +655,7 @@ class ContextManager:
         if chat_type == "group":
             session_id = "main"
         else:
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
             if session_id is None:
                 session_id = index.get("active", "sess_main")
             if not any(s["id"] == session_id for s in index.get("sessions", [])):
@@ -579,13 +668,14 @@ class ContextManager:
 
         name = session_id
         if chat_type == "private":
-            index = await self._load_session_index(bot_id, chat_type, chat_id)
+            index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
             for s in index.get("sessions", []):
                 if s["id"] == session_id:
                     name = s.get("name", session_id)
                     break
 
         return {
+            **(await self._metadata_unlocked(bot_id, chat_type, chat_id, session_id)),
             "id": session_id,
             "name": name,
             "chat_type": chat_type,
@@ -593,11 +683,14 @@ class ContextManager:
             "messages": messages if isinstance(messages, list) else [],
         }
 
+    @_chat_locked
     async def update_message(
         self, bot_id: str, chat_type: str, chat_id: str,
         session_id: str, index: int, content: str, role: str | None = None,
     ) -> bool:
         """Edit a single message in a session. Returns True on success."""
+        if await self._metadata_unlocked(bot_id, chat_type, chat_id, session_id) is None:
+            return False
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
         messages = await json_read(path)
         if not isinstance(messages, list) or not (0 <= index < len(messages)):
@@ -608,10 +701,13 @@ class ContextManager:
         await json_write(path, messages)
         return True
 
+    @_chat_locked
     async def reset_session(
         self, bot_id: str, chat_type: str, chat_id: str, session_id: str
     ) -> bool:
         """Reset (clear) a session's messages. Returns True on success."""
+        if await self._metadata_unlocked(bot_id, chat_type, chat_id, session_id) is None:
+            return False
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
         if not path.exists():
             return False
