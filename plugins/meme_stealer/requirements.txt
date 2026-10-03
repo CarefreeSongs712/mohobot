@@ -1,0 +1,13 @@
+# 以下依赖 mohobot 的 requirements.txt 已经包含（numpy 随 imagehash 安装），
+# 列出来只是说明插件用到了什么；正常部署无需额外安装。
+Pillow>=10.0.0
+numpy>=1.24
+aiohttp>=3.9
+openai>=1.0.0
+pydantic>=2.0.0
+starlette>=0.27
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# 可选：WebUI「语义空间」用 UMAP 把向量投影到二维；未安装时自动改用 PCA。
+# umap-learn>=0.5.5
