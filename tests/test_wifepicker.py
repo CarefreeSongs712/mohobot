@@ -81,6 +81,7 @@ def make_group_event_with_at(user_id, text, at_qq):
 
 async def make_plugin(tmp, config_extra=None):
     import sys as _sys
+    _sys.modules.pop("main", None)  # test_runtime_wiring 会把根 main.py 注册为 "main"
     _sys.path.insert(0, "plugins/wifepicker")
     from main import Plugin
 
@@ -523,6 +524,7 @@ async def test_jrlp_command_alias() -> None:
 async def test_global_triggers_declared() -> None:
     """抽老婆插件声明全部命令/别名为全局指令(群内多 bot 只由随机选中的一个 bot 回复)。"""
     import sys as _sys
+    _sys.modules.pop("main", None)
     _sys.path.insert(0, "plugins/wifepicker")
     from main import COMMANDS, Plugin
 

@@ -804,6 +804,94 @@ class Plugin:
                 logger.error(f"[qzone][{bot_id}] 自动回复被@(api)失败: {e}")
             await asyncio.sleep(random.uniform(1.5, 3.0))
 
+        # ── 自己的评论被回复扫描 ──
+        # bot 在他人说说下的评论收到楼中楼回复(atme 条目动作多为"回复",
+        # 正文不含 @ 故不命中上面的被@分支): 取详情后找 bot 评论的
+        # 未处理子回复, 回评那条回复。
+        await self._scan_replies_to_bot_comments(
+            bot_id, api, service, self_uin, items, bot_qqs, store,
+        )
+
+    @staticmethod
+    def _find_replies_to_bot(post: Post, self_uin: int, bot_qqs: set[int]) -> list[tuple[int, Any]]:
+        """找 bot 自己评论下的楼中楼回复(排除自己与其它 bot)。
+
+        返回 [(comments 下标, Comment)]; 新旧由调用方按 seen 去重。
+        """
+        bot_tids = {
+            c.tid for c in post.comments
+            if int(c.uin) == int(self_uin) and c.tid
+        }
+        if not bot_tids:
+            return []
+        out: list[tuple[int, Any]] = []
+        for idx, c in enumerate(post.comments):
+            if not c.parent_tid or c.parent_tid not in bot_tids:
+                continue
+            if int(c.uin) == int(self_uin) or int(c.uin) in bot_qqs:
+                continue
+            out.append((idx, c))
+        return out
+
+    async def _scan_replies_to_bot_comments(
+        self, bot_id: str, api, service, self_uin: int,
+        items: list[dict], bot_qqs: set[int], store: AutoReplyStore,
+    ) -> None:
+        """扫描与 bot 相关的动态, 补发对 bot 评论的回复。"""
+        bot_nick = self._bot_nickname(bot_id)
+        candidates: dict[tuple[str, str], dict] = {}
+        for item in items:
+            post_uin = item.get("post_uin")
+            post_tid = item.get("post_tid")
+            if not post_uin or not post_tid:
+                continue
+            if str(post_uin) == str(self_uin) or int(post_uin) in bot_qqs:
+                continue  # 自己/其它 bot 的说说归评论监听或跳过
+            content = str(item.get("content") or "")
+            if (bot_nick not in content and " 回复 " not in content
+                    and " 评论 " not in content):
+                continue  # 线程与 bot 无关
+            candidates.setdefault((str(post_uin), str(post_tid)), item)
+        scanned = 0
+        for (post_uin, post_tid), _item in candidates.items():
+            if scanned >= 3:  # 每轮最多取 3 篇详情, 控制 API 量
+                break
+            post = await self._fetch_post_detail(api, post_uin, post_tid)
+            scanned += 1
+            if post is None:
+                continue
+            for idx, reply in self._find_replies_to_bot(post, self_uin, bot_qqs):
+                key = (
+                    f"replyc:{post.uin}:{post.tid}:{reply.uin}:"
+                    f"{reply.tid or content_key(reply.create_time, reply.content[:50])}"
+                )
+                if await store.is_seen(key):
+                    continue
+                await store.mark_seen(key)
+                await store.save()
+                if await self._post_limit_reached(store, post.uin, post.tid):
+                    continue
+                blocked, _why = await self._actor_blocked(reply.uin)
+                if blocked:
+                    logger.debug(f"[qzone][{bot_id}] 跳过评论回复({_why}): {reply.uin}")
+                    continue
+                text = await self._generate_auto_text(
+                    bot_id, reply.nickname, reply.plain_content, post,
+                )
+                try:
+                    if reply.tid:
+                        await service.reply_comment(post, idx, text)
+                    else:
+                        await service.comment_posts(post, text)
+                    await store.incr_post_reply(self._post_key(post.uin, post.tid))
+                    await store.save()
+                    logger.info(
+                        f"[qzone][{bot_id}] 自动回复评论的回复: {post.tid} ← {reply.nickname}: {text}"
+                    )
+                except Exception as e:
+                    logger.error(f"[qzone][{bot_id}] 自动回复评论的回复失败: {e}")
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+
     @staticmethod
     def _find_mention_comment(post: Post, actor_uin, bot_nickname: str) -> int | None:
         """定位该用户在说说评论中最新一条 @bot 的评论(倒序找)。

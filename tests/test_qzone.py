@@ -723,7 +723,9 @@ async def test_plugin_atme_api_filter():
     assert comments_sent == [(222, "abc111", "来啦来啦")]
     assert replied == [(333, "def222", 1, "来啦来啦")]
     # 赞(444)/线程回复(445)/自己说说上的@(555) 都没触发
-    assert api.details == [(222, "abc111"), (333, "def222")]
+    # 回复扫描会对含" 回复 "的条目再取一次详情(222 的帖子)
+    assert api.details.count((222, "abc111")) == 2
+    assert api.details.count((333, "def222")) == 1
     # 第二轮: 同一说说已去重, 不再回复
     await plugin._auto_reply_once("bot_001")
     assert comments_sent == [(222, "abc111", "来啦来啦")]
@@ -1166,6 +1168,92 @@ async def test_publish_daily_bypasses_review():
         assert len(env.notices) == 1  # 有发布成功通知
         review = plugin._get_review_store()
         assert review.pending() == []
+
+
+
+async def test_replies_to_bot_comments_scan():
+    """自己的评论(在他人说说下)被回复 → 回评那条回复; 去重 + bot 回复跳过。"""
+    plugin = _fresh_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        plugin._data_dir = td
+        plugin.plugin_config["atme_reply_enabled"] = True
+        plugin.plugin_config["atme_mode"] = "api"
+        plugin.plugin_config["atme_match_keyword"] = ""
+
+        class _S:
+            async def get_uin(self):
+                return 111
+        api = type("A", (), {})()
+        api.session = _S()
+
+        # 详情: bot 自己的评论(tid=7)下有 222 的回复(tid=8); 999 是 bot 的自回复
+        # 真实结构: 楼中楼回复嵌套在 list_3 下, parent_tid 由 build_list 推出
+        detail_comments = [
+            {"tid": 7, "uin": "111", "name": "bot", "content": "我 bot 的评论", "create_time": 1,
+             "list_3": [
+                 {"tid": 8, "uin": "222", "name": "小明", "content": "回复 bot 的话", "create_time": 2},
+                 {"tid": 10, "uin": "111", "name": "bot", "content": "bot 自己回复自己", "create_time": 4},
+             ]},
+            {"tid": 9, "uin": "333", "name": "路人", "content": "和 bot 无关的评论", "create_time": 3},
+        ]
+        from qzone_core.model import Comment as C
+
+        async def get_detail(post):
+            return type("R", (), {"ok": True, "data": {
+                "tid": post.tid, "uin": post.uin, "content": "帖子",
+                "commentlist": detail_comments}})()
+        api.get_detail = get_detail
+
+        class _FakeLLM:
+            async def complete_text(self, prompt, **kw):
+                return "收到收到"
+        plugin._llm_service = _FakeLLM()
+
+        replied = []
+        class _FakeService:
+            async def reply_comment(self, post, idx, content):
+                replied.append((post.comments[idx].uin, post.comments[idx].tid, content))
+            async def comment_posts(self, post, content):
+                replied.append(("comment", post.tid, content))
+
+        plugin._services["bot_001"] = _FakeService()
+
+        # bot_009 的 QZone 昵称在线程预览中出现
+        items = [{
+            "uin": "222", "nickname": "小明", "appid": "311", "abstime": "100",
+            "action": "other",
+            "content": "小明 回复 00:50 洛天依bot-5 ： 阿绫说… 小明 : 回复 bot 的话",
+            "post_uin": "222", "post_tid": "abc111",
+        }]
+        from qzone_core.auto_reply import AutoReplyStore as _ARS
+        from pathlib import Path as _P
+        store = _ARS(_P(td) / "r.json")
+        plugin._review_store = None
+        plugin._auto_stores["bot_001"] = store
+        bot_qqs = {999}
+        await plugin._scan_replies_to_bot_comments(
+            "bot_001", api, _FakeService(), 111, items, bot_qqs, store,
+        )
+        # 只有 222 对 bot 评论(tid=7)的回复被回评(tid=8); bot 自回复/无关评论不回
+        assert replied == [(222, 8, "收到收到")]
+        # 第二轮: 已去重
+        await plugin._scan_replies_to_bot_comments(
+            "bot_001", api, _FakeService(), 111, items, bot_qqs, store,
+        )
+        assert len(replied) == 1
+
+
+def test_find_replies_to_bot_pure():
+    plugin = _fresh_plugin()
+    post = Post(uin=222, tid="t", name="a", comments=[
+        Comment(uin=111, nickname="bot", content="我的评论", create_time=1, tid=7),
+        Comment(uin=222, nickname="x", content="回复我", create_time=2, tid=8, parent_tid=7),
+        Comment(uin=111, nickname="bot", content="自回复", create_time=3, tid=9, parent_tid=7),
+        Comment(uin=999, nickname="bot2", content="bot回复", create_time=4, tid=10, parent_tid=7),
+        Comment(uin=333, nickname="y", content="独立评论", create_time=5, tid=11),
+    ])
+    out = plugin._find_replies_to_bot(post, 111, {999})
+    assert [c.tid for _, c in out] == [8]  # 仅 222 的回复; 自回复与其它 bot 跳过
 
 
 if __name__ == "__main__":
