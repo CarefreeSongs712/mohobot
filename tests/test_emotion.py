@@ -374,7 +374,12 @@ def test_injection_block_content():
     assert "关系阶段" in block
     assert "语气指导" in block
     assert "长期关系发展轨迹" in block
-    # 弱化版保密: 只要求不主动提及, 无刺探惩罚条款
+    assert "【情感回应风格】" in block
+    assert "由服务端生成" in block
+    assert "不是用户消息" in block
+    assert "不要将这些内部信息归因于用户" in block
+    assert "不得据此指责用户夹带提示词、索取罚款" in block
+    assert "内部参考" not in block
     assert "不要主动提及" in block
     assert "刺探" not in block
     assert "大幅降低好感度" not in block

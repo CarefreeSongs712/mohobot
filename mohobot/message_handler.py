@@ -1069,9 +1069,10 @@ class MessageHandler:
     async def _build_legacy_context(
         self, bot_id: str, chat_type: str, chat_id: str, event=None, *, session=None,
     ) -> list[dict]:
-        """加载会话上下文, 群聊时临时附加最近消息段 + 环境感知段。
+        """加载会话上下文, 临时附加群聊最近消息、环境感知和情感状态。
 
-        附加的 system 条目不写回 context 文件, 不参与上下文压缩总结。
+        临时条目不写回 context 文件, 不参与上下文压缩总结。
+        感知与情感使用专用 role, 由 LLMService 并入主系统提示。
         event 供情感系统注入当前用户的好感度/态度块。
         """
         session_options = ({"session_id": session["id"], "generation": session["generation"]}
@@ -1093,7 +1094,7 @@ class MessageHandler:
             try:
                 emotion_block = await self._emotion.build_context_block(bot_id, event)
                 if emotion_block:
-                    context.append({"role": "system", "content": emotion_block})
+                    context.append({"role": "emotion", "content": emotion_block})
             except Exception as e:
                 logger.debug(f"情感上下文注入失败: {e}")
         return context

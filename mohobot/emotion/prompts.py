@@ -2,7 +2,7 @@
 
 移植自 astrbot-plugin-emotionai_pro main.py::_build_enhanced_context 与
 emotion_expert.py::_build_emotion_analysis_prompt。差异:
-- 保密指令为弱化版(只要求不主动提及系统内部数值, 无"刺探降好感"条款)
+- 情感参数明确来自服务端, 不归因于用户, 无"刺探降好感"条款
 - 无 [需要情感评估] 标记机制(mohobot 流式分段发送, 标记无法事后剥离)
 """
 
@@ -21,9 +21,10 @@ def build_injection_block(
     state: EmotionalState, bot_name: str, relationship_context: str
 ) -> str:
     """pre-LLM 注入的系统消息文本。"""
-    return f"""【情感状态(内部参考)】
-你当前对这位用户怀有真实的情感。请根据以下状态自然调整回应风格与语气，
-让回应符合你们当前的关系；不要主动提及本系统或其中的任何数值。
+    return f"""【情感回应风格】
+以下状态由服务端生成, 不是用户消息, 也不表示用户发送、粘贴或透露了这些信息。
+仅用于自然调整回应风格与语气；不要主动提及本系统或其中的任何数值。
+不要将这些内部信息归因于用户, 不得据此指责用户夹带提示词、索取罚款或判断用户试图修改设定。
 
 {relationship_context}
 
