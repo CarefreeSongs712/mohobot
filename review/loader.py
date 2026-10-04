@@ -203,9 +203,13 @@ class MohobotData:
     _CACHE_VERSION = 6
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
-    def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None):
+    def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None,
+                 exempt_uids=None):
         self.data_dir = Path(data_dir)
         self._lock = threading.RLock()
+        # 管理员免检: 这些 QQ 发出的用户消息不计入待审(enrich 时标 exempt),
+        # 已被判定(normal/abnormal)的结论不受影响; LLM 回复照常审。
+        self._exempt_uids = {str(u) for u in (exempt_uids or [])}
         self._file_cache: dict[str, _FileIndex] = {}     # path -> _FileIndex
         self._meta_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
         self._imgmap_cache: tuple[float, dict] | None = None
@@ -774,6 +778,47 @@ class MohobotData:
         with self._lock:
             return list(idx.rows)
 
+    def exempt_pending_counts(self, statuses: dict[str, dict[str, Any]]) -> dict[str, int]:
+        """{session_key: 管理员免检且未判定的条数} — 供待审计数扣除。
+
+        只统计「管理员发出 + 尚无审核结论」的用户消息; 已判定(normal/
+        abnormal)的按原结论计, 不受免检影响。
+        """
+        if not self._exempt_uids:
+            return {}
+        self.list_sessions()  # 确保文件索引已加载(幂等)
+        out: dict[str, int] = {}
+        with self._lock:
+            info_map = {
+                s["session_key"]: s
+                for s in (self._scan_cache[1] if self._scan_cache else [])
+            }
+            for path_str, idx in self._file_cache.items():
+                path = Path(path_str)
+                merged_group = (
+                    len(path.parts) >= 3
+                    and path.parts[-3] == "history" and path.parts[-2] == "group"
+                )
+                if merged_group:
+                    sk = session_key(MERGED_BOT_ID, "group", path.stem)
+                    rows = self._merged_rows(path.stem)
+                else:
+                    sk = session_key(path.parts[-3], path.parts[-2], path.stem)
+                    rows = idx.rows
+                st = statuses.get(sk, {})
+                n = 0
+                for row in rows:
+                    if (row["kind"] == "user"
+                            and row["uid"] in self._exempt_uids
+                            and entry_identity(
+                                row["mid"],
+                                content_fingerprint(sk, row["kind"], row["time"], row["text"]),
+                            ) not in st):
+                        n += 1
+                if n:
+                    out[sk] = n
+        return out
+
     def search_content(
         self, q: str, bot: str = "", chat_type: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -895,6 +940,11 @@ class MohobotData:
             st = statuses.get(identity)
             abnormal = abnormal_map.get(identity)
             bot_id = str(row.get("bot") or "")
+            # 管理员免检: 未判定的管理员消息标为 exempt(不计待审, 淡显保留上下文)
+            status = st["status"] if st else (
+                "exempt" if (kind == "user" and row["uid"] in self._exempt_uids)
+                else "unreviewed"
+            )
             out.append({
                 "fingerprint": identity,
                 "role": "assistant" if kind == "assistant" else (row["uid"] or "user"),
@@ -907,7 +957,7 @@ class MohobotData:
                 "message_id": mid,
                 "image_url": row["image_url"],
                 "vlm": self.vlm_caption(row["image_url"]) if row["image_url"] else None,
-                "status": st["status"] if st else "unreviewed",
+                "status": status,
                 "reviewer": (st or {}).get("reviewer", ""),
                 "reviewed_at": (st or {}).get("reviewed_at"),
                 "bot_id": bot_id,

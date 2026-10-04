@@ -65,13 +65,16 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         force=True 重扫目录(文件级 mtime 缓存使其开销仅为 stat 调用),
         保证 mohobot 侧新写入的消息立即可见。
         计数来自 store 的进程内缓存(与 statuses_by_session 同一次构建),
-        loader/DB 的重调用都走线程, 不冻结事件循环。
+        管理员免检条目从待审中扣除; loader/DB 的重调用都走线程。
         """
+        all_statuses = await asyncio.to_thread(store.statuses_by_session)
         counts = await asyncio.to_thread(store.counts_by_session)
+        exempt = await asyncio.to_thread(data.exempt_pending_counts, all_statuses)
         items = []
         for s in await asyncio.to_thread(data.list_sessions, True):
-            normal, abnormal = counts.get(s["session_key"], (0, 0))
-            unreviewed = max(0, s["total"] - normal - abnormal)
+            sk = s["session_key"]
+            normal, abnormal = counts.get(sk, (0, 0))
+            unreviewed = max(0, s["total"] - normal - abnormal - exempt.get(sk, 0))
             items.append({**s, "normal": normal, "abnormal": abnormal, "unreviewed": unreviewed})
         return items
 

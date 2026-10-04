@@ -365,6 +365,69 @@ def test_loader_source_filter():
         assert all(r["mid"] != "M-PING" for r in data.filtered_rows("bot_001/private/10001"))
 
 
+def test_loader_exempt_admins():
+    """管理员免检: 未判定的管理员消息标 exempt(不计待审, 淡显保留上下文);
+    bot 回复照常待审; 已判定结论不受免检影响; 计数正确。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        data = MohobotData(root, exempt_uids={"10001"})   # 张三 = 管理员
+        sk = "bot_001/private/10001"
+        entries = data.enrich_entries(sk, {}, {})
+        by_mid = {e["message_id"]: e for e in entries}
+        assert by_mid["M-100"]["status"] == "exempt", "管理员用户消息免审"
+        assert by_mid["M-102"]["status"] == "exempt"
+        assert by_mid["MB-1"]["status"] == "unreviewed", "bot 回复照常待审"
+        # 群聊里管理员用户消息同样免审
+        g = data.enrich_entries("_merged/group/20002", {}, {})
+        assert all(e["status"] == "exempt" for e in g if e["kind"] == "user")
+        assert any(e["status"] == "unreviewed" for e in g if e["kind"] == "assistant")
+        # 已判定结论不受免检影响
+        store = ReviewStore(root / "review.db")
+        store.judge(sk, ["mid:M-100"], "normal", "alice")
+        entries2 = data.enrich_entries(sk, store.statuses_by_session().get(sk, {}), {})
+        assert entries2[0]["status"] == "normal"
+        # 免检计数: 只剩 M-102 一条未判定的管理员消息(群会话另有 4 条)
+        ec = data.exempt_pending_counts(store.statuses_by_session())
+        store.close()
+        assert ec.get(sk) == 1
+        assert ec.get("_merged/group/20002") == 4
+        # 不配置免检 → 行为不变
+        data2 = MohobotData(root)
+        assert data2.enrich_entries(sk, {}, {})[0]["status"] == "unreviewed"
+
+
+def test_api_exempt_admin_counts():
+    """API 层: 管理员消息从待审计数中扣除; 判定按钮对其不可用(非 unreviewed)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        from fastapi.testclient import TestClient
+        from review.app import create_app
+        cfg_path = root / "config.yaml"
+        h = hash_password("pw123")
+        cfg_path.write_text(f'users:\n  - username: admin\n    password_hash: "{h}"\n',
+                            encoding="utf-8")
+        cfg = ReviewConfig(users=[ReviewUser("admin", h)])
+        data = MohobotData(root, exempt_uids={"10001"})
+        store = ReviewStore(root / "review.db")
+        app = create_app(cfg, data, store, config_path=cfg_path)
+        client = TestClient(app)
+        try:
+            r = client.post("/api/login", json={"username": "admin", "password": "pw123"})
+            tok = r.json()["token"]
+            sess = client.get("/api/sessions", headers=_auth(tok)).json()["sessions"]
+            priv = {s["session_key"]: s for s in sess}["bot_001/private/10001"]
+            assert priv["total"] == 4 and priv["unreviewed"] == 2, "免检 2 条不计待审"
+            detail = client.get("/api/session/bot_001/private/10001",
+                                headers=_auth(tok)).json()
+            assert detail["unreviewed"] == 2
+            statuses = {e["status"] for e in detail["entries"]}
+            assert "exempt" in statuses, "免审条目应保留在明细里(淡显)"
+        finally:
+            store.close()
+
+
 def test_loader_incremental_append_and_rewrite():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
