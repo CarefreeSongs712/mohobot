@@ -224,6 +224,11 @@ class MohobotData:
         # 群聊合并行缓存: group_id -> ((文件, mtime, size), 排序去重后的行)
         self._merged_cache: dict[str, tuple[tuple, list[dict[str, Any]]]] = {}
 
+    @property
+    def exempt_uids(self) -> set[str]:
+        """免检 QQ 集合(管理员名单, 只读副本)。"""
+        return set(self._exempt_uids)
+
     # ── sidecar 缓存 ─────────────────────────────────────────
 
     def _ensure_cache_loaded(self) -> None:
