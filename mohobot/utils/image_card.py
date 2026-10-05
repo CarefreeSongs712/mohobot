@@ -142,6 +142,14 @@ def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = 
     return tmp_path
 
 
+HELP_GROUP_TEXT = "交流群 398870315"
+HELP_LINKS_TEXT = (
+    "介绍 / 使用须知  https://7121099.xyz/\n"
+    "备用  http://120.220.76.212:712/"
+)
+HELP_INFO_TEXT = f"{HELP_GROUP_TEXT}\n{HELP_LINKS_TEXT}"
+
+
 def render_help_card(sections: list[dict]) -> str | None:
     """把命令分组渲染成深色帮助卡片 PNG, 返回临时文件路径; 失败返回 None。
 
@@ -174,8 +182,32 @@ def render_help_card(sections: list[dict]) -> str | None:
         title_font = ImageFont.truetype(font_path, 22)
         section_font = ImageFont.truetype(font_path, 17)
         body_font = ImageFont.truetype(font_path, 14)
+        group_font = ImageFont.truetype(font_path, 30)
+        link_font = ImageFont.truetype(font_path, 18)
     except Exception:
         return None
+
+    # 标题下的全宽信息区: 按实际字体度量换行, 不截断群号/网址。
+    info_width = width - pad_x * 2
+    info_rows = []
+    info_h = 0
+    for text, font, color in [
+        (HELP_GROUP_TEXT, group_font, accent),
+        *((line, link_font, fg) for line in HELP_LINKS_TEXT.splitlines()),
+    ]:
+        lines = []
+        line = ""
+        for char in text:
+            if line and font.getlength(line + char) > info_width:
+                lines.append(line)
+                line = ""
+            line += char
+        lines.append(line)
+        for line in lines:
+            left, top, right, bottom = font.getbbox(line)
+            info_rows.append((line, font, color, info_h, left, top))
+            info_h += bottom - top + 12
+    info_h += section_gap
 
     # ── 预计算每个分组的渲染行数(两列, 每行最多 2 条) ──
     col_width = (width - pad_x * 2 - col_gap) // 2
@@ -215,11 +247,11 @@ def render_help_card(sections: list[dict]) -> str | None:
         sec["_row_count"] = len(sec["_rows"])
 
     # ── 计算卡片总高度 ──
-    height = pad_y * 2 + title_h
+    height = pad_y * 2 + title_h + 6 + info_h
     for sec in sections:
         if not sec.get("_row_count"):
             continue
-        height += section_font.getbbox("H")[3] + 8 + line_h * sec["_row_count"] + section_gap
+        height += section_font.getbbox("H")[3] + 10 + line_h * sec["_row_count"] + section_gap
     height += 10
 
     img = Image.new("RGB", (width, height), bg)
@@ -231,6 +263,9 @@ def render_help_card(sections: list[dict]) -> str | None:
     draw.rectangle([pad_x, pad_y + title_h - 10, pad_x + 180, pad_y + title_h - 6], fill=accent)
 
     y = pad_y + title_h + 6
+    for text, font, color, offset, left, top in info_rows:
+        draw.text((pad_x - left, y + offset - top), text, font=font, fill=color)
+    y += info_h
     for sec in sections:
         rows = sec.get("_rows") or []
         if not rows:

@@ -423,7 +423,9 @@ class CommandHandler(Interceptor):
 
     def _help_text(self, bot_id: str | None = None) -> str:
         """文本版帮助(图片渲染失败/无法发送时的降级)。"""
-        lines = ["📖 可用指令:"]
+        from mohobot.utils.image_card import HELP_INFO_TEXT
+
+        lines = ["可用指令:", HELP_INFO_TEXT]
         for name, (_, help_text) in self._commands.items():
             lines.append(f"  /{name} — {help_text}")
         for name, meta in sorted(self._all_plugin_commands(bot_id).items()):
@@ -435,25 +437,34 @@ class CommandHandler(Interceptor):
         self, bot_id: str, event: MessageEvent, args: list[str]
     ) -> str | None:
         """Show help — 渲染成 PIL 图片发送, 失败降级为文本。"""
-        from mohobot.utils.image_card import render_help_card
-        from mohobot.models.onebot import GroupMessageEvent as _G
+        import base64
+        import os
 
-        sections = self._build_help_sections(bot_id)
-        img_path = render_help_card(sections)
-        if img_path is not None and self._ws is not None:
-            try:
-                if isinstance(event, _G):
-                    chat_type, chat_id = "group", str(event.group_id)
-                else:
-                    chat_type, chat_id = "private", str(event.user_id)
-                await self._ws.send_image(bot_id, chat_type, chat_id, img_path)
-                import os
-                os.remove(img_path)
-                return None  # 已发送图片
-            except Exception as e:
-                logger.warning(f"发送帮助图片失败, 降级为文本: {e}")
+        from mohobot.utils.image_card import HELP_INFO_TEXT, render_help_card
+
+        img_path = None
+        try:
+            if self._ws is not None:
+                sections = self._build_help_sections(bot_id)
+                img_path = render_help_card(sections)
+                if img_path is not None:
+                    # 与 send_image 相同的内嵌图片协议, 一次发送图片和可点击网址。
+                    with open(img_path, "rb") as image:
+                        encoded = base64.b64encode(image.read()).decode("ascii")
+                    message = [
+                        {"type": "image", "data": {"file": f"base64://{encoded}"}},
+                        {"type": "text", "data": {"text": f"\n{HELP_INFO_TEXT}"}},
+                    ]
+                    if isinstance(event, GroupMessageEvent):
+                        await self._ws.send_group_msg(bot_id, str(event.group_id), message)
+                    else:
+                        await self._ws.send_private_msg(bot_id, str(event.user_id), message)
+                    return None  # 图片和网址已在同一条消息中发送
+        except Exception as e:
+            logger.warning(f"渲染或发送帮助图片失败, 降级为文本: {e}")
+        finally:
+            if img_path is not None:
                 try:
-                    import os
                     os.remove(img_path)
                 except OSError:
                     pass

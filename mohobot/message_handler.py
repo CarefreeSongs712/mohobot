@@ -1248,6 +1248,7 @@ class MessageHandler:
         if tts_filter is not None:
             # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成
             rest, tts_text = tts_filter.finish()
+            full_reply += rest
             if rest.strip():
                 segments_sent += 1
                 first_sent = await self._send_segment(bot_id, event, rest, first_sent)
@@ -1333,10 +1334,11 @@ class MessageHandler:
     async def _send_full_text(self, bot_id, event, text: str) -> None:
         """Segment a complete reply text and send with configured delays."""
         first_sent = False
-        for seg in self._flush_ready_segments(text)["segments"]:
+        flushed = self._flush_ready_segments(text)
+        for seg in flushed["segments"]:
             first_sent = await self._send_segment(bot_id, event, seg, first_sent)
-        if text.strip() and not first_sent:
-            await self._send_segment(bot_id, event, text, first_sent)
+        if flushed["rest"].strip():
+            await self._send_segment(bot_id, event, flushed["rest"], first_sent)
 
     async def _send_segment(self, bot_id, event, seg: str, first_sent: bool) -> bool:
         """Send one segmented message, stripped of whitespace.

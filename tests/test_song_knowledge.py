@@ -4,7 +4,7 @@
 1. 新 schema 建库/增删查(get_song_detail 完整字段 / 歌词片段搜索)
 2. SongInfoMatcher 歌名/书名号/裸文本+语境词/歌词子串/防误伤
 3. 注解格式化(【歌曲信息】段含介绍/演唱/UP主/词曲/歌词)
-4. Legacy 路径注入: LLMService._build_messages 用户消息下方追加注解
+4. Legacy 路径注入: LLMService._build_messages 在主系统消息中提供歌曲参考资料
 5. Agent 路径注入: payload["song_annotation"] → UnreadMessage → prompt
 6. 删除唱歌: 无 [sing] 解析 / 无 sing_plan
 """
@@ -156,7 +156,7 @@ async def test_annotation_format() -> None:
 
 
 async def test_legacy_injection() -> None:
-    """Legacy 路径: LLMService._build_messages 在用户消息下方追加注解。"""
+    """歌曲注解只进入主系统消息, 不改变用户正文。"""
     from mohobot.llm_service import LLMService
     from mohobot.models.config import GlobalConfig
     from mohobot.models.onebot import PrivateMessageEvent, GroupMessageEvent, Sender
@@ -184,10 +184,10 @@ async def test_legacy_injection() -> None:
     )
     msgs = await svc._build_messages("bot_001", ev, context=[])
     user_msg = msgs[-1]["content"]
-    assert "你会唱《千年食谱颂》吗" in user_msg
-    # 注解在用户消息同一内容里(下方)
-    assert "【歌曲信息】消息中提到歌曲《千年食谱颂》" in user_msg
-    assert "完整歌词：" in user_msg
+    assert user_msg == "你会唱《千年食谱颂》吗"
+    assert "【歌曲信息】消息中提到歌曲《千年食谱颂》" in msgs[0]["content"]
+    assert "完整歌词：" in msgs[0]["content"]
+    assert "【歌曲信息】" not in user_msg
 
     # 无命中 → 无注解
     ev2 = PrivateMessageEvent(
@@ -206,7 +206,9 @@ async def test_legacy_injection() -> None:
         sender=Sender(user_id=123456, nickname="测试"),
     )
     msgs3 = await svc._build_messages("bot_001", ev3, context=[])
-    assert "《九九八十一》" in msgs3[-1]["content"]
+    assert msgs3[-1]["content"] == "唱一首九九八十一"
+    assert "《九九八十一》" in msgs3[0]["content"]
+    await svc.close()
     print("[4] Legacy 路径注入 OK")
 
 

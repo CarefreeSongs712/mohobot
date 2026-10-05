@@ -486,6 +486,68 @@ def test_fuzzy_streaming_math_never_flushes_wrong() -> None:
     assert tts == "读"
 
 
+def test_ts_alias_all_chunk_boundaries() -> None:
+    cases = [
+        ("前<ts>朗读内容</ts>后", "前朗读内容后", "朗读内容"),
+        ("前< TS >朗读< / ts >后", "前朗读后", "朗读"),
+        ("[ts]第一段[/ts]【TS】第二段【/TS】", "第一段第二段", "第一段\n第二段"),
+        ("<ts>混合闭标签</tts>尾", "混合闭标签尾", "混合闭标签"),
+        ("<tts>混合闭标签</ts>尾", "混合闭标签尾", "混合闭标签"),
+        ("前<ts>未闭合", "前未闭合", "未闭合"),
+        ("前</ts>后", "前后", ""),
+        ("<tsx>原样</tsx><ts2>保留</ts2>", "<tsx>原样</tsx><ts2>保留</ts2>", ""),
+        ('<ts speed="2">原样</ts>', '<ts speed="2">原样', ""),
+    ]
+    for raw, display, speech in cases:
+        assert strip_and_extract(raw) == (display, speech), raw
+        chunkings = [[raw[:cut], raw[cut:]] for cut in range(len(raw) + 1)]
+        chunkings.append(list(raw))
+        for chunks in chunkings:
+            marker = TTSMarkerFilter()
+            output = "".join(marker.feed(chunk) for chunk in chunks)
+            rest, actual_speech = marker.finish()
+            assert (output + rest, actual_speech) == (display, speech), chunks
+
+
+async def test_tts_reply_modes_keep_display_speech_and_context_consistent() -> None:
+    from mohobot.message_handler import MessageHandler
+    from unittest.mock import AsyncMock
+
+    for tag in ("tts", "ts"):
+        for stream, segment in ((True, True), (False, True), (True, False), (False, False)):
+            speech = "这是一段需要完整朗读的语音内容。"
+            raw = f"前文<{tag}>{speech}</{tag}>后文[尾"
+            expected = f"前文{speech}后文[尾"
+            handler = MessageHandler.__new__(MessageHandler)
+            handler._stream = stream
+            handler._segment_reply = segment
+            handler._reply_quote = False
+            handler._seg_min_len = 12
+            handler._seg_max_len = 60
+            handler._seg_delay_min = handler._seg_delay_max = 0
+            handler._global_config = GlobalConfig()
+            handler._global_config.tts.enabled = True
+            bot_config = BotConfig(bot_id="bot_001", tts_enabled=True)
+            handler._bot_config = lambda bot_id: bot_config
+            jobs = []
+            handler._tts = SimpleNamespace(submit=lambda job: jobs.append(job) or True)
+
+            async def chunks(**kwargs):
+                for index, char in enumerate(raw):
+                    yield char, index == len(raw) - 1
+
+            handler._llm = SimpleNamespace(
+                chat=AsyncMock(return_value=(raw, None)), chat_stream=chunks,
+            )
+            handler._send_message = AsyncMock()
+            reply = await handler._stream_llm_reply("bot_001", _make_event(), [], {})
+            displayed = "".join(call.args[2] for call in handler._send_message.await_args_list)
+            assert displayed == expected, (tag, stream, segment, displayed)
+            assert reply == expected, (tag, stream, segment, reply)
+            assert len(jobs) == 1 and jobs[0].text == speech
+            assert jobs[0].bot_id == "bot_001" and jobs[0].source == "llm"
+
+
 # ── 8. 自建 HTTP 后端(http)与后端切换 ─────────────────────────
 
 

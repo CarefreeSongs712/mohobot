@@ -1,7 +1,7 @@
 """TTS 标注标记解析(模糊识别) — <tts>...</tts> 及其常见变体。
 
 LLM 回复中的朗读标注标签在实际输出里常有变体, 解析端统一容错:
-- 标签名别名: tts / voice / speech / say(大小写不敏感)
+- 标签名别名: tts / ts / voice / speech / say(大小写不敏感)
 - 空格容忍: < tts > 、</ tts > 、< / tts >
 - 括号形态: 尖括号 <> 、ASCII 方括号 [] 、中文方括号 【】
 - 闭标签统一用 / 前缀: </tts> 、【/tts】 、[ / speech ]
@@ -23,9 +23,9 @@ import re
 
 # 标签匹配: 三种括号家族 × 可选 / 闭前缀 × 别名(大小写不敏感), 纯标签无属性
 _TAG_RE = re.compile(
-    r"<\s*/?\s*(?:tts|voice|speech|say)\s*>"
-    r"|\[\s*/?\s*(?:tts|voice|speech|say)\s*\]"
-    r"|【\s*/?\s*(?:tts|voice|speech|say)\s*】",
+    r"<\s*/?\s*(?:tts|ts|voice|speech|say)\s*>"
+    r"|\[\s*/?\s*(?:tts|ts|voice|speech|say)\s*\]"
+    r"|【\s*/?\s*(?:tts|ts|voice|speech|say)\s*】",
     re.IGNORECASE,
 )
 _OPEN_DELIMS = ("<", "[", "【")
@@ -66,7 +66,7 @@ def strip_and_extract(text: str) -> tuple[str, str]:
     """非流式全文处理: 剥除所有可识别标签(含变体)。
 
     返回 (显示文本, 朗读文本) — 显示文本=剥掉标签后的全文(标注内容仍显示),
-    朗读文本取第一个非空标注并 normalize, 无标注时为空串。
+    朗读文本按顺序合并全部非空标注, 无标注时为空串。
     """
     display: list[str] = []
     spans: list[str] = []
