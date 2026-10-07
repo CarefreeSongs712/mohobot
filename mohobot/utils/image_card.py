@@ -145,7 +145,7 @@ def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = 
 HELP_GROUP_TEXT = "交流群 398870315"
 HELP_LINKS_TEXT = (
     "介绍 / 使用须知  https://7121099.xyz/\n"
-    "备用  http://120.220.76.212:712/"
+    "备用  http://103.236.75.12:10712/"
 )
 HELP_INFO_TEXT = f"{HELP_GROUP_TEXT}\n{HELP_LINKS_TEXT}"
 
