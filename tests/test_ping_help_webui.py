@@ -179,7 +179,7 @@ async def test_help_image():
 def _assert_help_info(text):
     for content in (
         "交流群 398870315", "介绍 / 使用须知", "https://7121099.xyz/",
-        "备用", "http://120.220.76.212:712/",
+        "备用", "http://103.236.75.12:10712/",
     ):
         assert content in text, text
 
