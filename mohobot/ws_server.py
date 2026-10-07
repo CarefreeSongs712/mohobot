@@ -19,6 +19,7 @@ import websockets.asyncio.server
 from loguru import logger
 
 from mohobot.models.onebot import Event
+from mohobot.models.config import is_external_service_group
 from mohobot.bot_manager import BotManager
 from mohobot.file_store import JSONLWriter
 from mohobot.services.outbound import ChatAddress, OutboundScheduler, ReplySender
@@ -34,6 +35,7 @@ _MESSAGE_ACTIONS = {
     "send_private_msg": "private",
     "send_group_forward_msg": "group",
 }
+_BLOCKED_GROUP_SEND = object()
 
 
 class WSServer:
@@ -60,7 +62,7 @@ class WSServer:
         self._bot_manager = bot_manager
         self._task_supervisor = task_supervisor
         self._data_dir = data_dir
-        # GlobalConfig(history_dual_write 双写过渡开关, 每次归档时热读取)
+        # Shared live GlobalConfig: read group guards and archive settings per send.
         self._global_config = global_config
         # bot 发言归档: bot 发出的消息以 message_sent 事件写入 history JSONL
         # (群聊写合并文件 data/history/group/{群号}.jsonl, 私聊与收到的消息
@@ -189,6 +191,43 @@ class WSServer:
         preview = str(data)[:300]
         logger.warning(f"Unknown message from bot {bot_id}: {preview}")
 
+    @staticmethod
+    def _group_send_target(action: str, params: dict[str, Any]):
+        """Identify group message/forward sends without blocking queries/private APIs."""
+        # OneBot async/rate-limited action suffixes must not bypass the guard.
+        for suffix in ("_async", "_rate_limited"):
+            if action.endswith(suffix):
+                action = action[:-len(suffix)]
+                break
+        if action in ("send_group_msg", "send_group_forward_msg"):
+            return params.get("group_id")
+        if action in ("send_msg", "send_forward_msg"):
+            message_type = params.get("message_type")
+            if message_type == "group" or (
+                not message_type and params.get("group_id") is not None
+            ):
+                return params.get("group_id")
+        # Quick-operation replies contain the destination in the event context.
+        if action == ".handle_quick_operation":
+            context = params.get("context") or {}
+            operation = params.get("operation") or {}
+            if context.get("message_type") == "group" and operation.get("reply") is not None:
+                return context.get("group_id")
+        return None
+
+    def _blocks_group_send(self, action: str, params: dict[str, Any]) -> bool:
+        cfg = getattr(self, "_global_config", None)
+        return is_external_service_group(
+            self._group_send_target(action, params),
+            getattr(cfg, "external_service_groups", ()),
+        )
+
+    async def _send_guarded(self, instance, payload: dict[str, Any]):
+        """Recheck the live config when the scheduler actually dispatches a send."""
+        if self._blocks_group_send(payload["action"], payload["params"]):
+            return _BLOCKED_GROUP_SEND
+        return await instance.send(payload)
+
     async def send_to_bot(
         self,
         bot_id: str,
@@ -203,6 +242,8 @@ class WSServer:
         (via echo) and returns it; otherwise returns None.
         """
         params = params or {}
+        if self._blocks_group_send(action, params):
+            return None
 
         # 消息发送类 action 统一走 _send_tracked(带 bot 发言归档), 保留响应语义
         if action in _MESSAGE_ACTIONS:
@@ -225,7 +266,7 @@ class WSServer:
 
         if not wait_response:
             await self._reply_sender.call(
-                bot_id, lambda: instance.send(payload), label=action
+                bot_id, lambda: self._send_guarded(instance, payload), label=action
             )
             return None
 
@@ -235,12 +276,16 @@ class WSServer:
         payload["echo"] = echo
         future = self._bot_manager.create_response_future(bot_id, echo)
         try:
-            await self._reply_sender.call(
-                bot_id, lambda: instance.send(payload), label=action
+            result = await self._reply_sender.call(
+                bot_id, lambda: self._send_guarded(instance, payload), label=action
             )
         except Exception:
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
+        if result is _BLOCKED_GROUP_SEND:
+            self._bot_manager.remove_response_future(bot_id, echo)
+            future.cancel()
+            return None
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -266,6 +311,8 @@ class WSServer:
         - wait_response=False(流式分段路径): 不等待, 保持发送速度;
         - wait_response=True: 等待并返回响应 dict(查询语义不变)。
         """
+        if self._blocks_group_send(action, params):
+            return None
         import uuid
         instance = self._bot_manager.get(bot_id)
         if not instance:
@@ -276,9 +323,9 @@ class WSServer:
         future = self._bot_manager.create_response_future(bot_id, echo)
         payload = {"action": action, "params": params, "echo": echo}
         try:
-            await self._reply_sender.send(
+            result = await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
-                lambda: instance.send(payload),
+                lambda: self._send_guarded(instance, payload),
                 label=action,
             )
         except Exception:
@@ -286,6 +333,11 @@ class WSServer:
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
+        if result is _BLOCKED_GROUP_SEND:
+            self._bot_manager.drop_pending_sent(echo)
+            self._bot_manager.remove_response_future(bot_id, echo)
+            future.cancel()
+            return None  # Not sent: no reply tracking, timeout, or speech archive.
         self._spawn_archive_task(self._archive_sent_message(
             bot_id, chat_type, chat_id, action, params, future, echo, source,
         ))

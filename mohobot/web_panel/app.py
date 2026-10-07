@@ -517,6 +517,9 @@ class WebPanel:
                     int(g) for g in (data["llm_excluded_groups"] or [])
                     if str(g).strip().isdigit()
                 ]
+            if "external_service_groups" in data:
+                from mohobot.models.config import _int_list
+                cfg.external_service_groups = _int_list(data["external_service_groups"])
 
             cfg.save(self._config_path)
             await self._sync_runtime_config(cfg)

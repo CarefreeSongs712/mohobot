@@ -100,7 +100,9 @@ async def test_web_config_changes_live_components():
                                          base_url="http://test",
                                          headers={"Authorization": "Bearer test"}) as client:
                 response = await client.put("/api/config", json={"data": {
-                    "llm_excluded_groups": [1002], "ignore_auto_reply": False,
+                    "llm_excluded_groups": [1002],
+                    "external_service_groups": [482999198, 1059744894],
+                    "ignore_auto_reply": False,
                     "history_dual_write": False, "group_recent_msgs_count": 0,
                     "admins": [3001], "touch_replies": ["new reply"],
                     "usage_excluded_models": ["excluded"],

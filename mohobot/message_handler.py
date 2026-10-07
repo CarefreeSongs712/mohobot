@@ -3,8 +3,8 @@
 Flow:
   1. Receive raw OneBot event
   2. Archive to history/ (JSONL)
-  3. Classify: notice/request/meta keep their existing dispatch paths
-  4. Message ban precheck → perception/merged reply/observe → group gate
+  3. External-service group gate (all group events), then classify/dispatch
+  4. Message ban precheck → perception/merged reply/observe → mention gate
   5. Interceptors run in registered order (ban commands keep their exceptions)
   6. Context load → LLM streaming → reply-quote first chunk → subsequent chunks
   7. Save context after streaming completes
@@ -31,6 +31,7 @@ from mohobot.models.onebot import (
     RequestEvent,
 )
 from mohobot.file_store import JSONLWriter
+from mohobot.models.config import is_external_service_group
 from mohobot.utils.cq_code import extract_plain_text
 
 
@@ -40,8 +41,8 @@ class MessageHandler:
     Flow:
       1. Receive raw OneBot event
       2. Archive to history/ (JSONL raw event log)
-      3. Classify: notice/request/meta keep their existing dispatch paths
-      4. Message ban precheck → perception/merged reply/observe → group gate
+      3. External-service group gate (all group events), then classify/dispatch
+      4. Message ban precheck → perception/merged reply/observe → mention gate
       5. Interceptors run in registered order (ban commands keep their exceptions)
       6. Legacy path: Context load → LLM streaming → reply-quote first chunk
       7. Save context after reply completes
@@ -193,6 +194,25 @@ class MessageHandler:
             if isinstance(event, MessageEvent):
                 await self._archive_event(bot_id, event, raw)
 
+            # Archive messages first, then gate all group events (including
+            # notices/requests and extension events) before any downstream hooks.
+            # Temporary/private messages may carry group metadata: never gate them.
+            group_id = getattr(event, "group_id", None) or raw.get("group_id")
+            private_event = (
+                isinstance(event, PrivateMessageEvent)
+                or raw.get("message_type") == "private"
+                or (isinstance(event, RequestEvent) and event.request_type == "friend")
+            )
+            if (
+                not private_event and group_id
+                and self._is_external_service_group(group_id)
+            ):
+                logger.debug(
+                    f"Skipping external-service group event: "
+                    f"bot={bot_id}, group={group_id}, type={event.post_type}"
+                )
+                return
+
             # Step 2: Classify and dispatch
             if isinstance(event, MessageEvent):
                 await self._handle_message(bot_id, event, raw)
@@ -261,6 +281,13 @@ class MessageHandler:
         if file_path not in self._writer_registry:
             self._writer_registry[file_path] = JSONLWriter(file_path)
         return self._writer_registry[file_path]
+
+    def _is_external_service_group(self, group_id) -> bool:
+        """Whether the group is reserved for an external service."""
+        cfg = getattr(self, "_global_config", None)
+        return is_external_service_group(
+            group_id, getattr(cfg, "external_service_groups", ()) if cfg else ()
+        )
 
     def _group_llm_excluded(self, group_id) -> bool:
         """该群是否在 LLM 排除名单(llm_excluded_groups): 命中则不做 LLM 聊天回复。

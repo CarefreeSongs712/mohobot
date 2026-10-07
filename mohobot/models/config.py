@@ -234,6 +234,15 @@ def _int_list(value) -> list[int]:
     return out
 
 
+def is_external_service_group(group_id, configured_groups=()) -> bool:
+    """Return whether a group is explicitly reserved for an external service."""
+    try:
+        group_id = int(group_id)
+    except (TypeError, ValueError):
+        return False
+    return group_id in _int_list(configured_groups)
+
+
 @dataclass
 class GlobalConfig:
     """Top-level global configuration."""
@@ -243,6 +252,8 @@ class GlobalConfig:
     # LLM 排除群: 这些群号内 bot 不做 LLM 聊天回复(@/引用/ping 均静默), 插件与
     # 命令不受影响(WebPanel 保存 setattr 同一实例, 天然热生效)
     llm_excluded_groups: list[int] = field(default_factory=list)
+    # 由外部服务(如 Koishi)独占处理的群; 框架收到消息后仍先归档, 随后完全静默。
+    external_service_groups: list[int] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
@@ -339,6 +350,7 @@ class GlobalConfig:
                 if str(m).strip()
             ],
             llm_excluded_groups=_int_list(raw.get("llm_excluded_groups")),
+            external_service_groups=_int_list(raw.get("external_service_groups")),
             server=ServerConfig(
                 host=server_raw.get("host", "0.0.0.0"),
                 port=server_raw.get("port", 8060),
@@ -538,6 +550,7 @@ class GlobalConfig:
             "admins": list(self.admins),
             "usage_excluded_models": list(self.usage_excluded_models),
             "llm_excluded_groups": list(self.llm_excluded_groups),
+            "external_service_groups": list(self.external_service_groups),
             "ban": {
                 "enabled": self.ban.enabled,
             },
@@ -663,6 +676,7 @@ class GlobalConfig:
             "admins": list(self.admins),
             "usage_excluded_models": list(self.usage_excluded_models),
             "llm_excluded_groups": list(self.llm_excluded_groups),
+            "external_service_groups": list(self.external_service_groups),
             "ban": {
                 "enabled": self.ban.enabled,
             },
