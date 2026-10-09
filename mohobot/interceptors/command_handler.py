@@ -425,7 +425,7 @@ class CommandHandler(Interceptor):
         """文本版帮助(图片渲染失败/无法发送时的降级)。"""
         from mohobot.utils.image_card import HELP_INFO_TEXT
 
-        lines = ["可用指令:", HELP_INFO_TEXT]
+        lines = ["可用指令: 交流群 398870315 | https://7121099.xyz/"]
         for name, (_, help_text) in self._commands.items():
             lines.append(f"  /{name} — {help_text}")
         for name, meta in sorted(self._all_plugin_commands(bot_id).items()):
@@ -440,7 +440,7 @@ class CommandHandler(Interceptor):
         import base64
         import os
 
-        from mohobot.utils.image_card import HELP_INFO_TEXT, render_help_card
+        from mohobot.utils.image_card import render_help_card
 
         img_path = None
         try:
@@ -448,18 +448,17 @@ class CommandHandler(Interceptor):
                 sections = self._build_help_sections(bot_id)
                 img_path = render_help_card(sections)
                 if img_path is not None:
-                    # 与 send_image 相同的内嵌图片协议, 一次发送图片和可点击网址。
+                    # 仅发送帮助卡片图片(群号/网址已渲染在卡片图内), 不附带文字。
                     with open(img_path, "rb") as image:
                         encoded = base64.b64encode(image.read()).decode("ascii")
                     message = [
                         {"type": "image", "data": {"file": f"base64://{encoded}"}},
-                        {"type": "text", "data": {"text": f"\n{HELP_INFO_TEXT}"}},
                     ]
                     if isinstance(event, GroupMessageEvent):
                         await self._ws.send_group_msg(bot_id, str(event.group_id), message)
                     else:
                         await self._ws.send_private_msg(bot_id, str(event.user_id), message)
-                    return None  # 图片和网址已在同一条消息中发送
+                    return None  # 帮助卡片图片已发送
         except Exception as e:
             logger.warning(f"渲染或发送帮助图片失败, 降级为文本: {e}")
         finally:
