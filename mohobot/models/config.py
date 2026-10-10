@@ -246,6 +246,44 @@ def is_external_service_group(group_id, configured_groups=()) -> bool:
 
 
 @dataclass
+class PersonaABConfig:
+    """Private, single-turn preference evaluation; bot allowlist is not configurable."""
+    enabled: bool = False
+    baseline_id: str = ""
+    test_id: str = ""
+    probability: float = 0.05
+    cooldown_seconds: int = 900
+    pending_seconds: int = 86400
+    max_pages: int = 8
+
+    @classmethod
+    def from_dict(cls, raw):
+        from dataclasses import fields
+        import math
+        if not isinstance(raw, dict):
+            raise ValueError("persona_ab 必须是对象")
+        if set(raw) - {f.name for f in fields(cls)}:
+            raise ValueError("persona_ab 包含未知配置")
+        result = cls(**raw)
+        if type(result.enabled) is not bool:
+            raise ValueError("enabled 必须为布尔值")
+        for key in ("baseline_id", "test_id"):
+            if not isinstance(getattr(result, key), str):
+                raise ValueError("人设 ID 必须为字符串")
+        if type(result.probability) not in (float, int) or not math.isfinite(result.probability) or not 0 <= result.probability <= 1:
+            raise ValueError("抽样概率必须为 0 到 1")
+        for key, minimum, maximum in (("cooldown_seconds", 0, 31536000), ("pending_seconds", 1, 31536000), ("max_pages", 1, 20)):
+            value = getattr(result, key)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(f"{key} 超出范围")
+        return result
+
+    def to_dict(self):
+        from dataclasses import asdict
+        return asdict(self)
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     admins: list[int] = field(default_factory=list)  # 全局管理员 QQ 号(封禁/插件命令共用)
@@ -261,6 +299,7 @@ class GlobalConfig:
     web_panel: WebPanelConfig = field(default_factory=WebPanelConfig)
     interceptor: InterceptorConfig = field(default_factory=InterceptorConfig)
     reply: ReplyConfig = field(default_factory=ReplyConfig)
+    persona_ab: PersonaABConfig = field(default_factory=PersonaABConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
     ban: BanConfig = field(default_factory=BanConfig)
@@ -398,6 +437,7 @@ class GlobalConfig:
             interceptor=InterceptorConfig(
                 keyword_file=interceptor_raw.get("keyword_file", "./data/keywords.json"),
             ),
+            persona_ab=PersonaABConfig.from_dict(raw.get("persona_ab", {})),
             reply=ReplyConfig(
                 stream=reply_raw.get("stream", True),
                 segment_reply=reply_raw.get("segment_reply", True),
@@ -534,6 +574,7 @@ class GlobalConfig:
             "interceptor": {
                 "keyword_file": self.interceptor.keyword_file,
             },
+            "persona_ab": self.persona_ab.to_dict(),
             "reply": {
                 "stream": self.reply.stream,
                 "segment_reply": self.reply.segment_reply,
@@ -662,6 +703,7 @@ class GlobalConfig:
             "interceptor": {
                 "keyword_file": self.interceptor.keyword_file,
             },
+            "persona_ab": self.persona_ab.to_dict(),
             "reply": {
                 "stream": self.reply.stream,
                 "segment_reply": self.reply.segment_reply,

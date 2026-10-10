@@ -24,7 +24,9 @@ class CommandHandler(Interceptor):
     UNKNOWN_CMD_COOLDOWN = 3600
 
     def __init__(self, context_manager, llm_service, ws_server, plugin_system=None,
-                 emotion_manager=None, tts_service=None, admins=None, persona_service=None):
+                 emotion_manager=None, tts_service=None, admins=None, persona_service=None,
+                 persona_ab_service=None):
+        self._persona_ab = persona_ab_service
         self._ctx_mgr = context_manager
         self._llm = llm_service
         self._ws = ws_server
@@ -41,6 +43,7 @@ class CommandHandler(Interceptor):
             "help":   (self._cmd_help,    "显示此帮助"),
             "clear":  (self._cmd_clear,   "清空当前会话"),
             "tts":    (self._cmd_tts,     "语音合成 | 用法: /tts <文本>(非管理员限30字)"),
+            "ab": (self._cmd_ab, "匿名人设评估 | /ab A|B|平局|都不好|跳过；/ab vote <id> A；/ab switch <id> A|B"),
             "persona": (self._cmd_persona, "私聊会话人设管理 (仅全局管理员) | " + self._PERSONA_USAGE),
         }
         # 情感系统命令(未启用时 emotion_manager 为 None, 不注册)
@@ -151,6 +154,11 @@ class CommandHandler(Interceptor):
         except Exception as e:
             logger.error(f"Command '{cmd_name}' error: {e}")
             return (True, f"命令执行出错: {e}")
+
+    async def _cmd_ab(self, bot_id, event, args):
+        if self._persona_ab is None:
+            return "人设评估服务未启用。"
+        return await self._persona_ab.command(bot_id, event, args)
 
     async def _handle_unknown_command(
         self, bot_id: str, event: MessageEvent, cmd_name: str

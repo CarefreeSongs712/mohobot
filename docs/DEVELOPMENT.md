@@ -77,8 +77,37 @@ python tests/_run_all.py          # 全量，从仓库根执行
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
 python tests/_js_check.py         # WebUI JS 括号平衡检查（改 index.html 后跑）
-python tests/smoke_startup.py     # 真实启动+关闭冒烟，用 tests/test_config.yaml
+python tests/smoke_startup.py     # 全临时数据 + mock WS/review，不启动真实服务
+python tests/test_persona_ab.py   # 人设评估离线状态机/LLM/图卡/API 回归
+python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，仅监听 localhost
 ```
+
+### 人设 A/B 核心集成与存储约束
+
+- `services/persona_ab.py` 是主链共享服务，不是插件；main 注入 MessageHandler、CommandHandler、WebPanel。
+  MessageHandler 在会话快照、引用和临时上下文准备后、普通 stream 前抽样；未命中仍用原链。
+- `_prepare_messages` 准备非人设输入；普通 `_build_messages` 保留包装和 TTS 行为。
+  评估只调用 `prepare_input` 一次，`complete_prepared` 复制共享输入、拼人设，无 tools/TTS，
+  冻结客户端和模型参数。SDK 自动重试关闭，仅服务端允许一次对应候选受控重试。
+  阶段硬上限：准备 60s、两版生成 120s、降级重试 60s、渲染 30s、每次发送 15s。
+  最终失败发送独立说明，不将错误或说明写入 assistant 上下文。来源 message_id 去重。
+  `votes`/回应率只统计有效反馈（A/B/平局/都不好），跳过单列，不计偏好票。
+- `/ab` 在 ban 检查后立即消费，不进入感知、情感或 LLM；投票不依赖会话存在。
+  switch 使用 `PersonaService.bind_session(expected_generation, require_active, expected_content_hash)`，
+  人设锁内校验 hash，再按 persona → maintenance → chat → file 顺序原子绑定。
+  不允许持评估文件锁获取人设锁。配置选择的人设参与删除/恢复引用检查。
+- `persona_ab_repository.py` 每 Bot/用户一份 JSON，路径 `data_dir/persona_ab/{bot_id}/{user_id}.json`。
+  同一 asyncio 文件锁执行读改写，临时文件 flush/fsync/replace。适用于当前单进程部署；
+  不提供跨进程文件事务。记录仅保存本轮问题/候选、人设快照/hash、模型公开参数、映射、
+  会话 generation、投票与切换，不存 API Key、客户端或完整历史。
+- 状态 `generating → sending → pending → voted/expired`；异常进入 failed/fallback/aborted/delivery_unknown。
+  网络与渲染不持文件锁；Pillow 在线程生成内存 base64，每页 1200×1240，默认最多 8 页，
+  超限不截断，改发完整文本。WS 必须获得整个图片组明确成功才计展示；unknown 不重发图片。
+- 主链 `append_context` 返回 False 时停止 DB/情感回写；投票不改变历史。
+  重启恢复 pending/冷却；中断生成 aborted、中断发送 delivery_unknown，不自动重发。
+- `/api/persona-ab` 与 `/api/persona-ab/export` 复用面板认证；详情统一转义用户文本。
+  统计仅表示单轮同历史偏好。聊天 ZIP 备份不包含 persona_ab；独立 JSON 导出，首版无恢复导入。
+  单用户 JSON 与统计全量扫描适合首版规模，未来大样本需索引/归档。
 
 **当前基线：`45 passed, 0 failed`**（2026-09-25 实测，含新增的 `test_emotion_webui.py`）。改动后以此为对照。
 

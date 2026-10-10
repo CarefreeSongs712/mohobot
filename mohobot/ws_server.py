@@ -340,16 +340,18 @@ class WSServer:
             return None  # Not sent: no reply tracking, timeout, or speech archive.
         self._spawn_archive_task(self._archive_sent_message(
             bot_id, chat_type, chat_id, action, params, future, echo, source,
+            owns_response=not wait_response,
         ))
         if not wait_response:
             return None
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
             return None
         finally:
             self._bot_manager.remove_response_future(bot_id, echo)
+            self._bot_manager.drop_pending_sent(echo)
 
     def _spawn_archive_task(self, coro) -> None:
         """派发归档后台任务(supervisor 优先, 关闭中回退裸 task)。"""
@@ -369,7 +371,7 @@ class WSServer:
     async def _archive_sent_message(
         self, bot_id: str, chat_type: str, chat_id: int | str,
         action: str, params: dict[str, Any],
-        future: asyncio.Future, echo: str, source: str = "auto",
+        future: asyncio.Future, echo: str, source: str = "auto", *, owns_response: bool = True,
     ) -> None:
         """把一条 bot 发言以 message_sent 事件写入 history JSONL。
 
@@ -379,15 +381,18 @@ class WSServer:
         """
         try:
             resp = await asyncio.wait_for(
-                future, timeout=self._ARCHIVE_ECHO_TIMEOUT,
+                asyncio.shield(future), timeout=self._ARCHIVE_ECHO_TIMEOUT,
             )
         except asyncio.TimeoutError:
             resp = None
         except Exception:
             return  # 发送链路失败(连接断开等), 不归档
         finally:
-            self._bot_manager.remove_response_future(bot_id, echo)
-            self._bot_manager.drop_pending_sent(echo)
+            # A confirmed-delivery caller owns routing until its longer timeout.
+            # The archive timeout must not steal a later (e.g. 9s) success echo.
+            if owns_response:
+                self._bot_manager.remove_response_future(bot_id, echo)
+                self._bot_manager.drop_pending_sent(echo)
 
         if resp is not None:
             status = str(resp.get("status", "") or "").lower()
@@ -515,14 +520,20 @@ class WSServer:
 
     async def send_private_msg(
         self, bot_id: str, user_id: int | str, message: str | list[dict[str, Any]],
-        source: str = "auto",
-    ) -> None:
-        """Send a private message via a specific bot (records message_id)."""
-        await self._send_tracked(
+        source: str = "auto", *, wait_response: bool = False,
+    ) -> dict[str, Any] | None:
+        """Compatible fire-and-forget by default; tracked callers get explicit delivery status."""
+        if wait_response and not self._bot_manager.get(bot_id):
+            return {"delivery_status": "failed"}
+        response = await self._send_tracked(
             bot_id, "send_private_msg",
             {"user_id": int(user_id), "message": message},
-            "private", user_id, source=source,
+            "private", user_id, source=source, wait_response=wait_response,
         )
+        if wait_response:
+            from mohobot.services.persona_ab import delivery_status
+            return dict(response or {}, delivery_status=delivery_status(response))
+        return response
 
     async def send_image(
         self, bot_id: str, chat_type: str, chat_id: int | str, image_path: str

@@ -1114,13 +1114,53 @@ class LLMService:
                         else "你是 Mohobot，一个有用的 AI 助手。"),
         }
 
-    async def _build_messages(
+    def freeze_completion(self, bot_config=None):
+        """Capture the actual client and public parameters before any preparation await."""
+        client = self._chat_client
+        if client is not None and hasattr(client, "with_options"):
+            client = client.with_options(max_retries=0)  # service owns the sole controlled retry
+        return {"client": client, "parameters": {
+            "model": (getattr(bot_config, "chat_model_override", "") or self._cfg.llm.chat_model),
+            "temperature": self._cfg.llm.chat_temperature,
+            "max_tokens": self._cfg.llm.chat_max_tokens,
+        }}
+
+    async def prepare_input(self, bot_id, event, context, bot_config=None):
+        return await self._prepare_messages(bot_id, event, context, bot_config, allow_tts=False)
+
+    async def complete_prepared(self, bot_id, event, prepared, persona_content, frozen):
+        """No tools, no TTS, no error strings masquerading as answers. Raises on failure."""
+        client = frozen["client"]
+        if client is None:
+            raise RuntimeError("LLM unavailable")
+        messages = deepcopy(prepared)
+        messages[0]["content"] = persona_content + messages[0]["content"]
+        response = await client.chat.completions.create(messages=messages, **frozen["parameters"])
+        await self._record_usage(frozen["parameters"]["model"], getattr(response, "usage", None), bot_id, event, module="persona_ab")
+        choice = response.choices[0] if response.choices else None
+        if not choice or getattr(choice.message, "tool_calls", None) or not (choice.message.content or "").strip():
+            raise RuntimeError("Empty or tool-only A/B completion")
+        if getattr(choice, "finish_reason", None) == "length":
+            raise RuntimeError("Truncated A/B completion")
+        from mohobot.utils.tts_marker import strip_and_extract
+        text = strip_and_extract(choice.message.content)[0]
+        if not text.strip():
+            raise RuntimeError("Empty A/B text")
+        return text
+
+    async def _build_messages(self, bot_id, event, context, bot_config=None, persona_content=None):
+        persona = persona_content if persona_content is not None else self.resolve_bot_persona(bot_config)["content"]
+        messages = await self._prepare_messages(bot_id, event, context, bot_config)
+        messages[0]["content"] = persona + messages[0]["content"]
+        return messages
+
+    async def _prepare_messages(
         self,
         bot_id: str,
         event: MessageEvent,
         context: list[dict[str, Any]],
         bot_config: BotConfig | None = None,
-        persona_content: str | None = None,
+        *, allow_tts: bool = True,
     ) -> list[dict[str, Any]]:
         """Build the complete messages array for the LLM call.
 
@@ -1136,9 +1176,7 @@ class LLMService:
         emotion_parts: list[str] = []
 
         # 1. System prompt
-        persona = (persona_content if persona_content is not None
-                   else self.resolve_bot_persona(bot_config)["content"])
-        system_content = persona
+        system_content = ""
 
         # Add user profile info to system prompt
         if isinstance(event, GroupMessageEvent):
@@ -1157,7 +1195,8 @@ class LLMService:
 
         # TTS 语音标注提示(仅开启 TTS 的 bot): 引导 LLM 用 <tts></tts> 标注朗读句
         if (
-            getattr(self._cfg, "tts", None) is not None
+            allow_tts
+            and getattr(self._cfg, "tts", None) is not None
             and self._cfg.tts.enabled
             and bot_config is not None
             and bot_config.tts_enabled

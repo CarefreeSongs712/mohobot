@@ -63,7 +63,9 @@ class MessageHandler:
         emotion_manager=None,
         tts_service=None,
         persona_service=None,
+        persona_ab_service=None,
     ):
+        self._persona_ab = persona_ab_service
         self._ws = ws_server
         self._persona_service = persona_service
         self._ctx_mgr = context_manager
@@ -437,6 +439,13 @@ class MessageHandler:
             ban_interceptor is not None and ban_interceptor.is_ban_command(event)
         )
 
+        # A/B commands bypass repeat filtering, perception/plugins/emotion and LLM context.
+        ab_text = extract_plain_text(event.message).strip()
+        if ab_text.split(maxsplit=1)[0:1] and ab_text.split(maxsplit=1)[0].lower() == "/ab" and getattr(self, "_persona_ab", None) is not None:
+            response = await self._persona_ab.command(bot_id, event, ab_text.split()[1:])
+            await self._send_reply(bot_id, event, response)
+            return
+
         # ── 私聊自动回复过滤: 命中即静默丢弃(不回复/不写上下文/不入库/不走插件) ──
         # 归档已在 handle_event Step 1 落盘(history 保留)。
         if isinstance(event, PrivateMessageEvent) and self._ignore_auto_reply_enabled():
@@ -578,8 +587,14 @@ class MessageHandler:
                 "content": f"【引用消息】\n{quote_display}",
             })
 
-        # Stream response — split by punctuation + length (标点符号+长度分隔法)
-        if reply_options is None:
+        ab_record = None
+        ab_service = getattr(self, "_persona_ab", None)
+        if ab_service is not None and session is not None:
+            ab_record = await ab_service.reserve(bot_id, event, session, persona)
+        # Stream behavior is untouched for non-evaluation turns.
+        if ab_record is not None:
+            full_reply = await ab_service.run(ab_record, event, context, bot_config, self._ws)
+        elif reply_options is None:
             full_reply = await self._stream_llm_reply(bot_id, event, context, raw)
         else:
             full_reply = await self._stream_llm_reply(
@@ -604,9 +619,13 @@ class MessageHandler:
             }
             session_options = ({"session_id": session["id"], "generation": session["generation"]}
                                if session is not None else {})
-            await self._ctx_mgr.append_context(
+            written = await self._ctx_mgr.append_context(
                 bot_id, chat_type, chat_id, [user_msg, ai_msg], **session_options,
             )
+            if ab_record is not None:
+                await ab_service.note_context(ab_record, written is not False)
+            if written is False:
+                return  # Deleted/replaced generation must not leak into DB or emotion.
             # history → 数据库 (SQLite)
             self._persist_legacy_turn(
                 bot_id, chat_type, chat_id, event,

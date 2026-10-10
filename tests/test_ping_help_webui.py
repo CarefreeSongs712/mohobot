@@ -167,19 +167,17 @@ async def test_help_image():
             assert len(ws.replies) == 1, "图片和网址应在同一消息内, 不另发消息"
             target_type, target_id, segments = ws.replies[0]
             assert (target_type, target_id) == (chat_type, chat_id)
-            assert [seg["type"] for seg in segments] == ["image", "text"]
+            assert [seg["type"] for seg in segments] == ["image"]
             image_file = segments[0]["data"]["file"]
             assert image_file.startswith("base64://")
             assert base64.b64decode(image_file.removeprefix("base64://")) == image_bytes
-            _assert_help_info(segments[1]["data"]["text"])
             assert not path.exists(), "发送后应清理临时图片"
     print("[+] /help 图片 OK")
 
 
 def _assert_help_info(text):
     for content in (
-        "交流群 398870315", "介绍 / 使用须知", "https://7121099.xyz/",
-        "备用", "http://103.236.75.12:10712/",
+        "交流群 398870315", "https://7121099.xyz/",
     ):
         assert content in text, text
 

@@ -120,6 +120,11 @@ class MohobotApplication:
             song_annotator=self._make_song_annotator(),
             persona_service=self._persona_service,
         )
+        from mohobot.services.persona_ab import PersonaABService
+        self._persona_ab_service = PersonaABService(
+            self._config.data_dir, self._config.persona_ab, self._persona_service, self._llm_service,
+        )
+        await self._persona_ab_service.startup()
         # 上下文 AI 总结压缩: 注入总结回调 + trim/时间压缩配置(WebUI 保存后可热同步)
         self._context_manager.set_summarizer(self._llm_service.summarize_context)
         self._context_manager.set_trim_config(
@@ -226,6 +231,7 @@ class MohobotApplication:
             emotion_manager=self._emotion_manager,
             tts_service=self._tts_service,
             persona_service=self._persona_service,
+            persona_ab_service=self._persona_ab_service,
         )
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
@@ -245,6 +251,7 @@ class MohobotApplication:
             emotion_manager=self._emotion_manager,
             tts_service=self._tts_service,
             persona_service=self._persona_service,
+            persona_ab_service=self._persona_ab_service,
             admins=self._config.admins,
         )
         keyword_filter = KeywordFilter()
@@ -309,6 +316,7 @@ class MohobotApplication:
                 emotion_manager=self._emotion_manager,
                 tts_service=self._tts_service,
                 persona_service=self._persona_service,
+                persona_ab_service=self._persona_ab_service,
                 config_update_callback=self.sync_config,
             )
             # Start web panel in background

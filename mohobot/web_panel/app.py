@@ -164,7 +164,9 @@ class WebPanel:
         tts_service=None,
         config_update_callback=None,
         persona_service=None,
+        persona_ab_service=None,
     ):
+        self._persona_ab = persona_ab_service
         self._host = host
         self._port = port
         self._username = username
@@ -530,8 +532,28 @@ class WebPanel:
                 from mohobot.models.config import _int_list
                 cfg.external_service_groups = _int_list(data["external_service_groups"])
 
-            cfg.save(self._config_path)
-            await self._sync_runtime_config(cfg)
+            if "persona_ab" in data:
+                from mohobot.models.config import PersonaABConfig
+                if self._persona_ab is None:
+                    raise HTTPException(status_code=503, detail="评估服务不可用")
+                try:
+                    cfg.persona_ab = PersonaABConfig.from_dict(data["persona_ab"])
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                async with self._persona_service.lock:
+                    try:
+                        self._persona_ab.validate_config(cfg.persona_ab)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc))
+                    cfg.save(self._config_path)
+                    await self._sync_runtime_config(cfg)
+                    # Also works in standalone/mock panels without main's callback.
+                    for key, value in cfg.persona_ab.to_dict().items():
+                        setattr(self._persona_ab.config, key, value)
+                    self._persona_service.invalidate_references()
+            else:
+                cfg.save(self._config_path)
+                await self._sync_runtime_config(cfg)
             # 热同步上下文压缩配置(立即生效, 无需重启)
             if self._context_manager is not None:
                 self._context_manager.set_trim_config(
@@ -668,6 +690,22 @@ class WebPanel:
 
             logger.info(f"Web panel: bot {bot_id} config updated")
             return {"status": "ok"}
+
+        @app.get("/api/persona-ab")
+        async def persona_ab_report(request: Request, bot_id: str = "", version_hash: str = "", page: int = 1, page_size: int = 20):
+            await _require_auth(request)
+            if self._persona_ab is None:
+                raise HTTPException(status_code=503, detail="评估服务不可用")
+            return await self._persona_ab.report(bot_id=bot_id, version_hash=version_hash, page=max(1, page), page_size=page_size)
+
+        @app.get("/api/persona-ab/export")
+        async def persona_ab_export(request: Request, bot_id: str = "", version_hash: str = ""):
+            await _require_auth(request)
+            if self._persona_ab is None:
+                raise HTTPException(status_code=503, detail="评估服务不可用")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(await self._persona_ab.report(bot_id=bot_id, version_hash=version_hash, export=True),
+                headers={"Content-Disposition": 'attachment; filename="persona-ab.json"'})
 
         # ── Shared persona presets ──────────────────────────
 

@@ -205,13 +205,19 @@ class ContextManager:
             return await self._metadata_unlocked(bot_id, "private", user_id, session_id)
 
     @_chat_locked
-    async def set_session_persona(self, bot_id: str, chat_type: str, chat_id: str, session_id: str, persona_id: str) -> dict:
+    async def set_session_persona(self, bot_id: str, chat_type: str, chat_id: str, session_id: str, persona_id: str, *, expected_generation=None, require_active=False, deadline=None, clock=None) -> dict:
         if chat_type != "private":
             raise ValueError("只有私聊会话允许覆盖人设")
         index = await self._read_index_unlocked(bot_id, chat_type, chat_id)
         metadata = next((s for s in (index or {}).get("sessions", []) if s["id"] == session_id), None)
         if metadata is None:
             raise ValueError("会话不存在")
+        if expected_generation is not None and metadata["generation"] != expected_generation:
+            raise ValueError("原会话 generation 已变化，拒绝切换")
+        if require_active and index.get("active") != session_id:
+            raise ValueError("原会话必须是当前活动会话")
+        if deadline is not None and (clock or time.time)() >= deadline:
+            raise ValueError("评估已过期，拒绝切换")
         metadata["persona_id"] = persona_id
         await self._save_session_index(bot_id, chat_type, chat_id, index)
         return dict(metadata)

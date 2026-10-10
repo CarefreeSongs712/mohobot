@@ -37,7 +37,10 @@ def test_vision_prompt_config():
     assert cfg2.llm.vision_prompt == cfg.llm.vision_prompt
     os.unlink(tmp)
     # 旧配置(无字段) → 默认
-    cfg3 = GlobalConfig.load("config/global.yaml")
+    with tempfile.TemporaryDirectory() as directory:
+        old_path = Path(directory) / "legacy.yaml"
+        old_path.write_text("llm: {}\n", encoding="utf-8")
+        cfg3 = GlobalConfig.load(old_path)
     assert "洛天依" in cfg3.llm.vision_prompt
     # WebUI 字段
     d = cfg.to_dict()

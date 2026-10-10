@@ -106,7 +106,7 @@ async def _collect_legacy(svc, responses, tool_results):
     svc._chat_client = client
     results = iter(tool_results)
 
-    async def fake_execute(name, args):
+    async def fake_execute(name, args, *, context=None):
         return next(results)
 
     svc._execute_tool = fake_execute

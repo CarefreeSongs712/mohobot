@@ -213,6 +213,12 @@ class PersonaService:
 
     def _scan_references(self) -> list[dict]:
         references = []
+        ab = getattr(self, "_ab_config", None)
+        if ab is not None:
+            for role in ("baseline_id", "test_id"):
+                identifier = getattr(ab, role, "")
+                if identifier:
+                    references.append({"type": "persona_ab", "persona_id": identifier, "role": role})
         for cfg in self._bot_manager.list_bot_configs():
             references.append({"type": "bot", "bot_id": cfg.bot_id,
                                "nickname": cfg.nickname, "persona_id": cfg.persona_id or DEFAULT_PERSONA_ID})
@@ -370,11 +376,20 @@ class PersonaService:
             result["warnings"] = result["effective"]["warnings"]
         return result
 
-    async def bind_session(self, bot_id: str, user_id: str, session_id: str, persona_id: str) -> dict:
+    async def bind_session(self, bot_id: str, user_id: str, session_id: str, persona_id: str, *, expected_generation=None, require_active=False, expected_content_hash=None, deadline=None, clock=None) -> dict:
         async with self.lock:
             cfg, user_id, session_id = self._session_args(bot_id, user_id, session_id)
-            self._require_persona(persona_id)
-            session = await self._context_manager.set_session_persona(bot_id, "private", user_id, session_id, persona_id)
+            preset = self._require_persona(persona_id)
+            if expected_content_hash is not None:
+                import hashlib
+                if hashlib.sha256(preset["content"].encode("utf-8")).hexdigest() != expected_content_hash:
+                    raise ValueError("人设正文已修改，拒绝切换到旧快照")
+            options = {}
+            if expected_generation is not None or require_active:
+                options = {"expected_generation": expected_generation, "require_active": require_active}
+            if deadline is not None:
+                options.update(deadline=deadline, clock=clock)
+            session = await self._context_manager.set_session_persona(bot_id, "private", user_id, session_id, persona_id, **options)
             self.invalidate_references()
             return self._binding_result(cfg, user_id, session)
 

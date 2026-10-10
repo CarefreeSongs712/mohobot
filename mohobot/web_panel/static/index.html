@@ -231,6 +231,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item active" data-page="dashboard"><span class="icon">📊</span> 数据总览</div>
     <div class="nav-item" data-page="usage"><span class="icon">📈</span> 用量统计</div>
     <div class="nav-item" data-page="config"><span class="icon">⚙️</span> 配置文件</div>
+    <div class="nav-item" data-page="persona-ab"><span class="icon">AB</span> 人设评估</div>
     <div class="nav-item" data-page="personas"><span class="icon">P</span> 人设管理</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
@@ -308,7 +309,8 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="subtitle">可视化编辑全局配置与 Bot 配置</div>
     <div class="grid cols-2">
       <div class="card">
-        <div class="card-title">🌐 全局配置</div>
+        <div class="card-title">全局配置</div>
+        <p>匿名人设抽样与全局基准/测试版本请在左侧「人设评估」配置；返回该页将刷新人设下拉。</p>
         <div id="config-global-form"></div>
         <button class="btn" onclick="saveGlobalConfig()">保存全局配置</button>
       </div>
@@ -326,6 +328,21 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <button class="btn" id="config-bot-save" onclick="saveBotConfig()" disabled>保存 Bot 配置</button>
         <div id="unbound-list" style="margin-top:12px"></div>
       </div>
+    </div>
+  </div>
+
+  <div class="page" id="page-persona-ab">
+    <h2>人设 A/B 评估</h2>
+    <p>单轮同历史偏好，不代表长期实验。聊天备份不含评估数据；请独立导出，首版不支持恢复导入。</p>
+    <div class="card"><div id="ab-config"></div><button class="btn" id="ab-save" onclick="saveABConfig()" disabled>保存评估配置</button></div>
+    <div class="card">
+      <div class="form-row"><label for="ab-bot">Bot</label><select id="ab-bot"><option value="">全部</option><option>bot_001</option><option>bot_009</option><option>bot_002</option></select></div>
+      <div class="form-row"><label for="ab-hash">版本正文 hash</label><input id="ab-hash" placeholder="完整 SHA-256，留空为全部"></div>
+      <button class="btn" onclick="loadABReport(1)">筛选 / 刷新</button>
+      <button class="btn" onclick="exportAB()">独立 JSON 导出</button>
+      <div id="ab-stats"></div><div id="ab-details"></div>
+      <button class="btn" id="ab-prev" onclick="loadABReport(Math.max(1,abPage-1))" disabled>上一页</button>
+      <span id="ab-page"></span><button class="btn" id="ab-next" onclick="loadABReport(abPage+1)" disabled>下一页</button>
     </div>
   </div>
 
@@ -709,6 +726,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (previousPage === 'personas' && document.getElementById('cfg-persona_id')) refreshPersonaChoices();
         else loadConfigPage();
         break;
+      case 'persona-ab': loadABPage(); break;
       case 'personas': loadPersonasPage(); break;
       case 'models': loadModels(); break;
       case 'tts': loadTtsPage(); break;
@@ -1304,6 +1322,89 @@ async function saveBotConfig() {
     await apiJSON(`/api/bots/${botId}/config`, { method: 'PUT', body: { data } });
     showToast('Bot 配置已保存');
   } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+// ═══════════════ Persona A/B ═══════════════
+let abPage = 1;
+let abReportGeneration = 0;
+let abConfigReady = false;
+async function loadABPage() {
+  const generation = pageRequestGeneration;
+  abConfigReady = false;
+  document.getElementById('ab-save').disabled = true;
+  document.getElementById('ab-config').textContent = '正在加载评估配置与人设…';
+  try {
+    const [cfg, options] = await Promise.all([apiJSON('/api/config'), apiJSON('/api/personas/options')]);
+    if (generation !== pageRequestGeneration) return;
+    const value = cfg.persona_ab || {};
+    const select = (key, label) => `<div class="form-row"><label for="ab-${key}">${label}</label><select id="ab-${key}"><option value="">未选择</option>${options.map(p => `<option value="${esc(p.id)}" ${p.id === value[key] ? 'selected' : ''}>${esc(p.name)} (${esc(p.id)})</option>`).join('')}</select></div>`;
+    document.getElementById('ab-config').innerHTML = '<p>仅私聊 bot_001 / bot_009 / bot_002；默认关闭。修改配置不改变旧评估快照。</p>' +
+      `<label><input type="checkbox" id="ab-enabled" ${value.enabled ? 'checked' : ''}>启用抽样</label>` +
+      select('baseline_id', '全局基准人设') + select('test_id', '全局测试人设') +
+      [['probability','概率（0~1，5% = 0.05）',0.05],['cooldown_seconds','冷却秒',900],['pending_seconds','待投票秒',86400],['max_pages','最大图卡页数',8]].map(([key,label,fallback]) => `<div class="form-row"><label for="ab-${key}">${label}</label><input type="number" step="any" id="ab-${key}" value="${esc(value[key] ?? fallback)}"></div>`).join('');
+    abConfigReady = true;
+    document.getElementById('ab-save').disabled = false;
+    await loadABReport(1);
+  } catch(e) {
+    if (generation === pageRequestGeneration) {
+      abConfigReady = false;
+      document.getElementById('ab-config').textContent = '加载失败，请重新进入页面重试：' + e.message;
+      document.getElementById('ab-save').disabled = true;
+    }
+    showToast(e.message, false);
+  }
+}
+async function saveABConfig() {
+  if (!abConfigReady) return;
+  const saveButton = document.getElementById('ab-save');
+  saveButton.disabled = true;
+  const value = {enabled: document.getElementById('ab-enabled').checked};
+  for (const key of ['baseline_id','test_id']) value[key] = document.getElementById('ab-'+key).value;
+  for (const key of ['probability','cooldown_seconds','pending_seconds','max_pages']) value[key] = Number(document.getElementById('ab-'+key).value);
+  try { await apiJSON('/api/config', {method:'PUT', body:{data:{persona_ab:value}}}); showToast('评估配置已保存'); }
+  catch(e) { showToast(e.message, false); }
+  finally { saveButton.disabled = !abConfigReady; }
+}
+function abFilters() { return new URLSearchParams({bot_id:document.getElementById('ab-bot').value, version_hash:document.getElementById('ab-hash').value.trim()}); }
+async function loadABReport(page) {
+  const generation = pageRequestGeneration;
+  const requestGeneration = ++abReportGeneration;
+  document.getElementById('ab-prev').disabled = true;
+  document.getElementById('ab-next').disabled = true;
+  try {
+    const query = abFilters(); query.set('page', page);
+    const result = await apiJSON('/api/persona-ab?' + query);
+    if (generation !== pageRequestGeneration || requestGeneration !== abReportGeneration) return;
+    abPage = page;
+    const labels = {shown:'完整展示',votes:'投票',response_rate:'回应率',baseline_wins:'基准胜票',test_wins:'测试胜票',ties:'平局',both_bad:'都不好',skipped:'跳过',expired:'过期',failed:'失败/降级'};
+    document.getElementById('ab-stats').textContent = Object.entries(result.statistics).map(([k,v]) => `${labels[k] || k}: ${k === 'response_rate' ? (v*100).toFixed(1)+'%' : v}`).join(' | ');
+    document.getElementById('ab-page').textContent = `第 ${page} 页，共 ${result.total} 条`;
+    document.getElementById('ab-prev').disabled = page <= 1;
+    document.getElementById('ab-next').disabled = page * 20 >= result.total;
+    document.getElementById('ab-details').innerHTML = result.records.map(r => {
+      const text = side => r.candidates?.[r.mapping?.[side]] || '未生成';
+      const mapping = side => `${side} → ${r.mapping?.[side] === 'baseline' ? '基准' : '测试'}`;
+      return `<details class="card"><summary>${esc(r.id)} · ${esc(r.bot_id)} / ${esc(r.user_id)} · ${esc(r.state)} · 票 ${esc(r.vote || '未投')}</summary>
+        <p>创建时间 ${esc(new Date(r.created_at*1000).toLocaleString())}；上下文侧 ${esc(r.context_side === 'baseline' ? '基准' : '测试')}；已写入 ${r.context_written ? '是' : '否'}</p>
+        <p>问题</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r.question)}</pre>
+        <div class="grid cols-2"><div><b>${esc(mapping('A'))}（左）</b><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(text('A'))}</pre></div>
+        <div><b>${esc(mapping('B'))}（右）</b><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(text('B'))}</pre></div></div>
+        <p>投票 ${esc(r.vote || '未投')}；切换 ${esc(r.switch?.choice || '未切换')}</p>
+        <details><summary>技术详情（版本 hash / 快照 / 发送状态）</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(r,null,2))}</pre></details></details>`;
+    }).join('');
+  } catch(e) {
+    if (generation === pageRequestGeneration && requestGeneration === abReportGeneration) {
+      document.getElementById('ab-details').textContent = '加载失败，请重试：' + e.message;
+      showToast(e.message, false);
+    }
+  }
+}
+async function exportAB() {
+  try {
+    const result = await apiJSON('/api/persona-ab/export?' + abFilters());
+    const url = URL.createObjectURL(new Blob([JSON.stringify(result,null,2)], {type:'application/json'}));
+    const link = document.createElement('a'); link.href = url; link.download = 'persona-ab.json'; link.click(); URL.revokeObjectURL(url);
+  } catch(e) { showToast(e.message, false); }
 }
 
 // ═══════════════ Shared personas ═══════════════

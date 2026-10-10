@@ -9,6 +9,18 @@
 # 封禁系统与插件(关系管理器等)共用此列表。
 admins: []
 
+# ── 私聊匿名人设 A/B（单轮同历史偏好，不是长期实验） ─────────────
+# 固定仅 bot_001 / bot_009 / bot_002；后台「人设评估」选择两版现有人设。
+# 数据独立存放 data_dir/persona_ab，不包含在聊天备份中，只支持独立 JSON 导出。
+persona_ab:
+  enabled: false
+  baseline_id: ""
+  test_id: ""
+  probability: 0.05
+  cooldown_seconds: 900
+  pending_seconds: 86400
+  max_pages: 8  # 每页 1200x1240；超过限制改发完整纯文字，不截断
+
 # ── LLM 排除群 ──────────────────────────────────────────────
 # 这些群号内 bot 不做 LLM 聊天回复(@/引用/ping 均静默),
 # 插件与命令不受影响; WebUI 可改, 保存立即生效。
