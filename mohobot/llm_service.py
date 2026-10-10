@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import time
 import json
 from copy import deepcopy
@@ -51,6 +52,12 @@ class LLMService:
         # 聚合结果短缓存: key=(kind, range_key, 文件size, 文件mtime),
         # 文件未变化时同一查询 15s 内直接复用, 避免每次全量遍历记录。
         self._usage_agg_cache: dict[tuple, tuple[float, dict]] = {}
+        # dashboard 总览的累计聚合(totals/per_model/每日桶): 独立于 records
+        # 缓存, 用自己的 offset 记录已合并到的字节位置, 并落盘到
+        # stats/llm_usage_totals.json —— 重启后冷启动打开 dashboard 免全量解析。
+        self._usage_totals: dict[str, Any] = self._usage_totals_fresh(0)
+        self._usage_totals_loaded = False
+        self._usage_totals_dirty = False
         # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
         self._image_cache = image_cache
         # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
@@ -598,25 +605,16 @@ class LLMService:
                 # 文件被截断/重建: 放弃增量, 全量重读
                 state["offset"] = 0
                 self._usage_records_cache = []
+            excluded = self._usage_excluded()
             async with aiofiles.open(usage_file, "rb") as f:
                 await f.seek(state["offset"])
                 blob = await f.read()
-            text = blob.decode("utf-8", errors="replace")
-            if text and not text.endswith("\n"):
-                text = text[:text.rfind("\n") + 1]
-            new_records: list[dict] = []
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    new_records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            new_records, new_offset = self._parse_usage_blob(blob, state["offset"])
+            if excluded:
+                new_records = [r for r in new_records if str(r.get("model", "")) not in excluded]
             self._usage_records_cache.extend(new_records)
             self._usage_file_state = {
-                "size": size, "mtime_ns": mtime_ns,
-                "offset": state["offset"] + len(text.encode("utf-8")),
+                "size": size, "mtime_ns": mtime_ns, "offset": new_offset,
             }
             return self._filter_usage_records(self._usage_records_cache)
 
@@ -930,47 +928,160 @@ class LLMService:
             logger.warning(f"情感分析 LLM 调用失败: {e}")
             return None
 
-    async def get_usage_stats(self) -> dict[str, Any]:
-        """Aggregate token usage from data/stats/llm_usage.jsonl.
+    def _usage_totals_fresh(self, offset: int = 0) -> dict[str, Any]:
+        return {
+            "offset": int(offset),
+            "totals": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0},
+            "per_model": {},
+            "days": {},  # day_index(int) -> {"calls", "prompt_tokens", "completion_tokens", "total_tokens"}
+        }
 
-        Returns totals + per-model breakdown + today's usage.
+    def _usage_excluded(self) -> set[str]:
+        return {str(m).strip() for m in (getattr(self._cfg, "usage_excluded_models", None) or [])
+                if str(m).strip()}
+
+    @staticmethod
+    def _parse_usage_blob(blob: bytes, start_offset: int) -> tuple[list[dict], int]:
+        """解析 [start_offset, ...] 的 jsonl 字节段。
+
+        返回 (记录列表, 新 offset)。末尾不是完整行的残留留到下次解析
+        (写入方逐行追加, 残行会随后续写入补全)。
         """
-        return await self._cached_usage_agg("all", "all", self._compute_usage_stats)
+        text = blob.decode("utf-8", errors="replace")
+        if text and not text.endswith("\n"):
+            text = text[:text.rfind("\n") + 1]
+        records: list[dict] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return records, start_offset + len(text.encode("utf-8"))
 
-    async def _compute_usage_stats(self) -> dict[str, Any]:
-        import datetime
-        from mohobot.utils.time_utils import TZ_UTC8
-        today_start = (
-            datetime.datetime.now(TZ_UTC8)
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .timestamp()
-        )
+    def _merge_usage_totals(self, records: list[dict]) -> None:
+        """把记录段合并进 dashboard 累计聚合。
 
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
-        per_model: dict[str, dict] = {}
-        today = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
-
-        for rec in await self._load_usage_records():
-            pt = rec.get("prompt_tokens", 0)
-            ct = rec.get("completion_tokens", 0)
-            tt = rec.get("total_tokens", 0)
+        day_index 按 UTC+8 自然日切桶: (ts + 8h) // 24h, 取当日桶即"今日"。
+        """
+        t = self._usage_totals
+        totals, per_model, days = t["totals"], t["per_model"], t["days"]
+        for rec in records:
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            tt = int(rec.get("total_tokens", 0) or 0) or (pt + ct)
+            totals["calls"] += 1
             totals["prompt_tokens"] += pt
             totals["completion_tokens"] += ct
             totals["total_tokens"] += tt
-            totals["calls"] += 1
             model = rec.get("model", "unknown")
-            pm = per_model.setdefault(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            pm = per_model.setdefault(model, {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
             pm["calls"] += 1
             pm["prompt_tokens"] += pt
             pm["completion_tokens"] += ct
             pm["total_tokens"] += tt
-            if rec.get("time", 0) >= today_start:
-                today["prompt_tokens"] += pt
-                today["completion_tokens"] += ct
-                today["total_tokens"] += tt
-                today["calls"] += 1
+            day = days.setdefault(int((rec.get("time", 0) or 0) + 28800) // 86400, {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            day["calls"] += 1
+            day["prompt_tokens"] += pt
+            day["completion_tokens"] += ct
+            day["total_tokens"] += tt
 
-        return {"totals": totals, "per_model": per_model, "today": today}
+    def _usage_totals_restore(self, t: dict) -> None:
+        path = Path(self._cfg.data_dir) / "stats" / "llm_usage_totals.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("version") != 1:
+                return
+            offset = data.get("offset")
+            if type(offset) is not int or offset < 0:
+                return
+            for section, fields in (("totals", {"calls", "prompt_tokens", "completion_tokens", "total_tokens"}),
+                                    ("per_model", None), ("days", None)):
+                value = data.get(section)
+                if section == "totals":
+                    if not isinstance(value, dict) or not fields.issubset(value):
+                        return
+                elif not isinstance(value, dict):
+                    return
+            t["offset"] = offset
+            t["totals"] = {k: int(v) for k, v in data["totals"].items()}
+            t["per_model"] = {m: {k: int(v) for k, v in s.items()} for m, s in data["per_model"].items()}
+            t["days"] = {int(d): {k: int(v) for k, v in s.items()} for d, s in data["days"].items()}
+        except (OSError, ValueError, TypeError):
+            pass  # 无基线或基线损坏: 从头累计并重建基线
+
+    def _usage_totals_save(self) -> None:
+        t = self._usage_totals
+        path = Path(self._cfg.data_dir) / "stats" / "llm_usage_totals.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({
+                "version": 1, "offset": t["offset"],
+                "totals": t["totals"], "per_model": t["per_model"],
+                "days": {str(d): s for d, s in t["days"].items()},
+            }, ensure_ascii=False)
+            fd, temporary = tempfile.mkstemp(prefix=".usagetotals-", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        except OSError as exc:
+            logger.debug(f"Failed to save usage totals baseline: {exc}")
+
+    async def get_usage_stats(self) -> dict[str, Any]:
+        """dashboard 总览: 累计/分模型/今日 token 用量。
+
+        独立于 records 缓存: 各自维护解析到的字节位置(offset), 只解析新增
+        段并合并进累计结构, 基线落盘 —— 重启后(排除模型列表不变时)dashboard
+        首开免全量解析。文件被截断时退回从头重新累计。
+        """
+        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
+        excluded = self._usage_excluded()
+        async with self._usage_file_lock:
+            t = self._usage_totals
+            if not self._usage_totals_loaded:
+                self._usage_totals_loaded = True
+                self._usage_totals_restore(t)
+            try:
+                stat = await aiofiles.os.stat(usage_file)
+                size = stat.st_size
+            except OSError:
+                # 文件不存在: 累计清空(可能已被清理)
+                if t["offset"] != 0 or t["totals"]["calls"]:
+                    self._usage_totals = self._usage_totals_fresh(0)
+                    self._usage_totals_dirty = True
+                t = self._usage_totals
+            else:
+                if size < t["offset"]:
+                    self._usage_totals = self._usage_totals_fresh(0)
+                    t = self._usage_totals
+                if size > t["offset"]:
+                    async with aiofiles.open(usage_file, "rb") as f:
+                        await f.seek(t["offset"])
+                        blob = await f.read()
+                    records, new_offset = self._parse_usage_blob(blob, t["offset"])
+                    if excluded:
+                        records = [r for r in records if str(r.get("model", "")) not in excluded]
+                    self._merge_usage_totals(records)
+                    t = self._usage_totals
+                    t["offset"] = new_offset
+                    self._usage_totals_dirty = True
+            if self._usage_totals_dirty:
+                self._usage_totals_dirty = False
+                asyncio.create_task(asyncio.to_thread(self._usage_totals_save))
+            today = t["days"].get(int((time.time() + 28800) // 86400),
+                                  {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            return {"totals": dict(t["totals"]), "per_model": deepcopy(t["per_model"]),
+                    "today": dict(today)}
 
     def resolve_bot_persona(self, bot_config: BotConfig | None) -> dict[str, Any]:
         service = getattr(self, "_persona_service", None)
