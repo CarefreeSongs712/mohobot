@@ -1856,8 +1856,27 @@ class WebPanel:
                         prev = states.get(rel)
                         if prev and prev["size"] == st.st_size and prev["mtime_ns"] == st.st_mtime_ns:
                             continue
-                        lines = _count(f)
-                        states[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "lines": lines}
+                        lines: int | None = None
+                        if prev and st.st_size > prev["size"]:
+                            # 追加写入(写入方逐行追加): 只数新增字节段的行,
+                            # 避免活跃大群文件(几十 MB)被整文件重数。
+                            # 末尾不足一整行的残留留到下次(size 记为已数到的位置)。
+                            try:
+                                with open(f, "rb") as fh:
+                                    fh.seek(prev["size"])
+                                    added = fh.read().decode("utf-8", errors="replace")
+                                if added and not added.endswith("\n"):
+                                    added = added[:added.rfind("\n") + 1]
+                                lines = prev["lines"] + sum(
+                                    1 for l in added.splitlines() if l.strip())
+                                counted_size = prev["size"] + len(added.encode("utf-8"))
+                            except OSError:
+                                lines = None
+                        if lines is None:
+                            counted_size = st.st_size
+                            lines = _count(f)
+                        states[rel] = {"size": counted_size, "mtime_ns": st.st_mtime_ns,
+                                       "lines": lines}
                         changed = True
         removed = [rel for rel in states if rel not in seen]
         for rel in removed:
