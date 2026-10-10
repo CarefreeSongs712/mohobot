@@ -684,8 +684,23 @@ class LLMService:
     async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
 
+    @staticmethod
+    def _usage_range_start(records: list[dict], since: float, buffer: int = 2000) -> int:
+        """时间范围聚合的起点下标。
+
+        记录按写入时间近似有序(append-only), 二分定位 time >= since 的起点,
+        再向前多收容 buffer 条兜住写入时刻的轻微乱序; 范围极长时回到全量。
+        """
+        from bisect import bisect_right
+        idx = bisect_right(records, since, key=lambda r: r.get("time") or 0)
+        return max(0, idx - buffer)
+
+    async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
+        since = self._range_since(range_key)
+
+        records = await self._load_usage_records()
         sessions: dict[tuple[str, str, str], dict] = {}
-        for rec in await self._load_usage_records():
+        for rec in records[self._usage_range_start(records, since):]:
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)
@@ -737,8 +752,9 @@ class LLMService:
 
     async def _compute_user_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
+        records = await self._load_usage_records()
         users: dict[str, dict] = {}
-        for rec in await self._load_usage_records():
+        for rec in records[self._usage_range_start(records, since):]:
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)
@@ -789,8 +805,9 @@ class LLMService:
 
     async def _compute_module_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
+        records = await self._load_usage_records()
         bots: dict[str, dict] = {}
-        for rec in await self._load_usage_records():
+        for rec in records[self._usage_range_start(records, since):]:
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)
