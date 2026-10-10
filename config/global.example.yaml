@@ -125,6 +125,7 @@ emotion:
   keyword_threshold: 3          # 关键词门控触发阈值(用户消息累计情感强度, 越大越省)
   analysis_round_cooldown: 2    # 距上次分析不足 N 轮则跳过本轮(0=不限)
   min_interval_sec: 180         # 同一用户两次分析的最小间隔(秒, 0=不限)
+  max_concurrent: 4             # 同时执行的情感分析调用上限(1=串行; 变更后重启生效)
   # 队列积压时改用快速模型 burst(消化积压后回到正常模型):
   burst_model: DeepSeek-V4-Flash   # 快速模型名; 留空=不启用
   queue_burst_threshold: 5         # 排队分析数超过该值触发

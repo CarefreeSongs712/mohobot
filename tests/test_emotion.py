@@ -233,7 +233,7 @@ async def test_manager_frequency_cooldown():
 # ── 4. 情感专家 ───────────────────────────────────────────────
 
 async def test_expert_parse_and_clamp():
-    async def fake_llm(prompt):
+    async def fake_llm(prompt, model=None):
         return ('好的，这是分析：```json\n{"emotion_updates": {"favor": 99, "intimacy": -99, '
                 '"joy": 5, "sadness": -7}, "relationship": "非常亲密的朋友伙伴关系", '
                 '"attitude": "热情亲切温暖可亲"}\n```')
@@ -252,7 +252,7 @@ async def test_expert_parse_and_clamp():
 async def test_expert_fallback_on_failure_and_disable():
     calls = {"n": 0}
 
-    async def failing_llm(prompt):
+    async def failing_llm(prompt, model=None):
         calls["n"] += 1
         return None
 
@@ -272,7 +272,7 @@ async def test_expert_fallback_on_failure_and_disable():
 
 
 async def test_expert_malformed_json_recovery():
-    async def bad_json(prompt):
+    async def bad_json(prompt, model=None):
         return "{emotion_updates: {favor: 2, joy: 1,}, relationship: '普通朋友', attitude: '平和'}"
 
     expert = EmotionExpert(llm_call=bad_json, retries=1)
@@ -290,7 +290,7 @@ async def test_expert_circuit_half_open_recovery():
                '"relationship": "朋友", "attitude": "温和"}')
 
     def make_llm(ok: bool):
-        async def fake_llm(prompt):
+        async def fake_llm(prompt, model=None):
             calls["n"] += 1
             return ok_json if ok else None
         return fake_llm
@@ -503,12 +503,12 @@ async def test_manager_process_turn_integration():
     await run()
 
 
-async def test_manager_analysis_serialized():
-    """单并发队列: 多用户并发触发时, 情感分析 LLM 调用互斥排队(同时最多 1 次)。"""
+async def test_manager_analysis_concurrency():
+    """多并发信号量: max_concurrent=1 退回串行; 默认 4 时并发执行且不超上限。"""
     active = {"n": 0, "max": 0}
 
     class _FakeLLM:
-        async def analyze_emotion(self, prompt):
+        async def analyze_emotion(self, prompt, model=None):
             active["n"] += 1
             active["max"] = max(active["max"], active["n"])
             await asyncio.sleep(0.05)
@@ -516,22 +516,33 @@ async def test_manager_analysis_serialized():
             return ('{"emotion_updates": {"favor": 1}, '
                     '"relationship": "朋友", "attitude": "温和"}')
 
-    async def run():
+    async def run(max_concurrent, expect_peak_min, expect_peak_max):
         tmp = tempfile.mkdtemp()
         manager = EmotionManager(
-            data_dir=tmp, config=_make_cfg(smart_update=False),  # 每轮都分析, 强制排队
+            data_dir=tmp,
+            config=_make_cfg(smart_update=False,  # 每轮都分析, 强制排队
+                             max_concurrent=max_concurrent),
             llm_service=_FakeLLM(), admins=[999],
         )
+        active["n"] = 0
+        active["max"] = 0
         await asyncio.gather(*[
             manager.process_turn("bot_001", str(1000 + i), "你好", "嗯嗯")
-            for i in range(4)
+            for i in range(8)
         ])
-        assert active["max"] == 1, f"并发峰值应为 1, 实际 {active['max']}"
+        assert expect_peak_min <= active["max"] <= expect_peak_max, (
+            f"并发峰值应在 [{expect_peak_min}, {expect_peak_max}], "
+            f"实际 {active['max']} (max_concurrent={max_concurrent})"
+        )
         assert (await manager.get_state("bot_001", "1001")).favor == 1
         await manager.shutdown()
 
-    await run()
-
+    # 上限 1 → 退化为串行(同时最多 1 次)
+    await run(1, 1, 1)
+    # 默认/上限 4 → 真并发, 峰值 ≥2 且不超过上限
+    await run(4, 2, 4)
+    # 上限 2 → 不被 8 个任务打穿
+    await run(2, 2, 2)
 
 async def test_manager_queue_burst_fast_model():
     """队列积压超阈值 → 改用快速模型连续 N 次, 之后回到正常模型。"""

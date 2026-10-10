@@ -52,11 +52,17 @@ class EmotionManager:
         )
         self._admins: set[int] = {int(a) for a in (admins or [])}
         self._save_task: asyncio.Task | None = None
-        # 单并发队列: 同一时刻只允许一次情感分析 LLM 调用, 其余排队等待
-        self._analysis_lock = asyncio.Lock()
+        # 多并发信号量: 同一时刻最多 max_concurrent 次情感分析 LLM 调用
+        # (旧网关时代单并发串行的遗留限制, 现走 new-api 可承受并发; 上限
+        # 仍保留, 防止峰值把网关打满), 排队任务由 burst 机制削峰。
+        # max_concurrent 变更后需重启生效(信号量容量不可热缩容重建)。
+        self._analysis_sem = asyncio.Semaphore(
+            max(1, int(getattr(config, "max_concurrent", 4) or 1))
+        )
         self._pending_analysis = 0      # 已进入分析段(排队+进行中)的任务数
+        self._running_analysis = 0      # 正在执行的调用数(面板展示并发度)
         self._burst_left = 0            # 快速模型 burst 剩余次数
-        self._active_model: str | None = None   # 本次分析用的模型(None=配置的正常模型)
+        self._active_model: str | None = None   # 最近一次选择的模型(None=正常模型, 仅展示)
 
     # ── 生命周期 ─────────────────────────────────────────────
 
@@ -88,10 +94,10 @@ class EmotionManager:
             except Exception as e:
                 logger.debug(f"情感数据周期落盘失败: {e}")
 
-    def _analyze_llm(self, prompt: str):
-        """情感分析 LLM 调用(burst 期间按次指定快速模型)。"""
-        if self._active_model:
-            return self._llm.analyze_emotion(prompt, model=self._active_model)
+    def _analyze_llm(self, prompt: str, model: str | None = None):
+        """情感分析 LLM 调用(各并发任务显式传递本次模型, burst 期间为快速模型)。"""
+        if model:
+            return self._llm.analyze_emotion(prompt, model=model)
         return self._llm.analyze_emotion(prompt)
 
     # ── 配置热同步 / 管理员 ──────────────────────────────────
@@ -199,28 +205,33 @@ class EmotionManager:
 
         logger.debug(f"情感更新触发({bot_id}/{user_key}): {reason}")
         bot_name = self._bot_name_provider(bot_id)
-        # 单并发队列: 情感分析串行执行(同时只有一次 LLM 调用), 其余排队等待。
-        # 多用户并发重 prompt 会把网关打满引发超时连锁; 串行化降低峰值压力。
+        # 多并发信号量: 同一时刻最多 max_concurrent 次情感分析 LLM 调用,
+        # 排队任务由 burst 机制削峰(上限保留防止峰值打满网关)。
         self._pending_analysis += 1
         try:
-            async with self._analysis_lock:
-                # 此刻仍在等待的任务数(自己已持锁) = 排队积压深度。
-                # 积压超过阈值 → 用快速模型 burst 若干次, 尽快消化队列。
-                self._pick_analysis_model(self._pending_analysis - 1)
-                updates = await self._expert.analyze(user_text, ai_reply, state, bot_name)
-                self.apply_expert_updates(state, updates)
+            async with self._analysis_sem:
+                try:
+                    # 此刻其余已进入分析段的任务数(排队+进行中) = 积压深度。
+                    # 积压超过阈值 → 用快速模型 burst 若干次, 尽快消化队列。
+                    model = self._pick_analysis_model(self._pending_analysis - 1)
+                    updates = await self._expert.analyze(
+                        user_text, ai_reply, state, bot_name, model=model,
+                    )
+                    self.apply_expert_updates(state, updates)
 
-                significance = self._calculate_significance(updates)
-                written = self._memory.add_interaction(
-                    bot_id, user_key, user_text, ai_reply,
-                    significance, updates, threshold=int(self._cfg.significance_threshold),
-                )
-                if written:
-                    self._store.touch_memory_dirty(bot_id)
+                    significance = self._calculate_significance(updates)
+                    written = self._memory.add_interaction(
+                        bot_id, user_key, user_text, ai_reply,
+                        significance, updates, threshold=int(self._cfg.significance_threshold),
+                    )
+                    if written:
+                        self._store.touch_memory_dirty(bot_id)
 
-                state.reset_force_update_counter()
-                StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
-                self._store.set_state(bot_id, user_key, state)
+                    state.reset_force_update_counter()
+                    StageManager.get_stage_info(state)  # 刷新阶段/复合分/进度
+                    self._store.set_state(bot_id, user_key, state)
+                finally:
+                    self._running_analysis -= 1
         finally:
             self._pending_analysis -= 1
             self._active_model = None
@@ -229,16 +240,18 @@ class EmotionManager:
             f"favor={state.favor} intimacy={state.intimacy} source={updates.get('source')}"
         )
 
-    def _pick_analysis_model(self, queued: int) -> None:
+    def _pick_analysis_model(self, queued: int) -> str | None:
         """选择本次分析用的模型: 队列积压超阈值时启用快速模型 burst。
 
         burst 进行中不重复触发(一次触发固定连续 count 次);
         burst_model 为空表示不启用(始终用配置的正常模型)。
+        多并发下每个任务独立确定本次模型, 无 await 同步段, 不存在共享竞态。
+        返回本次应用的模型名(None=配置的正常模型), 由调用方显式传给 expert。
         """
         burst_model = str(getattr(self._cfg, "burst_model", "") or "").strip()
         if not burst_model:
             self._active_model = None
-            return
+            return None
         threshold = max(0, int(getattr(self._cfg, "queue_burst_threshold", 5)))
         count = max(1, int(getattr(self._cfg, "queue_burst_count", 3)))
         if queued > threshold and self._burst_left <= 0:
@@ -250,8 +263,9 @@ class EmotionManager:
         if self._burst_left > 0:
             self._burst_left -= 1
             self._active_model = burst_model
-        else:
-            self._active_model = None
+            return burst_model
+        self._active_model = None
+        return None
 
     # ── 更新应用(移植 _apply_expert_updates) ─────────────────
 
@@ -380,7 +394,9 @@ class EmotionManager:
             "smart_update": bool(self._cfg.smart_update),
             "analysis_timeout_sec": int(getattr(self._cfg, "analysis_timeout_sec", 90)),
             "burst_model": str(getattr(self._cfg, "burst_model", "") or ""),
+            "max_concurrent": max(1, int(getattr(self._cfg, "max_concurrent", 4) or 1)),
             "queue_pending": self._pending_analysis,
+            "queue_running": self._running_analysis,
             "burst_left": self._burst_left,
             "active_model": self._active_model,
             "expert": self._expert.status(),

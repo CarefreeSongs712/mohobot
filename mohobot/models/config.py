@@ -163,6 +163,8 @@ class EmotionConfig:
     keyword_threshold: int = 3       # 关键词门控触发阈值(用户消息累计情感强度; 越大越保守)
     analysis_round_cooldown: int = 2 # 距上次分析不足 N 轮则跳过本轮(0=不限)
     min_interval_sec: int = 180      # 同一用户两次情感分析的最小时间间隔(秒, 0=不限)
+    # 并发上限(变更后重启生效; 信号量容量不可热重建):
+    max_concurrent: int = 4          # 同时执行的情感分析 LLM 调用上限(1=退回串行)
     # 队列积压时改用快速模型 burst(把积压快速消化掉, 再回到正常模型):
     queue_burst_threshold: int = 5        # 排队任务超过该值时启用
     queue_burst_count: int = 3            # 快速模型连续调用次数
@@ -424,6 +426,7 @@ class GlobalConfig:
                 keyword_threshold=int(emotion_raw.get("keyword_threshold", 3)),
                 analysis_round_cooldown=int(emotion_raw.get("analysis_round_cooldown", 2)),
                 min_interval_sec=int(emotion_raw.get("min_interval_sec", 180)),
+                max_concurrent=max(1, int(emotion_raw.get("max_concurrent", 4) or 1)),
                 queue_burst_threshold=int(emotion_raw.get("queue_burst_threshold", 5)),
                 queue_burst_count=int(emotion_raw.get("queue_burst_count", 3)),
                 burst_model=str(emotion_raw.get("burst_model", "DeepSeek-V4-Flash") or ""),
@@ -562,6 +565,7 @@ class GlobalConfig:
                 "keyword_threshold": self.emotion.keyword_threshold,
                 "analysis_round_cooldown": self.emotion.analysis_round_cooldown,
                 "min_interval_sec": self.emotion.min_interval_sec,
+                "max_concurrent": self.emotion.max_concurrent,
                 "queue_burst_threshold": self.emotion.queue_burst_threshold,
                 "queue_burst_count": self.emotion.queue_burst_count,
                 "burst_model": self.emotion.burst_model,
@@ -688,6 +692,7 @@ class GlobalConfig:
                 "keyword_threshold": self.emotion.keyword_threshold,
                 "analysis_round_cooldown": self.emotion.analysis_round_cooldown,
                 "min_interval_sec": self.emotion.min_interval_sec,
+                "max_concurrent": self.emotion.max_concurrent,
                 "queue_burst_threshold": self.emotion.queue_burst_threshold,
                 "queue_burst_count": self.emotion.queue_burst_count,
                 "burst_model": self.emotion.burst_model,

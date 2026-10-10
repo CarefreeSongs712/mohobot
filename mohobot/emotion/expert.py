@@ -32,7 +32,7 @@ class EmotionExpert:
 
     def __init__(
         self,
-        llm_call: Callable[[str], Awaitable[str | None]],
+        llm_call: Callable[..., Awaitable[str | None]],
         timeout: float = 30.0,
         retries: int = 2,
         retry_delay: float = 1.0,
@@ -46,13 +46,17 @@ class EmotionExpert:
         self._tripped_at: float = 0.0   # 熔断打开的时刻(半开恢复冷却计时基准)
 
     async def analyze(
-        self, user_msg: str, bot_reply: str, state: EmotionalState, bot_name: str = "AI"
+        self, user_msg: str, bot_reply: str, state: EmotionalState, bot_name: str = "AI",
+        model: str | None = None,
     ) -> dict[str, Any]:
-        """分析入口: 返回 {favor, intimacy, 8 情绪, relationship_text, attitude_text, source}。"""
+        """分析入口: 返回 {favor, intimacy, 8 情绪, relationship_text, attitude_text, source}。
+
+        model 非空时本次调用显式指定模型(多并发时由 manager 按任务选择)。
+        """
         self._maybe_half_open()
         try:
             if self._llm_available:
-                text = await self._call_llm_with_retry(user_msg, bot_reply, state, bot_name)
+                text = await self._call_llm_with_retry(user_msg, bot_reply, state, bot_name, model=model)
                 if text:
                     updates = self._parse(text)
                     updates["source"] = "llm_analysis"
@@ -105,14 +109,15 @@ class EmotionExpert:
     # ── LLM 调用 ─────────────────────────────────────────────
 
     async def _call_llm_with_retry(
-        self, user_msg: str, bot_reply: str, state: EmotionalState, bot_name: str
+        self, user_msg: str, bot_reply: str, state: EmotionalState, bot_name: str,
+        model: str | None = None,
     ) -> str | None:
         from .prompts import build_expert_prompt
         prompt = build_expert_prompt(user_msg, bot_reply, state, bot_name or "AI")
         for attempt in range(self._retries):
             try:
                 result = await asyncio.wait_for(
-                    self._llm_call(prompt), timeout=self._timeout
+                    self._llm_call(prompt, model=model), timeout=self._timeout
                 )
                 if result and len(result.strip()) > 10:
                     return result.strip()

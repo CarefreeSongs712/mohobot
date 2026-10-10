@@ -59,7 +59,7 @@ def make_client(tmp: str, manager: EmotionManager) -> TestClient:
 
 
 async def test_expert_status() -> None:
-    async def ok_call(prompt):
+    async def ok_call(prompt, model=None):
         return FAKE_ANALYSIS
 
     expert = EmotionExpert(llm_call=ok_call)
