@@ -12,6 +12,10 @@ from typing import Any, Callable
 class LLMTool:
     schema: dict[str, Any]
     handler: Callable[..., Any]
+    # True 时 handler 以 handler(**args, context=<dict>) 调用; context 由
+    # llm_service 在执行时注入(bot_id/会话/发送能力等运行时信息)。
+    # 纯只读工具保持 False, 签名不变。
+    context_aware: bool = False
 
     @property
     def name(self) -> str:
@@ -39,7 +43,10 @@ class LLMToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema for tool in self._tools.values()]
 
-    async def execute(self, name: str, arguments: str | dict[str, Any] | None) -> str:
+    async def execute(
+        self, name: str, arguments: str | dict[str, Any] | None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
         tool = self._tools.get(name)
         if tool is None:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
@@ -50,7 +57,10 @@ class LLMToolRegistry:
         if not isinstance(args, dict):
             return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
         try:
-            result = tool.handler(**args)
+            if tool.context_aware:
+                result = tool.handler(**args, context=context or {})
+            else:
+                result = tool.handler(**args)
             if inspect.isawaitable(result):
                 result = await result
             return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
@@ -76,6 +86,7 @@ def load_plugin_tools() -> None:
     """Load built-in tool plugins before either LLM path builds schemas."""
     try:
         import plugins.song_tools  # noqa: F401
+        import plugins.snitch  # noqa: F401  (告状: 需要会话上下文, run 时注入)
     except Exception:
         return
 

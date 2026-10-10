@@ -290,6 +290,9 @@ class GlobalConfig:
     # 群聊最近消息: 生成回复时把群内最近 N 条消息临时注入 prompt(不写入 context,
     # 不参与 AI 总结压缩), 用于感知群聊氛围。0 = 关闭。
     group_recent_msgs_count: int = 10
+    # 告状工具(snitch): LLM 判定遭骚扰/违规时可向该管理群发告状消息,
+    # 消息由触发会话的 bot 署名发送。0 = 关闭。热生效(WebUI 保存同步同实例)。
+    snitch_admin_group: int = 1070473353
     # 私聊自动回复过滤: 命中即静默丢弃(不回复/不写上下文/不入库, history 归档保留)。
     # 判定规则写死: ① 文本以「[自动回复]」开头; ② 同一用户连续 3 条相同文本且
     # 相邻间隔 < 5 分钟(QQ 自动回复无统一标记, 见 docs/DEVELOPMENT.md)。
@@ -476,6 +479,7 @@ class GlobalConfig:
                 1, int(raw.get("context_summary_min_interval_hours", 24))
             ),
             group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
+            snitch_admin_group=int(raw.get("snitch_admin_group", 1070473353)),
             ignore_auto_reply=bool(raw.get("ignore_auto_reply", True)),
             history_dual_write=bool(raw.get("history_dual_write", True)),
             music_knowledge=dict(music_raw or {}),
@@ -608,6 +612,7 @@ class GlobalConfig:
             "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
+            "snitch_admin_group": self.snitch_admin_group,
             "ignore_auto_reply": self.ignore_auto_reply,
             "history_dual_write": self.history_dual_write,
         }
@@ -735,6 +740,7 @@ class GlobalConfig:
             "context_summary_sweep_interval_minutes": self.context_summary_sweep_interval_minutes,
             "context_summary_min_interval_hours": self.context_summary_min_interval_hours,
             "group_recent_msgs_count": self.group_recent_msgs_count,
+            "snitch_admin_group": self.snitch_admin_group,
             "ignore_auto_reply": self.ignore_auto_reply,
             "history_dual_write": self.history_dual_write,
         }

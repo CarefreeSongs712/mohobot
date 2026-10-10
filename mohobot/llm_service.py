@@ -272,7 +272,9 @@ class LLMService:
                 ],
             })
             for tc in tool_calls:
-                result = await self._execute_tool(tc.function.name, tc.function.arguments)
+                result = await self._execute_tool(
+                    tc.function.name, tc.function.arguments,
+                    context=self._tool_call_context(bot_id, event))
                 tool_results.append({
                     "tool_call_id": tc.id,
                     "function_name": tc.function.name,
@@ -432,7 +434,9 @@ class LLMService:
             })
             for idx, tc_data in sorted(tool_calls_buffer.items()):
                 args_str = tc_data.get("arguments", "{}")
-                result = await self._execute_tool(tc_data["function_name"], args_str)
+                result = await self._execute_tool(
+                    tc_data["function_name"], args_str,
+                    context=self._tool_call_context(bot_id, event))
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_data.get("id") or f"call_{idx}",
@@ -1346,7 +1350,10 @@ class LLMService:
             logger.warning(f"Vision describe file failed: {e}")
             return ""
 
-    async def _execute_tool(self, func_name: str, args_json: str) -> str:
+    async def _execute_tool(
+        self, func_name: str, args_json: str,
+        context: dict | None = None,
+    ) -> str:
         """Execute a tool/function call and return the result."""
         try:
             args = json.loads(args_json)
@@ -1374,8 +1381,64 @@ class LLMService:
                 return json.dumps({"error": f"搜索失败: {e}"}, ensure_ascii=False)
         from mohobot.services.llm_tools import registry
         if registry.contains(func_name):
-            return await registry.execute(func_name, args)
+            return await registry.execute(func_name, args, context=context)
         return json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
+
+    def attach_ws(self, ws_server) -> None:
+        """注入 WSServer 引用(main.py 在创建 WS 后调用), 供需要主动发消息
+        的工具(如告状 snitch)构造发送闭包。"""
+        self._ws = ws_server
+
+    def attach_bot_manager(self, bot_manager) -> None:
+        """注入 BotManager, 工具上下文据此补充 bot 昵称等信息。"""
+        self._bot_manager = bot_manager
+
+    def _tool_call_context(self, bot_id: str, event: MessageEvent | None) -> dict | None:
+        """LLM 工具执行时的会话上下文(bot/会话身份 + 群消息发送闭包)。
+
+        没有可用 event(纯内部调用/测试)或未注入 ws 时返回 None,
+        context_aware 工具收到空 context 自行降级。
+        """
+        if not isinstance(event, MessageEvent) or getattr(self, "_ws", None) is None:
+            return None
+        try:
+            if isinstance(event, GroupMessageEvent):
+                chat_type = "group"
+                chat_id = event.group_id
+            else:
+                chat_type = "private"
+                chat_id = event.user_id
+            sender = event.sender
+            if isinstance(sender, dict):
+                sender_name = str(sender.get("card") or sender.get("nickname")
+                                  or f"User-{event.user_id}")
+            else:
+                sender_name = str(getattr(sender, "card", "") or getattr(sender, "nickname", "")
+                                  or f"User-{event.user_id}")
+        except AttributeError:
+            return None
+        bot_nickname = ""
+        mgr = getattr(self, "_bot_manager", None)
+        if mgr is not None:
+            try:
+                cfg = next((c for c in mgr.list_bot_configs() if c.bot_id == bot_id), None)
+                bot_nickname = str(cfg.nickname or "") if cfg is not None else ""
+            except Exception:
+                bot_nickname = ""
+
+        async def send_group_msg(group_id, message):
+            await self._ws.send_group_msg(bot_id, group_id, message, source="tool_snitch")
+
+        return {
+            "bot_id": bot_id,
+            "bot_nickname": bot_nickname,
+            "chat_type": chat_type,
+            "chat_id": chat_id,
+            "user_id": event.user_id,
+            "sender_name": sender_name,
+            "admin_group": getattr(self._cfg, "snitch_admin_group", 0),
+            "send_group_msg": send_group_msg,
+        }
 
     @staticmethod
     async def _close_clients(clients: list) -> None:

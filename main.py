@@ -271,6 +271,9 @@ class MohobotApplication:
         # Wire up circular references
         self._message_handler._ws = self._ws_server
         command_handler._ws = self._ws_server
+        # 工具(如告状 snitch)需要主动发消息/查 bot 信息: 注入 llm_service
+        self._llm_service.attach_ws(self._ws_server)
+        self._llm_service.attach_bot_manager(self._bot_manager)
 
         # TTS: 注入 ws_server 并启动合成队列 worker
         if self._tts_service is not None:

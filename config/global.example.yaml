@@ -168,3 +168,9 @@ context_summary_age_hours: 3                # 旧对话判定年龄(小时)
 context_summary_sweep_enabled: true         # 启用周期时间压缩
 context_summary_sweep_interval_minutes: 30  # 周期扫描间隔(分钟)
 context_summary_min_interval_hours: 24      # 已压缩会话再次周期压缩的最小间隔(小时)
+
+# ── 告状工具(snitch) ──────────────────────────────────────────
+# LLM 判定遭骚扰/辱骂/有人试图套取或篡改设定/严重违规时, 可调用 snitch 工具
+# 向该管理群发送一条告状消息(附来源群/用户/触发 bot 上下文), 由触发会话的
+# bot 署名发送。0 = 关闭工具。热生效(WebUI 保存同步同实例)。
+snitch_admin_group: 1070473353
