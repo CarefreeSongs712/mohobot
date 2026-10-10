@@ -140,7 +140,53 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 
 ## 🚀 生产部署（Ubuntu 服务器）
 
-### 1. 环境准备
+### 现有生产环境与发布流程
+
+以下为 **2026-10-10 核实的生产环境**；后续部署先检查实际状态。下方 `/opt/mohobot`、专用用户及 `mohobot.service` 是新部署模板，不应在现有生产上重复安装另一套服务。
+
+| 项目 | 现有生产配置 |
+|------|------|
+| 连接 | `ssh -p 10139 root@103.236.75.12` |
+| 工作目录 | `/root/QQBot/mohobot` |
+| Python | `/root/.pyenv/versions/3.12.13/bin/python` |
+| systemd unit | `migration-mohobot.service` |
+| 主进程端口 | 8081（OneBot）、9090（管理面板）、9092（表情包插件启用时） |
+| review | 独立子进程，端口 9091；可能随同一 systemd unit 重启 |
+
+**仅以 main 发布。** 本地完成测试后，按用户授权提交、推送，再同步生产。远程变更必须已获明确授权；只改文档不代表授权部署。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
+
+```bash
+# 生产只读预检：检查输出，保留未跟踪的配置备份
+ssh -p 10139 root@103.236.75.12 'cd /root/QQBot/mohobot && git status --short && git branch --show-current && git log -1 --oneline && systemctl show migration-mohobot.service -p ActiveState -p MainPID -p WorkingDirectory -p ExecStart'
+
+# 确认已授权、目标正确且没有待处理修改后同步
+ssh -p 10139 root@103.236.75.12 'set -eu; cd /root/QQBot/mohobot; test "$(git branch --show-current)" = main; test -z "$(git status --porcelain --untracked-files=no)"; git pull --ff-only origin main; git log -1 --oneline'
+
+# 确认配置有效、所需依赖已具备后，重启现有 unit
+ssh -p 10139 root@103.236.75.12 'set -eu; systemctl restart migration-mohobot.service; sleep 14; systemctl show migration-mohobot.service -p ActiveState -p SubState -p MainPID -p NRestarts; ss -ltnp | grep -E ":8081|:9090|:9091|:9092"'
+```
+
+- `--ff-only` 失败、存在未处理修改或运行方式不符时，暂停并报告。历史分叉即使 tree 相同也不能自动 reset/merge；备份旧历史和配置后，另行取得处理方案的确认。Git bundle 只备份已提交历史，不包含运行数据或未提交修改。
+- 现有生产不使用 screen，不能在 systemd 之外再启动 `main.py`。手工终止进程可能触发自动重启；优先管理已核实的 unit。异常时若必须定位进程，应同时核对 Python exe、项目 cwd 和主入口，避免误操作其他项目。
+- Web 面板“重启”是在原进程中重新装配服务，不能代替发布新 Python 代码后的进程重启。
+- SSH 中断后重新核对提交、配置、unit/PID、端口和启动日志，不假定剩余命令已执行。
+- 验收须确认 8081/9090 属于新 MainPID，按启用情况检查 9091/9092，并在**本次启动**日志确认歌曲索引数量。5495 首仅为 2026-10-10 的核实值，后续应与实际歌曲库核对。
+- gateway 是 `/root/QQBot/gateway` 下的另一个项目，历史端口 36712；本次核实时未监听，不能据此擅自启动或重启它。
+
+生产已按用户要求配置 GitHub HTTPS 代理；配置形式如下，不必每次部署重写：
+
+```bash
+git config --global url."https://gh-proxy.org/https://github.com/".insteadOf "https://github.com/"
+git -C /root/QQBot/mohobot remote set-url origin https://github.com/CarefreeSongs712/mohobot.git
+```
+
+global 重写影响该用户所有匹配的 GitHub HTTPS 地址，不作用于 SSH origin。代理是第三方服务，不向其传递凭据、私有配置或运行数据；不关闭 host key/TLS 校验绕过连接问题。
+
+控制台日志使用 `journalctl -u migration-mohobot.service --since '<本次重启时间>' --no-pager`；应用日志仍在 `logs/`，review 另有 `review/panel.log`。解析长 journal 消息时使用 `--all -o json` 并处理 MESSAGE 为字符串、null 或字节列表的情况，避免把省略的消息误判为未启动。
+
+数据库同步、历史迁移和备份恢复不属于常规代码发布，须按需单独授权。现有业务配置应保留：2026-10-10 上线的评估为基准 `persona_002`、新版 `persona_008`，5% 概率、15 分钟冷却；这是部署快照，不改变新安装默认关闭的行为。评估数据需独立导出，不随聊天备份保存。
+
+### 1. 新部署环境准备
 
 ```bash
 # Python 3.12（示例用 pyenv）
@@ -209,9 +255,9 @@ sudo chmod 600 /etc/mohobot/mohobot.env
 
 LLM、Vision、Anysearch 和 embedding 密钥同样应保存在未纳入 Git 的 `config/global.yaml` 或服务 Secret 中。WebUI 只返回密钥是否已设置，不回传原始值。
 
-### 4. 使用 systemd 运行（推荐）
+### 4. 新部署使用 systemd 运行
 
-仓库提供 [`deploy/mohobot.service`](deploy/mohobot.service)。先创建专用用户和虚拟环境，再安装服务：
+仓库提供 [`deploy/mohobot.service`](deploy/mohobot.service) 作为新部署模板。现有生产使用上文的 `migration-mohobot.service`，不要重复安装。新环境先创建专用用户和虚拟环境，再安装服务：
 
 ```bash
 sudo useradd --system --home /opt/mohobot --shell /usr/sbin/nologin mohobot || true
@@ -238,16 +284,18 @@ cd /opt/mohobot && python main.py
 #   优雅停止: kill -TERM <pid>          (main.py 捕获 SIGTERM 落盘退出)
 ```
 
-### 4. 连接 OneBot 客户端
+> 仅用于开发或临时环境。现有生产由 systemd 管理；不要同时用 screen、nohup 或手工 `python main.py` 启动第二个生产实例。
+
+### 6. 连接 OneBot 客户端
 
 NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务器IP>:8081`（端口见 `config/global.yaml` 的 `server.port`）。多个机器人各开一个连接，`X-Self-ID` 头为各自 QQ；Web 面板（`http://<IP>:9090`）创建 bot 并绑定 QQ 后即可使用。
 
-### 5. 部署后验证
+### 7. 部署后验证与日常维护
 
 - 日志确认插件加载：`grep "Loaded plugin" logs/mohobot_*.log`
 - Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
 - 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
-- 更新部署：`git pull origin main` 后 `kill -TERM <pid>` 重启
+- 更新部署：参见上方“现有生产环境与发布流程”；常规使用 `git pull --ff-only origin main`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
 - **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码默认 `history_dual_write: true` 双写过渡，确认稳定后在 WebUI 关闭
 
 ### 上下文压缩与群聊最近消息

@@ -297,7 +297,7 @@ async def test_timeouts_release_slot_and_failure_is_not_an_answer():
             report = await e.service.report()
             assert report["records"][0]["state"] == "failed"
             assert "未能完成" in ws.sent[-1][2][0]["data"]["text"]
-            assert "用于人设评估" in ws.sent[0][2][0]["data"]["text"]
+            assert "用于人设提示词的改进" in ws.sent[0][2][0]["data"]["text"]
             assert await reserve(e, mid=2000) is not None
 
 

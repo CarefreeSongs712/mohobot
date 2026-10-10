@@ -133,7 +133,11 @@ class PersonaABService:
         errors = {}
         try:
             frozen = self.llm.freeze_completion(bot_config)
-            notice = await send([{"type": "text", "data": {"text": "本轮将展示匿名 A/B 回复供你比较。本轮问题、两版回答及反馈将保存用于人设评估。可以继续聊天，稍后用 /ab A 或 /ab B 投票；投票不会自动切换人设。"}}])
+            notice = await send([{"type": "text", "data": {"text": (
+                "你好呀！提前跟你说一声，接下来会有一个小环节想邀请你参与～\n"
+                "我会展示两组回复（A 和 B），你可以进行比较。本轮的对话内容、两版回答以及你的反馈都会被记录下来，用于人设提示词的改进。\n"
+                "你完全可以继续正常跟我聊天，不用有任何顾虑。之后如果想表达偏好，随时用 /ab A 或 /ab B 投票就好～放心，投票不会自动切换我的人设，一切由你掌控。"
+            )}}])
             prepared = await asyncio.wait_for(self.llm.prepare_input(bot_id, event, context, bot_config), self.PREPARE_TIMEOUT)
             await update(parameters=copy.deepcopy(frozen["parameters"]), question=prepared[-1]["content"])
             async def generate(side):

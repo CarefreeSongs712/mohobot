@@ -66,9 +66,15 @@ export MOHOBOT_WEB_PASSWORD='your-strong-password'
 
 # 启动
 python main.py
-#   WS  监听 config/global.yaml → server.port（示例 8081；dataclass 默认 8060）
-#   面板 http://127.0.0.1:9090 ｜ 审核面板 http://127.0.0.1:9091
+#   WS   监听 config/global.yaml → server.port（示例 8081；dataclass 默认 8060）
+#   面板  http://127.0.0.1:9090 ｜ 审核面板 http://127.0.0.1:9091 ｜ 表情包插件 http://127.0.0.1:9092
 ```
+
+### 发布与部署约定
+
+- **只以 main 分支发布。** 本地通过全量回归测试后，按用户授权提交并推送到 GitHub `main`。
+- 生产环境统一通过 `git pull --ff-only origin main` 获取更新；禁止日常无备份 reset/force 操作。
+- 生产由 systemd 服务管理，不要在服务运行时另起 screen / nohup 进程；更新后使用对应的 systemd unit 重启，不要用面板内的进程内重启代替版本发布。完整说明见 `README.md` 与外部部署规范。
 
 ### 回归测试（唯一的验收手段）
 
@@ -882,9 +888,10 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 
 ### 9.2 审核面板 `review/`
 
-半独立：**独立进程、独立端口（默认 9091）、独立配置（`review/config.yaml`）、独立数据库（`review/data/review.db`）**。主进程退出不影响它。
+半独立：**独立进程、独立端口（默认 9091）、独立配置（`review/config.yaml`）、独立数据库（`review/data/review.db`）**。
 
-- 主进程 `main.py:_maybe_start_review_panel()` 负责拉起：缺 `config.yaml` / `enabled: false` / 端口已被监听 → 跳过；否则 detached `Popen` 起 `review/main.py`，日志写 `review/panel.log`。
+- 主进程 `main.py:_maybe_start_review_panel()` 负责拉起：缺 `config.yaml` / `enabled: false` / 端口已被监听 → 跳过；否则以 detached `Popen` 起 `review/main.py`，日志写 `review/panel.log`。
+- **生命周期注意**：手工停主进程时 review 会继续运行；但现有生产若通过 systemd（如 `KillMode=control-group` 的 unit）停止或重启，同 cgroup 下的 review 子进程也会一并停止，再随新主进程重新拉起。验证时需一并检查 9091 是否恢复。
 - **数据源：`data/history` 消息事件流（唯一来源）**。history 只增不删，条目身份 = **message_id**（`mid:<id>`；无 id 时退回内容指纹 `hash:...`），审核结论永不因上下文压缩而失联（旧 contexts 指纹方案已废弃 —— 框架的 AI 总结压缩曾使生产上 97.5% 的已审条目失联）。
 - **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 某只 bot（`at` 段 qq == 该 bot 的 self_id）或引用某只 bot 发言（`reply` 段 id ∈ 该 bot 已归档发言 mid 集合）的消息；私聊全部审（按 bot 独立会话）。
 - **群聊单文件会话**：群聊归档本身已合并存储（`history/group/{群号}.jsonl`，见 §4.6），session_key 仍固定 `"_merged/group/{群号}"`（兼容 review.db 既有结论）。bot 发言按行内 `bot_id` 归属（旧数据无该字段时按 self_id 反查 bots 配置）；用户消息命中 @/引用 时归属到对应 bot（同时命中多只取 bot_id 排序最前者）。按 bot 的 mid 集合（`bot_mids_by_bot`）与 self_id（文件内 message_sent 行自带 ∪ bots 配置）做过滤。用户消息无 id 时按 time+uid+text 兜底去重；bot 发言不做内容级去重。
@@ -895,17 +902,19 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - 多用户支持，改密码时**按行替换 `config.yaml` 的 `password_hash:` 行以保留注释**（`_write_user_password`，结构不符时兜底整体重写、注释会丢）。
 - **登录防爆破**：登录处理全局串行化（`asyncio.Lock`）+ 每次尝试固定 0.5s 硬延迟（耗时恒定防计时侧信道）。
 
-**生产切换（旧 contexts 指纹 → history message_id）部署步骤**：
+**历史生产切换（旧 contexts 指纹 → history message_id，历史升级记录）**：
+
+> 这是旧版本升级历史记录，不是日常部署步骤。常规发布参见 `README.md` 的“现有生产环境与发布流程”及 `远程部署操作规范.txt`。
 
 1. 备份并清空旧审核库（旧指纹基于 contexts 条目，切到 message_id 后无法映射，按约定全部作废；如需留证据先从面板导出 CSV）：
    ```bash
    cd review/data && stamp=$(date +%Y%m%d-%H%M%S) \
      && for f in review.db review.db-wal review.db-shm; do [ -f "$f" ] && mv "$f" "$f.bak-$stamp"; done
    ```
-2. `git pull` 后**重启 mohobot**（WSServer 归档逻辑与 review 面板都需要新代码）。
+2. `git pull` 后重启 mohobot（WSServer 归档逻辑与 review 面板都需要新代码；生产使用对应 systemd 服务）。
 3. 重启前的 bot 历史发言没有 `message_sent` 归档，用户引用它们的旧消息不会被识别为「引用 bot」；新发言即时生效。
 
-⚠️ 生产服务器上 `review/hash_password.py` 有**未提交的手工改动**（绕过导入错误的就地补丁），部署 `git pull` 前需先处理（还原或提交），否则 pull 会被本地修改卡住。
+⚠️ 历史生产曾发生 `review/hash_password.py` 未提交修改卡住 pull 的情况；部署前必须确认工作区干净，发现未提交修改时暂停报告，不要自动还原或提交。日常同步必须采用 `git pull --ff-only origin main`，分叉时先备份再单独处理。
 
 ---
 
