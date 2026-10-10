@@ -143,7 +143,7 @@ async def test_usage_excluded_models():
                          "model": "DeepSeek-V4-Flash", "prompt_tokens": 10, "completion_tokens": 5,
                          "total_tokens": 15, "cached_tokens": 0, "user_id": "", "chat_type": "", "chat_id": ""})
     await writer.close()
-    svc._usage_records_cache = None  # 清缓存
+    svc._usage_file_state = {"size": 0, "mtime_ns": 0, "offset": 0}  # 强制全量重读
 
     result = await svc.get_module_usage_stats("30d")
     bots = {b["bot_id"]: b for b in result["bots"]}

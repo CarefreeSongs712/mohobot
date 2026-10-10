@@ -214,8 +214,14 @@ class WebPanel:
         self._start_time = time.time()
         # 登录防爆破: 全局串行化 + 每次尝试固定 0.5s 硬延迟
         self._login_lock = asyncio.Lock()
-        # framework 统计缓存(60s TTL): history 遍历开销大, 避免每次刷新阻塞
+        # framework 统计: history 目录百万行级, 全量逐行计数约 14s。
+        # 改为文件级增量 —— 记录每个 history 文件的 (size, mtime, 行数),
+        # 只重新计数发生变化的文件; 基线落盘 data/stats/history_counts.json,
+        # 进程重启后免全量扫描。请求侧加 5s 节流 + 并发锁。
+        self._fw_stats_lock = asyncio.Lock()
         self._fw_stats_cache: tuple[float, dict] | None = None
+        self._fw_file_state: dict[str, dict] = {}
+        self._fw_baseline_loaded = False
         from mohobot.services.audit import AuditLogger
         self._audit = AuditLogger(str(self._data_dir))
         self._setup_routes()
@@ -368,10 +374,13 @@ class WebPanel:
         async def dashboard(request: Request):
             await _require_auth(request)
 
-            system = await self._get_system_stats()
-            framework = await self._get_framework_stats()
-            bots = await self._get_bot_list()
-            usage = await self._get_llm_usage()
+            # 四项统计并行取: 各自独立耗时(增量扫描/CPU采样等), 串行会叠加
+            system, framework, bots, usage = await asyncio.gather(
+                self._get_system_stats(),
+                self._get_framework_stats(),
+                self._get_bot_list(),
+                self._get_llm_usage(),
+            )
 
             return {
                 "system": system,
@@ -1740,72 +1749,28 @@ class WebPanel:
     async def _get_framework_stats(self) -> dict[str, Any]:
         """Framework-level stats: message counts from history files.
 
-        history 目录可能很大(数百 MB/数百文件), 同步全量遍历会阻塞事件循环
-        导致 WebUI 其他请求排队 — 丢线程池执行 + 结果缓存 60s。
+        history 目录可能很大(数百 MB/数百文件), 全量逐行计数会阻塞事件循环
+        且耗时十几秒 —— 丢线程池执行, 并做文件级增量: 只重新计数 size/mtime
+        变化的文件, 结果 5s 节流, 并发请求在同一把锁内合并。
         """
-        import asyncio
         now = time.time()
-        if self._fw_stats_cache is not None and now - self._fw_stats_cache[0] < 60:
-            cached = dict(self._fw_stats_cache[1])
-            cached["start_time"] = self._start_time
-            cached["uptime"] = now - self._start_time
-            if self._bot_manager:
-                cached["bot_count"] = self._bot_manager.bot_count
-            return cached
+        if self._fw_stats_cache is not None and now - self._fw_stats_cache[0] < 5:
+            return self._fw_result(self._fw_stats_cache[1], now)
+        async with self._fw_stats_lock:
+            now = time.time()
+            if self._fw_stats_cache is not None and now - self._fw_stats_cache[0] < 5:
+                return self._fw_result(self._fw_stats_cache[1], now)
+            if not self._fw_baseline_loaded:
+                self._fw_baseline_loaded = True
+                self._fw_load_baseline()
+            counts, changed = await asyncio.to_thread(self._fw_scan_incremental)
+            if changed:
+                asyncio.create_task(asyncio.to_thread(self._fw_save_baseline))
+            self._fw_stats_cache = (now, counts)
+            return self._fw_result(counts, now)
 
-        def _count_sync() -> dict[str, int]:
-            result: dict[str, int] = {
-                "total_messages": 0,
-                "history_files": 0,
-                "context_files": 0,
-            }
-            history_dir = self._data_dir / "history"
-            if history_dir.exists():
-                # 群聊合并目录 history/group/*.jsonl(单层) + bot 目录
-                # {bot_id}/private/*.jsonl(两层); 逐行迭代(内存友好)
-                for entry in history_dir.iterdir():
-                    if not entry.is_dir():
-                        continue
-                    if entry.name == "group":
-                        for f in entry.iterdir():
-                            if f.suffix == ".jsonl":
-                                result["history_files"] += 1
-                                try:
-                                    with open(f, "r", encoding="utf-8") as fh:
-                                        result["total_messages"] += sum(
-                                            1 for line in fh if line.strip()
-                                        )
-                                except OSError:
-                                    pass
-                        continue
-                    for chat_dir in entry.iterdir():
-                        if not chat_dir.is_dir():
-                            continue
-                        for f in chat_dir.iterdir():
-                            if f.suffix == ".jsonl":
-                                result["history_files"] += 1
-                                try:
-                                    with open(f, "r", encoding="utf-8") as fh:
-                                        result["total_messages"] += sum(
-                                            1 for line in fh if line.strip()
-                                        )
-                                except OSError:
-                                    pass
-            contexts_dir = self._data_dir / "contexts"
-            if contexts_dir.exists():
-                for bot_dir in contexts_dir.iterdir():
-                    if bot_dir.is_dir():
-                        for chat_type in bot_dir.iterdir():
-                            if chat_type.is_dir():
-                                for user_dir in chat_type.iterdir():
-                                    if user_dir.is_dir():
-                                        for f in user_dir.iterdir():
-                                            if f.suffix == ".json":
-                                                result["context_files"] += 1
-            return result
-
-        counts = await asyncio.to_thread(_count_sync)
-        result = {
+    def _fw_result(self, counts: dict[str, int], now: float) -> dict[str, Any]:
+        return {
             "start_time": self._start_time,
             "uptime": now - self._start_time,
             "total_messages": counts["total_messages"],
@@ -1813,12 +1778,110 @@ class WebPanel:
             "context_files": counts["context_files"],
             "bot_count": self._bot_manager.bot_count if self._bot_manager else 0,
         }
-        self._fw_stats_cache = (now, {
-            "total_messages": counts["total_messages"],
-            "history_files": counts["history_files"],
-            "context_files": counts["context_files"],
-        })
-        return result
+
+    def _fw_load_baseline(self) -> None:
+        """从落盘基线恢复上次统计(启动后首次请求免 14s 全量扫描)。"""
+        path = self._data_dir / "stats" / "history_counts.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("version") != 1 or not isinstance(data.get("files"), dict):
+                return
+            for rel, item in data["files"].items():
+                size, mtime_ns, lines = item
+                if type(size) is int and type(mtime_ns) is int and type(lines) is int and size >= 0:
+                    self._fw_file_state[rel] = {"size": size, "mtime_ns": mtime_ns, "lines": lines}
+        except (OSError, ValueError, TypeError):
+            pass  # 无基线或基线损坏: 走一次全量扫描重建
+
+    def _fw_save_baseline(self) -> None:
+        """原子落盘基线: 文件账本 + 聚合计数。失败仅影响下次重启后首次扫描。"""
+        path = self._data_dir / "stats" / "history_counts.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({"version": 1, "files": {
+                rel: [s["size"], s["mtime_ns"], s["lines"]]
+                for rel, s in self._fw_file_state.items()
+            }}, ensure_ascii=False)
+            fd, temporary = tempfile.mkstemp(prefix=".fwcounts-", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        except OSError as exc:
+            logger.debug(f"Failed to save history counts baseline: {exc}")
+
+    def _fw_scan_incremental(self) -> tuple[dict[str, int], bool]:
+        """增量扫描 history 目录: 只重数变化的 .jsonl, 删除的文件移出账本。
+
+        返回 (聚合计数, 是否有变化需要落盘)。
+        """
+        data_dir = self._data_dir
+        history_dir = data_dir / "history"
+        states = self._fw_file_state
+        seen: set[str] = set()
+        changed = False
+
+        def _count(f: Path) -> int:
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    return sum(1 for line in fh if line.strip())
+            except OSError:
+                return 0
+
+        if history_dir.exists():
+            for entry in history_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                # 群聊合并目录 history/group/*.jsonl(单层) + bot 目录
+                # {bot_id}/private/*.jsonl(两层)
+                if entry.name == "group":
+                    sub_dirs = [entry]
+                else:
+                    sub_dirs = [d for d in entry.iterdir() if d.is_dir()]
+                for d in sub_dirs:
+                    for f in d.iterdir():
+                        if f.suffix != ".jsonl":
+                            continue
+                        rel = str(f.relative_to(data_dir)).replace("\\", "/")
+                        seen.add(rel)
+                        try:
+                            st = f.stat()
+                        except OSError:
+                            continue
+                        prev = states.get(rel)
+                        if prev and prev["size"] == st.st_size and prev["mtime_ns"] == st.st_mtime_ns:
+                            continue
+                        lines = _count(f)
+                        states[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "lines": lines}
+                        changed = True
+        removed = [rel for rel in states if rel not in seen]
+        for rel in removed:
+            del states[rel]
+            changed = True
+
+        counts: dict[str, int] = {
+            "total_messages": sum(s["lines"] for s in states.values()),
+            "history_files": len(states),
+        }
+        # 会话文件数量目录小(~两千个), 全量 stat 约 0.1s, 保持每次现算
+        context_files = 0
+        contexts_dir = data_dir / "contexts"
+        if contexts_dir.exists():
+            for bot_dir in contexts_dir.iterdir():
+                if bot_dir.is_dir():
+                    for chat_type in bot_dir.iterdir():
+                        if chat_type.is_dir():
+                            for user_dir in chat_type.iterdir():
+                                if user_dir.is_dir():
+                                    context_files += sum(
+                                        1 for f in user_dir.iterdir() if f.suffix == ".json")
+        counts["context_files"] = context_files
+        return counts, changed
 
     def _get_unbound_list(self) -> list[dict[str, Any]]:
         """未绑定 bot 的在线连接(接受但不处理消息)。"""

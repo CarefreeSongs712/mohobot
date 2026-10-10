@@ -42,9 +42,15 @@ class LLMService:
         self._persona_service = persona_service
         self._usage_recorder = usage_recorder or UsageRecorder(self._cfg.data_dir)
         self._owns_usage_recorder = usage_recorder is None
-        # 用量记录缓存: (到期时间, 记录列表)。文件有几万行, 全量解析较慢,
-        # dashboard 与用量页 60s 内复用同一份解析结果。
-        self._usage_records_cache: tuple[float, list[dict]] | None = None
+        # 用量记录增量加载: llm_usage.jsonl 为纯追加写入, 记住已解析到的
+        # 字节位置, 每次只解析新增行; 文件未变化时直接复用内存记录
+        # (全量解析 58MB 约 2~3s, 增量后毫秒级)。
+        self._usage_records_cache: list[dict] = []
+        self._usage_file_state: dict[str, int] = {"size": 0, "mtime_ns": 0, "offset": 0}
+        self._usage_file_lock = asyncio.Lock()
+        # 聚合结果短缓存: key=(kind, range_key, 文件size, 文件mtime),
+        # 文件未变化时同一查询 15s 内直接复用, 避免每次全量遍历记录。
+        self._usage_agg_cache: dict[tuple, tuple[float, dict]] = {}
         # 图片缓存(下载 + phash 去重 + 描述缓存)。可选注入, 未传时降级为每次直调 vision。
         self._image_cache = image_cache
         # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
@@ -569,26 +575,68 @@ class LLMService:
             user_id=user_id,
         )
 
-    async def _load_usage_records(self, ttl: float = 60.0) -> list[dict]:
-        """全量读取 llm_usage.jsonl 并解析, 带 TTL 缓存(默认 60s)。"""
-        import aiofiles
-        now = time.monotonic()
-        if self._usage_records_cache is not None and now < self._usage_records_cache[0]:
-            return self._usage_records_cache[1]
+    async def _load_usage_records(self) -> list[dict]:
+        """增量读取 llm_usage.jsonl 并解析, 返回过滤后的记录列表。
+
+        写入方(JSONLWriter)逐行追加, 因此记住上次解析到的字节位置即可只
+        解析新增行; 末尾不足一整行的残留留到下次再解析。文件被截断
+        (重建/轮转)时退回全量重读。并发调用在同一把锁内串行, 不会重复解析。
+        """
         usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
-        records: list[dict] = []
-        if usage_file.exists():
-            async with aiofiles.open(usage_file, "r", encoding="utf-8") as f:
-                async for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        self._usage_records_cache = (now + ttl, self._filter_usage_records(records))
-        return self._usage_records_cache[1]
+        async with self._usage_file_lock:
+            try:
+                stat = await aiofiles.os.stat(usage_file)
+            except OSError:
+                self._usage_records_cache = []
+                self._usage_file_state = {"size": 0, "mtime_ns": 0, "offset": 0}
+                return []
+            size, mtime_ns = stat.st_size, stat.st_mtime_ns
+            state = self._usage_file_state
+            if size == state["size"] and mtime_ns == state["mtime_ns"]:
+                return self._filter_usage_records(self._usage_records_cache)
+            if size < state["offset"]:
+                # 文件被截断/重建: 放弃增量, 全量重读
+                state["offset"] = 0
+                self._usage_records_cache = []
+            async with aiofiles.open(usage_file, "rb") as f:
+                await f.seek(state["offset"])
+                blob = await f.read()
+            text = blob.decode("utf-8", errors="replace")
+            if text and not text.endswith("\n"):
+                text = text[:text.rfind("\n") + 1]
+            new_records: list[dict] = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    new_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            self._usage_records_cache.extend(new_records)
+            self._usage_file_state = {
+                "size": size, "mtime_ns": mtime_ns,
+                "offset": state["offset"] + len(text.encode("utf-8")),
+            }
+            return self._filter_usage_records(self._usage_records_cache)
+
+    async def _cached_usage_agg(self, kind: str, range_key: str, builder) -> dict:
+        """聚合结果短缓存(15s): 同一 kind/range 且用量文件未变化时直接复用。
+
+        key 必须取自增量解析之后的文件状态, 否则新写入的记录会被旧聚合吞掉。
+        """
+        await self._load_usage_records()
+        state = self._usage_file_state
+        key = (kind, range_key, state["size"], state["mtime_ns"])
+        cached = self._usage_agg_cache.get(key)
+        now = time.monotonic()
+        if cached and now < cached[0]:
+            return deepcopy(cached[1])
+        result = await builder()
+        if len(self._usage_agg_cache) > 64:
+            self._usage_agg_cache.clear()
+        self._usage_agg_cache[key] = (now + 15.0, result)
+        return deepcopy(result)
 
     def _filter_usage_records(self, records: list[dict]) -> list[dict]:
         """按配置排除模型(usage_excluded_models): 其调用不计入用量统计, 记录仍落盘。"""
@@ -632,6 +680,10 @@ class LLMService:
         range_key: today(今日) / 7d(近7天) / 30d(近30天) / 自定义 "Nd"(近N天, 含今日)。
         旧记录无会话字段 → 归入 chat_id 为空字符串的未知会话。
         """
+        return await self._cached_usage_agg("session", range_key,
+                                            lambda: self._compute_session_usage(range_key))
+
+    async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
 
         sessions: dict[tuple[str, str, str], dict] = {}
@@ -682,6 +734,10 @@ class LLMService:
         无用户身份的记录(总结/情感/识图等系统内部调用, 以及旧记录)归"未知用户"。
         返回 users: [{user_id, calls, tokens..., bots: {bot_id: {calls, total_tokens, modules}}}]。
         """
+        return await self._cached_usage_agg("user", range_key,
+                                            lambda: self._compute_user_usage(range_key))
+
+    async def _compute_user_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
         users: dict[str, dict] = {}
         for rec in await self._load_usage_records():
@@ -730,6 +786,10 @@ class LLMService:
         返回 bots: [{bot_id, calls, total_tokens, modules: {module: {calls, total_tokens}}}],
         bot_id 为空的系统内部调用归"系统"行。
         """
+        return await self._cached_usage_agg("module", range_key,
+                                            lambda: self._compute_module_usage(range_key))
+
+    async def _compute_module_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
         bots: dict[str, dict] = {}
         for rec in await self._load_usage_records():
@@ -875,6 +935,9 @@ class LLMService:
 
         Returns totals + per-model breakdown + today's usage.
         """
+        return await self._cached_usage_agg("all", "all", self._compute_usage_stats)
+
+    async def _compute_usage_stats(self) -> dict[str, Any]:
         import datetime
         from mohobot.utils.time_utils import TZ_UTC8
         today_start = (
