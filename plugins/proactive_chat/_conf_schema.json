@@ -1,0 +1,67 @@
+{
+  "enable": {
+    "type": "bool",
+    "default": true,
+    "description": "✅ 启用私聊主动消息",
+    "hint": "总开关。关闭后不再触发任何主动消息, 已排队的任务在下次 tick 清理; 重新开启后由用户下一条私聊消息重建排程"
+  },
+  "min_interval_minutes": {
+    "type": "int",
+    "default": 30,
+    "description": "最小触发间隔 (分钟)",
+    "hint": "用户发言后, 下一次主动消息的随机触发窗口下限, 防止过于频繁打扰",
+    "slider": {"min": 1, "max": 2880, "step": 1}
+  },
+  "max_interval_minutes": {
+    "type": "int",
+    "default": 600,
+    "description": "最大触发间隔 (分钟)",
+    "hint": "随机触发窗口上限; 实际触发时间在 [最小, 最大] 区间内随机取点, 降低规律性",
+    "slider": {"min": 1, "max": 2880, "step": 5}
+  },
+  "quiet_hours": {
+    "type": "string",
+    "default": "1-7",
+    "description": "免打扰时段",
+    "hint": "该时段内不发送主动消息, 到期任务顺延重排。24 小时制 \"开始-结束\", 支持跨天如 \"23-7\"; 留空或非法值视为不启用"
+  },
+  "max_unanswered_times": {
+    "type": "int",
+    "default": 4,
+    "description": "最大连续未回复次数",
+    "hint": "bot 连续主动发送多次用户都未回复时暂停打扰; 用户回复后自动归零恢复。0 = 不限制",
+    "slider": {"min": 0, "max": 20, "step": 1}
+  },
+  "proactive_prompt": {
+    "type": "text",
+    "default": "[系统任务：主动对话]\n你被授权在私聊中发起一次“主动消息”。你的回复必须完全符合你的人格设定，并严格遵守所有的输出规则。\n\n[情景分析]\n- 我们好像已经有一段时间没有说话了，我应该主动打破沉默，让他知道我想他了。\n- 当前时间是: {{current_time}}。\n- 我之前已经主动找过他，但他没有回复的次数是: {{unanswered_count}} 次。如果这个次数大于0，我的语气应该带上一点点不易察觉的失落和困惑。\n\n[行动指南]\n1.  首先，回顾我们的聊天记录，看看我们最后在聊什么。\n2.  如果上次的话题已经结束了，我可以关心一下他现在在做什么。\n3.  我可以向他提出一个我一直以来都很好奇的问题。\n4.  如果实在不知道该说什么，就直接表达我想他的心情也可以。\n\n[最终指令]\n请综合以上所有信息，用最像你自己的、最自然的方式，生成一句主动聊天的开场白。",
+    "hint": "指导 LLM 主动开口的核心提示词。占位符: {{unanswered_count}}=连续未回复次数, {{current_time}}=当前时间。这段提示词只在当轮生效, 不会写入聊天上下文"
+  },
+  "exclude_users": {
+    "type": "list",
+    "default": [],
+    "description": "排除用户 QQ 列表",
+    "hint": "逗号分隔。名单内的用户不参与主动消息, 已跟踪的会话会被移除"
+  },
+  "enable_auto_trigger": {
+    "type": "bool",
+    "default": false,
+    "description": "🤖 启动后自动触发",
+    "hint": "插件启动后, 已跟踪会话若在设定时间内没有任何消息且没有待发任务, 自动补建一次主动消息任务"
+  },
+  "auto_trigger_after_minutes": {
+    "type": "int",
+    "default": 5,
+    "description": "自动触发等待时间 (分钟)",
+    "hint": "启动后静默达到该时长才自动补建任务; 期间用户来过消息则放弃",
+    "slider": {"min": 1, "max": 120, "step": 1}
+  },
+  "tick_interval_sec": {
+    "type": "int",
+    "default": 30,
+    "description": "调度轮询间隔 (秒)",
+    "hint": "检查到期任务的周期; 触发精度受此影响, 一般无需修改",
+    "slider": {"min": 5, "max": 300, "step": 5},
+    "invisible": true
+  }
+}

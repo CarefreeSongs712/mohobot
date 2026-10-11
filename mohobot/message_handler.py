@@ -1377,18 +1377,19 @@ class MessageHandler:
         if accepted:
             logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")
 
-    async def _send_full_text(self, bot_id, event, text: str) -> None:
+    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> None:
         """Segment a complete reply text and send with configured delays."""
         first_sent = False
         flushed = self._flush_ready_segments(text)
         for seg in flushed["segments"]:
-            first_sent = await self._send_segment(bot_id, event, seg, first_sent)
+            first_sent = await self._send_segment(bot_id, event, seg, first_sent, quote=quote)
         if flushed["rest"].strip():
-            await self._send_segment(bot_id, event, flushed["rest"], first_sent)
+            await self._send_segment(bot_id, event, flushed["rest"], first_sent, quote=quote)
 
-    async def _send_segment(self, bot_id, event, seg: str, first_sent: bool) -> bool:
+    async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *, quote: bool = True) -> bool:
         """Send one segmented message, stripped of whitespace.
 
+        quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
         Returns the updated first_sent flag.
         """
         seg = seg.strip()
@@ -1400,7 +1401,7 @@ class MessageHandler:
             await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
             message: str | list[dict] = seg
         else:
-            if self._reply_quote:
+            if quote and self._reply_quote:
                 # First segment quotes the user's message
                 message = [
                     {"type": "reply", "data": {"id": str(event.message_id)}},
@@ -1412,6 +1413,30 @@ class MessageHandler:
 
         await self._send_message(bot_id, event, message, source="llm")
         return first_sent
+
+    async def send_proactive_reply(self, bot_id: str, event: MessageEvent, text: str) -> str:
+        """发送 bot 主动发起的回复, 形态与被动回复一致(分段/段延迟/TTS 跟随同一套配置),
+        但不做回复引用(主动消息没有可引用的来消息)。
+
+        Returns 实际发出的展示文本(TTS 标注已剥除), 供调用方写回上下文; 空文本不发送。
+        """
+        full_reply = (text or "").strip()
+        if not full_reply:
+            return ""
+        tts_text = ""
+        if self._tts_active(bot_id):
+            from mohobot.utils.tts_marker import strip_and_extract
+            full_reply, tts_text = strip_and_extract(full_reply)
+        if not full_reply.strip():
+            # 纯 TTS 标注无展示文本: 不发文本, 仍提交语音
+            self._submit_tts(bot_id, event, tts_text)
+            return ""
+        if self._segment_reply:
+            await self._send_full_text(bot_id, event, full_reply, quote=False)
+        else:
+            await self._send_message(bot_id, event, full_reply, source="llm")
+        self._submit_tts(bot_id, event, tts_text)
+        return full_reply
 
     def _flush_ready_segments(self, buffer: str) -> dict:
         """Split buffered text into ready-to-send segments.
