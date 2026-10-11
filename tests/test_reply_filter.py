@@ -180,3 +180,15 @@ def test_streaming_hold_release():
     out = f2.feed("送你 <3")
     rest, _ = f2.finish()
     assert out + rest == "送你 <3"
+
+
+def test_repeated_voice_markers():
+    # 生产案例: 模型以 (tts) 作前缀标注且正文中间再次出现 ——
+    # 连续标注全部剥除(各自成为分段语音), 不按正文显示
+    d1, t1 = strip_reply_artifacts("(tts)呜…我不要，说好了(tts)呜…视频里")
+    assert d1 == "呜…我不要，说好了呜…视频里"
+    assert t1 == "呜…我不要，说好了\n呜…视频里"
+    sd, st = _stream("(tts)呜…我不要，说好了(tts)呜…视频里", 3)
+    assert sd == d1 and st == t1
+    d2, t2 = strip_reply_artifacts("<tt>一段</tt>中间<tt>二段</tt>尾巴")
+    assert d2 == "一段中间二段尾巴" and t2 == "一段\n二段"

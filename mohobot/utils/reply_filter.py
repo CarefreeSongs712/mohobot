@@ -242,7 +242,16 @@ class ReplyArtifactFilter:
                 self._buf = self._buf[m.end():]
                 self._close_span()
                 return True
-            # voice 态内其它标签一律按正文(与既有 TTS 过滤的嵌套语义一致)
+            if family == "voice":
+                # 连续标注(如 "(tts)…(tts)…"): 剥标签并重开一段,
+                # 不按正文显示 —— 生产中模型会重复使用同类前缀标注
+                self._emit_content(out, self._buf[:m.start()])
+                self._buf = self._buf[m.end():]
+                self._close_span()
+                self._mode = "voice"
+                self._cur_span = []
+                return True
+            # voice 态内其它家族标签一律按正文(与既有 TTS 过滤的嵌套语义一致)
             self._emit_content(out, self._buf[:m.end()])
             self._buf = self._buf[m.end():]
             return True
