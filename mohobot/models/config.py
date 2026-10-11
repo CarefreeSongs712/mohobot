@@ -219,6 +219,33 @@ class TTSConfig:
     cmd_cooldown: int = 120          # 非管理员冷却(秒)
 
 
+@dataclass
+class KnowledgeConfig:
+    """虚拟歌手知识库(RAG) — embedding 语义检索 + 可选 rerank。
+
+    LLM 工具接入(knowledge_search/knowledge_lookup), 与歌曲知识
+    (music_knowledge, 关键词/歌词确定性匹配)互补并存。
+    enabled 开关启动时读取(修改后需重启); 其余字段经
+    KnowledgeService.sync_config 热同步, embedding 模型变更自动重建索引。
+
+    密钥回退链: embedding_api_key → MOHOBOT_EMBEDDING_API_KEY → chat key;
+    rerank_api_key → MOHOBOT_RERANK_API_KEY → embedding key。
+    rerank_model 留空 = 跳过重排(纯 embedding 余弦检索)。
+    """
+    enabled: bool = False
+    source_dir: str = "./data/knowledge_db"      # 知识源(md + index.json)
+    index_dir: str = "./data/knowledge_index"    # 向量索引 SQLite(可整目录删除重建)
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_api_key: str = ""
+    rerank_model: str = ""                       # 如 BAAI/bge-reranker-v2-m3
+    rerank_base_url: str = "https://api.siliconflow.cn/v1"
+    rerank_api_key: str = ""
+    search_top_k: int = 20                       # 余弦召回数(rerank 候选池)
+    search_top_n: int = 5                        # 最终返回给模型的块数
+    max_chars_per_result: int = 800              # 单块注入正文的字符截断
+
+
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
 
 
@@ -307,6 +334,8 @@ class GlobalConfig:
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
     # TTS 语音合成(MiniMax t2a_v2 云端 API; 每 bot 开关在 BotConfig.tts_enabled)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    # 虚拟歌手知识库(RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     # 歌曲知识库(识别 + LLM 前注入; song_database/crawler/关键词文件)
     music_knowledge: dict = field(default_factory=dict)
     # 戳一戳全局兜底文案(bot 私有 touch_replies 优先, 都为空时用内置默认)
@@ -362,6 +391,7 @@ class GlobalConfig:
         ban_raw = raw.get("ban", {})
         emotion_raw = raw.get("emotion", {})
         tts_raw = raw.get("tts", {})
+        knowledge_raw = raw.get("knowledge", {})
 
         # 旧配置迁移: agent.music_knowledge / agent.reflex.touch_replies
         # 曾嵌在已删除的 agent: 段下, 读到旧键时搬到顶层并重写配置文件
@@ -504,6 +534,20 @@ class GlobalConfig:
                 cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),
                 cmd_cooldown=max(0, int(tts_raw.get("cmd_cooldown", 120))),
             ),
+            knowledge=KnowledgeConfig(
+                enabled=bool(knowledge_raw.get("enabled", False)),
+                source_dir=str(knowledge_raw.get("source_dir", "./data/knowledge_db") or "./data/knowledge_db"),
+                index_dir=str(knowledge_raw.get("index_dir", "./data/knowledge_index") or "./data/knowledge_index"),
+                embedding_model=str(knowledge_raw.get("embedding_model", "BAAI/bge-m3") or "BAAI/bge-m3"),
+                embedding_base_url=str(knowledge_raw.get("embedding_base_url", "https://api.siliconflow.cn/v1") or ""),
+                embedding_api_key=str(knowledge_raw.get("embedding_api_key", "") or ""),
+                rerank_model=str(knowledge_raw.get("rerank_model", "") or ""),
+                rerank_base_url=str(knowledge_raw.get("rerank_base_url", "https://api.siliconflow.cn/v1") or ""),
+                rerank_api_key=str(knowledge_raw.get("rerank_api_key", "") or ""),
+                search_top_k=max(1, int(knowledge_raw.get("search_top_k", 20))),
+                search_top_n=max(1, int(knowledge_raw.get("search_top_n", 5))),
+                max_chars_per_result=max(100, int(knowledge_raw.get("max_chars_per_result", 800))),
+            ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
@@ -640,6 +684,20 @@ class GlobalConfig:
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
             },
+            "knowledge": {
+                "enabled": self.knowledge.enabled,
+                "source_dir": self.knowledge.source_dir,
+                "index_dir": self.knowledge.index_dir,
+                "embedding_model": self.knowledge.embedding_model,
+                "embedding_base_url": self.knowledge.embedding_base_url,
+                "embedding_api_key": self.knowledge.embedding_api_key,
+                "rerank_model": self.knowledge.rerank_model,
+                "rerank_base_url": self.knowledge.rerank_base_url,
+                "rerank_api_key": self.knowledge.rerank_api_key,
+                "search_top_k": self.knowledge.search_top_k,
+                "search_top_n": self.knowledge.search_top_n,
+                "max_chars_per_result": self.knowledge.max_chars_per_result,
+            },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
             "log_dir": self.log_dir,
@@ -768,6 +826,20 @@ class GlobalConfig:
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+            },
+            "knowledge": {
+                "enabled": self.knowledge.enabled,
+                "source_dir": self.knowledge.source_dir,
+                "index_dir": self.knowledge.index_dir,
+                "embedding_model": self.knowledge.embedding_model,
+                "embedding_base_url": self.knowledge.embedding_base_url,
+                "embedding_api_key": self.knowledge.embedding_api_key,
+                "rerank_model": self.knowledge.rerank_model,
+                "rerank_base_url": self.knowledge.rerank_base_url,
+                "rerank_api_key": self.knowledge.rerank_api_key,
+                "search_top_k": self.knowledge.search_top_k,
+                "search_top_n": self.knowledge.search_top_n,
+                "max_chars_per_result": self.knowledge.max_chars_per_result,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),

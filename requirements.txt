@@ -42,6 +42,9 @@ loguru>=0.7.0
 Pillow>=10.0.0
 imagehash>=4.3.0  # 图片 phash 去重(ImageCache)
 
+# 知识库向量检索(余弦相似度矩阵)
+numpy>=1.26.0
+
 # CQ Code parsing (regex)
 # (stdlib only)
 

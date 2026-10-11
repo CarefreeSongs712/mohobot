@@ -55,6 +55,7 @@ class MohobotApplication:
         self._song_matcher: Any | None = None
         self._song_info_service: Any | None = None
         self._tts_service: Any | None = None
+        self._knowledge_service: Any | None = None
         self._task_supervisor = TaskSupervisor()
         self._running = False
         self._shutting_down = False
@@ -177,6 +178,37 @@ class MohobotApplication:
             except Exception as e:
                 self._tts_service = None
                 logger.warning(f"TTS 服务初始化失败, 已降级: {e}")
+
+        # 知识库(虚拟歌手 RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入。
+        # enabled 开关启动时读取; 初始化失败 → 降级并摘除工具(正常聊天不受影响)。
+        self._knowledge_service = None
+        from mohobot.knowledge.tools import register_knowledge_tools, unregister_knowledge_tools
+        if self._config.knowledge.enabled:
+            try:
+                from mohobot.knowledge import KnowledgeService
+                chat_fallback_key = (
+                    self._config.llm.chat_api_key
+                    or os.environ.get("MOHOBOT_LLM_API_KEY", "")
+                )
+                service = KnowledgeService(
+                    self._config.knowledge,
+                    fallback_api_key=chat_fallback_key,
+                )
+                await service.startup()
+                self._knowledge_service = service
+                register_knowledge_tools(service)
+                # 后台增量索引: 就绪前 knowledge_search 返回"索引中", 不阻塞启动
+                self._task_supervisor.create_task(
+                    service.reindex(), name="knowledge-index", owner="knowledge",
+                )
+                logger.info("知识库服务已加载(KnowledgeService), 后台索引中")
+            except Exception as e:
+                self._knowledge_service = None
+                unregister_knowledge_tools()
+                logger.warning(f"知识库初始化失败, 已降级: {e}")
+        else:
+            # 禁用/重启后禁用: 摘除上一进程周期可能残留的工具注册
+            unregister_knowledge_tools()
 
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
@@ -323,6 +355,7 @@ class MohobotApplication:
                 restart_callback=self.restart,
                 emotion_manager=self._emotion_manager,
                 tts_service=self._tts_service,
+                knowledge_service=self._knowledge_service,
                 persona_service=self._persona_service,
                 persona_ab_service=self._persona_ab_service,
                 config_update_callback=self.sync_config,
@@ -431,6 +464,8 @@ class MohobotApplication:
             self._message_handler.sync_config(self._config)
         if self._tts_service is not None:
             self._tts_service.sync_config(config.tts)
+        if self._knowledge_service is not None:
+            await self._knowledge_service.sync_config(config.knowledge)
         logger.info("Runtime configuration synchronized")
 
     async def restart(self) -> None:
@@ -541,6 +576,11 @@ class MohobotApplication:
         # TTS: 停止合成队列 worker(丢弃排队任务)并关闭 HTTP 客户端
         if getattr(self, "_tts_service", None):
             await self._tts_service.stop()
+
+        # 知识库: 取消后台索引任务并关闭 API 客户端/索引库
+        await self._task_supervisor.cancel_owner("knowledge")
+        if getattr(self, "_knowledge_service", None):
+            await self._knowledge_service.close()
 
         # Stop WS server
         if self._ws_server:

@@ -733,22 +733,14 @@ registry.register(LLMTool(
 ))
 ```
 
-`registry` 在 `llm_tools.py` import 时通过 `load_plugin_tools()` 主动 import `plugins.song_tools` 来填充。`_current_tools_schemas()` 每次调用重读 registry（热重载插件工具可见）。
+`registry` 的填充有两条路：
 
-⚠️ **加工具的致命陷阱**：`_execute_tool` 只把**名字以 `song_` 开头**的调用路由到 registry：
+1. `llm_tools.py` import 时 `load_plugin_tools()` 主动 import `plugins.song_tools` / `plugins.snitch`（模块级 `_register()`）。
+2. 核心服务工具由装配方注册：`main.py` 在 `KnowledgeService.startup()` 成功后调 `knowledge.tools.register_knowledge_tools(service)`（失败/禁用时 `unregister_knowledge_tools()` 摘除）。
 
-```python
-if func_name.startswith("song_"):
-    return await registry.execute(func_name, args)
-```
+`_current_tools_schemas()` 每次调用重读 registry（热重载插件工具可见）。
 
-其他名字的插件工具会被**广告给模型但执行时返回 `未知工具`**。所以要加新工具，必须：
-
-1. 在插件里 `registry.register(...)`；
-2. 保证该模块在启动时被 import（`llm_tools.load_plugin_tools()` 目前只 import `plugins.song_tools`，需要在那里补 import）；
-3. **修改 `_execute_tool`**：把前缀判断改成「先查 registry，未命中再走内置分支」，或者接受 `song_` 前缀这一临时约定。
-
-（注意 `_execute_tool` 里 `startswith("song_")` 的分支**重复写了两次**，第二个是死代码 —— 历史遗留。）
+✅ **执行路由（现状）**：`_execute_tool` 先匹配内置工具，然后 `registry.contains(func_name)` 命中即 `await registry.execute(...)` —— **任意已注册工具名都可执行，没有前缀限制**（本节旧版"仅 `song_` 前缀"的描述已过时；`registry.unregister()` 仅供服务降级/重启时摘除自有工具，插件路径不使用）。
 
 工具循环上限 4 轮（`max_tool_rounds`），最后一轮不再提供工具以逼出文本；若仍空则非流式重试一次。
 
@@ -842,11 +834,22 @@ await supervisor.shutdown()
 - VCPedia 同步内置 Anubis PoW 反爬解题 + cookie 复用；入口 `/sync-songs`（管理员）或 `scripts/sync_vcpedia.py`。
 - 用**独立的**轻量 engine/pool（`pool.py`），与 `mohobot/db` 无关。
 
-### 8.7 AnySearch
+### 8.7 知识库 `knowledge/`（虚拟歌手 RAG）
+
+- 数据：知识源 `data/knowledge_db/`（markdown 条目 + `index.json`，不入 git）；派生向量索引 `data/knowledge_index/knowledge.db`（可整目录删除重建）。
+- 切块（`chunker.py`）：md 按二级标题切（超长按空行再切）、`index.json` 的 singers/songs/producers 逐条成卡（同时是别名来源）、README 跳过。**嵌入输入是「标题\n正文」**（标题不含在正文里）。
+- 检索（`service.py`）：query 嵌入 → numpy 余弦 top_k → 配置了 `rerank_model` 时 POST `/rerank`（硅基流动格式，非 OpenAI 标准）→ 截断 top_n。rerank 失败自动回退 embedding 排序。
+- 增量：`files` 表记录 (mtime,size)，文件变化整文件重嵌，消失即清理；embedding 模型变更 → 强制全量重嵌（`meta.embedding_model` 只在成功后写入）。
+- 工具：`knowledge_search`（语义）/ `knowledge_lookup`（名称+别名精确查档案，支持「洛神」「404」等）。未就绪/失败返回错误 JSON，不影响主聊天路径。
+- 密钥回退：`embedding_api_key` → `MOHOBOT_EMBEDDING_API_KEY` → chat key；`rerank_api_key` → `MOHOBOT_RERANK_API_KEY` → embedding key。
+- 生命周期：`knowledge.enabled` **启动时读取**；初始化失败降级（工具摘除，正常聊天不受影响）；启动后台增量索引（owner=`knowledge`）；其余字段 WebUI 热同步，embedding 模型变更自动重建。面板「知识库」页：状态/强制重建/测试检索。
+- 与歌曲知识（8.6）**互补并存**：那个是确定性匹配自动注入，这个是模型自主调用的语义检索。
+
+### 8.8 AnySearch
 
 Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻塞回复）。只在 `anysearch.enabled` + `api_key` 都满足时构造并注入插件；未配置时 `anysearch_search` 工具 schema 被摘掉。
 
-### 8.8 图片缓存 `image_cache.py`
+### 8.9 图片缓存 `image_cache.py`
 
 - 300 MB LRU 上限，按 `cached_at` 淘汰最旧；`data/cache/image_cache_map.json` 存 `{url: {path, phash, description, cached_at, size}}`。
 - **phash 去重**：Hamming 距离 < 5 视为同一张图，复用描述。

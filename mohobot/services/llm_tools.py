@@ -40,6 +40,13 @@ class LLMToolRegistry:
         """Return whether a plugin registered this exact tool name."""
         return name in self._tools
 
+    def unregister(self, name: str) -> None:
+        """Remove a tool by name (no-op if absent).
+
+        供服务降级/进程内重启时摘除自有工具(如知识库), 插件路径不使用。
+        """
+        self._tools.pop(name, None)
+
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema for tool in self._tools.values()]
 
