@@ -1247,16 +1247,16 @@ class MessageHandler:
                 **options,
             )
             full_reply = reply_text or ""
-            tts_text = ""
-            if self._tts_active(bot_id):
-                from mohobot.utils.tts_marker import strip_and_extract
-                full_reply, tts_text = strip_and_extract(full_reply)
+            from mohobot.utils.reply_filter import strip_reply_artifacts
+            full_reply, tts_text = strip_reply_artifacts(full_reply)
             await self._send_full_text(bot_id, event, full_reply)
             self._submit_tts(bot_id, event, tts_text)
             return full_reply
 
-        from mohobot.utils.tts_marker import TTSMarkerFilter
-        tts_filter = TTSMarkerFilter() if self._tts_active(bot_id) else None
+        from mohobot.utils.reply_filter import ReplyArtifactFilter
+        # 产物过滤对所有 bot 生效(非 TTS bot 也要剥 <text>/<tool_call> 等泄漏),
+        # 提取的朗读文本仅在 TTS 开启时被 _submit_tts 接受
+        artifact_filter = ReplyArtifactFilter()
 
         buffer = ""
         full_reply = ""
@@ -1271,9 +1271,8 @@ class MessageHandler:
             **options,
         ):
             if chunk:
-                if tts_filter is not None:
-                    # <tts> 标签剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
-                    chunk = tts_filter.feed(chunk)
+                # 标签/产物剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
+                chunk = artifact_filter.feed(chunk)
                 if chunk:
                     buffer += chunk
                     full_reply += chunk
@@ -1291,14 +1290,13 @@ class MessageHandler:
                 first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
                 buffer = ""
 
-        if tts_filter is not None:
-            # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成
-            rest, tts_text = tts_filter.finish()
-            full_reply += rest
-            if rest.strip():
-                segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, rest, first_sent)
-            self._submit_tts(bot_id, event, tts_text)
+        # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
+        rest, tts_text = artifact_filter.finish()
+        full_reply += rest
+        if rest.strip():
+            segments_sent += 1
+            first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+        self._submit_tts(bot_id, event, tts_text)
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
@@ -1324,10 +1322,8 @@ class MessageHandler:
             if chunk:
                 full_reply += chunk
 
-        tts_text = ""
-        if self._tts_active(bot_id):
-            from mohobot.utils.tts_marker import strip_and_extract
-            full_reply, tts_text = strip_and_extract(full_reply)
+        from mohobot.utils.reply_filter import strip_reply_artifacts
+        full_reply, tts_text = strip_reply_artifacts(full_reply)
 
         text = full_reply.strip()
         if text:
@@ -1423,10 +1419,8 @@ class MessageHandler:
         full_reply = (text or "").strip()
         if not full_reply:
             return ""
-        tts_text = ""
-        if self._tts_active(bot_id):
-            from mohobot.utils.tts_marker import strip_and_extract
-            full_reply, tts_text = strip_and_extract(full_reply)
+        from mohobot.utils.reply_filter import strip_reply_artifacts
+        full_reply, tts_text = strip_reply_artifacts(full_reply)
         if not full_reply.strip():
             # 纯 TTS 标注无展示文本: 不发文本, 仍提交语音
             self._submit_tts(bot_id, event, tts_text)

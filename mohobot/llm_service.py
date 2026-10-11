@@ -1142,8 +1142,8 @@ class LLMService:
             raise RuntimeError("Empty or tool-only A/B completion")
         if getattr(choice, "finish_reason", None) == "length":
             raise RuntimeError("Truncated A/B completion")
-        from mohobot.utils.tts_marker import strip_and_extract
-        text = strip_and_extract(choice.message.content)[0]
+        from mohobot.utils.reply_filter import strip_reply_artifacts
+        text = strip_reply_artifacts(choice.message.content)[0]
         if not text.strip():
             raise RuntimeError("Empty A/B text")
         return text
