@@ -181,11 +181,14 @@ class MohobotApplication:
 
         # 知识库(虚拟歌手 RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入。
         # enabled 开关启动时读取; 初始化失败 → 降级并摘除工具(正常聊天不受影响)。
+        # 注意: 依赖缺失(numpy/openai)时 import 也会失败, 必须整体落在降级范围内。
         self._knowledge_service = None
-        from mohobot.knowledge.tools import register_knowledge_tools, unregister_knowledge_tools
         if self._config.knowledge.enabled:
             try:
                 from mohobot.knowledge import KnowledgeService
+                from mohobot.knowledge.tools import (
+                    register_knowledge_tools, unregister_knowledge_tools,
+                )
                 chat_fallback_key = (
                     self._config.llm.chat_api_key
                     or os.environ.get("MOHOBOT_LLM_API_KEY", "")
@@ -193,6 +196,7 @@ class MohobotApplication:
                 service = KnowledgeService(
                     self._config.knowledge,
                     fallback_api_key=chat_fallback_key,
+                    task_supervisor=self._task_supervisor,
                 )
                 await service.startup()
                 self._knowledge_service = service
@@ -204,11 +208,19 @@ class MohobotApplication:
                 logger.info("知识库服务已加载(KnowledgeService), 后台索引中")
             except Exception as e:
                 self._knowledge_service = None
-                unregister_knowledge_tools()
+                try:
+                    from mohobot.knowledge.tools import unregister_knowledge_tools
+                    unregister_knowledge_tools()
+                except Exception:
+                    pass
                 logger.warning(f"知识库初始化失败, 已降级: {e}")
         else:
             # 禁用/重启后禁用: 摘除上一进程周期可能残留的工具注册
-            unregister_knowledge_tools()
+            try:
+                from mohobot.knowledge.tools import unregister_knowledge_tools
+                unregister_knowledge_tools()
+            except Exception:
+                pass
 
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,

@@ -73,10 +73,12 @@ class KnowledgeIndexStore:
     # ── meta ──────────────────────────────────────────────────
 
     def get_meta(self, key: str) -> Optional[str]:
-        row = self._require_conn().execute(
-            "SELECT value FROM meta WHERE key = ?", (key,),
-        ).fetchone()
-        return row[0] if row else None
+        # 读写同连接跨线程使用, 读也加锁: 避免与写事务交错读到半程状态
+        with self._lock:
+            row = self._require_conn().execute(
+                "SELECT value FROM meta WHERE key = ?", (key,),
+            ).fetchone()
+            return row[0] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
         with self._lock:
@@ -91,9 +93,10 @@ class KnowledgeIndexStore:
 
     def list_file_states(self) -> dict[str, tuple[float, int]]:
         """path → (mtime, size)。"""
-        rows = self._require_conn().execute(
-            "SELECT path, mtime, size FROM files"
-        ).fetchall()
+        with self._lock:
+            rows = self._require_conn().execute(
+                "SELECT path, mtime, size FROM files"
+            ).fetchall()
         return {path: (float(mtime or 0), int(size or 0)) for path, mtime, size in rows}
 
     def replace_file(
@@ -145,10 +148,11 @@ class KnowledgeIndexStore:
 
         库为数百块量级, 全量带向量载入(<几 MB)远比二次查询简单。
         """
-        rows = self._require_conn().execute(
-            "SELECT chunk_id, source, title, text, embedding, model FROM chunks "
-            "ORDER BY source, rowid"
-        ).fetchall()
+        with self._lock:
+            rows = self._require_conn().execute(
+                "SELECT chunk_id, source, title, text, embedding, model FROM chunks "
+                "ORDER BY source, rowid"
+            ).fetchall()
         return [
             {
                 "chunk_id": chunk_id, "source": source,
@@ -159,4 +163,6 @@ class KnowledgeIndexStore:
         ]
 
     def count_chunks(self) -> int:
-        return int(self._require_conn().execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        with self._lock:
+            return int(self._require_conn().execute(
+                "SELECT COUNT(*) FROM chunks").fetchone()[0])

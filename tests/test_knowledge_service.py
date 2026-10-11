@@ -251,3 +251,40 @@ async def test_sync_config_rebuilds_provider_and_reindexes():
                 assert svc._state["last_stats"]["model_changed"] is True
             finally:
                 await svc.close()
+
+
+async def test_model_label_follows_actual_provider():
+        """meta/行标签必须反映 provider 真实模型: 换模型但 provider 重建失败时,
+        强制重建仍用旧模型嵌入, meta 不得标成新模型(否则配置齐后漏触发重建)。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "kb").mkdir()
+            _write_kb(tmp / "kb")
+            cfg = KnowledgeConfig(
+                enabled=True, source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
+            )
+            emb = FakeEmbedding()
+            emb.model = "model-v1"  # provider 自报模型
+            svc = KnowledgeService(cfg, embedding_provider=emb, rerank_provider=FakeRerank())
+            try:
+                await svc.startup()
+                await svc.reindex()
+                meta = await asyncio.to_thread(svc._store.get_meta, "embedding_model")
+                assert meta == "model-v1", meta
+
+                # 配置改为 v2; 注入模式不重建 provider(模拟重建失败) → 仍用 v1 嵌入
+                new_cfg = KnowledgeConfig(
+                    enabled=True, source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
+                    embedding_model="model-v2",
+                )
+                await svc.sync_config(new_cfg)
+                before = svc._state["last_stats"]
+                for _ in range(200):
+                    st = svc._state["last_stats"]
+                    if st is not None and st is not before and not svc._state["indexing"]:
+                        break
+                    await asyncio.sleep(0.02)
+                meta2 = await asyncio.to_thread(svc._store.get_meta, "embedding_model")
+                assert meta2 == "model-v1", meta2
+            finally:
+                await svc.close()

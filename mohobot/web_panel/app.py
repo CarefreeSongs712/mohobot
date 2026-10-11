@@ -495,9 +495,10 @@ class WebPanel:
                         setattr(cfg.tts, k, v)
             if "knowledge" in data:
                 knowledge_data = data["knowledge"] or {}
-                # api_key 留空或掩码原样 → 保持原 key(与 tts 同模式)
+                # source_dir/index_dir 为服务端运行路径, 仅本地配置文件可改
+                # (与 database/data_dir 同策略); api_key 留空或掩码原样 → 保持原 key
                 for k, v in knowledge_data.items():
-                    if not hasattr(cfg.knowledge, k):
+                    if not hasattr(cfg.knowledge, k) or k in ("source_dir", "index_dir"):
                         continue
                     if k.endswith("api_key"):
                         sv = str(v or "")

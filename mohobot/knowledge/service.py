@@ -50,6 +50,7 @@ class KnowledgeService:
         fallback_api_key: str = "",
         embedding_provider: EmbeddingProvider | None = None,
         rerank_provider: RerankProvider | None = None,
+        task_supervisor=None,
     ):
         self._cfg = config
         self._fallback_api_key = (fallback_api_key or "").strip()
@@ -57,7 +58,9 @@ class KnowledgeService:
         self._embedding = embedding_provider
         self._rerank = rerank_provider
         self._providers_builtin = embedding_provider is None
+        self._supervisor = task_supervisor
         self._store: KnowledgeIndexStore | None = None
+        self._retired_providers: list = []   # 换配置后保留到 close 统一回收(同 LLMService 约定)
         self._lock = asyncio.Lock()          # reindex 互斥
         self._chunks: list[dict] = []        # 与矩阵行一一对应
         self._matrix: np.ndarray | None = None
@@ -96,8 +99,13 @@ class KnowledgeService:
         self._active_signature = self._provider_signature()
 
         self._store = KnowledgeIndexStore(self._cfg.index_dir)
-        await asyncio.to_thread(self._store.open)
-        await asyncio.to_thread(self._refresh_lookup)
+        try:
+            await asyncio.to_thread(self._store.open)
+            await asyncio.to_thread(self._refresh_lookup)
+        except Exception:
+            # 索引库打不开时回收已建好的 API 客户端再向上抛(main 降级)
+            await self._close_providers()
+            raise
         logger.info(
             f"知识库服务已初始化: source={self._cfg.source_dir} "
             f"index={self._cfg.index_dir} embedding={self._cfg.embedding_model} "
@@ -123,24 +131,28 @@ class KnowledgeService:
             self._cfg.rerank_base_url, self._cfg.rerank_api_key,
         )
 
+    async def _close_providers(self) -> None:
+        providers = [self._embedding, self._rerank, *self._retired_providers]
+        self._retired_providers = []
+        for provider in providers:
+            if provider is None or not self._providers_builtin:
+                continue
+            try:
+                await provider.close()
+            except Exception:
+                pass
+
     async def close(self) -> None:
-        self._state["ready"] = False
-        if self._embedding is not None and self._providers_builtin:
-            try:
-                await self._embedding.close()
-            except Exception:
-                pass
-        if self._rerank is not None and self._providers_builtin:
-            try:
-                await self._rerank.close()
-            except Exception:
-                pass
-        if self._store is not None:
-            await asyncio.to_thread(self._store.close)
-        self._embedding = self._rerank = None
-        self._store = None
-        self._matrix = None
-        self._chunks = []
+        # 先等在途 reindex 收尾(共享 asyncio 锁), 避免关闭索引库时半途写入
+        async with self._lock:
+            self._state["ready"] = False
+            await self._close_providers()
+            if self._store is not None:
+                await asyncio.to_thread(self._store.close)
+            self._embedding = self._rerank = None
+            self._store = None
+            self._matrix = None
+            self._chunks = []
 
     # ── 索引 ──────────────────────────────────────────────────
 
@@ -174,9 +186,14 @@ class KnowledgeService:
         for path, abs_path, _, _ in files:
             all_chunks[path] = await asyncio.to_thread(chunk_file, abs_path, path)
 
+        # 实际用于嵌入的模型名: provider 自报优先。热同步换模型但 provider 重建
+        # 失败(如缺 key)时 provider 仍是旧模型 —— meta/行标签必须反映真实模型,
+        # 否则标记成新模型会导致下次配置齐后漏触发重建, 索引混入旧模型向量。
+        embed_model = str(getattr(self._embedding, "model", "") or "").strip() \
+            or self._cfg.embedding_model
         stored = await asyncio.to_thread(self._store.list_file_states)
         stored_model = await asyncio.to_thread(self._store.get_meta, "embedding_model")
-        model_changed = stored_model is not None and stored_model != self._cfg.embedding_model
+        model_changed = bool(stored_model) and stored_model != embed_model
 
         # 待重嵌文件: 新文件 / mtime+size 变化 / 强制 / embedding 模型变更
         changed = [
@@ -212,7 +229,7 @@ class KnowledgeService:
                     await asyncio.to_thread(
                         self._store.replace_file,
                         path, mtime, size, rows,
-                        self._cfg.embedding_model, indexed_at,
+                        embed_model, indexed_at,
                     )
                     embedded_count += len(rows)
             else:
@@ -223,12 +240,12 @@ class KnowledgeService:
                         await asyncio.to_thread(
                             self._store.replace_file,
                             path, mtime, size, [],
-                            self._cfg.embedding_model, _now(),
+                            embed_model, _now(),
                         )
         for path in removed:
             await asyncio.to_thread(self._store.remove_file, path)
 
-        await asyncio.to_thread(self._store.set_meta, "embedding_model", self._cfg.embedding_model)
+        await asyncio.to_thread(self._store.set_meta, "embedding_model", embed_model)
         await asyncio.to_thread(self._store.set_meta, "last_indexed_at", _now())
         await asyncio.to_thread(self._refresh_lookup)
         await self._load_matrix()
@@ -459,18 +476,29 @@ class KnowledgeService:
                 )
                 self._rerank = self._build_rerank(embedding_key, base_url)
                 self._active_signature = self._provider_signature()
+                # 在途调用可能还持有旧客户端: 保留到 close 统一回收(同 LLMService 约定)
                 for provider in (old_embedding, old_rerank):
                     if provider is not None:
-                        try:
-                            await provider.close()
-                        except Exception:
-                            pass
+                        self._retired_providers.append(provider)
             else:
                 logger.warning("知识库配置变更后缺少 base_url/model/api_key, 保留原 provider")
         if config.embedding_model != (await asyncio.to_thread(
                 self._store.get_meta, "embedding_model") if self._store else None):
-            asyncio.create_task(self._reindex_after_model_change())
+            self._schedule_model_reindex()
 
-    async def _reindex_after_model_change(self) -> None:
-        logger.info("embedding 模型已变更, 后台重建知识库索引")
-        await self.reindex(force=True)
+    def _schedule_model_reindex(self) -> None:
+        """embedding 模型变更后的强制重建(受监管后台任务; 关闭期静默放弃)。"""
+
+        async def _run() -> None:
+            logger.info("embedding 模型已变更, 后台重建知识库索引")
+            await self.reindex(force=True)
+
+        if self._supervisor is not None:
+            try:
+                self._supervisor.create_task(
+                    _run(), name="knowledge-reindex", owner="knowledge",
+                )
+                return
+            except Exception:
+                pass
+        asyncio.create_task(_run())
