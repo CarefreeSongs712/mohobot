@@ -88,7 +88,8 @@ class Plugin:
             self.engine = ProactiveEngine(
                 state_path=Path(self._data_dir) / "proactive_chat" / "state.json",
                 config=dict(self.plugin_config or {}),
-                get_ref=lambda name: getattr(type(self), name, None),
+                # 引擎引用名无下划线前缀, 插件类属性带 _ 前缀, 此处统一映射
+                get_ref=lambda name: getattr(type(self), f"_{name}", None),
             )
         else:
             self.engine.update_config(dict(self.plugin_config or {}))

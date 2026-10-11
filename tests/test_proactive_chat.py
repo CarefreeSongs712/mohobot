@@ -6,12 +6,15 @@
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "proactive_chat"
 sys.path.insert(0, str(_PLUGIN_DIR))
+
+from mohobot.file_store import json_update
 
 from proactive_chat_core.engine import ProactiveEngine, session_key
 from proactive_chat_core.schedule import is_quiet_time, random_interval_seconds, render_prompt
@@ -514,8 +517,9 @@ async def test_plugin_loads_through_plugin_system():
 
         class _StubBotManager:
             def get(self, bot_id):
-                cfg = SimpleNamespace(persona_id="", chat_model_override="", qq=111)
-                return SimpleNamespace(config=cfg, qq=111)
+                from mohobot.models.config import BotConfig
+                cfg = BotConfig(bot_id="bot_001", qq=111, nickname="测试Bot")
+                return SimpleNamespace(config=cfg, qq=111) if bot_id == "bot_001" else None
 
         class _StubCtx:
             async def capture_session(self, *a, **k):
@@ -527,11 +531,29 @@ async def test_plugin_loads_through_plugin_system():
             async def append_context(self, *a, **k):
                 pass
 
+        class _StubLlm:
+            _chat_client = object()
+
+            async def chat(self, **kwargs):
+                return ("主动问候测试", None)
+
+        class _StubPersona:
+            def resolve(self, bot_config, pid=""):
+                return {"content": "x"}
+
+        sent = []
+
+        class _StubMH:
+            async def send_proactive_reply(self, bot_id, event, text):
+                sent.append((bot_id, text))
+                return text
+
         ps.set_runtime_refs(
             bot_manager=_StubBotManager(),
-            llm_service=SimpleNamespace(_chat_client=object()),
+            llm_service=_StubLlm(),
             context_manager=_StubCtx(),
-            persona_service=SimpleNamespace(resolve=lambda bot_config, pid="": {"content": "x"}),
+            persona_service=_StubPersona(),
+            message_handler=_StubMH(),
         )
         count = await ps.load_plugins()
         assert count == 1
@@ -563,9 +585,24 @@ async def test_plugin_loads_through_plugin_system():
         # 周期接口与配置热更新(interval_sec 由 on_tick 从配置刷新)
         await inst.on_tick()
         assert inst.interval_sec >= 5
-        inst.plugin_config = dict(inst.plugin_config, enable=False, tick_interval_sec=60)
+        inst.plugin_config = dict(inst.plugin_config, tick_interval_sec=60)
         inst.on_config_update()
         await inst.on_tick()
         assert inst.interval_sec == 60
+
+        # 端到端: 强制到期 → 走真实注入链路应完成生成与发送
+        # (回归: 引擎引用名与插件类属性曾因下划线前缀错位, 到期会话被静默顺延)
+        def _force_due(state):
+            for e in (state.get("sessions") or {}).values():
+                e["next_trigger_time"] = time.time() - 400
+            return state
+
+        await json_update(tmp_path / "data" / "proactive_chat" / "state.json", _force_due)
+        inst.plugin_config = dict(inst.plugin_config, enable=True)
+        inst.on_config_update()
+        await inst.on_tick()
+        assert sent and sent[0][0] == "bot_001" and sent[0][1] == "主动问候测试"
+        state = await _read_state(tmp_path / "data" / "proactive_chat" / "state.json")
+        assert state["sessions"]["bot_001:123"]["unanswered_count"] == 1
 
         await ps.shutdown_plugins()

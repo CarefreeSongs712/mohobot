@@ -281,13 +281,16 @@ class ProactiveEngine:
                 # bot 离线: 顺延而不是反复消耗窗口, 避免重连后过期补发
                 overdue = now - entry["next_trigger_time"]
                 if overdue > _OFFLINE_POSTPONE_SECONDS:
+                    logger.info(f"[主动消息] {key} bot 未连接, 顺延 {_OFFLINE_POSTPONE_SECONDS}s")
                     await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
                 return
 
             llm = self._ref("llm_service")
             # LLMService._available 即 _chat_client is not None; 这里直接判客户端
             if llm is None or getattr(llm, "_chat_client", None) is None:
-                await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
+                if now - entry["next_trigger_time"] > _OFFLINE_POSTPONE_SECONDS:
+                    logger.warning(f"[主动消息] {key} LLM 未就绪, 顺延 {_OFFLINE_POSTPONE_SECONDS}s")
+                    await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
                 return
 
             if is_quiet_time(cfg.get("quiet_hours", "1-7")):
@@ -304,7 +307,9 @@ class ProactiveEngine:
             context_manager = self._ref("context_manager")
             persona_service = self._ref("persona_service")
             if context_manager is None or persona_service is None:
-                await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
+                if now - entry["next_trigger_time"] > _OFFLINE_POSTPONE_SECONDS:
+                    logger.warning(f"[主动消息] {key} 上下文/人设服务未注入, 顺延 {_OFFLINE_POSTPONE_SECONDS}s")
+                    await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
                 return
 
             # 捕获会话一致性快照(与被动回复同机制)
