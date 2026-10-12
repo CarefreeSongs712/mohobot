@@ -1754,7 +1754,9 @@ class MessageHandler:
             logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")
             return True
 
-        # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串)
+        # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串);
+        # 没有回复的 bot 不进节点, 不用占位(修三条独立回复都只见一条后的
+        # "后续 bot 全部静默" 情况下满屏"(无响应)"的问题)
         replies: dict[str, str] = {}
         for b in bots:
             reply = await self._collect_merged_reply(b, event, raw, text)
@@ -1763,16 +1765,21 @@ class MessageHandler:
 
         nodes = []
         for b in bots:
+            if b not in replies:
+                continue
             bot_qq, bot_nick = self._bot_identity(b)
-            content = replies.get(b) or "(无响应)"
             nodes.append({
                 "type": "node",
                 "data": {
                     "user_id": str(bot_qq),
                     "nickname": bot_nick,
-                    "content": [{"type": "text", "data": {"text": content}}],
+                    "content": [{"type": "text", "data": {"text": replies[b]}}],
                 },
             })
+
+        if not nodes:
+            logger.debug(f"合并回复 {text!r}: 所有 bot 均无回复, 静默跳过(群 {group_id})")
+            return True
 
         try:
             await self._ws.send_group_forward_msg(sender, event.group_id, nodes)
@@ -1780,7 +1787,7 @@ class MessageHandler:
                 f"合并回复 {text!r}: {len(nodes)} 个 bot 的回复已合并发送(群 {group_id})"
             )
         except Exception as e:
-            # 合并转发失败 → 退化为发送者自己的那条普通回复
+            # 合并转发发送失败 → 发送者自己的那条普通回复
             logger.warning(f"合并转发发送失败, 退化为普通回复: {e}")
             own = replies.get(sender)
             if own:
