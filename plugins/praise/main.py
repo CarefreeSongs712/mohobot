@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 
 from loguru import logger
@@ -43,6 +44,11 @@ class Plugin:
     # 判定"已达上限"的错误关键词(平台返回)
     _LIMIT_HINTS = ("频繁", "上限", "过快", "too many", "频繁操作", "操作过快")
 
+    # 一分钟全局节流: 用户 QQ -> 上次触发时间戳(类级 = 跨 bot/群/私聊全局)。
+    # 触发即占用(无论点赞成败), 60s 内再次触发直接提示, 不调 API。
+    _THROTTLE_WINDOW = 60.0
+    _throttle_cache: dict[int, float] = {}
+
     # 默认配置(_conf_schema.json 注入覆盖; 无 schema 时的兜底)
     _DEFAULTS = {
         "like_total": 20,
@@ -50,6 +56,7 @@ class Plugin:
         "success_msg": "✅ 已给你点了 {count} 个赞~",
         "fail_msg": "❌ 点赞失败: {detail}",
         "limit_msg": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
+        "throttle_msg": "bot一次点赞就会把所有的赞点完，不需要发送多次。反复点赞可能导致bot风控",
         # 每日定时点赞
         "daily_like_enabled": True,
         "daily_like_time": "08:00",
@@ -206,6 +213,21 @@ class Plugin:
 
         user_id = event.user_id
         logger.info(f"Praise request from {user_id} (bot {bot_id})")
+
+        # 一分钟全局节流: 触发即占用窗口(成败与否), 60s 内再触发只提示不调 API。
+        # 放最前(先于 ws/配置检查): 节流语义针对"发送频率"本身。
+        throttle_msg = self._cfg("throttle_msg", self._DEFAULTS["throttle_msg"])
+        now_ts = time.time()
+        last = Plugin._throttle_cache.get(int(user_id), 0)
+        if now_ts - last < Plugin._THROTTLE_WINDOW:
+            logger.debug(f"Praise throttled: {user_id} (retry in "
+                         f"{Plugin._THROTTLE_WINDOW - (now_ts - last):.0f}s)")
+            return (True, throttle_msg)
+        # 顺手清理过期条目, 防长驻进程下缓存膨胀
+        expired = [k for k, ts in Plugin._throttle_cache.items() if now_ts - ts > 3600]
+        for k in expired:
+            del Plugin._throttle_cache[k]
+        Plugin._throttle_cache[int(user_id)] = now_ts
 
         ws_server = self._ws_server
         if ws_server is None:
