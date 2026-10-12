@@ -18,6 +18,10 @@ bot 在私聊中按随机窗口主动发起消息的插件。机制与默认提�
   - 免打扰时段 `quiet_hours`(如 `23-7`, 支持跨天): 到期任务跳过并重排;
   - 连续 `max_unanswered_times` 次未回复: 暂停, 用户回复后归零恢复;
   - LLM 生成期间用户来新消息: 丢弃本次生成结果(用户已在对话, 不抢话)。
+- **LLM 自主决策**(`enable_llm_choice`, 默认开): 到期触发时模型结合上下文/时间/未回复状态自主判断——
+  只输出 `[SKIP]` 表示"此刻不合适"(本次不发、不计数、正常重排);
+  只输出 `[PAUSE]` 表示"对方不希望被打扰"(暂停该会话, 对方回复后自动恢复)。
+  判断指令为服务端固定段, 自定义提示词不影响协议; 固定次数上限仍作硬保底。
 - **冷启动**: `enable_auto_trigger` 开启时, 启动后静默 `auto_trigger_after_minutes` 分钟且无消息的已跟踪会话自动补建一次任务。
 - **重启恢复**: 调度状态持久化于 `data/proactive_chat/state.json`; 重启后到期任务照常触发, 停机期间已过期(>60s)的任务清理不补发, 交由自动触发或用户下一条消息重建。
 
@@ -36,7 +40,8 @@ bot 在私聊中按随机窗口主动发起消息的插件。机制与默认提�
 | `enable` | true | 总开关 |
 | `min_interval_minutes` / `max_interval_minutes` | 30 / 600 | 随机触发窗口(分钟) |
 | `quiet_hours` | `1-7` | 免打扰时段(24h, 支持跨天) |
-| `max_unanswered_times` | 4 | 连续未回复上限(0 不限制) |
+| `max_unanswered_times` | 4 | 连续未回复上限(0 不限制, 作硬保底) |
+| `enable_llm_choice` | true | 触发时允许 LLM 自主决定发送([SKIP]/[PAUSE]) |
 | `proactive_prompt` | (内置模板) | 主动开口提示词, 占位符 `{{unanswered_count}}` / `{{current_time}}` |
 | `exclude_users` | [] | 排除用户 QQ 列表 |
 | `enable_auto_trigger` / `auto_trigger_after_minutes` | false / 5 | 启动后静默自动补建任务 |
