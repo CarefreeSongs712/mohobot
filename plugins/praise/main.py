@@ -49,6 +49,30 @@ class Plugin:
     _THROTTLE_WINDOW = 60.0
     _throttle_cache: dict[int, float] = {}
 
+    # 同一消息事件的多 bot 分发去重: message_id -> 占用时间戳。
+    # 群里一条消息会被每个在线 bot 的 hook 各调一次且 message_id 相同
+    # (框架群归档去重同样依赖此事实), 只由先到的 bot 处理(成功或节流
+    # 提示), 其余静默 —— 节流提示只该出现在用户再发一条新消息时。
+    _event_owner_cache: dict[str, float] = {}
+
+    @staticmethod
+    def _claim_event(raw_event: dict) -> bool:
+        """声明本条消息事件的唯一处理权; 已被处理过的 message_id 返回 False。"""
+        try:
+            mid = str(raw_event.get("message_id") or "")
+        except AttributeError:
+            return True  # 拿不到 id(非标准事件)时保持旧行为
+        if not mid:
+            return True
+        now = time.time()
+        stale = [k for k, ts in Plugin._event_owner_cache.items() if now - ts > 120]
+        for k in stale:
+            del Plugin._event_owner_cache[k]
+        if mid in Plugin._event_owner_cache:
+            return False
+        Plugin._event_owner_cache[mid] = now
+        return True
+
     # 默认配置(_conf_schema.json 注入覆盖; 无 schema 时的兜底)
     _DEFAULTS = {
         "like_total": 20,
@@ -209,6 +233,11 @@ class Plugin:
             text = text.strip()
 
         if text not in PRAISE_TRIGGERS:
+            return (False, None)
+
+        # 同一条消息的多 bot 分发只由一个 bot 处理, 其余静默不回复
+        if not self._claim_event(raw_event):
+            logger.debug(f"Praise event already handled: {raw_event.get('message_id')}")
             return (False, None)
 
         user_id = event.user_id
