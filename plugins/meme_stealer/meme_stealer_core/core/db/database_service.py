@@ -460,11 +460,14 @@ class DatabaseService(
             rows = conn.execute("SELECT path FROM emoji").fetchall()
             return [r["path"] for r in rows]
 
-    def get_paths_sorted_newest(self) -> list[str]:
-        """按列表指令的稳定顺序返回路径，无需加载全量元数据。"""
+    def get_paths_sorted_newest(self, scope_target: str | None = None) -> list[str]:
+        """按列表指令的稳定顺序返回可见路径；None 保留管理命令全库语义。"""
+        clause, params = self._scope_condition(scope_target)
+        where = f" WHERE {clause}" if clause else ""
         with self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT path FROM emoji ORDER BY created_at DESC, path DESC"
+                "SELECT e.path FROM emoji e" + where + " ORDER BY e.created_at DESC, e.path DESC",
+                params,
             ).fetchall()
             return [row["path"] for row in rows]
 
@@ -482,10 +485,12 @@ class DatabaseService(
             ).fetchall()
             return {r["path"]: r["phash"] for r in rows}
 
-    def count_total(self) -> int:
-        """统计表情包总数。"""
+    def count_total(self, scope_target: str | None = None) -> int:
+        """统计可见表情包总数；默认 None 保持管理/维护接口兼容。"""
+        clause, params = self._scope_condition(scope_target)
+        where = f" WHERE {clause}" if clause else ""
         with self._get_connection() as conn:
-            result = conn.execute("SELECT COUNT(*) as cnt FROM emoji").fetchone()
+            result = conn.execute("SELECT COUNT(*) as cnt FROM emoji e" + where, params).fetchone()
             return result["cnt"] if result else 0
 
     def blacklisted_hashes(self) -> set[str]:

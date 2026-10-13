@@ -19,11 +19,25 @@ class ImageManagementCommand:
     def __init__(self, plugin_instance: Any) -> None:
         self.plugin = plugin_instance
 
+    def _scope_target_for_event(self, event: StealerEvent) -> str:
+        """A missing event target is public-only, never trusted all-library access."""
+        cfg = getattr(self.plugin, "plugin_config", None)
+        getter = getattr(cfg, "get_event_target", None)
+        if not callable(getter):
+            getter = getattr(self.plugin, "get_event_target", None)
+        if not callable(getter):
+            return ""
+        try:
+            scope, target = getter(event)
+        except Exception:
+            return ""
+        return f"{scope}:{target}" if scope and target else ""
+
     @staticmethod
-    def _existing_path_indexes(db_service: Any) -> dict[str, int]:
-        """Number present files in the same order used by numeric commands."""
+    def _existing_path_indexes(db_service: Any, scope_target: str | None = None) -> dict[str, int]:
+        """Admins retain global numeric-action IDs; ordinary lists number visible files."""
         indexes: dict[str, int] = {}
-        for path in db_service.get_paths_sorted_newest():
+        for path in db_service.get_paths_sorted_newest(scope_target=scope_target):
             if Path(path).exists():
                 indexes[path] = len(indexes) + 1
         return indexes
@@ -37,6 +51,8 @@ class ImageManagementCommand:
         category: str = "",
         limit: str = "10",
         page: str = "1",
+        *,
+        is_admin: bool = False,
     ):
         """列出表情包，支持按分类筛选。
 
@@ -82,14 +98,18 @@ class ImageManagementCommand:
             page_num = 1
         page_num = max(1, page_num)
 
-        # 使用数据库分页查询，避免全量加载
+        scope_target = self._scope_target_for_event(event)
+        numbering_target = None if is_admin else scope_target
+
+        # 使用数据库分页查询，先按作用域过滤再计数/分页
         db_service = getattr(self.plugin, "db_service", None)
         if db_service and hasattr(db_service, "get_emojis_paginated"):
             cat_filter = category if category else None
             rows, total_filtered, _category_counts = db_service.get_emojis_paginated(
-                page=page_num, page_size=per_page, category=cat_filter, sort_order="newest"
+                page=page_num, page_size=per_page, category=cat_filter, sort_order="newest",
+                scope_target=scope_target,
             )
-            total_all = db_service.count_total()
+            total_all = db_service.count_total(scope_target=scope_target)
 
             if total_all == 0:
                 yield event.plain_result("暂无表情包数据")
@@ -103,8 +123,9 @@ class ImageManagementCommand:
                     page_size=per_page,
                     category=cat_filter,
                     sort_order="newest",
+                    scope_target=scope_target,
                 )
-            indexes = self._existing_path_indexes(db_service)
+            indexes = self._existing_path_indexes(db_service, numbering_target)
 
             # 构建展示列表，标记文件是否存在
             display_images = []
@@ -148,6 +169,10 @@ class ImageManagementCommand:
             missing_count = 0
             for img_path, img_info in image_index.items():
                 if isinstance(img_info, dict):
+                    if normalize_scope_mode(img_info.get("scope_mode")) == "local":
+                        origin = str(img_info.get("origin_target", "") or "").strip()
+                        if not scope_target or origin != scope_target:
+                            continue
                     file_exists = Path(img_path).exists()
                     if not file_exists:
                         missing_count += 1
@@ -180,9 +205,12 @@ class ImageManagementCommand:
                 key=lambda item: (int(item.get("created_at", 0) or 0), item["path"]),
                 reverse=True,
             )
+            admin_indexes = {
+                img["path"]: i + 1 for i, img in enumerate(self._collect_valid_images(image_index))
+            } if is_admin else {}
             next_index = 1
             for img in all_images:
-                img["index"] = next_index if img["file_exists"] else 0
+                img["index"] = (admin_indexes.get(img["path"], 0) if is_admin else next_index) if img["file_exists"] else 0
                 if img["file_exists"]:
                     next_index += 1
 

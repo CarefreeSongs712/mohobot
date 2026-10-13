@@ -678,7 +678,9 @@ class StealerApp(MemeSearchToolWorkflow, MemeStealToolWorkflow):
             params = params[: max(arity - 1, 0)] + [" ".join(params[max(arity - 1, 0):])] if arity else []
         owner_name, method_name = handler_path.split(".", 1)
         handler = getattr(getattr(self, owner_name), method_name)
-        async for result in handler(event, *params):
+        # Only the authorized entrypoint can select management-compatible global IDs.
+        results = handler(event, *params, is_admin=is_admin) if name == "list" else handler(event, *params)
+        async for result in results:
             yield result
 
     # ── LLM 工具 ────────────────────────────────────────────

@@ -35,6 +35,18 @@ class LibraryQueries:
             ).fetchone()[0]
             return counts
 
+    @staticmethod
+    def _scope_condition(scope_target: str | None) -> tuple[str, list[Any]]:
+        """None is trusted all-library access; empty target is public-only."""
+        if scope_target is None:
+            return "", []
+        if not scope_target:
+            return "e.scope_mode = 'public'", []
+        return (
+            "(e.scope_mode = 'public' OR (e.scope_mode = 'local' AND e.origin_target = ?))",
+            [scope_target],
+        )
+
     def get_emojis_paginated(
         self,
         page: int = 1,
@@ -93,13 +105,12 @@ class LibraryQueries:
                 category_count_where_clauses.append("e.is_favorite = 1")
 
             # scope 过滤
-            if scope_target:
-                where_clauses.append("(e.scope_mode = 'public' OR e.origin_target = ?)")
-                params.append(scope_target)
-                category_count_where_clauses.append(
-                    "(e.scope_mode = 'public' OR e.origin_target = ?)"
-                )
-                category_count_params.append(scope_target)
+            scope_clause, scope_params = self._scope_condition(scope_target)
+            if scope_clause:
+                where_clauses.append(scope_clause)
+                params.extend(scope_params)
+                category_count_where_clauses.append(scope_clause)
+                category_count_params.extend(scope_params)
 
             # 搜索过滤（描述/标签/场景/分类/hash/来源/文件名/路径）
             if search_query:
