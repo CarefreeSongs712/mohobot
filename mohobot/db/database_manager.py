@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import uuid
 from datetime import datetime
 from typing import Any
@@ -18,22 +19,146 @@ from sqlalchemy import text
 from mohobot.db import sql_database as sqldb
 from mohobot.db.sql_database import Conversation, ConversationContext, User
 
+LEGACY_DB_FILE = "luotianyi.db"
+
+
+def _table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """各用户表的行数快照, 用于迁移前后比对。"""
+    names = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    counts: dict[str, int] = {}
+    for name in names:
+        quoted = '"' + str(name).replace('"', '""') + '"'
+        counts[str(name)] = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+    return counts
+
+
+def _verify_migrated(path: str, expected: dict[str, int]) -> None:
+    """校验迁移产物: 完整性检查 + 行数一致。任何异常都由调用方处理为迁移失败。"""
+    conn = sqlite3.connect(path)
+    try:
+        state = conn.execute("PRAGMA quick_check").fetchone()
+        if not state or str(state[0]).strip().lower() != "ok":
+            raise ValueError(f"quick_check 未通过: {state!r}")
+        actual = _table_counts(conn)
+    finally:
+        conn.close()
+    if actual != expected:
+        raise ValueError(f"迁移后行数不一致: {expected} -> {actual}")
+
+
+def _fsync_path(path: str) -> None:
+    """尽力 fsync(文件或目录); 不支持时只告警, 不让迁移因此失败。"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as e:
+        logger.warning(f"fsync 打开失败({path}): {e}")
+        return
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        logger.warning(f"fsync 失败({path}): {e}")
+    finally:
+        os.close(fd)
+
+
+def _archive_legacy_files(legacy: str) -> None:
+    """迁移成功后把旧库三件套整体移入备份目录, 便于回滚。
+
+    必须放进**同一个目录并保留原文件名**: SQLite 是靠 ``<主库名>-wal`` 找日志的,
+    若只给三个文件各加后缀, 备份里的 WAL 就不再配对, 回滚时会丢同样的数据。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = f"{legacy}.pre-migration-{stamp}"
+    suffix = 0
+    while os.path.exists(backup_dir):
+        suffix += 1
+        backup_dir = f"{legacy}.pre-migration-{stamp}-{suffix}"
+    try:
+        os.makedirs(backup_dir)
+    except OSError as e:
+        logger.warning(f"旧库留档目录创建失败({backup_dir}): {e}")
+        return
+    for extra in ("", "-wal", "-shm"):
+        source = legacy + extra
+        if not os.path.exists(source):
+            continue
+        try:
+            os.replace(source, os.path.join(backup_dir, os.path.basename(source)))
+        except OSError as e:
+            logger.warning(f"旧库留档失败({source}): {e}")
+
+
+def migrate_legacy_database(db_folder: str, legacy: str, target: str) -> bool:
+    """把旧库(含 WAL 中已提交事务)迁移到新文件名。返回是否已成功发布新库。
+
+    旧实现直接 ``os.rename`` 主库文件: WAL 模式下异常退出会留下
+    ``luotianyi.db-wal``(其中有已提交事务), 改名后新库读不到它, 最近的会话
+    记录静默丢失。这里改用 SQLite 官方 backup 接口(它读取的是完整逻辑库,
+    自然包含 WAL 中已提交的内容), 校验通过后再原子发布。
+
+    失败时**不新建空库**: 返回 False, 由调用方继续使用旧库文件名, 数据保持可用。
+    """
+    tmp = target + ".migrating"
+    if os.path.isdir(tmp):
+        logger.error(f"数据库迁移失败: 临时路径被目录占用 {tmp}")
+        return False
+    try:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        src = sqlite3.connect(legacy)
+        try:
+            src.execute("PRAGMA busy_timeout=15000")
+            expected = _table_counts(src)
+            dst = sqlite3.connect(tmp)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        _verify_migrated(tmp, expected)
+        _fsync_path(tmp)
+        os.replace(tmp, target)          # 同目录内原子替换
+        _fsync_path(db_folder)
+    except Exception as e:                # noqa: BLE001 - 任何失败都必须回退而不是丢数据
+        logger.error(f"数据库迁移失败({e}); 保留旧库并继续使用 {os.path.basename(legacy)}")
+        if os.path.isfile(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False
+
+    _archive_legacy_files(legacy)
+    return True
+
 
 class DatabaseManager:
     """封装独立 SQLite 的读写。"""
 
     def __init__(self, db_folder: str = "data/database", db_file: str = "mohobot.db"):
-        # 旧库迁移: 早期版本名为 luotianyi.db, 改名后自动迁移
-        legacy = os.path.join(db_folder, "luotianyi.db")
+        # 旧库迁移: 早期版本名为 luotianyi.db, 迁移到新名后继续使用
+        os.makedirs(db_folder, exist_ok=True)
+        legacy = os.path.join(db_folder, LEGACY_DB_FILE)
         target = os.path.join(db_folder, db_file)
-        if db_file != "luotianyi.db" and os.path.exists(legacy) and not os.path.exists(target):
-            try:
-                os.rename(legacy, target)
-                logger.info(f"数据库迁移: luotianyi.db → {db_file}")
-            except OSError as e:
-                logger.warning(f"数据库迁移失败({e}), 将新建 {db_file}")
-        self._engine = sqldb.init_sql_db(db_folder, db_file)
-        logger.info(f"DatabaseManager initialized: {db_folder}/{db_file}")
+        effective_file = db_file
+        if db_file != LEGACY_DB_FILE:
+            if os.path.exists(legacy) and not os.path.exists(target):
+                if migrate_legacy_database(db_folder, legacy, target):
+                    logger.info(f"数据库迁移: {LEGACY_DB_FILE} → {db_file}(含 WAL 已提交内容)")
+                else:
+                    # 迁移未完成时继续用旧库文件: 绝不静默新建空库让用户以为数据丢了。
+                    effective_file = LEGACY_DB_FILE
+            elif os.path.exists(legacy) and os.path.exists(target):
+                logger.info(f"检测到旧库 {LEGACY_DB_FILE}, 但 {db_file} 已存在, 跳过迁移")
+        self._engine = sqldb.init_sql_db(db_folder, effective_file)
+        logger.info(f"DatabaseManager initialized: {db_folder}/{effective_file}")
 
     # ── 用户 ─────────────────────────────────────────────────
 
