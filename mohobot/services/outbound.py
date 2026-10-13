@@ -28,6 +28,21 @@ class ChatAddress:
 
 
 @dataclass
+class DispatchAttempt:
+    """调用方可见的派发标记: worker 真正开始执行 operation 之前置位。
+
+    取消语义依赖它。入队后调用方被取消(超时/父任务取消)时, 必须区分两种状态:
+
+    - **未派发**: 排队中或仍在限速等待 —— 消息还没发出去, worker 应当直接丢弃,
+      否则调用方以为已放弃, 用户却收到一条过时消息;
+    - **已派发**: 已经进入传输层 —— 无法撤回, 归档/回执所有权必须转交后台,
+      不能随调用方一起消失, 否则 history 与实际投递不一致。
+    """
+
+    dispatched: bool = False
+
+
+@dataclass
 class _OutboundItem:
     operation: Callable[[], Awaitable[Any]]
     future: asyncio.Future[Any]
@@ -35,6 +50,7 @@ class _OutboundItem:
     sequence: int
     rate_limited: bool
     label: str
+    attempt: DispatchAttempt | None = None
 
 
 class OutboundScheduler:
@@ -71,6 +87,7 @@ class OutboundScheduler:
         *,
         control: bool = False,
         label: str = "outbound",
+        attempt: DispatchAttempt | None = None,
     ) -> Any:
         if not self._accepting:
             raise OutboundClosedError("outbound scheduler is stopping")
@@ -96,6 +113,7 @@ class OutboundScheduler:
             sequence=next(self._sequence),
             rate_limited=True,
             label=label,
+            attempt=attempt,
         )
         if queue.full():
             # Fail fast instead of holding the caller only to hit the same
@@ -131,10 +149,26 @@ class OutboundScheduler:
                 _, _, item = await queue.get()
                 inflight = item
                 try:
+                    # 调用方可能在入队后放弃(取消/超时): 未派发前不得发送。
+                    if item.future.done():
+                        logger.debug(
+                            "Outbound item abandoned before dispatch: bot={} label={}",
+                            bot_id, item.label,
+                        )
+                        continue
                     if self._interval:
                         delay = self._interval - (time.monotonic() - last_message_at)
                         if delay > 0:
                             await asyncio.sleep(delay)
+                            # 限速等待期间被取消同样不得发送。
+                            if item.future.done():
+                                logger.debug(
+                                    "Outbound item abandoned during rate limit: bot={} label={}",
+                                    bot_id, item.label,
+                                )
+                                continue
+                    if item.attempt is not None:
+                        item.attempt.dispatched = True
                     result = await item.operation()
                     last_message_at = time.monotonic()
                     if not item.future.done():
@@ -198,8 +232,11 @@ class ReplySender:
         operation: Callable[[], Awaitable[Any]],
         *,
         label: str = "message",
+        attempt: DispatchAttempt | None = None,
     ) -> Any:
-        return await self.scheduler.submit(address.bot_id, operation, control=False, label=label)
+        return await self.scheduler.submit(
+            address.bot_id, operation, control=False, label=label, attempt=attempt,
+        )
 
     async def call(
         self,

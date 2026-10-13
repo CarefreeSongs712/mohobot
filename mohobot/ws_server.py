@@ -22,7 +22,7 @@ from mohobot.models.onebot import Event
 from mohobot.models.config import is_external_service_group
 from mohobot.bot_manager import BotManager
 from mohobot.file_store import JSONLWriter
-from mohobot.services.outbound import ChatAddress, OutboundScheduler, ReplySender
+from mohobot.services.outbound import ChatAddress, DispatchAttempt, OutboundScheduler, ReplySender
 from mohobot.services.task_supervisor import TaskSupervisor, TaskSupervisorClosed
 from mohobot.utils.cq_code import extract_plain_text
 
@@ -322,12 +322,29 @@ class WSServer:
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
         future = self._bot_manager.create_response_future(bot_id, echo)
         payload = {"action": action, "params": params, "echo": echo}
+        attempt = DispatchAttempt()
         try:
             result = await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
                 lambda: self._send_guarded(instance, payload),
                 label=action,
+                attempt=attempt,
             )
+        except asyncio.CancelledError:
+            # 调用方被取消(超时/父任务取消)。未派发时排队项会被 worker 丢弃,
+            # 这里清掉追踪即可; 已派发时消息可能已经发出, 归档所有权必须转交
+            # 后台(等 echo 或 8s 兜底) —— 否则 history 与真实投递不一致,
+            # pending/回执 future 也会永久残留。
+            if attempt.dispatched:
+                self._spawn_archive_task(self._archive_sent_message(
+                    bot_id, chat_type, chat_id, action, params, future, echo, source,
+                    owns_response=True,
+                ))
+            else:
+                self._bot_manager.drop_pending_sent(echo)
+                self._bot_manager.remove_response_future(bot_id, echo)
+                future.cancel()
+            raise
         except Exception:
             # Send failed — don't leave the tracked entry dangling
             self._bot_manager.drop_pending_sent(echo)
