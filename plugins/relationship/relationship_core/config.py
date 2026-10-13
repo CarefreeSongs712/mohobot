@@ -20,7 +20,8 @@ class PluginConfig:
 
     def __init__(self, data: dict, *, admins: list[str] | None = None,
                  ws_server=None, data_dir: str = "./data", lock=None):
-        self._data = data or {}
+        # Keep even an empty injected dictionary shared with Plugin.plugin_config.
+        self._data = data if isinstance(data, dict) else {}
         self.ws_server = ws_server
         self._data_dir = data_dir
         # 跨实例共享锁(多个 _ensure_handlers 重建的 cfg 引用同一把锁)
@@ -176,7 +177,12 @@ class PluginConfig:
             return current
 
         try:
-            await json_update(self._config_path(), _merge, default={})
+            persisted = await json_update(self._config_path(), _merge, default={})
+            # Entry hooks rebuild handlers from plugin_config. Publish the disk snapshot
+            # back into that same dictionary so a following request sees new blacklists.
+            self._data.clear()
+            self._data.update(persisted)
+            self._rebuild()
         except Exception as e:
             logger.warning(f"关系插件配置持久化失败: {e}")
 
