@@ -50,16 +50,30 @@ _DROP_SALVAGE_CHARS = 2000
 # 方括号/【】/圆括号家族只认 VOICE 别名(含既有 ts/voice/speech/say)
 _VOICE_ALIAS_ALT = "|".join(sorted(VOICE_TAGS, key=len, reverse=True))
 
-# 标签名后只允许空白分隔、引号包裹的属性, 不把 ASCII 比较式当格式标签。
-# 旧工具产物 <function=search_meme> 单独限定为 DROP 家族, 不扩宽普通语法。
+# 尖括号语法分两层, 兼顾"不误伤 ASCII 比较式"与"不放过内部块":
+#
+# 1. 通用层(_ANGLE_TAG_RE): 属性必须是 name=value 形态(value 可带引号),
+#    且属性名以字母/下划线/冒号开头。于是 `a < b && c > d`、`a < foo bar > c`
+#    这类比较式不会被当成标签剥掉(旧实现允许任意 ASCII 属性段, 会误删)。
+# 2. DROP 层(_ANGLE_DROP_ATTR_RE): 内部块标签必须尽量认全, 否则"开标签认不出、
+#    闭标签被当游离闭标签丢"会让内部内容直接泄漏给用户。所以对 DROP 家族额外
+#    接受裸 token 属性(`<eot 1>`、`<tool_call foo=bar>`)与紧跟其后的
+#    `name=value`(`<function=search_meme>`), 且属性段引号感知 —— 属性值里的
+#    `>`(如 `<think data="a>b">`)不会被误当作标签结尾。
+_ANGLE_ATTR_NAME = r"[a-zA-Z_:][a-zA-Z0-9_.:-]*"
+_ANGLE_ATTR_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'<>]+)"
 _ANGLE_TAG_RE = re.compile(
     r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9_-]{0,18})"
-    r"(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*\s*=\s*"
-    r"(?:\"[\x20-\x21\x23-\x7e]*\"|'[\x20-\x26\x28-\x7e]*'))*\s*/?>"
+    r"(?:\s+" + _ANGLE_ATTR_NAME + r"\s*=\s*" + _ANGLE_ATTR_VALUE + r")*\s*/?>"
 )
-_ANGLE_DROP_ASSIGN_RE = re.compile(
-    r"<\s*(/?)\s*(" + "|".join(sorted(DROP_TAGS, key=len, reverse=True))
-    + r")\s*=\s*[a-zA-Z0-9_.:-]{1,80}\s*>", re.IGNORECASE,
+_ANGLE_DROP_TOKEN = (
+    r"(?:" + _ANGLE_ATTR_NAME + r"\s*=\s*" + _ANGLE_ATTR_VALUE + r"|[^\s\"'<>]+)"
+)
+_ANGLE_DROP_ATTR_RE = re.compile(
+    r"<\s*(/?)\s*(" + "|".join(sorted(DROP_TAGS, key=len, reverse=True)) + r")"
+    r"(?=[\s/>=])(?:\s*=\s*" + _ANGLE_ATTR_VALUE + r")?"
+    r"(?:\s+" + _ANGLE_DROP_TOKEN + r")*\s*/?>",
+    re.IGNORECASE,
 )
 _BR_VOICE_RE = re.compile(
     r"[\[【]\s*(/?)\s*(" + _VOICE_ALIAS_ALT + r")\s*[\]】]",
@@ -99,8 +113,8 @@ def _partial_tail_hold(buf: str, mode: str | None) -> int | None:
         ch = buf[i]
         if ch == "<":
             tail = buf[i:]
-            if ">" in tail[1:]:
-                return None  # 已有闭定界符却未成完整标签: 不是标签, 放行
+            if _has_unquoted_angle_close(tail):
+                return None  # 引号外已有闭定界符却未成完整标签: 不是标签, 放行
             if len(tail) > _HOLD_CAP_ANGLE:
                 return None
             # 名字可选: 裸 "<" 与 "</" 都可能补全成标签, 也要扣留
@@ -123,6 +137,25 @@ def _partial_tail_hold(buf: str, mode: str | None) -> int | None:
                 return i  # 仅起始符: 仍可能成为 [tts / （tts
             return None
     return None
+
+
+def _has_unquoted_angle_close(tail: str) -> bool:
+    """tail 中是否存在「引号外」的 ``>``。
+
+    属性值里允许出现 ``>``(如 ``<think data="a>b">``): 若把引号内的 ``>``
+    当作标签已闭合, 流式分片一旦落在该位置之后就会把未完成的标签当正文吐出,
+    造成"整段正常、分片泄漏"的不一致。
+    """
+    quote = ""
+    for ch in tail:
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == ">":
+            return True
+    return False
 
 
 def _pick_tts_text(spans: list[str]) -> str:
@@ -229,7 +262,7 @@ class ReplyArtifactFilter:
         同起点时尖括号优先(形态更明确)。
         """
         best = None  # (start, kind, m)
-        for regex, kind in ((_ANGLE_TAG_RE, "angle"), (_ANGLE_DROP_ASSIGN_RE, "angle"),
+        for regex, kind in ((_ANGLE_TAG_RE, "angle"), (_ANGLE_DROP_ATTR_RE, "angle"),
                             (_BR_VOICE_RE, "br"), (_PAR_VOICE_RE, "par")):
             m = regex.search(self._buf, start)
             if m and (best is None or m.start() < best[0]):
@@ -336,8 +369,15 @@ class ReplyArtifactFilter:
             "tool_call", "function", "parameter", "arg_key", "arg_value",
             "description", "search_meme", "steal_meme", "send_meme",
         }:
-            # 保留既有超长未闭合工具块救援策略; 救援内容不加入朗读。
+            # 保留既有超长未闭合工具块救援策略: 内容按正文放行, 不吞掉整条回复。
+            # 但畸形工具块的内容不得进入朗读 —— 否则流式分片大小会改变朗读文本
+            # (实测 chunk=1 时约 500 字工具内容会被读出来)。因此这里结束当前
+            # voice 片段, 并让后续正文留在正文态, 不再累积到朗读。
             salvage, self._buf = self._buf, ""
+            if self._drop_return_mode == "voice":
+                self._spans.append("".join(self._cur_span))
+                self._cur_span = []
+            self._drop_return_mode = None
             self._leave_drop()
             out.append(salvage)
             return True

@@ -76,6 +76,77 @@ def test_comparisons_and_non_attribute_ascii_stay_verbatim():
         _assert_all_splits(raw, (body, body))
 
 
+def test_drop_tags_with_unquoted_attributes_still_drop_content():
+    """DROP 标签带空白分隔/无引号属性时仍必须整块丢弃。
+
+    收紧通用标签语法后, 这类开标签一度认不出, 而闭标签仍被当游离闭标签剥掉,
+    内部推理/工具内容会直接泄漏到显示文本(以及 voice 内的朗读文本)。
+    """
+    cases = [
+        ("<think data=x>INTERNAL</think>visible", "visible"),
+        ("<tool_call foo=bar>SECRET</tool_call>visible", "visible"),
+        ("<send_meme emoji_id=3></send_meme>哦", "哦"),
+        ("<function=search meme>SECRET</function>visible", "visible"),
+        ("<eot 1>SECRET</eot>tail", "tail"),
+        ("<reasoning level=2>THOUGHTS</reasoning>正文", "正文"),
+        ("<parameter name=query>SELECT</parameter>正文", "正文"),
+    ]
+    for raw, expected in cases:
+        _assert_all_splits(raw, (expected, ""))
+    # voice 内同样不得泄漏: 显示与朗读都只能看到标注外的正文。
+    for raw, body in (
+        ("<tts>前缀<think data=x>SECRET</think>后缀</tts>", "前缀后缀"),
+        ("<tts>前缀<tool_call foo=bar>SECRET</tool_call>后缀</tts>", "前缀后缀"),
+    ):
+        _assert_all_splits(raw, (body, body))
+
+
+def test_quoted_attribute_containing_angle_bracket_is_split_invariant():
+    """属性值里的 ``>`` 不是标签结尾: 任意流式切分点都不得泄漏 DROP 内容。"""
+    for raw, expected in (
+        ('<think data="a>b">SECRET</think>visible', "visible"),
+        ("<think data='a>b'>SECRET</think>visible", "visible"),
+        ('<tool_call arg="x>y">SECRET</tool_call>visible', "visible"),
+    ):
+        _assert_all_splits(raw, (expected, ""))
+
+
+def test_unquoted_attribute_format_tag_is_still_stripped():
+    """FORMAT 标签的无引号属性仍应剥壳保正文(此前退化为原样显示)。
+
+    与比较式防护的边界: 属性段必须含 ``=`` 才按属性处理, 因此
+    ``a < b && c > d`` / ``a < foo bar > c`` 仍原样透传。
+    """
+    for raw, expected in (
+        ("<b style=color:red>x</b>", "x"),
+        ("<font color=red>红</font>", "红"),
+        ('<p style="color:#66CCFF"></p>欸，', "欸，"),
+        ("<span data-x=1>内容</span>", "内容"),
+    ):
+        _assert_all_splits(raw, (expected, ""))
+    _assert_all_splits("<tts>A<font color=red>B</font>C</tts>", ("ABC", "ABC"))
+
+
+def test_closing_drop_tag_with_attribute_keeps_following_text():
+    """带属性的 DROP 闭标签要能闭合, 不能把后面的正文一起吞掉。"""
+    _assert_all_splits("<think>x</think data=x>tail", ("tail", ""))
+    _assert_all_splits("<tts>前缀<think>x</think data=x>后缀</tts>", ("前缀后缀", "前缀后缀"))
+
+
+def test_malformed_tool_salvage_never_enters_speech_and_is_split_invariant():
+    """超长畸形工具块按正文放行, 但内容不得进入朗读, 且朗读结果与分片无关。"""
+    body = "x" * 2500
+    raw = f"<tts>前缀<tool_call>{body}"
+    expected_display = "前缀" + body
+    assert strip_reply_artifacts(raw) == (expected_display, "前缀")
+    # 生产按 LLM delta 调 feed(): 不同分片大小必须得到同一结果。
+    for size in (1, 13, 500, 2501):
+        parser = ReplyArtifactFilter()
+        display = "".join(parser.feed(raw[i:i + size]) for i in range(0, len(raw), size))
+        rest, speech = parser.finish()
+        assert (display + rest, speech) == (expected_display, "前缀"), size
+
+
 def test_quoted_attributes_and_legacy_drop_syntax_are_compatible():
     """带引号属性仍按标签处理; 旧工具产物 <function=name> 仍属于 DROP。"""
     _assert_all_splits('<tts><b style="color:red">A</b><think data="x">secret</think>B</tts>', ("AB", "AB"))
@@ -90,7 +161,6 @@ def main():
         if name.startswith("test_") and callable(func):
             func()
     print("\nALL REPLY FILTER NESTING TESTS PASSED")
-
 
 if __name__ == "__main__":
     main()
