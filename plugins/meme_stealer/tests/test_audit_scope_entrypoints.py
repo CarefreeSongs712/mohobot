@@ -71,21 +71,29 @@ async def test_real_plugin_list_keeps_local_image_and_counts_inside_scope(tmp_pa
                                      (333, "bot_001", {"public", "private-A"}),
                                      (0, "bot_001", {"public"})):
             original, _ = _event(group=group, bot=bot)
+            renders_before = len(rendered)
             await plugin.on_message(bot, original, {})
+            # 必须断言本次确实渲染过: 否则可见集合为空时会提前 yield "暂无数据",
+            # rendered[-1] 复检上一次的结果, 断言就失去鉴别力。
+            assert len(rendered) == renders_before + 1, (group, bot, len(rendered))
             assert {i["desc"] for i in rendered[-1]["items"]} == expected
             assert rendered[-1]["total_all"] == len(expected)
             assert rendered[-1]["total_filtered"] == len(expected)
         # Authorized numbering stays compatible with the global numeric admin actions,
         # but admin listing in an ordinary chat still does not reveal foreign images.
         original, _ = _event("/meme list", group=444, user=7777)
+        renders_before = len(rendered)
         await plugin.on_message("bot_001", original, {})
+        assert len(rendered) == renders_before + 1
         assert [i["desc"] for i in rendered[-1]["items"]] == ["private-B", "public"]
         assert [i["index"] for i in rendered[-1]["items"]] == [2, 3]
         index = app.db_service.get_index_cache_readonly()
         assert app.image_commands._find_target_image(index, "2")["name"] == "private-B.png"
         assert app.image_commands._find_target_image(index, "3")["name"] == "public.png"
         original, _ = _event("/meme list uncategorized 1 99", group=444)
+        renders_before = len(rendered)
         await plugin.on_message("bot_001", original, {})
+        assert len(rendered) == renders_before + 1
         assert [i["desc"] for i in rendered[-1]["items"]] == ["public"]
         assert rendered[-1]["total_filtered"] == 1 and rendered[-1]["total_all"] == 2
         app.image_render_service = None
