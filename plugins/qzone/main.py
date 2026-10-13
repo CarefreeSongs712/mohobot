@@ -627,6 +627,9 @@ class Plugin:
             if await self._post_limit_reached(store, post.uin, post.tid):
                 continue
             for idx, comment in enumerate(post.comments):
+                # 每次生成/发送前检查累计额度；达到上限的剩余评论保留未读。
+                if await self._post_limit_reached(store, post.uin, post.tid):
+                    break
                 if int(comment.uin) == int(self_uin):
                     continue
                 blocked, why = await self._actor_blocked(comment.uin)
