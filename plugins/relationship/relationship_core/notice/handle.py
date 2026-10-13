@@ -38,11 +38,13 @@ class NoticeHandle:
         if result.admin_reply:
             await self._send_admin(bot_id, result.admin_reply)
 
-        # 拉黑群聊/用户
+        # 拉黑群聊/用户(号码规范化与合法性校验统一由 PluginConfig 处理:
+        # "  222  " / 全角数字 / 前导零在此处不再被 isdigit 误拒)
         if result.black_group:
-            self.cfg.add_black_group(notice.group_id)
+            await self.cfg.add_black_group(notice.group_id)
         if result.black_user:
-            self.cfg.add_block_user(notice.user_id)
+            # kick_me 的 user_id 是被踢的 bot；拉黑的是踢人操作者。
+            await self.cfg.add_block_user(notice.operator_id)
 
         # 退群
         if result.leave_group:
