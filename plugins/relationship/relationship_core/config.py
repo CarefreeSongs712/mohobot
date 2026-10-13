@@ -266,10 +266,6 @@ class RequestConfig:
             if normalized and normalized not in ids:
                 ids.append(normalized)
         return ids
-        self.auto_reject_group = bool(data.get("auto_reject_group", False))
-        self.auto_agree_group = bool(data.get("auto_agree_group", False))
-        self.auto_reject_friend = bool(data.get("auto_reject_friend", False))
-        self.auto_agree_friend = bool(data.get("auto_agree_friend", False))
 
 
 class NoticeConfig:
