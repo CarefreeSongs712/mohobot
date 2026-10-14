@@ -122,15 +122,20 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
 
 `.github/workflows/ci.yml` 在 PR、`push main` 和手工触发时执行。只读仓库权限，不使用生产密钥，同一分支的新运行会取消旧运行。
 
-| job | 范围 | 状态 |
+| job | 范围 | 是否阻塞 PR |
 |---|---|---|
-| Python 3.12 | compileall、逐用例 pytest、根 runner、独立并发专项 | 阻塞 |
-| Syntax and control-flow checks | 全仓 Ruff `E9,F63,F7` | 阻塞 |
-| Meme plugin regression | 插件自己的 pytest 和现有 lint 规则 | 阻塞 |
-| Python 3.10 | 验证 README 声明的最低版本 | 初期非阻塞，待 GitHub runner 验证稳定 |
-| Full lint report | Ruff `E4,E7,E9,F`（忽略 `E402`），上传告警 artifact | 非阻塞，明确保留历史债务 |
+| Tests (Python 3.12) | compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
+| Syntax and control-flow checks | 全仓 Ruff `E9,F63,F7` | 是 |
+| Meme plugin regression | 插件自己的 pytest 和现有 lint 规则 | 是 |
+| Ruff debt report | Ruff `E4,E7,E9,F`（忽略 `E402`）的既有告警，写入 step summary 并上传 artifact | 否（job 保持绿色，见下） |
 
-完整 Ruff 报告仍含历史 `F821/F811` 等告警，不代表全仓 lint 已通过。清理后再将规则扩展为阻塞检查，不能用隐藏告警的方式变绿。仓库管理员还需设置分支保护并选择稳定检查项，workflow 本身不会修改保护设置。
+三个阻塞 job 是 PR 的合并信号；它们失败就是真的失败。所有测试进程都带 `timeout` 与 `faulthandler_timeout`，卡住的用例会先打出线程栈再由超时终止（退出码 124），不会静默挂到 job 超时。
+
+`Ruff debt report` 是**信息性**的：仓库仍有既存告警（当前 159 条，全部来自本 PR 之前的代码），ruff 在这些告警上必然返回非零。若把它当门禁，每个 PR 都会显示一个红色检查，却无法区分"新引入的问题"和"历史债务"。因此它只报告、不判红，条目数写进 step summary，完整清单在该运行的 `ruff-debt-report` artifact 里。清理完债务后再把它升级为阻塞检查——不能靠隐藏告警来变绿。
+
+`.github/workflows/compat.yml` 单独跟踪 Python 兼容性（手工触发、每周日、`push main`），**刻意不挂在 PR 上**：Python 3.10 目前跑到约 170 个用例后整体停滞（跨用例累积，单文件单独跑都很快，例如 `tests/test_login_guard.py` 5.4s、`tests/test_image_tool_fixes.py` 7s），结论是 3.10 兼容性**尚未验证**。把它放在 PR 门禁上只会让每个 PR 变红，却无助于定位；放在这里既能持续采集信号（带线程栈与日志 artifact），又不干扰合并判断。
+
+仓库管理员还需设置分支保护并选择上面三个阻塞检查，workflow 本身不会修改保护设置。
 
 meme 插件应在独立目录执行，避免与根测试命名空间混用：
 
