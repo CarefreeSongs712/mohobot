@@ -261,6 +261,47 @@ async def test_proactive_chat_never_sends_llm_failure_text():
         assert entry["next_trigger_time"] == now[0] + 60, "失败后应正常重排"
 
 
+async def test_stream_diagnostic_preserves_partial_body_order():
+    """正文后紧跟半截标签再失败时: 正文、标签尾部、诊断必须保持流式顺序。
+
+    复核曾发现旧实现先 finish() 发送半截标签尾部, 再发送尚在 buffer 的正文,
+    实际顺序从 ``正文<te[diag]`` 变成 ``<te正文[diag]``。只替换 LLM 流和发送边界,
+    仍走真实 MessageHandler._stream_llm_reply / ReplyArtifactFilter。
+    """
+    from mohobot.message_handler import MessageHandler
+
+    handler = object.__new__(MessageHandler)
+    handler._ws = None
+    handler._segment_reply = True
+    handler._stream = True
+    handler._reply_quote = False
+    handler._seg_delay_min = 0
+    handler._seg_delay_max = 0
+    handler._seg_min_len = 12
+    handler._seg_max_len = 60
+    sent = []
+
+    class _Llm:
+        async def chat_stream(self, **kwargs):
+            yield "正文", False
+            yield "<te", False
+            yield LLMDiagnostic("[diag]"), True
+
+    async def send_segment(bot_id, event, text, first_sent, *, quote=True):
+        sent.append(text)
+        return True
+
+    handler._llm = _Llm()
+    handler._send_segment = send_segment
+    handler._submit_tts = lambda *args: None
+
+    result = await handler._stream_llm_reply("bot", None, [], {})
+
+    assert sent == ["正文", "<te", "[diag]"], sent
+    assert isinstance(result, LLMDiagnostic)
+    assert result == "[diag]"
+
+
 def test_diagnostic_marker_keeps_str_compatibility():
     """标记类型必须保持 str 兼容, 旧调用方不受影响; 字符串运算后标记丢失(调用方须先判断)。"""
     d = LLMDiagnostic("[LLM 调用失败: x]")

@@ -1287,8 +1287,12 @@ class MessageHandler:
         ):
             if isinstance(chunk, LLMDiagnostic):
                 # 诊断不进回复过滤器(过滤后会退化成普通 str 而丢失标记), 单独记下;
-                # 已流出的正文照常收尾, 诊断在最后单独发出。
+                # 先冲刷此前缓冲的正文, 诊断在最后单独发出。
                 diagnostic = chunk
+                if buffer.strip():
+                    segments_sent += 1
+                    first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                    buffer = ""
                 continue
             if chunk:
                 # 标签/产物剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
@@ -1318,8 +1322,7 @@ class MessageHandler:
             first_sent = await self._send_segment(bot_id, event, rest, first_sent)
         if diagnostic is not None:
             # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
-            if buffer.strip():
-                first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+            # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
             await self._send_segment(bot_id, event, diagnostic, first_sent)
             logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
             return diagnostic
