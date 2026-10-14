@@ -320,7 +320,10 @@ class LLMService:
             choice = response2.choices[0] if response2.choices else None
             if choice is None:
                 return "", tool_results
-            reply_text = choice.message.content or ""
+            # 中间跟进可能同时带可见文本与下一轮 tool_calls。文本已经是模型输出的一部分,
+            # 不能因继续工具循环而被下一轮 reply_text 覆盖; chat_stream 也会按同样顺序
+            # 把每个文本 chunk 交给调用方。
+            reply_text += choice.message.content or ""
             # 强制文本轮不再接受工具调用: 即使网关仍返回 tool_calls 也到此为止, 保证有界。
             tool_calls = None if final_round else choice.message.tool_calls
 

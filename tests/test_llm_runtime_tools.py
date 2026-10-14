@@ -389,7 +389,7 @@ async def test_inflight_chat_and_tool_followup_keep_old_client_open():
                 entered.set()
                 await release.wait()
                 old.close.assert_not_awaited()
-                return _response(tool_calls=[tool_call])
+                return _response(content=None, tool_calls=[tool_call])
             return _response("old followup finished")
 
         old.chat.completions.create.side_effect = complete

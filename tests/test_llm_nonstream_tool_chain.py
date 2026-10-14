@@ -77,6 +77,25 @@ def _service(responses, tool_outputs):
     return svc, completions, executed
 
 
+async def test_nonstream_mixed_text_and_tool_calls_is_preserved():
+    """中间跟进同时带正文和 tool_calls: 正文不能被后续最终文本覆盖。"""
+    svc, completions, executed = _service(
+        [
+            _response(tool_calls=[_tool_call("c1")]),
+            _response(content="我先查一下。", tool_calls=[_tool_call("c2")]),
+            _response(content="结果是晴天。"),
+        ],
+        ['{"query": "天气"}', '{"weather": "sunny"}'],
+    )
+    reply, tool_results = await svc.chat("bot_001", None, [], {})
+
+    assert reply == "我先查一下。结果是晴天。", reply
+    assert [item["tool_call_id"] for item in tool_results] == ["c1", "c2"]
+    assert [name for name, _ in executed] == ["song_search", "song_search"]
+    assert len(completions.calls) == 3
+    await svc.close()
+
+
 async def test_nonstream_chained_tool_calls_reach_final_text():
     """跟进响应再次要求调用工具 → 继续执行 → 拿到最终文本。"""
     svc, completions, executed = _service(
