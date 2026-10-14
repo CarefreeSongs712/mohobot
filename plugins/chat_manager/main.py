@@ -164,7 +164,7 @@ class Plugin:
         if failed and not ok:
             return f"❌ 转发失败(共 {failed} 批), 请检查协议端连接。"
         if failed:
-            return f"⚠️ 已转发 {len(nodes)} 条, 其中 {failed} 批失败(成功 {ok} 批)。"
+            return f"⚠️ 已转发 {len(messages)} 条, 其中 {failed} 批失败(成功 {ok} 批)。"
         return None
 
     # ── /发送消息 ─────────────────────────────────────────────
