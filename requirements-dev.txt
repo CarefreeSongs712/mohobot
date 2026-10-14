@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Keep the CI test toolchain reproducible on Python 3.10 and 3.12.
+pytest==8.4.2
+pytest-asyncio==1.4.0
+ruff==0.17.0
