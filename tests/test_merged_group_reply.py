@@ -1,13 +1,12 @@
 """群聊多 bot 合并回复测试:
 
 1. 触发匹配: 精确/带参数命中, 无关文本不命中
-2. 多 bot 群: 非选中 bot 静默跳过; 被选中的 bot 收集全部 bot 回复并发合并转发
+2. 多 bot 群: 非选中 bot 静默跳过; 被选中的 bot 收集有实际回复的 bot 并发合并转发
 3. 节点署名: user_id/nickname 为各 bot 自己, 顺序按 bot_id
 4. 单 bot 群 / 未命中: 走原流程(返回 False)
 5. 合并转发发送失败: 退化为发送者自己的普通回复
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -143,7 +142,7 @@ async def test_merged_reply_multi_bot():
     await run()
 
 
-async def test_merged_reply_failed_bot_placeholder():
+async def test_merged_reply_omits_failed_bot():
     bots = {
         "bot_001": _FakeInstance("bot_001", 111, "大乔"),
         "bot_002": _FakeInstance("bot_002", 222, "小乔"),
@@ -157,8 +156,10 @@ async def test_merged_reply_failed_bot_placeholder():
         event = _make_event(text="/好感度")
         assert await h._try_merged_group_reply("bot_001", event, {}) is True
         _, _, nodes = ws.forwards[0]
+        # 静默失败的 bot 不生成节点; 只转发实际有回复的 bot。
+        assert len(nodes) == 1
         assert nodes[0]["data"]["content"][0]["data"]["text"] == "来自 bot_001 的回复"
-        assert nodes[1]["data"]["content"][0]["data"]["text"] == "(无响应)"
+        assert plugins.called == ["bot_001", "bot_002"]
 
     await run()
 
