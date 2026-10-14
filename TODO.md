@@ -24,7 +24,7 @@
 | #21 | chat-manager 部分批次失败时修复 `nodes` NameError | 叠放在 #19 上；独立审查通过，#19 合入后 retarget main |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
-| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 独立审查通过；依赖 #22/#23，真实 Actions 的 3.12/语法/插件检查已成功，3.10 仍在跑 |
+| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 独立审查通过；依赖 #22/#23，真实 Actions 的 3.12/语法/插件检查已成功；3.10 出现测试挂起，最新 workflow 已加进程级超时与栈诊断 |
 
 维护者已表态暂缓：
 
@@ -68,7 +68,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 选型依据：
 
 - **Python 3.12**：生产实际运行 3.12.13（README 部署章节）；
-- **3.10**：README 声明支持 3.10+，按常见 3.11+ 特性（`TaskGroup`、`tomllib`、`ExceptionGroup`、`except*`、`typing.Self` 等）检索没有命中，但从未在 3.10 上实际跑过，所以先作非阻塞 job；
+- **3.10**：README 声明支持 3.10+；实际 Actions 中依赖安装与 compileall 成功，但 pytest 约 24% 后挂起。尚未确认最低版本兼容性，保持实验性非阻塞，并用五分钟进程超时与线程栈诊断定位；
 - **两个 runner 都跑**：根 runner 是项目文档里的入口，但它按**文件**计数、文件内首个失败即中止、并且会漏掉"返回协程"的用例；pytest 能逐用例报告。等 pytest 稳定后可以只保留 pytest。
 
 当前基线耗时（本地）：根 runner 约 70s，pytest 约 86s，meme 插件约 8s。
