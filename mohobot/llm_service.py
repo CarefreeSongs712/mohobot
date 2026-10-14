@@ -27,6 +27,7 @@ from mohobot.models.onebot import (
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
 from mohobot.services.usage import UsageRecorder
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
 
 
 class LLMService:
@@ -213,7 +214,7 @@ class LLMService:
         # Check if LLM is available
         if not self._available or self._chat_client is None:
             logger.warning("LLM not configured — cannot process message")
-            return "LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", None
+            return LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), None
 
         # Determine which model and client to use
         model = self._cfg.llm.chat_model
@@ -245,7 +246,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
-            return f"[LLM 调用失败: {e}]", None
+            return LLMDiagnostic(f"[LLM 调用失败: {e}]"), None
 
         await self._record_usage(
             model, getattr(response, "usage", None), bot_id, event, module="chat"
@@ -304,7 +305,7 @@ class LLMService:
                 reply_text = (choice2.message.content or "") if choice2 else ""
             except Exception as e:
                 logger.error(f"LLM API call failed (after tools): {e}")
-                reply_text = f"[LLM 调用失败: {e}]"
+                reply_text = LLMDiagnostic(f"[LLM 调用失败: {e}]")
 
         return reply_text, tool_results
 
@@ -323,7 +324,7 @@ class LLMService:
         The caller should send individual chunks as they arrive.
         """
         if not self._available or self._chat_client is None:
-            yield ("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", True)
+            yield (LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), True)
             return
 
         model = self._cfg.llm.chat_model
@@ -361,7 +362,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM stream call failed: {e}")
-            yield (f"[LLM 调用失败: {e}]", True)
+            yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
             return
 
         full_content = ""
@@ -532,11 +533,11 @@ class LLMService:
                         return
                 except Exception as e:
                     logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
-                yield ("[工具调用完成，但模型未返回文本]", True)
+                yield (LLMDiagnostic("[工具调用完成，但模型未返回文本]"), True)
                 return
             except Exception as e:
                 logger.error(f"LLM stream call failed (after tools): {e}")
-                yield (f"[LLM 调用失败: {e}]", True)
+                yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
                 return
 
         # Empty stream guard: some gateways return 0 chunks for unsupported
@@ -546,7 +547,7 @@ class LLMService:
                 f"LLM stream returned NO data (model={model}, max_tokens={max_tokens}) — "
                 "gateway may not support this combo"
             )
-            yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
+            yield (LLMDiagnostic("[模型未返回内容——请检查 max_tokens 或模型配置]"), True)
             return
 
         yield ("", True)  # Signal completion with no extra text
