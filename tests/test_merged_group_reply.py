@@ -126,7 +126,7 @@ async def test_merged_reply_multi_bot():
         # 非选中 bot: 静默跳过(返回 True, 不发送任何东西)
         event = _make_event()
         assert await h._try_merged_group_reply("bot_002", event, {}) is True
-        assert ws.forwards == [] and plugins.called == []
+        assert ws.forwards == [] and ws.replies == [] and plugins.called == []
 
         # 选中 bot: 收集全部 bot 回复, 发合并转发
         assert await h._try_merged_group_reply("bot_001", event, {}) is True
