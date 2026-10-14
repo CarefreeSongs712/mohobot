@@ -45,11 +45,11 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q main.py mohobot plugins review scripts tests
       - name: Run individual test cases
-        run: python -m pytest -q tests --ignore=tests/test_concurrency.py
+        run: timeout --kill-after=30s 5m python -m pytest -q -o faulthandler_timeout=120 tests --ignore=tests/test_concurrency.py
       - name: Run legacy regression runner
-        run: python tests/_run_all.py
+        run: timeout --kill-after=30s 5m python tests/_run_all.py
       - name: Run concurrency regression
-        run: python tests/test_concurrency.py
+        run: timeout --kill-after=30s 3m python tests/test_concurrency.py
 
   syntax:
     name: Syntax and control-flow checks
