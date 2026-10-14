@@ -24,7 +24,7 @@
 | #21 | chat-manager 部分批次失败时修复 `nodes` NameError | 叠放在 #19 上；独立审查通过，#19 合入后 retarget main |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
-| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 独立审查通过；依赖 #22/#23，真实 Actions 的 3.12/语法/插件检查已成功；3.10 出现测试挂起，最新 workflow 已加进程级超时与栈诊断 |
+| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
 
 维护者已表态暂缓：
 
@@ -36,7 +36,7 @@
 **上述 main 基线没有项目 CI。** 没有 `.github/workflows/`，也没有 pytest / ruff 配置或 `pyproject.toml`。`main` 未设分支保护。
 （CI PR 之前的唯一 Actions 记录是 GitHub 托管的 Copilot PR 审查，属于平台功能。）
 
-**当前 main 仍未接入 CI**，但两个测试前置 PR 已验证可组合变绿：PR #22 修复 qzone async 测试，PR #23 修复 #10 过时断言；组合基线 pytest `594 passed`、根 runner `66 passed, 0 failed`。CI workflow 已在 PR #24，真实 Actions 已确认 Python 3.12、语法检查和 meme 插件 job 成功；完整 lint 报告因历史债务失败，属非阻塞。
+**当前 main 仍未接入 CI**，但两个测试前置 PR 已验证可组合变绿：PR #22 修复 qzone async 测试，PR #23 修复 #10 过时断言；组合基线 pytest `594 passed`、根 runner `66 passed, 0 failed`。CI workflow 已在 PR #24，真实 Actions 已**全绿**：3.12 测试、语法检查、meme 插件、Ruff 债务报告（信息性）四项均成功。
 
 ### 2.1 已完成/待维护者合入的前置项
 
@@ -51,7 +51,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 
   改成 `async def` 即可。验证：pytest 下 4 个通过，且根 runner 日志中不再出现这 4 条 never-awaited。
 - [x] **根目录开发依赖清单**：PR #24 新增根 `requirements-dev.txt`，固定 pytest / pytest-asyncio / ruff；全新虚拟环境安装后 `pip check` 无冲突。
-- [ ] **清理剩余静态告警**（见第 3 节）：`F821` 未定义名 25 处、`F811` 重定义 1 处。CI 初期只阻塞 `E9,F63,F7`，完整 `E4,E7,E9,F` 作为非阻塞 artifact，避免把已知债务伪装成绿色。
+- [ ] **清理剩余静态告警**：当前 159 条（`F401` 82、`F821` 25、`F841` 20、`F541` 12、`E741` 8 等），全部来自既有代码。CI 只阻塞 `E9,F63,F7`；完整 `E4,E7,E9,F` 由信息性 job 报告（计数进 step summary + artifact），避免把已知债务显示成 PR 的失败，也避免隐藏告警。
 
 ### 2.2 workflow 设计（PR #24 已实现，待合入）
 
@@ -62,13 +62,13 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | `tests` (Python 3.12) | 开发依赖安装、compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
 | `meme-plugin` | 在 `plugins/meme_stealer/` 下按其 `CLAUDE.md` 跑 `pytest tests` 与 `ruff check` | 是 |
 | `syntax` | Ruff `E9,F63,F7`：阻塞语法和控制流错误 | 是 |
-| `lint-report` | 完整 `E4,E7,E9,F` 告警 artifact | 否（已知历史债务） |
-| `tests` (Python 3.10) | 同 3.12 测试 job，实验性矩阵 | 否（先观察） |
+| `Ruff debt report` | 既有 `E4,E7,E9,F` 告警：计数进 step summary + 完整 artifact；job 保持绿色 | 否（信息性，不隐藏告警） |
+| `compat.yml` (Python 3.10) | 手工触发 / 每周日 / `push main`，带线程栈与日志 artifact | 否（刻意不挂 PR） |
 
 选型依据：
 
 - **Python 3.12**：生产实际运行 3.12.13（README 部署章节）；
-- **3.10**：README 声明支持 3.10+；实际 Actions 中依赖安装与 compileall 成功，但 pytest 约 24% 后挂起。尚未确认最低版本兼容性，保持实验性非阻塞，并用五分钟进程超时与线程栈诊断定位；
+- **3.10**：README 声明支持 3.10+，但兼容性**未验证**——套件会挂死，已定位到具体用例（见第 3 节 P2），放在 PR 门禁上只会让每个 PR 变红，因此移到独立 `compat.yml`（手工触发 / 每周日 / `push main`），保留线程栈与日志 artifact 继续采样；
 - **两个 runner 都跑**：根 runner 是项目文档里的入口，但它按**文件**计数、文件内首个失败即中止、并且会漏掉"返回协程"的用例；pytest 能逐用例报告。等 pytest 稳定后可以只保留 pytest。
 
 当前基线耗时（本地）：根 runner 约 70s，pytest 约 86s，meme 插件约 8s。
@@ -79,10 +79,11 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 - PR #24 已加 `pytest.ini` 统一 async 模式；后续可统一 ruff 配置，清理告警后再收紧 blocking rules；
 - `main` 分支保护：要求 CI 通过才能合并。
 
-## 3. 已确认的缺陷（静态检查发现，未开 Issue）
+## 3. 已确认的缺陷
 
 | 级别 | 位置 | 问题 | 证据 |
 |---|---|---|---|
+| **P2** | `mohobot/services/outbound.py:132`（`submit` 的 `return await future`） | Python 3.10 上，已派发后取消调用方，取消**不会**让 `submit()` 的 future 结束，调用方永久停在 `await`；3.12 正常。生产跑 3.12 故不受影响，但 README 声明的 3.10+ 属未验证 | 3.10 单跑 `tests/test_outbound_cancellation.py` 即挂死（20s 触发 faulthandler），同文件 3.12 **1.8s 通过**；任务栈转储：`main → await running`、`submit → outbound.py:132`、`_worker → outbound.py:172 await item.operation()` |
 | **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #21 已修复并独立审查通过，待 #19 后合入；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
