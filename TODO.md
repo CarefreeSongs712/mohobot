@@ -1,9 +1,9 @@
 # TODO
 
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
-完成后直接删掉该项（历史留在 PR 里），不要只打勾。
+实现但尚未合入时保留条目并注明 PR；维护者合入后删除已完成条目，历史留在 PR 中。
 
-> 事实基线：2026-10-14，`main` = `b4548cd`。下文的测试/静态检查数字都是在这个提交上实测的。
+> 原始事实基线：2026-10-14，`main` = `b4548cd`。历史静态检查数字基于此提交；PR #22–#24 的组合测试/CI 结果另列，不与 main 基线混用。
 
 ## 工作约定
 
@@ -18,8 +18,13 @@
 | PR | 内容 | 备注 |
 |---|---|---|
 | #17 | 删除 `RequestConfig._clean()` 后残留的 4 行不可达代码 | 纯删除；修复 ruff `F821` |
-| #18 | #4 P1：LLM 诊断文案不再写入上下文 / 数据库 / 情感分析 | — |
-| #19 | #4 P2：非流式模式支持链式多轮工具调用 | **与 #18 在 `llm_service.py` 文本冲突**，后合并的一方需 rebase：把循环内"跟进失败"的返回值包成 `LLMDiagnostic(...)` |
+| #18 | #4 P1：LLM 诊断文案不再写入上下文 / 数据库 / 情感分析 | 独立复审通过，流式诊断前正文顺序缺陷已修复 |
+| #19 | #4 P2：非流式模式支持链式多轮工具调用 | 独立复审通过；与 #18 在 `llm_service.py` 有文本冲突，后合并的一方需 rebase |
+| #20 | 本 TODO 清单与 CI 接入计划 | 按已验证测试和 GitHub PR 状态更新，待维护者审查 |
+| #21 | chat-manager 部分批次失败时修复 `nodes` NameError | 叠放在 #19 上；独立审查通过，#19 合入后 retarget main |
+| #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
+| #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
+| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 独立审查通过；依赖 #22/#23，真实 Actions 的 3.12/语法/插件检查已成功，3.10 仍在跑 |
 
 维护者已表态暂缓：
 
@@ -28,35 +33,37 @@
 
 ## 2. 接入 CI
 
-**现状：项目没有 CI。** 没有 `.github/workflows/`，也没有 pytest / ruff 配置或 `pyproject.toml`。`main` 未设分支保护。
-（Actions 页面能看到的唯一记录是 GitHub 托管的 Copilot PR 审查，属于平台功能，不是项目 CI。）
+**上述 main 基线没有项目 CI。** 没有 `.github/workflows/`，也没有 pytest / ruff 配置或 `pyproject.toml`。`main` 未设分支保护。
+（CI PR 之前的唯一 Actions 记录是 GitHub 托管的 Copilot PR 审查，属于平台功能。）
 
-**今天直接打开 CI 会是红的**，所以要先完成下面的前置项，再加 workflow。
+**当前 main 仍未接入 CI**，但两个测试前置 PR 已验证可组合变绿：PR #22 修复 qzone async 测试，PR #23 修复 #10 过时断言；组合基线 pytest `594 passed`、根 runner `66 passed, 0 failed`。CI workflow 已在 PR #24，真实 Actions 已确认 Python 3.12、语法检查和 meme 插件 job 成功；完整 lint 报告因历史债务失败，属非阻塞。
 
-### 2.1 前置项（让 `main` 先变绿）
+### 2.1 已完成/待维护者合入的前置项
 
-- [ ] **#10**：根 runner 唯一失败 `tests/test_merged_group_reply.py`（用例断言的占位节点已被 `b6e0bf6` 有意移除）。
-  验证：`python tests/_run_all.py` 输出 `N passed, 0 failed`。
-- [ ] **4 个 qzone 用例从未真正执行过**：`tests/test_qzone.py` 的 `test_session_fetch_and_cache` / `test_session_reset_clears_cache` / `test_session_invalid_uin` / `test_session_no_o_prefix_uin` 是**普通函数却返回协程**（`return run()`）。
+- [x] **#10**：PR #23 将 `tests/test_merged_group_reply.py` 的占位断言更新为当前“静默 bot 不生成节点”行为；组合根 runner `66 passed, 0 failed`。
+- [x] **4 个 qzone 用例**：PR #22 将 `test_session_fetch_and_cache` / `test_session_reset_clears_cache` / `test_session_invalid_uin` / `test_session_no_o_prefix_uin` 改为真正的 `async def`，pytest qzone `67 passed`，根 runner 不再出现其 never-awaited 警告。
+
+PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下原始诊断作为历史记录保留：
+
+- 原 qzone 用例是**普通函数却返回协程**（`return run()`）。
   - 根 runner 只对 `async def` 做 `await`，所以这 4 个协程被直接丢弃（日志里是 `coroutine '...run' was never awaited`），整个文件却记为 `PASS`；
   - pytest 下这 4 个直接报错。
 
   改成 `async def` 即可。验证：pytest 下 4 个通过，且根 runner 日志中不再出现这 4 条 never-awaited。
-- [ ] **根目录缺开发依赖清单**：`requirements.txt` 里没有 pytest / pytest-asyncio / ruff，但 `tests/test_outbound_cancellation.py`（#16 引入）顶层 `import pytest`。只装 `requirements.txt` 的干净环境里，根 runner 会在这个文件上失败。
-  新增根目录 `requirements-dev.txt`（可参照 `plugins/meme_stealer/requirements-dev.txt` 的版本约束）。
-- [ ] **先修掉"真错误"类静态告警**（见第 3 节）：`F821` 未定义名 25 处、`F811` 重定义 1 处。
+- [x] **根目录开发依赖清单**：PR #24 新增根 `requirements-dev.txt`，固定 pytest / pytest-asyncio / ruff；全新虚拟环境安装后 `pip check` 无冲突。
+- [ ] **清理剩余静态告警**（见第 3 节）：`F821` 未定义名 25 处、`F811` 重定义 1 处。CI 初期只阻塞 `E9,F63,F7`，完整 `E4,E7,E9,F` 作为非阻塞 artifact，避免把已知债务伪装成绿色。
 
-### 2.2 workflow 设计
+### 2.2 workflow 设计（PR #24 已实现，待合入）
 
 `main` 变绿后，新增 `.github/workflows/ci.yml`，`push main` 与 `pull_request` 触发：
 
 | job | 内容 | 是否阻塞合并 |
 |---|---|---|
-| `tests` (Python 3.12) | `pip install -r requirements.txt -r requirements-dev.txt` → `python -m compileall -q main.py mohobot plugins review scripts tests` → `python tests/_run_all.py` → `python tests/test_concurrency.py` | 是 |
-| `pytest` (Python 3.12) | `python -m pytest -q --asyncio-mode=auto tests --ignore=tests/test_concurrency.py`：逐用例报告，能抓住上面那类"协程未执行"的假 PASS | 是（前置项完成后） |
+| `tests` (Python 3.12) | 开发依赖安装、compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
 | `meme-plugin` | 在 `plugins/meme_stealer/` 下按其 `CLAUDE.md` 跑 `pytest tests` 与 `ruff check` | 是 |
-| `lint` | `ruff check --select E9,F63,F7,F82`：只拦真错误，先不管风格类 | 是 |
-| `py310` | 同 `tests`，Python 3.10 | 否（先观察） |
+| `syntax` | Ruff `E9,F63,F7`：阻塞语法和控制流错误 | 是 |
+| `lint-report` | 完整 `E4,E7,E9,F` 告警 artifact | 否（已知历史债务） |
+| `tests` (Python 3.10) | 同 3.12 测试 job，实验性矩阵 | 否（先观察） |
 
 选型依据：
 
@@ -69,14 +76,14 @@
 ### 2.3 之后再做
 
 - 风格类告警（`F401` 83、`F841` 20、`F541` 12、`E741` 8、`E731` 5、`E401` 3、`E702` 2、`E701` 1，合计 134 处）逐步清理后再纳入 `lint`；
-- 加 `pyproject.toml` 统一 pytest（`asyncio_mode`）与 ruff 配置，去掉命令行参数；
+- PR #24 已加 `pytest.ini` 统一 async 模式；后续可统一 ruff 配置，清理告警后再收紧 blocking rules；
 - `main` 分支保护：要求 CI 通过才能合并。
 
 ## 3. 已确认的缺陷（静态检查发现，未开 Issue）
 
 | 级别 | 位置 | 问题 | 证据 |
 |---|---|---|---|
-| **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在**部分批次转发失败**时引用未定义的 `nodes`，抛 `NameError`，用户看不到"部分失败"提示 | 探针：`ok=1 failed=1 -> NameError: name 'nodes' is not defined`；全部成功 / 全部失败两条分支正常。应为 `len(messages)` |
+| **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #21 已修复并独立审查通过，待 #19 后合入；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
 | P3 | `tests/test_qzone.py:859,871` | `_PubFakeAPI` 定义了两个 `__init__`，第一个被静默覆盖 | ruff `F811` |
