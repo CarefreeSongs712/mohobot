@@ -68,7 +68,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 选型依据：
 
 - **Python 3.12**：生产实际运行 3.12.13（README 部署章节）；
-- **3.10**：README 声明支持 3.10+，但兼容性**未验证**——套件会挂死，已定位到具体用例（见第 3 节 P2），放在 PR 门禁上只会让每个 PR 变红，因此移到独立 `compat.yml`（手工触发 / 每周日 / `push main`），保留线程栈与日志 artifact 继续采样；
+- **3.10 / 3.11**：README 声明支持 3.10+，但兼容性**未验证**——套件会挂死，已定位到根因并开 **#25**（见第 3 节 P2）。放在 PR 门禁上只会让每个 PR 变红，因此移到独立 `compat.yml`（手工触发 / 每周日 / `push main`），保留线程栈与日志 artifact 继续采样；#25 修好后可把 3.10/3.11 重新纳入；
 - **两个 runner 都跑**：根 runner 是项目文档里的入口，但它按**文件**计数、文件内首个失败即中止、并且会漏掉"返回协程"的用例；pytest 能逐用例报告。等 pytest 稳定后可以只保留 pytest。
 
 当前基线耗时（本地）：根 runner 约 70s，pytest 约 86s，meme 插件约 8s。
@@ -83,7 +83,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 
 | 级别 | 位置 | 问题 | 证据 |
 |---|---|---|---|
-| **P2** | `mohobot/services/outbound.py:132`（`submit` 的 `return await future`） | Python 3.10 上，已派发后取消调用方，取消**不会**让 `submit()` 的 future 结束，调用方永久停在 `await`；3.12 正常。生产跑 3.12 故不受影响，但 README 声明的 3.10+ 属未验证 | 3.10 单跑 `tests/test_outbound_cancellation.py` 即挂死（20s 触发 faulthandler），同文件 3.12 **1.8s 通过**；任务栈转储：`main → await running`、`submit → outbound.py:132`、`_worker → outbound.py:172 await item.operation()` |
+| **P2** | `mohobot/services/outbound.py:125` 的 `asyncio.wait_for(queue.put(...))` / 首次由 #16 引入 | Python **3.10 与 3.11** 上，调用方在"入队完成→开始等结果"窗口被取消时，取消被 `wait_for` 吞掉：调用方拿不到 `CancelledError`，会永久挂起或返回自己以为已取消的结果。生产跑 3.12 不受影响，但 README 声明的 3.10+ 属未验证 | 已开 **#25**（含最小复现、任务栈、3.10/3.11/3.12 状态对照、`wait_for` 源码定位：`except CancelledError: if fut.done(): return fut.result()`；3.12 用 `asyncio.timeout` 重写后正常） |
 | **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #21 已修复并独立审查通过，待 #19 后合入；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
@@ -101,6 +101,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | #8 | review 面板：历史缓存身份、作用域约束、审核状态并发 | 未开始 |
 | #9 | 插件送达回执、运行时生命周期策略 | 单帖回复上限已由 #14 修复 |
 | #10 | 根回归基线失败 | PR #23 已实现并审查通过，待维护者合入后才在 main 上解决 |
+| #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | 已定位并写好复现/根因/建议修法；待单独 PR。修好后可把 3.10/3.11 重新纳入兼容性检查 |
 | #2 | 旧库迁移丢 WAL | 维护者暂缓（#15） |
 | #6 | meme 作用域与图片来源边界 | 维护者表示 meme 将重写，暂不修 |
 
