@@ -123,8 +123,11 @@ class Plugin:
         self._pending[key] = {"entries": entries, "clean": clean,
                               "expires": time.time() + PENDING_TTL}
 
-        lines = [f"共解析到 {len(entries)} 条消息。",
-                 "将先清空当前会话再写入。" if clean else "将追加写入当前会话。"]
+        user_n = sum(1 for e in entries if e["role"] != "assistant")
+        bot_n = len(entries) - user_n
+        lines = [f"共解析到 {len(entries)} 条消息（用户 {user_n} 条 / bot {bot_n} 条）。",
+                 ("⚠️ 将先清空当前会话再写入——现有上下文会被全部覆盖！"
+                  if clean else "将追加写入当前会话。")]
         if dropped:
             lines.append(f"超出上限 {limit} 条，仅保留最近 {limit} 条。")
         lines.append("回复「确认」写入，回复「取消」放弃。（10 分钟内有效）")
@@ -259,6 +262,7 @@ class Plugin:
     # ── 解析节点 → 上下文条目 ────────────────────────────────
 
     def _build_entries(self, bot_qqs: set[int], msgs: list) -> list[dict]:
+        bot_nicks = self._bot_nickname_set()
         entries: list[dict] = []
         for node in msgs:
             if not isinstance(node, dict):
@@ -276,7 +280,10 @@ class Plugin:
             text = self._render_segments(segments)
             if not text:
                 continue
-            if uid and uid in bot_qqs:
+            # 助手判定: QQ 号精确 + 昵称(含机器人名片变体, 如"墨清弦bot"/"洛天依bot-6")
+            is_bot = (uid and uid in bot_qqs) or bool(
+                display and any(nick and nick in display for nick in bot_nicks))
+            if is_bot:
                 role = "assistant"
             else:
                 role = f"{uid or display}-{display or uid}"
@@ -286,6 +293,20 @@ class Plugin:
                 ts = int(time.time())
             entries.append({"role": role, "content": text, "timestamp": ts})
         return entries
+
+    def _bot_nickname_set(self) -> set[str]:
+        bm = self._bot_manager
+        nicks: set[str] = set()
+        if bm is None:
+            return nicks
+        try:
+            for inst in getattr(bm, "all_bots", []) or []:
+                nick = str(getattr(inst, "nickname", "") or "").strip()
+                if nick:
+                    nicks.add(nick)
+        except Exception as e:
+            logger.debug(f"ctx_restore bot nicknames unavailable: {e}")
+        return nicks
 
     def _bot_qq_set(self) -> set[int]:
         bm = self._bot_manager
