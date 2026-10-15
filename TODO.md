@@ -81,9 +81,41 @@
 
 **保留**所有开放 PR 的分支——删除它们会直接关掉对应 PR。另外 `fork` 远程仍留有 #11–#16 的旧副本与一个非本会话创建的 `feat/knowledge-base`，未动。
 
+### 1.4 审查发现 → 处理状态（2026-10-16）
+
+**已修（代码/配置/文档）**
+
+| 出处 | 发现 | 处理 |
+|---|---|---|
+| #18 复审 N1 [P1·合并流程] | naive 冲突解析会静默重开 issue #4 的 P1 | **Closed**：新增门禁用例 `test_nonstream_tool_followup_failure_keeps_diagnostic_marker`（head `6c32dce`） |
+| #18 复审 N2 [P2] | 用例集不覆盖非流式跟进失败出口 | **Closed**（同上，即该用例本身） |
+| #18 复审 N6 [P3] | PR 正文滞后（6 用例/6 passed、缺合并要求） | 已更新正文为 8 用例 + 新增「合并注意」一节 |
+| #19 N1 [P2] | 非流式工具轮无文本 → 用户静默 | **已修**（head `0e87563`）：回落 `[工具调用完成，但模型未返回文本]`，与流式一致；原固化 `reply == ""` 的用例已改断言 |
+| #19 N2 [P3] | 空 `choices` 丢弃已累积正文 | **已修**：改为 `break` 保留已累积文本 + 新增用例 |
+| #23 N1 [P2] | issue #10 第 2 条「全静默跳过」零覆盖 | **已修**（head `b8a077d`）：新增 `test_merged_reply_all_bots_silent_sends_nothing`；变异「全静默仍发占位转发」由 5 passed 变 **1 failed**（原先逃逸） |
+| #24 N3 [P2] | compat 步骤截断、3.10 信号只剩半份 | **已修**：runner/concurrency 加 `if: always()` |
+| #24 N4 [P3] | job 超时 < 各 step 之和 | **已修**：py310 job 15m → 30m |
+| #24 N7 [P3] | README 仍称 3.10+ | **已修**：标注「3.12 为 CI 实际验证版本；3.10/3.11 尚未验证」 |
+| #24 N8 [P3] | lint job 会把「没跑成」报成 0 条 | **已修**：三分支（有告警/无告警/Ruff 未正常完成），用 stderr 判断；已实测三种情况 |
+| #24 N1 [P2] | PR 自述与合并事实不符 | 已更正正文（merge-base 仍 `b4548cd`、三点 diff 不收缩、携带 #23 旧版断言） |
+| #28 归因 | 3.10 停滞被归因「跨用例累积」 | 已修 `docs/DEVELOPMENT.md` + `compat.yml` 注释为真因 issue #25 |
+| #22 N1 [P3] | PR 正文 67 passed 未注明异步配置 | 正文已补复现命令与解释 |
+| #26 N3 [P3] | 口径不一致（67/1 vs 66/1、pytest 需 auto） | 已在 PR 评论中更正 |
+
+**记录为后续项（未改动，避免让已复核 head 失效）**
+
+- **#28 N1/N2 [P3]**：`enqueue_timeout_sec` / `outbound_enqueue_timeout` 已成无效配置（满队列立即失败），示例配置与开发文档仍在宣称「入队超时(秒)」；`outbound.py:76` 的 `self._enqueue_timeout` 成死状态，`except asyncio.QueueFull` 在单事件循环下不可达。建议独立 follow-up PR 同步配置/文档并清理死状态。
+- **#28 N3 [P3]**：同类「`wait_for` 包住可能同回合完成的 awaitable」模式在 `close()` 及仓内其它位置仍存在（超出本 PR 范围）。
+- **#24 N2 [P2]**：阻塞 Ruff 只选 `E9,F63,F7`，`F821/F811` 不在门禁；待 #17/#26/#29/#32 清掉现有 F821 后（剩 `bot_manager.py` 3 处字符串注解），可把 `F821` 纳入阻塞集——它在本仓抓到过真 bug（`chat_manager` 的 `nodes`）。
+- **#24 N5/N6 [P3]**：`requirements.txt` 全 `>=` 不可复现、缺 `pip check`；Actions 未按 SHA 钉版本。
+- **#26 N1/N2 [P3]**：回归 stub 掉真实分批路径；部分失败提示把「读取条数」当「已转发条数」（实测投递 3/4、文案 5）。
+- **#18 N3/N4/N5 [P3]**：失败轮连用户消息一起不落盘（待维护者确认是否有意）；`emotion/manager.py` 前缀兜底冗余；早退跳过 `ab_service.note_context`（当前不可达）。
+- **#19 N3/N4/N5 [P3]**：`max_tokens` 上限对齐、后续轮异常覆盖正文口径、新文件裸 ruff 告警（RUF100/RUF059）。
+- **知识库 P3**：`mohobot/llm_service.py` 的 `MessageSegment` 未使用导入 + 重复死桩的 `since`（`_compute_session_usage` 定义两次），待 #18/#19 合入后清理。
+
 ### 1.1 合并顺序与合并后果（基于当前 head 实测）
 
-> **⚠️ main 已前进（2026-10-15 23:15 复核）**：`origin/main` = **`2b95bf0`**，比本文档此前引用的 `b4548cd` 多 5 个提交，**全部只新增 `plugins/ctx_restore/`（`_conf_schema.json`、`main.py`）**，与所有开放 PR 零重叠。因此各 PR 记录的 base `b4548cd` 已过期，合并会落在 `2b95bf0` 上；此前"main 未动"的说法作废。
+> **⚠️ main 已前进（2026-10-16 复核）**：`origin/main` = **`bd9fbd2`**，比本文档最初引用的 `b4548cd` 多 6 个提交，**全部只新增/修改 `plugins/ctx_restore/`**（维护者 10-15 晚 22:49–23:23 连推 6 次，直接推 main、无 PR、无测试），与所有开放 PR 零重叠。因此各 PR 记录的 base `b4548cd` 已过期；此前"main 未动"的说法作废。
 
 **最新 main 的实测基线（`2b95bf0`，本机隔离快照）**：`pytest -o asyncio_mode=auto tests` = **5 failed / 589 passed**；根 runner = **65 passed / 1 failed**；`ruff E9,F63,F7` 与 compileall 通过。**这 5 个失败正是 #22（4 个 qzone 假通过）与 #23（#10 占位断言）要修的**——即当前 main 上若已有 CI，阻塞测试 job 会是红的，#22/#23（或带这两项修复的 #24）是让 main 变绿的前提。
 
