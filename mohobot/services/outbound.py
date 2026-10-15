@@ -121,11 +121,13 @@ class OutboundScheduler:
             raise OutboundQueueFullError(
                 f"outbound queue full for bot {bot_id} ({label})"
             )
+        # The full check and non-blocking put deliberately form one fast-fail
+        # boundary.  Awaiting queue.put() through asyncio.wait_for() lets Python
+        # 3.10/3.11 swallow caller cancellation when the put completes in the
+        # same loop turn; a cancelled caller would then wait on `future` forever.
         try:
-            await asyncio.wait_for(
-                queue.put((item.priority, item.sequence, item)), timeout=self._enqueue_timeout
-            )
-        except asyncio.TimeoutError as exc:
+            queue.put_nowait((item.priority, item.sequence, item))
+        except asyncio.QueueFull as exc:
             raise OutboundQueueFullError(
                 f"outbound queue full for bot {bot_id} ({label})"
             ) from exc
