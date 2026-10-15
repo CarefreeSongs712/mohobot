@@ -21,12 +21,14 @@
 | #18 | #4 P1：LLM 诊断文案不再写入上下文 / 数据库 / 情感分析 | 独立复审通过，流式诊断前正文顺序缺陷已修复 |
 | #19 | #4 P2：非流式模式支持链式多轮工具调用 | 独立复审通过；与 #18 在 `llm_service.py` 有文本冲突，后合并的一方需 rebase |
 | #20 | 本 TODO 清单与 CI 接入计划 | 按已验证测试和 GitHub PR 状态更新，待维护者审查 |
-| #21 | chat-manager 部分批次失败时修复 `nodes` NameError | 叠放在 #19 上；独立审查通过，#19 合入后 retarget main |
+| #26 | chat-manager 部分批次失败时修复 `nodes` NameError | 直接基于 main，替代已关闭的叠放 PR #21；独立审查中 |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
 
-维护者已表态暂缓：
+建议合入顺序：先 #22、#23，再 #24；#17 与 #26 可独立合入；#18/#19 需先处理文本冲突，#25 另行修复 3.10/3.11 取消语义。
+
+维护者已表态暂缓，相关 PR 已关闭：
 
 - #12（meme 列表作用域）—— "meme 后面要大改一次……相关的先不用修了"
 - #15（旧库 WAL 迁移）—— "感觉没什么必要，先不合并吧"
@@ -84,7 +86,7 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | 级别 | 位置 | 问题 | 证据 |
 |---|---|---|---|
 | **P2** | `mohobot/services/outbound.py:125` 的 `asyncio.wait_for(queue.put(...))` / 首次由 #16 引入 | Python **3.10 与 3.11** 上，调用方在"入队完成→开始等结果"窗口被取消时，取消被 `wait_for` 吞掉：调用方拿不到 `CancelledError`，会永久挂起或返回自己以为已取消的结果。生产跑 3.12 不受影响，但 README 声明的 3.10+ 属未验证 | 已开 **#25**（含最小复现、任务栈、3.10/3.11/3.12 状态对照、`wait_for` 源码定位：`except CancelledError: if fut.done(): return fut.result()`；3.12 用 `asyncio.timeout` 重写后正常） |
-| **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #21 已修复并独立审查通过，待 #19 后合入；历史探针明确 `NameError`，全成功/全失败正常 |
+| **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #26 直接基于 main 修复，独立审查中；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
 | P3 | `tests/test_qzone.py:859,871` | `_PubFakeAPI` 定义了两个 `__init__`，第一个被静默覆盖 | ruff `F811` |
@@ -101,9 +103,10 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | #8 | review 面板：历史缓存身份、作用域约束、审核状态并发 | 未开始 |
 | #9 | 插件送达回执、运行时生命周期策略 | 单帖回复上限已由 #14 修复 |
 | #10 | 根回归基线失败 | PR #23 已实现并审查通过，待维护者合入后才在 main 上解决 |
-| #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | 已定位并写好复现/根因/建议修法；待单独 PR。修好后可把 3.10/3.11 重新纳入兼容性检查 |
-| #2 | 旧库迁移丢 WAL | 维护者暂缓（#15） |
-| #6 | meme 作用域与图片来源边界 | 维护者表示 meme 将重写，暂不修 |
+| #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | Issue 已定位根因；待单独修复 PR。修好后可把 3.10/3.11 重新纳入兼容性检查 |
+| #26 | chat-manager 部分转发失败时的 `nodes` NameError | 直接基于 main，独立审查中 |
+| #2 | 旧库迁移丢 WAL | 维护者暂缓，PR #15 已关闭 |
+| #6 | meme 作用域与图片来源边界 | 维护者表示 meme 将重写，PR #12 已关闭 |
 
 ## 5. 测试基础设施
 
