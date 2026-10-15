@@ -40,8 +40,33 @@
 |---|---|---|
 | #19 | PASS（0 P1 / 1 P2 / 4 P3） | N1 [P2]：非流式缺终态兜底——工具跑完但模型不返文本时 `chat()` 返回空串，`stream=false` 下用户完全静默，而流式有 `[工具调用完成，但模型未返回文本]`；新用例把 `reply == ""` 固化为期望，与"语义一致"自述矛盾（**base 同样为空，非本 PR 引入**）。已提交 review（COMMENTED） |
 | #26 | PASS（0 P1 / 0 P2 / 3 P3） | base RED `NameError` @ main.py:167、head GREEN、变异杀死、四种批次情形端到端核对；与已关闭 #21 的两文件 blob 完全相同（替换忠实）。P3：回归 stub 掉真实分批；提示把"读取条数"当"已转发条数"（实测投递 3/4 vs 文案 5）；commit 称根 runner 67/1 实测 66/1。已提交 review（COMMENTED） |
-| #18 | **CHANGES REQUESTED**（N1 [P1·合并流程] + N2 [P2]） | 代码本身在其 base 上无缺陷（8 个诊断出口全标记、3 个消费点、真实链路 71/71 断言）；阻断点是**合并解析**：照搬 #19 那一侧会把标记退回 `str`，静默重开 issue #4 的 P1（naive 合并下测试全绿但链路探针 5 项失败）。N2：缺一条覆盖非流式 `chat()` 跟进失败出口的用例，补上即可把该风险变成门禁。已提交 review（COMMENTED；GitHub 不允许对自建 PR 投 request-changes） |
-| #24 | PASS（0 P1；P2×3、P3×5） | 合入最新 main（含 ctx_restore）**无冲突**，合并快照上阻塞入口全绿：pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过 → 合入后首次 `push: main` 预计绿。纠正了作者三处结论，见 §1.1。已提交 review（COMMENTED） |
+| #18 | 原 **CHANGES REQUESTED**（N1 [P1·合并流程] + N2 [P2]）→ **N2 已落地，N1 已转为门禁** | 代码本身在其 base 上无缺陷（8 个诊断出口全标记、3 个消费点、真实链路 71/71 断言）；阻断点是**合并解析**：照搬 #19 那一侧会把标记退回 `str`，静默重开 issue #4 的 P1（naive 合并下测试全绿但链路探针 5 项失败）。**已在 head `6c32dce` 补上 N2 门禁用例**（见 §1.2），naive 解析会被测试杀死。原 review 以 COMMENTED 提交（GitHub 不允许对自建 PR 投 request-changes） |
+| #24 | PASS（0 P1；P2×3、P3×5） | 合入最新 main（含 ctx_restore）**无冲突**，合并快照上阻塞入口全绿：pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过 → 合入后首次 `push: main` 预计绿。纠正了作者三处结论，见 §1.1。已提交 review（COMMENTED）。**已修**：`docs/DEVELOPMENT.md` 与 `compat.yml` 里"3.10 停滞=跨用例累积"的归因改为真因 issue #25（head `79bb18f`） |
+| #28 | PASS（0 阻断；3 P3） | 跨版本实测：base 3.10/3.11 该文件**挂死 exit 124**（含单跑 issue 点名用例），head 三版本均 5 passed；issue #25 三种现象在 base 全部复现、head 全部消除；根因行号本地核实（3.10 `tasks.py:433-435`、3.11 `:477-479`、3.12 `:519` 已重写）。P3：`enqueue_timeout_sec` 成为死状态但文档/配置仍宣称该超时（建议独立 follow-up）；compat.yml 时机建议；根因归因更正。已提交 review（COMMENTED） |
+| #22 | PASS（0 阻断；1 P3） | AST 证明 base 是"普通 def 返回协程"、head 为真 async 且函数体逐语句全等；**决定性变异**：把 `session.py:90` 改回缺陷 `[1:]`，base 根 runner 仍 PASS（变异逃逸）、head 变 FAIL → 证明用例现在真的执行；根 runner 的 4 条 never-awaited 消失。P3：PR 正文的 "67 passed" 需注明 `-o asyncio_mode=auto`。已提交 review（COMMENTED） |
+| #23 | PASS（0 阻断；1 P2） | base 复现 issue #10（根 runner 65/1、`IndexError`），head 66/0；交叉实验（base 生产代码 + head 测试）66/0 → 只改期望；变异 mut1/mut2 均被杀死，且证明 #24 带回的副本在同样变异下会漏（`5701be49` 是净增覆盖）。P2：issue #10 方案第 2 条"全部 bot 无回复时静默"零覆盖（`message_handler.py:1780-1782`），建议补用例或在关闭 #10 时记录缺口。已提交 review（COMMENTED） |
+
+### 1.2 dev 集成分支（本地演练，不动 main）
+
+按用户要求建了 `dev` 分支把已审查的 PR 全部合并演练：起点 `origin/main@2b95bf0`，**17 个分支零冲突合入**（唯一冲突是 #18↔#19 的 `llm_service.py`，按审查结论解析为 `return LLMDiagnostic(...), tool_results`），当前领先 main **74 个提交**、42+ 文件。
+
+实测（隔离快照）：
+
+| 入口 | 结果 |
+|---|---|
+| 裸 `pytest tests`（靠 `pytest.ini` 的 asyncio auto） | **609 passed**（main 为 5 failed/589 passed） |
+| 根 runner `tests/_run_all.py` | **69 passed / 0 failed**（main 为 65/1；issue #10 已修） |
+| `tests/test_concurrency.py` | 全部通过 |
+| `ruff E9,F63,F7` / `compileall` | 通过 |
+
+**#18 的 P1 合并风险已由测试把守**（本轮最重要的落地）：在 #18 分支新增用例 `test_nonstream_tool_followup_failure_keeps_diagnostic_marker`（head `6c32dce`），断言非流式链式"跟进失败"出口返回 `LLMDiagnostic`，并用真实 `MessageHandler` 端到端断言诊断可见但**上下文/DB/情感零落盘**。变异验证：
+
+- #18 分支原样：**8 passed**；把该出口改成普通 `str` → **1 failed**（杀死）；
+- dev 合并态原样：**8 passed**；把它按 naive 解析改成普通 `str` → **1 failed**（杀死）。
+
+即：如果将来有人把 #18/#19 的冲突解成普通字符串，这条用例会直接失败，而不是让 issue #4 的 P1 静默复活。
+
+> 说明：`dev` 只在本地，用于验证合并可行性与顺序；**未推送、未动 main**。维护者合并时仍走各 PR。
 
 ### 1.1 合并顺序与合并后果（基于当前 head 实测）
 
