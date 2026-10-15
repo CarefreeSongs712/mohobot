@@ -115,4 +115,5 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 
 ## 6. 文档
 
-- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）在 fork `w-sli/mohobot` 的 `docs/audit-handover-and-rules` 分支（`e5d1c01`）上，尚未开 PR。提交前需按独立复核结论修正审计文档里的过度结论（例如"所有取消都会丢归档"不成立：等待回执阶段有 8 秒兜底）。
+- [ ] 仿照 [Agent-LuoTianyi 的 docs 组织](https://github.com/SheepLiu712/Agent-LuoTianyi/tree/dev/docs) 完善本项目文档体系：补齐/统一 `TODO.md`、代码地图、开发守则、规格文档模板、开发进程/实现计划、项目说明与贡献指南等职责。参考目录结构和文档职责，不直接复制其他项目内容；按模块和当前代码逐项核对。
+- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）已从历史 fork 分支整理到 PR #27（当前 head `b82e537` 的 docs 分支），待独立审查和维护者合入。审计快照基于 `b63ad48`，已标注历史边界；后续修复以当前 TODO、issue、PR 和 CI 为准。
