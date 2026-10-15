@@ -1,0 +1,8 @@
+{
+  "max_entries": {
+    "type": "int",
+    "default": 200,
+    "description": "单次恢复条数上限",
+    "hint": "超出时仅保留最近的 N 条消息(防一次性超长恢复)"
+  }
+}
