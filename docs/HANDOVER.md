@@ -2,7 +2,7 @@
 
 > 核对日期：2026-10-12（Asia/Shanghai）｜**历史代码基点**：`b63ad48`｜当时分支：`main`。
 > 本文记录该次本地检查，不代表当前 `main`、生产实时状态或发布授权。接手前工作区干净，HEAD 与当时本地缓存的 origin/main 相同；未执行 fetch/SSH，也没有部署、迁移或业务配置修改。
-> 当前状态请先看仓库根目录 [TODO.md](../TODO.md)、开放 PR/issue 与 GitHub Actions；不要把本文的旧基线数字直接当作当前验收结果。
+> 当前状态请先看 [PR #20 的 TODO/工作台](https://github.com/CarefreeSongs712/mohobot/pull/20)、开放 PR/issue 与 GitHub Actions；不要把本文的旧基线数字直接当作当前验收结果。
 
 ## 1. 接手结论与范围
 
