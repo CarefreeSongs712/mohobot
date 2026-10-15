@@ -136,10 +136,12 @@ class Plugin:
         del self._pending[key]
         cm = self._context_manager
         n = len(pending["entries"])
+        # chat_id 必须是 str: ContextManager 用 Path / chat_id 拼会话文件路径
+        peer = str(event.user_id)
         try:
             if pending.get("clean"):
-                await cm.clear_context(bot_id, "private", event.user_id)
-            ok = await cm.append_context(bot_id, "private", event.user_id,
+                await cm.clear_context(bot_id, "private", peer)
+            ok = await cm.append_context(bot_id, "private", peer,
                                          pending["entries"])
         except Exception as e:
             logger.error(f"ctx_restore commit failed: {e}")
@@ -147,9 +149,9 @@ class Plugin:
         if ok:
             if pending.get("clean"):
                 logger.info(f"ctx_restore: replaced context with {n} entries "
-                            f"({bot_id}/{event.user_id})")
+                            f"({bot_id}/{peer})")
                 return (True, f"已清空并用 {n} 条消息重建当前会话上下文。")
-            logger.info(f"ctx_restore: restored {n} entries ({bot_id}/{event.user_id})")
+            logger.info(f"ctx_restore: restored {n} entries ({bot_id}/{peer})")
             return (True, f"已恢复 {n} 条消息到当前会话上下文。")
         return (True, "恢复失败：会话不可写。")
 
