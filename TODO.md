@@ -34,6 +34,13 @@
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
 
+**正式审查（pr-review-report 规范，2026-10-15）**：
+
+| PR | 结论 | 要点 |
+|---|---|---|
+| #19 | PASS（0 P1 / 1 P2 / 4 P3） | N1 [P2]：非流式缺终态兜底——工具跑完但模型不返文本时 `chat()` 返回空串，`stream=false` 下用户完全静默，而流式有 `[工具调用完成，但模型未返回文本]`；新用例把 `reply == ""` 固化为期望，与"语义一致"自述矛盾（**base 同样为空，非本 PR 引入**）。已提交 review（COMMENTED） |
+| #26 | PASS（0 P1 / 0 P2 / 3 P3） | base RED `NameError` @ main.py:167、head GREEN、变异杀死、四种批次情形端到端核对；与已关闭 #21 的两文件 blob 完全相同（替换忠实）。P3：回归 stub 掉真实分批；提示把"读取条数"当"已转发条数"（实测投递 3/4 vs 文案 5）；commit 称根 runner 67/1 实测 66/1。已提交 review（COMMENTED） |
+
 ### 1.1 合并顺序与合并后果（基于当前 head 实测）
 
 **没有任何堆叠 PR**：除 #18/#19 的历史关系外，全部开放 PR 的 base 都是 `main@b4548cd`。
@@ -42,7 +49,7 @@
 
 | 文件 | PR | 后果 |
 |---|---|---|
-| `mohobot/llm_service.py` | #18、#19 | **真冲突**：#18 改 213/245/304/323/361/532/546 行，#19 改 257/286 行（非流式聊天区相邻重叠）。后合的一方必须 rebase 并重跑两边的测试 |
+| `mohobot/llm_service.py` | #18、#19 | **真冲突，且只有 1 个冲突块**：位于 `chat()` 的跟进 `except` 分支（#19 的 `return f"[LLM 调用失败…]", tool_results` ↔ #18 的 `reply_text = LLMDiagnostic(...)`），#18 其余 8 处自动合并。**rebase 时必须改成 `return LLMDiagnostic(...), tool_results`**，否则 #18 的 P1（诊断文案当正文落盘）会在链式路径重现；而 #19 把这个返回点从 1 处扩到最多 5 轮，等于把 P1 暴露面复制多份 |
 | `tests/test_merged_group_reply.py` | #23、#24 | #24 分支已包含 #23 的提交。**先合 #23 → #24 的 diff 自动收缩，无冲突**；直接合 #24 则一并带入该测试修复（内容相同，不会产生分歧） |
 | `tests/test_qzone.py` | #22、#24 | 同上：#24 含 #22 提交，先合 #22 更干净 |
 
@@ -147,4 +154,5 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 ## 6. 文档
 
 - [ ] 仿照 [Agent-LuoTianyi 的 docs 组织](https://github.com/SheepLiu712/Agent-LuoTianyi/tree/dev/docs) 完善本项目文档体系：补齐/统一 `TODO.md`、代码地图、开发守则、规格文档模板、开发进程/实现计划、项目说明与贡献指南等职责。参考目录结构和文档职责，不直接复制其他项目内容；按模块和当前代码逐项核对。
-- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）已从历史 fork 分支整理到 PR #27（当前 head `b82e537` 的 docs 分支），待独立审查和维护者合入。审计快照基于 `b63ad48`，已标注历史边界；后续修复以当前 TODO、issue、PR 和 CI 为准。
+- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）已从历史 fork 分支整理到 PR #27（docs 分支 head `c17fea0`），新建独立审查 PASS 后待维护者合入。审计快照基于 `b63ad48`，已标注历史边界；后续修复以当前 TODO、issue、PR 和 CI 为准。
+- [ ] **审计完整性的已知缺口**：`/查看聊天` 部分转发失败的 `nodes` NameError（引入于 `115ac17`，早于审计基点 `b63ad48`）**没有被那份审计报告收录**，是后来从 CI 基线的 `F821` 检查发现的（修复见 #26）。说明该审计的 P1/P2 清单不是完备清单；若将来把 `AUDIT-2026-10-12.md` 当作"已审计范围"引用，需同时说明这一点。
