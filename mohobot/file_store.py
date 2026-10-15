@@ -7,11 +7,9 @@ concurrent write corruption while allowing parallel access to different files.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import asyncio
+from typing import Any
 
 import aiofiles
 import aiofiles.os

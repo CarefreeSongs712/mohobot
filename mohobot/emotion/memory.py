@@ -12,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 MAX_PER_USER = 50
 MAX_IMPORTANT_EVENTS = 50
 

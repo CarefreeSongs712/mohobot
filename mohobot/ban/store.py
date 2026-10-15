@@ -17,6 +17,8 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from mohobot.ban.models import UserDataList, UserDataModel
 from mohobot.file_store import json_read, json_write
 
