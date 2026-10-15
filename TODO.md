@@ -34,7 +34,26 @@
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
 
-建议合入顺序：先 #22、#23，再 #24；#17、#26、#28、#29、#30、#32、#33、#34、#35、#36 可独立合入；#18/#19 需先处理文本冲突。#27 是文档独立 PR；#25 已由 #28 实现修复，待维护者合入后关闭 issue。
+### 1.1 合并顺序与合并后果（基于当前 head 实测）
+
+**没有任何堆叠 PR**：除 #18/#19 的历史关系外，全部开放 PR 的 base 都是 `main@b4548cd`。
+
+**文件重叠矩阵**（全仓只有 3 个文件被多个开放 PR 触碰）：
+
+| 文件 | PR | 后果 |
+|---|---|---|
+| `mohobot/llm_service.py` | #18、#19 | **真冲突**：#18 改 213/245/304/323/361/532/546 行，#19 改 257/286 行（非流式聊天区相邻重叠）。后合的一方必须 rebase 并重跑两边的测试 |
+| `tests/test_merged_group_reply.py` | #23、#24 | #24 分支已包含 #23 的提交。**先合 #23 → #24 的 diff 自动收缩，无冲突**；直接合 #24 则一并带入该测试修复（内容相同，不会产生分歧） |
+| `tests/test_qzone.py` | #22、#24 | 同上：#24 含 #22 提交，先合 #22 更干净 |
+
+其余生产文件各自只被一个 PR 触碰（`outbound.py`←#28、`chat_manager/main.py`←#26、`relationship config`←#17、`llm_service/message_handler/llm_diagnostic/engine`←#18、`ban/store`+`file_store`+`image_cache` 等←#32、`ban_filter`+`vcpedia`+`app.py` 等←#36）。
+
+**建议顺序与合入后立即发生的变化**：
+
+1. **#22、#23 先合**（测试可信度）：#23 让 main 根 runner 从 `65 passed/1 failed` 变 **`66 passed/0 failed`**，issue #10 可关；#22 让 4 个此前从未真正执行的 qzone 用例开始执行。两者都只改测试文件。
+2. **#24 再合**（CI + `pytest.ini`）：合入后 `push: main` 立即触发 CI；该分支现存 4 项检查全绿（Python 3.12 / 语法 / meme 插件 / Ruff 债务报告），且 `pytest.ini` 会让**裸 `pytest tests/` 从 13 failed 恢复正常**。3.10/3.11 走独立 `compat.yml`（手工/每周/push main），不会给 main 留下长期红叉。
+3. **#26、#28、#32–#36、#30、#29、#17、#27、#20** 可独立合入，互不冲突（见上表）。
+4. **#18/#19 最后处理**：两者都在 `llm_service.py`，必须串行 + rebase；建议先合 #18（P1：诊断不落盘，涉及数据正确性），再 rebase #19 并重跑 `tests/test_llm_nonstream_tool_chain.py` 与 `tests/test_llm_runtime_tools.py`。只合其中之一不会让 main 语义不一致（各自自洽），但两个都未合时 issue #4 仍未关闭。
 
 维护者已表态暂缓，相关 PR 已关闭：
 
