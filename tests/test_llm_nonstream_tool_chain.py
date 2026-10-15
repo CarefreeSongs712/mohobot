@@ -137,17 +137,38 @@ async def test_nonstream_round_limit_forces_text_answer():
 
 
 async def test_nonstream_loop_is_bounded_even_if_gateway_keeps_returning_tools():
-    """强制文本轮里网关仍返回 tool_calls: 不再执行, 循环必须终止。"""
+    """强制文本轮里网关仍返回 tool_calls: 不再执行, 循环必须终止。
+
+    工具已执行但模型最终没给出文本 → 必须回落到与 chat_stream 相同的兜底文案,
+    不能静默返回空串(否则 stream=false 的用户什么都收不到)。
+    """
     svc, completions, executed = _service(
         [*[_response(tool_calls=[_tool_call(f"c{i}")]) for i in range(6)],
          _response(content="不应被请求到")],
         ['{"songs": []}'] * 10,
     )
-    reply, _ = await svc.chat("bot_001", None, [], {})
+    reply, tool_results = await svc.chat("bot_001", None, [], {})
 
     assert len(completions.calls) == 6, len(completions.calls)
     assert len(executed) == 5, "强制文本轮返回的工具调用不得执行"
-    assert reply == ""
+    assert reply == "[工具调用完成，但模型未返回文本]", reply
+    assert len(tool_results) == 5, tool_results
+    await svc.close()
+
+
+async def test_nonstream_empty_choices_keeps_accumulated_text():
+    """跟进的响应没有 choices 时, 结束循环并保留此前已累积的正文(不再丢弃成空串)。"""
+    empty_choices = SimpleNamespace(choices=[], usage=None)
+    svc, completions, _ = _service(
+        [_response(tool_calls=[_tool_call("c1")]),
+         _response(content="前半句。", tool_calls=[_tool_call("c2")]),
+         empty_choices],
+        ['{"songs": []}'] * 4,
+    )
+    reply, tool_results = await svc.chat("bot_001", None, [], {})
+    assert len(completions.calls) == 3, len(completions.calls)
+    assert reply == "前半句。", reply
+    assert len(tool_results) == 2, tool_results
     await svc.close()
 
 

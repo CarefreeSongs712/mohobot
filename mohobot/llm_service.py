@@ -319,13 +319,19 @@ class LLMService:
             )
             choice = response2.choices[0] if response2.choices else None
             if choice is None:
-                return "", tool_results
+                # 空 choices: 结束循环而不是丢弃已累积的正文(流式同场景也是直接收尾)。
+                break
             # 中间跟进可能同时带可见文本与下一轮 tool_calls。文本已经是模型输出的一部分,
             # 不能因继续工具循环而被下一轮 reply_text 覆盖; chat_stream 也会按同样顺序
             # 把每个文本 chunk 交给调用方。
             reply_text += choice.message.content or ""
             # 强制文本轮不再接受工具调用: 即使网关仍返回 tool_calls 也到此为止, 保证有界。
             tool_calls = None if final_round else choice.message.tool_calls
+
+        # 与 chat_stream 对齐: 工具已执行但模型最终没给出任何文本时不能静默返回空串,
+        # 否则 stream=false 的用户什么也收不到(流式同场景会输出这段兜底文案)。
+        if tool_results and not reply_text.strip():
+            return "[工具调用完成，但模型未返回文本]", tool_results
 
         return reply_text, tool_results
 
