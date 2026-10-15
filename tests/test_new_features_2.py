@@ -329,6 +329,8 @@ async def test_usage_stats():
             "bot_001", make_private_event(1001, "/用量 7d"), {},
         )
         assert handled3 and "近 7 天" in reply3
+
+    await run()
     print("[+] 用量统计 OK")
 
 
