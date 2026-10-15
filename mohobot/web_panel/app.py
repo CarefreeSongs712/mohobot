@@ -37,12 +37,9 @@ def _valid_usage_range(range_key: str) -> bool:
         return True
     return bool(re.fullmatch(r"\d{1,4}[dh]", str(range_key)))
 
-from urllib.parse import urlsplit
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -299,7 +296,6 @@ class WebPanel:
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
         async def _audit(request: Request, action: str, target: str = "", details: Any = None, success: bool = True):
-            token = request.headers.get("Authorization", "")[7:]
             from mohobot.services.audit import AuditLogger
             audit_logger = AuditLogger(str(self._data_dir))
             try:
@@ -586,7 +582,6 @@ class WebPanel:
         @app.get("/api/bots")
         async def list_bots(request: Request):
             await _require_auth(request)
-            from mohobot.models.config import BotConfig
 
             # Scan data/bots/*/config.json — returns ALL configured bots
             # (online or not), with qq + nickname from their config.
@@ -1906,7 +1901,7 @@ class WebPanel:
                                 if added and not added.endswith("\n"):
                                     added = added[:added.rfind("\n") + 1]
                                 lines = prev["lines"] + sum(
-                                    1 for l in added.splitlines() if l.strip())
+                                    1 for line in added.splitlines() if line.strip())
                                 counted_size = prev["size"] + len(added.encode("utf-8"))
                             except OSError:
                                 lines = None

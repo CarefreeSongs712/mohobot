@@ -317,7 +317,7 @@ def _filter_lyrics_lines(text: str) -> str:
         s = line.strip()
         if re.match(r"^(@canvas|height=|comment=|setLoop=|[}\s]+$)", s):
             continue
-        if LATEX_JUNK := (_LATEX_RE.search(s) and not re.search(r"[\u4e00-\u9fff]", s)):
+        if _LATEX_RE.search(s) and not re.search(r"[\u4e00-\u9fff]", s):
             continue
         if "<nowiki>" in s or "</nowiki>" in s:
             s = s.replace("<nowiki>", "").replace("</nowiki>", "")
