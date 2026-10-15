@@ -309,3 +309,54 @@ def test_diagnostic_marker_keeps_str_compatibility():
     assert d.startswith("[LLM") and len(d) == len("[LLM 调用失败: x]")
     assert not isinstance(d.strip(), LLMDiagnostic)
     assert not isinstance(d + "", LLMDiagnostic)
+
+
+class _ToolThenFailCompletions:
+    """第 1 次返回工具调用, 跟进调用抛异常 —— 非流式链式工具路径的失败出口。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[SimpleNamespace(
+                        id="call_1", type="function",
+                        function=SimpleNamespace(name="unknown_test_tool", arguments="{}"),
+                    )],
+                ))],
+                usage=None,
+            )
+        raise RuntimeError("HTTP 502 bad gateway")
+
+
+async def test_nonstream_tool_followup_failure_keeps_diagnostic_marker():
+    """非流式链式工具路径的"跟进失败"出口必须返回 LLMDiagnostic, 而不是普通 str。
+
+    这是 #18 与 #19 合并时唯一的冲突点: 若把它解成 `return f"[LLM 调用失败: {e}]", ...`,
+    诊断会被 MessageHandler 当成正文写回上下文/DB/情感, 静默重开 issue #4 的 P1。
+    本用例把该出口钉住, 使错误的冲突解析会被测试直接杀死。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        handler, _, _, _, _, bot = await _setup(
+            td, stream=False, segment=True, completions=_ToolThenFailCompletions(),
+        )
+        reply, tool_results = await handler._llm.chat(bot, _event(), [], {})
+        assert isinstance(reply, LLMDiagnostic), type(reply)
+        assert reply == "[LLM 调用失败: HTTP 502 bad gateway]", reply
+        assert isinstance(tool_results, list) and tool_results, tool_results
+        await handler.close()
+
+    with tempfile.TemporaryDirectory() as td:
+        handler, context, ws, db, emotion, bot = await _setup(
+            td, stream=False, segment=True, completions=_ToolThenFailCompletions(),
+        )
+        await handler._handle_message(bot, _event(), {})
+        shown = " ".join(_sent_text(m) for m in ws.sent)
+        assert "LLM 调用失败" in shown, ws.sent
+        assert await context.load_context(bot, "private", "3001") == []
+        assert db.rows == [] and emotion.turns == [], (db.rows, emotion.turns)
+        await handler.close()
