@@ -1,10 +1,16 @@
 name: Compatibility
 
-# Deliberately NOT triggered on pull requests: Python 3.10 currently stalls part way
-# through the suite (cross-test accumulation, reproducible locally), so keeping it on
-# the PR path would paint every pull request red for an unresolved question.
+# Deliberately NOT triggered on pull requests: on Python 3.10/3.11 the suite used to
+# stall, which kept every pull request red for an unresolved question.  Root cause was
+# identified (issue #25: asyncio.wait_for() swallows caller cancellation;
+# tests/test_outbound_cancellation.py::test_cancelled_after_dispatch_is_reported_to_caller
+# hangs on its own in base 3.10/3.11) and fixed in PR #28 — it was never "cross-test
+# accumulation"; the unrelated files that were sampled individually are simply fast.
 # It stays scheduled + manually runnable so the compatibility signal keeps being
 # collected, and the bounded timeout keeps runs from burning the job budget.
+# After #22/#23/#24/#28 land: re-run manually, drop continue-on-error, add a 3.11 job,
+# then promote this into a blocking check (otherwise 3.10/3.11 regressions are silently
+# missed by a 3.12-only gate).
 on:
   workflow_dispatch:
   schedule:
