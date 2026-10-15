@@ -193,54 +193,60 @@ class Plugin:
                         f"{[s.get('type') if isinstance(s, dict) else type(s).__name__ for s in message]}, "
                         f"forward-id empty, types={fwd_types}")
         if fwd_id:
-            try:
-                resp2 = await ws.send_to_bot(bot_id, "get_forward_msg", {"id": fwd_id},
-                                             wait_response=True, timeout=15.0)
-            except Exception as e:
-                logger.debug(f"ctx_restore get_forward_msg({fwd_id}) failed: {e}")
-                return None
-            fw = self._resp_data(resp2)
-            msgs = fw.get("messages") if isinstance(fw, dict) else None
-            if isinstance(msgs, list) and msgs:
+            tried = []
+            for params in ({"message_id": int(reply_id)}, {"id": fwd_id}):
                 try:
-                    node_desc = [
-                        {"sender": (m.get("sender") or {}).get("user_id"),
-                         "nick": (m.get("sender") or {}).get("nickname"),
-                         "keys": [k for k in m.keys() if k in ("content", "message")],
-                         "seg_count": len(m.get("content") or m.get("message") or [])}
-                        for m in msgs if isinstance(m, dict)]
-                    logger.info(f"ctx_restore diagnostic: forward({fwd_id}) "
-                                f"nodes={len(msgs)} {node_desc}")
-                    import json as _json
-                    raw_dump = _json.dumps(msgs[:6], ensure_ascii=False, default=str)
-                    for ch in range(0, min(len(raw_dump), 7200), 1800):
-                        logger.info(f"ctx_restore raw dump [{ch}]: "
-                                    f"{raw_dump[ch:ch+1800]}")
-                except Exception:
-                    pass
-                # 展开嵌套 forward: 节点本身是嵌套合并转发时递归拉一层
-                expanded: list = []
-                for node in msgs:
-                    if isinstance(node, dict):
-                        nested = ""
-                        for seg in (node.get("content") or node.get("message") or []):
-                            if isinstance(seg, dict) and seg.get("type") == "forward":
-                                nid = str((seg.get("data") or {}).get("id", "") or "")
-                                if nid:
-                                    nested = nid
-                                    break
-                        if nested:
-                            deeper = await self._fetch_forward(bot_id, nested)
-                            if deeper:
-                                expanded.extend(deeper)
-                            continue
-                    expanded.append(node)
-                if len(expanded) != len(msgs):
-                    logger.info(f"ctx_restore diagnostic: expanded {len(msgs)} -> {len(expanded)} nodes")
-                return expanded
-            logger.info(f"ctx_restore diagnostic: get_forward_msg({fwd_id}) "
-                        f"retcode/empty: fw type={type(fw).__name__}, keys={list(fw.keys()) if isinstance(fw, dict) else 'N/A'}")
-            return None
+                    resp2 = await ws.send_to_bot(bot_id, "get_forward_msg",
+                                                 params, wait_response=True, timeout=15.0)
+                except Exception as e:
+                    logger.debug(f"ctx_restore get_forward_msg({params}) failed: {e}")
+                    continue
+                fw = self._resp_data(resp2)
+                cur = fw.get("messages") if isinstance(fw, dict) else None
+                if isinstance(cur, list) and cur:
+                    tried.append((params, cur))
+                    break
+                logger.info(f"ctx_restore diagnostic: get_forward_msg(params={list(params)}) "
+                            f"returned {type(cur).__name__}, keys={list(fw.keys()) if isinstance(fw, dict) else 'N/A'}")
+            if not tried:
+                return None
+            msgs = tried[0][1]
+            try:
+                node_desc = [
+                    {"sender": (m.get("sender") or {}).get("user_id"),
+                     "nick": (m.get("sender") or {}).get("nickname"),
+                     "keys": [k for k in m.keys() if k in ("content", "message")],
+                     "seg_count": len(m.get("content") or m.get("message") or [])}
+                    for m in msgs if isinstance(m, dict)]
+                logger.info(f"ctx_restore diagnostic: forward({fwd_id}) "
+                            f"nodes={len(msgs)} {node_desc}")
+                import json as _json
+                raw_dump = _json.dumps(msgs[:6], ensure_ascii=False, default=str)
+                for ch in range(0, min(len(raw_dump), 7200), 1800):
+                    logger.info(f"ctx_restore raw dump [{ch}]: "
+                                f"{raw_dump[ch:ch+1800]}")
+            except Exception:
+                pass
+        # 展开嵌套 forward: 节点本身是嵌套合并转发时递归拉一层
+        expanded: list = []
+        for node in msgs:
+            if isinstance(node, dict):
+                nested = ""
+                for seg in (node.get("content") or node.get("message") or []):
+                    if isinstance(seg, dict) and seg.get("type") == "forward":
+                        nid = str((seg.get("data") or {}).get("id", "") or "")
+                        if nid:
+                            nested = nid
+                            break
+                if nested:
+                    deeper = await self._fetch_forward(bot_id, nested)
+                    if deeper:
+                        expanded.extend(deeper)
+                    continue
+            expanded.append(node)
+        if len(expanded) != len(msgs):
+            logger.info(f"ctx_restore diagnostic: expanded {len(msgs)} -> {len(expanded)} nodes")
+        return expanded
         # 没找到 forward id: 落回单条被引用消息(当前行为)
         sender = data.get("sender") or {}
         logger.info(f"ctx_restore diagnostic: fallback single-message restore "
