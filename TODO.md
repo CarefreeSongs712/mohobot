@@ -40,8 +40,16 @@
 |---|---|---|
 | #19 | PASS（0 P1 / 1 P2 / 4 P3） | N1 [P2]：非流式缺终态兜底——工具跑完但模型不返文本时 `chat()` 返回空串，`stream=false` 下用户完全静默，而流式有 `[工具调用完成，但模型未返回文本]`；新用例把 `reply == ""` 固化为期望，与"语义一致"自述矛盾（**base 同样为空，非本 PR 引入**）。已提交 review（COMMENTED） |
 | #26 | PASS（0 P1 / 0 P2 / 3 P3） | base RED `NameError` @ main.py:167、head GREEN、变异杀死、四种批次情形端到端核对；与已关闭 #21 的两文件 blob 完全相同（替换忠实）。P3：回归 stub 掉真实分批；提示把"读取条数"当"已转发条数"（实测投递 3/4 vs 文案 5）；commit 称根 runner 67/1 实测 66/1。已提交 review（COMMENTED） |
+| #18 | **CHANGES REQUESTED**（N1 [P1·合并流程] + N2 [P2]） | 代码本身在其 base 上无缺陷（8 个诊断出口全标记、3 个消费点、真实链路 71/71 断言）；阻断点是**合并解析**：照搬 #19 那一侧会把标记退回 `str`，静默重开 issue #4 的 P1（naive 合并下测试全绿但链路探针 5 项失败）。N2：缺一条覆盖非流式 `chat()` 跟进失败出口的用例，补上即可把该风险变成门禁。已提交 review（COMMENTED；GitHub 不允许对自建 PR 投 request-changes） |
+| #24 | PASS（0 P1；P2×3、P3×5） | 合入最新 main（含 ctx_restore）**无冲突**，合并快照上阻塞入口全绿：pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过 → 合入后首次 `push: main` 预计绿。纠正了作者三处结论，见 §1.1。已提交 review（COMMENTED） |
 
 ### 1.1 合并顺序与合并后果（基于当前 head 实测）
+
+> **⚠️ main 已前进（2026-10-15 23:15 复核）**：`origin/main` = **`2b95bf0`**，比本文档此前引用的 `b4548cd` 多 5 个提交，**全部只新增 `plugins/ctx_restore/`（`_conf_schema.json`、`main.py`）**，与所有开放 PR 零重叠。因此各 PR 记录的 base `b4548cd` 已过期，合并会落在 `2b95bf0` 上；此前"main 未动"的说法作废。
+
+**最新 main 的实测基线（`2b95bf0`，本机隔离快照）**：`pytest -o asyncio_mode=auto tests` = **5 failed / 589 passed**；根 runner = **65 passed / 1 failed**；`ruff E9,F63,F7` 与 compileall 通过。**这 5 个失败正是 #22（4 个 qzone 假通过）与 #23（#10 占位断言）要修的**——即当前 main 上若已有 CI，阻塞测试 job 会是红的，#22/#23（或带这两项修复的 #24）是让 main 变绿的前提。
+
+**裸 `pytest tests/` 的真实数字（更正）**：无根配置时 pytest-asyncio 1.4 默认 strict，实测 **378 failed / 221 passed**（不是此前记的 13 failed——那是 53 个用例的子集口径）；加 `-o asyncio_mode=auto` 后 main = 5 failed/589 passed，`#24` head = **594 passed**。所以 `pytest.ini` 的作用是让 378 个 async 用例真正执行，而不是"修 13 个失败"。
 
 **没有任何堆叠 PR**：除 #18/#19 的历史关系外，全部开放 PR 的 base 都是 `main@b4548cd`。
 
@@ -50,15 +58,15 @@
 | 文件 | PR | 后果 |
 |---|---|---|
 | `mohobot/llm_service.py` | #18、#19 | **真冲突，且只有 1 个冲突块**：位于 `chat()` 的跟进 `except` 分支（#19 的 `return f"[LLM 调用失败…]", tool_results` ↔ #18 的 `reply_text = LLMDiagnostic(...)`），#18 其余 8 处自动合并。**rebase 时必须改成 `return LLMDiagnostic(...), tool_results`**，否则 #18 的 P1（诊断文案当正文落盘）会在链式路径重现；而 #19 把这个返回点从 1 处扩到最多 5 轮，等于把 P1 暴露面复制多份 |
-| `tests/test_merged_group_reply.py` | #23、#24 | #24 分支已包含 #23 的提交。**先合 #23 → #24 的 diff 自动收缩，无冲突**；直接合 #24 则一并带入该测试修复（内容相同，不会产生分歧） |
-| `tests/test_qzone.py` | #22、#24 | 同上：#24 含 #22 提交，先合 #22 更干净 |
+| `tests/test_merged_group_reply.py` | #23、#24 | **更正**：#24 分支里的副本是 #23 的**旧版**（`test_merged_group_reply.py:129` 少 `ws.replies == []`），且 `merge-base(#23head, #24head)` 仍是 `b4548cd` → 先合 #23 **不会**让 #24 的展示 diff 自动收缩（需 rebase / "Update branch"）。若直接按现状合 #24，冲突解决必须**保留 main 侧（带 `ws.replies == []` 的那版）**，否则会把这行断言改弱 |
+| `tests/test_qzone.py` | #22、#24 | #24 里的副本与 #22 head **逐字节相同**（`08ca85f`），内容无分歧；但同样因为 merge-base 未变而不会自动收缩，合并时该文件实际是空操作。推荐做法：**先合 #22、#23，再 rebase/Update branch #24**，让它只剩 CI 文件 |
 
 其余生产文件各自只被一个 PR 触碰（`outbound.py`←#28、`chat_manager/main.py`←#26、`relationship config`←#17、`llm_service/message_handler/llm_diagnostic/engine`←#18、`ban/store`+`file_store`+`image_cache` 等←#32、`ban_filter`+`vcpedia`+`app.py` 等←#36）。
 
 **建议顺序与合入后立即发生的变化**：
 
 1. **#22、#23 先合**（测试可信度）：#23 让 main 根 runner 从 `65 passed/1 failed` 变 **`66 passed/0 failed`**，issue #10 可关；#22 让 4 个此前从未真正执行的 qzone 用例开始执行。两者都只改测试文件。
-2. **#24 再合**（CI + `pytest.ini`）：合入后 `push: main` 立即触发 CI；该分支现存 4 项检查全绿（Python 3.12 / 语法 / meme 插件 / Ruff 债务报告），且 `pytest.ini` 会让**裸 `pytest tests/` 从 13 failed 恢复正常**。3.10/3.11 走独立 `compat.yml`（手工/每周/push main），不会给 main 留下长期红叉。
+2. **#24 再合**（CI + `pytest.ini`）：推荐**先合 #22/#23，再 rebase / Update branch #24**，让它只剩 CI 文件（否则见上表：展示 diff 不收缩，且可能把 #23 的断言改弱）。合入后 `push: main` 立即触发 CI；审查员在"最新 main + #24"的合并快照上实测阻塞入口全绿（pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过），预计首次运行即绿。`pytest.ini` 的作用是让 **378 个 async 用例真正执行**（无配置时裸跑 378 failed/221 passed），不是"修 13 个失败"。3.10/3.11 走独立 `compat.yml`（手工/每周/`push main`）；注意该 workflow **至今 0 次真实运行**，且上次 py310 job 在 pytest exit 124 后跳过了 runner/concurrency 步骤、artifact 只剩半份——合入后应手工 dispatch 一次确认端到端。
 3. **#26、#28、#32–#36、#30、#29、#17、#27、#20** 可独立合入，互不冲突（见上表）。
 4. **#18/#19 最后处理**：两者都在 `llm_service.py`，必须串行 + rebase；建议先合 #18（P1：诊断不落盘，涉及数据正确性），再 rebase #19 并重跑 `tests/test_llm_nonstream_tool_chain.py` 与 `tests/test_llm_runtime_tools.py`。只合其中之一不会让 main 语义不一致（各自自洽），但两个都未合时 issue #4 仍未关闭。
 
