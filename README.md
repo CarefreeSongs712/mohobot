@@ -53,7 +53,7 @@
 
 | 分类 | 技术 |
 |------|------|
-| 语言 | Python 3.10+ |
+| 语言 | Python 3.12（CI 实际验证版本）；声明支持 3.10+，但 3.10/3.11 **尚未验证**，见 [开发指南](docs/DEVELOPMENT.md) |
 | 异步 | asyncio |
 | WebSocket | websockets |
 | Web 面板 | FastAPI + SSE |
@@ -191,7 +191,7 @@ global 重写影响该用户所有匹配的 GitHub HTTPS 地址，不作用于 S
 ```bash
 # Python 3.12（示例用 pyenv）
 sudo apt update
-curl -fsSL https://pyenv.run | bash   # 或直接使用系统 Python 3.10+
+curl -fsSL https://pyenv.run | bash   # 建议 3.12（3.10+ 虽声明支持但未验证）
 pyenv install 3.12.13
 pyenv global 3.12.13
 

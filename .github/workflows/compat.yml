@@ -31,7 +31,8 @@ jobs:
   py310:
     name: Tests (Python 3.10, informational)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 覆盖 install + compileall + 6m/6m/4m 三个带超时的测试步骤（各步之和 16m+）
+    timeout-minutes: 30
     continue-on-error: true
     env:
       PYTHONUTF8: "1"
@@ -55,9 +56,13 @@ jobs:
           set -o pipefail
           timeout --kill-after=30s 6m python -m pytest -q -o faulthandler_timeout=120 \
             tests --ignore=tests/test_concurrency.py 2>&1 | tee pytest-py310.log
+      # if: always() —— pytest 步骤超时/失败后，后续入口仍要执行并留下日志，
+      # 否则这一步之后的兼容信号会被整段跳过，只剩半份（见 PR 审查 N3）。
       - name: Run legacy regression runner
+        if: always()
         run: timeout --kill-after=30s 6m python tests/_run_all.py 2>&1 | tee runner-py310.log
       - name: Run concurrency regression
+        if: always()
         run: timeout --kill-after=30s 4m python tests/test_concurrency.py 2>&1 | tee concurrency-py310.log
       - name: Upload Python 3.10 logs
         if: always()

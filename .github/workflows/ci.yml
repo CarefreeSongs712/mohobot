@@ -100,19 +100,32 @@ jobs:
       - name: Collect existing lint findings
         run: |
           set -o pipefail
+          # 区分「ruff 判定有告警」(exit 1) 与「ruff 自己没跑起来」(其它非零码/无输出):
+          # 后者不能显示成「0 条债务」。
+          status=0
           python -m ruff check --isolated --select E4,E7,E9,F --ignore E402 --output-format concise \
-            main.py mohobot plugins review scripts tests > ruff-report.txt || true
+            main.py mohobot plugins review scripts tests > ruff-report.txt 2> ruff-stderr.txt || status=$?
           total=$(grep -cE ':[0-9]+:[0-9]+: [A-Z]+[0-9]+' ruff-report.txt || true)
           {
             echo "### Ruff debt report"
             echo ""
-            echo "Existing findings (not introduced by this pull request): **${total}**"
-            echo ""
-            echo '```'
-            grep -oE ' [A-Z]+[0-9]+ ' ruff-report.txt | sort | uniq -c | sort -rn || true
-            echo '```'
-            echo ""
-            echo "Full list: the \`ruff-debt-report\` artifact of this run."
+            if [ "$total" -eq 0 ] && { [ -s ruff-stderr.txt ] || { [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; }; }; then
+              echo "**Ruff 未正常完成（退出码 ${status}）**，本次报告不可用——这不是「0 条债务」。"
+              echo ""
+              echo '```'
+              tail -n 5 ruff-stderr.txt || true
+              echo '```'
+            elif [ "$total" -eq 0 ]; then
+              echo "本规则集下没有告警。"
+            else
+              echo "Existing findings (not introduced by this pull request): **${total}**"
+              echo ""
+              echo '```'
+              grep -oE ' [A-Z]+[0-9]+ ' ruff-report.txt | sort | uniq -c | sort -rn || true
+              echo '```'
+              echo ""
+              echo "Full list: the \`ruff-debt-report\` artifact of this run."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload lint report
         if: always()
