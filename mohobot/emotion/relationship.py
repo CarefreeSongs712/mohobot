@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import EmotionalState, STAGE_ORDER, STAGE_NAMES
+from .models import EmotionalState, STAGE_ORDER
 
 # 阶段配置: 权重/阈值/过渡缓冲/过渡期亲密度加成系数
 STAGE_CONFIGS: dict[str, dict[str, Any]] = {
