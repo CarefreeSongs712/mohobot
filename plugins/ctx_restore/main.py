@@ -211,6 +211,11 @@ class Plugin:
                         for m in msgs if isinstance(m, dict)]
                     logger.info(f"ctx_restore diagnostic: forward({fwd_id}) "
                                 f"nodes={len(msgs)} {node_desc}")
+                    import json as _json
+                    raw_dump = _json.dumps(msgs[:6], ensure_ascii=False, default=str)
+                    for ch in range(0, min(len(raw_dump), 7200), 1800):
+                        logger.info(f"ctx_restore raw dump [{ch}]: "
+                                    f"{raw_dump[ch:ch+1800]}")
                 except Exception:
                     pass
                 # 展开嵌套 forward: 节点本身是嵌套合并转发时递归拉一层
