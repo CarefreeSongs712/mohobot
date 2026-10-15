@@ -48,13 +48,13 @@
 
 ### 1.2 dev 集成分支（本地演练，不动 main）
 
-按用户要求建了 `dev` 分支把已审查的 PR 全部合并演练：起点 `origin/main@2b95bf0`，**17 个分支零冲突合入**（唯一冲突是 #18↔#19 的 `llm_service.py`，按审查结论解析为 `return LLMDiagnostic(...), tool_results`），当前领先 main **74 个提交**、42+ 文件。
+按用户要求建了 `dev` 分支把已审查的 PR 全部合并演练：起点 `origin/main@2b95bf0`，**17 个分支零冲突合入**（唯一冲突是 #18↔#19 的 `llm_service.py`，按审查结论解析为 `return LLMDiagnostic(...), tool_results`），随后并入维护者新提交（`origin/main` 已到 **`bd9fbd2`**，仍只动 `plugins/ctx_restore/`），当前领先 main **75 个提交**。
 
-实测（隔离快照）：
+实测（隔离快照，含门禁用例后）：
 
 | 入口 | 结果 |
 |---|---|
-| 裸 `pytest tests`（靠 `pytest.ini` 的 asyncio auto） | **609 passed**（main 为 5 failed/589 passed） |
+| 裸 `pytest tests`（靠 `pytest.ini` 的 asyncio auto） | **610 passed**（main 为 5 failed/589 passed） |
 | 根 runner `tests/_run_all.py` | **69 passed / 0 failed**（main 为 65/1；issue #10 已修） |
 | `tests/test_concurrency.py` | 全部通过 |
 | `ruff E9,F63,F7` / `compileall` | 通过 |
@@ -66,7 +66,20 @@
 
 即：如果将来有人把 #18/#19 的冲突解成普通字符串，这条用例会直接失败，而不是让 issue #4 的 P1 静默复活。
 
+**独立复审（针对 head `6c32dce`）确认解除**：N1 [P1·合并流程] → **[Closed]**、N2 [P2] → **[Closed]**，结论 PASS。复审自己做了三向变异，其中 M3（只把 `message_handler.py:1259` 消费点改成 `if False:`、标记保留）→ 3 failed，证明端到端那半段确实承重，不是空转。naive 态下全仓根 runner 由 69/0 变 **68 passed / 1 failed**，而 #19 自带用例仍全绿——新用例是唯一红灯。
+
+新增两条 P3：**N6**（PR 正文滞后：写"6 个用例/6 passed"，实际 8）→ **已修**，正文已更新为 8 个用例、补上"与 #19 的合并解析要求"一节；**N7**（门禁入口依赖：head 无 `pytest.ini`，裸 pytest 7 failed；`tests/_run_all.py` 与 #24 的 `asyncio_mode=auto` 下才执行）→ 记录，不阻断。
+
 > 说明：`dev` 只在本地，用于验证合并可行性与顺序；**未推送、未动 main**。维护者合并时仍走各 PR。
+
+### 1.3 分支清理（2026-10-15）
+
+本地分支 **28 → 19**（= 17 个开放 PR 分支 + `main` + `dev`）。删除的是：
+- 已关闭 PR 的分支：#12 `fix/meme-list-scope`、#15 `fix/sqlite-legacy-wal-migration`、#21 `fix/chat-manager-partial-forward`、#31 `lint/core-unused-imports-2`（后两个同时删了 origin 远程分支）；
+- 已合并 PR 的本地残留：#11 `fix/reply-filter-nesting`、#13 `fix/relationship-kick-blacklist`、#14 `fix/qzone-per-post-reply-cap`、#16 `fix/outbound-cancellation-state`（origin 侧早已随合并删除）；
+- 历史快照：本地 `docs/handover-audit-main`、`docs/audit-handover-and-rules`（内容已重放进 #27 / #24）。
+
+**保留**所有开放 PR 的分支——删除它们会直接关掉对应 PR。另外 `fork` 远程仍留有 #11–#16 的旧副本与一个非本会话创建的 `feat/knowledge-base`，未动。
 
 ### 1.1 合并顺序与合并后果（基于当前 head 实测）
 
