@@ -24,7 +24,7 @@
 | #26 | chat-manager 部分批次失败时修复 `nodes` NameError | 直接基于 main，替代已关闭的叠放 PR #21；独立审查通过，待维护者合入 |
 | #28 | 修复 Python 3.10/3.11 `wait_for` 吞取消 | 独立复核 PASS；3.10/3.11/3.12 出站测试均 5 passed，待维护者合入。`enqueue_timeout_sec` 参数暂保兼容但不再控制入队等待，后续可清理文档/配置 |
 | #29 | 清理三个失效/错误形状的 P3 回归测试 | 新 head `35f75f4` 已补 `await run()`；独立复核 PASS，19 个 pytest、原生入口和 Ruff 通过，待维护者合入 |
-| #30 | 第一批低风险 Ruff 测试债务清理 | 5 个独立测试文件，12 个 pytest、原生入口、Ruff 均通过；等待独立复核 |
+| #30 | 第一批低风险 Ruff 测试债务清理 | 独立复核 PASS；5 个独立测试文件，12 个 pytest、原生入口、Ruff 均通过，待维护者合入 |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
