@@ -35,7 +35,6 @@ def test_full_reply_quote_isolation():
     )
     flushed = h._flush_ready_segments(text)
     segments = flushed["segments"] + ([flushed["rest"]] if flushed["rest"].strip() else [])
-    joined = "\n".join(s.strip() for s in segments)
     assert "乘破冰的船，\n将涌动的爱收揽" in segments[1] or any(
         "乘破冰的船" in s and "风暴无法将我阻拦" in s for s in segments
     ), segments  # 引文整体在一段内
