@@ -23,7 +23,7 @@
 | #20 | 本 TODO 清单与 CI 接入计划 | 按已验证测试和 GitHub PR 状态更新，待维护者审查 |
 | #26 | chat-manager 部分批次失败时修复 `nodes` NameError | 直接基于 main，替代已关闭的叠放 PR #21；独立审查通过，待维护者合入 |
 | #28 | 修复 Python 3.10/3.11 `wait_for` 吞取消 | `outbound.py` 改 `put_nowait`；3.10/3.11/3.12 出站测试均 5 passed，独立审查中 |
-| #29 | 清理三个失效/错误形状的 P3 回归测试 | pytest 19 passed、原生入口通过，独立审查中 |
+| #29 | 清理三个失效/错误形状的 P3 回归测试 | 新 head `35f75f4` 已补 `await run()`；19 个 pytest、原生入口和 Ruff 已重跑通过，等待新 head 独立复核 |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
