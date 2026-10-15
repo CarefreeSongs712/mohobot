@@ -27,12 +27,14 @@
 | #30 | 第一批低风险 Ruff 测试债务清理 | 独立复核 PASS；5 个独立测试文件，12 个 pytest、原生入口、Ruff 均通过，待维护者合入 |
 | #32 | 第二批低风险 Ruff 核心导入清理（替代已关闭的 #31） | 独立复核 PASS；直接基于 main，仅 6 个核心文件；29 个 pytest、Ruff 通过，待维护者合入 |
 | #33 | 第三批低风险 Ruff 告警清理 | 独立核验 PASS；3 个文件，24 个 pytest、Ruff、compileall 通过，待维护者合入 |
-| #34 | 第四批低风险 Ruff 清理（persona_ab） | 单文件，17 个 pytest、Ruff 通过；文件已无本批规则告警，等待独立复核 |
+| #34 | 第四批低风险 Ruff 清理（persona_ab） | 独立复核 PASS（base 6 条对应告警 → head 0）；17 个 pytest、Ruff 通过，待维护者合入 |
+| #35 | 第五批低风险 Ruff 清理（wifepicker） | 独立复核 PASS（base 3×F841 → head 0，AST 确认无副作用）；16 个 pytest，待维护者合入 |
+| #36 | 第六批：核心模块残留局部与导入清理 | 7 个文件，53 个 pytest、Ruff、compileall 通过；内含两处需单独处理的问题（见第 3 节），等待独立复核 |
 | #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
 | #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
 | #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
 
-建议合入顺序：先 #22、#23，再 #24；#17、#26、#28、#29、#30、#32、#33、#34 可独立合入；#18/#19 需先处理文本冲突。#27 是文档独立 PR；#25 已由 #28 实现修复，待维护者合入后关闭 issue。
+建议合入顺序：先 #22、#23，再 #24；#17、#26、#28、#29、#30、#32、#33、#34、#35、#36 可独立合入；#18/#19 需先处理文本冲突。#27 是文档独立 PR；#25 已由 #28 实现修复，待维护者合入后关闭 issue。
 
 维护者已表态暂缓，相关 PR 已关闭：
 
@@ -95,6 +97,8 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #26 直接基于 main 修复，独立审查中；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
+| P3 | `mohobot/llm_service.py:688-689` | **重复定义**：一个只有 `since = self._range_since(...)` 的 `_compute_session_usage` 死桩被 702 行的真实实现覆盖；死桩恒返回 `None`，若将来有人把真实实现挪走会静默出错 | ruff `F841`（`since` 未使用）；该文件正被 #18/#19 修改，**待其合入后单独清理**，避免冲突 |
+| P3 | `plugins/perception/main.py:264` | 注释称"失败也缓存空值 60s"，但 `ttl` 算完从未使用，读取侧（第 249 行）固定用 `_GROUP_NAME_TTL`(600s) → 空结果实际缓存 600s，**意图未实现** | ruff `F841`（`ttl` 未使用）。删除变量行为不变，但真正的问题是缓存时长与注释不符，需单独评估是否实现 per-entry TTL |
 | P3 | `tests/test_qzone.py:859,871` | `_PubFakeAPI` 定义了两个 `__init__`，第一个被静默覆盖 | ruff `F811` |
 | P3 | `tests/test_neteasemusic.py:276` | 替身 `FailingAPI.get` 是 `async def`，而真实调用方是 `async with self._http().get(url)`。用例仍通过，但触发降级的其实是替身形状错误引起的 `TypeError`，而不是它想模拟的 `RuntimeError("connection refused")` | 根 runner 日志：`coroutine 'FailingAPI.get' was never awaited` |
 | — | `mohobot/bot_manager.py:31,36,362`、`mohobot/file_store.py:19,23` | 字符串注解里引用了未导入的 `websockets` / `asyncio`，运行时无影响 | ruff `F821`；用 `TYPE_CHECKING` 导入即可消除 |
