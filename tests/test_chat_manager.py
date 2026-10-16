@@ -386,14 +386,14 @@ async def test_send_failure_reports_error():
 async def test_usage_errors():
     """缺参/非数字目标/非正整数条数 → 明确提示, 无副作用。"""
     cases = [
-        (f"/查看聊天", "用法"),
+        ("/查看聊天", "用法"),
         (f"/查看聊天 {GROUP} abc", "正整数"),
         (f"/查看聊天 {GROUP} 0", "正整数"),
-        (f"/查看聊天 abc", "纯数字"),
+        ("/查看聊天 abc", "纯数字"),
         (f"/查看聊天 {GROUP} 1 extra", "参数过多"),
-        (f"/发送消息", "用法"),
+        ("/发送消息", "用法"),
         (f"/发送消息 {USER}", "用法"),
-        (f"/发送消息 abc 你好", "纯数字"),
+        ("/发送消息 abc 你好", "纯数字"),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         for text, expect in cases:
