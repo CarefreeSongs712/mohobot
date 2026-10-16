@@ -2,7 +2,7 @@
 
 > 面向要改这个仓库的人。目标：读完能独立加插件、加配置项、加 LLM 工具、加 DB 字段，并且知道每处改动该动哪些文件。
 >
-> 基于 `main` 分支当前工作区（`__version__ = "0.1.0"`，约 3.7 万行 Python）整理。
+> 这份指南随代码演进，版本号与行数等动态信息不作为验收基线。
 > 文末「已知坑与不一致」一章是实际踩点记录，**建议先读那一章**。
 
 ---
@@ -45,7 +45,7 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 | `mohobot/web_panel/` | 主管理面板（FastAPI + 单文件前端 `static/index.html`） |
 | `plugins/` | 动态加载插件 |
 | `review/` | 聊天记录审核面板（半独立进程） |
-| `tests/` | 自研 runner 的回归测试（非 pytest） |
+| `tests/` | 原生 runner 与 pytest 双入口回归测试 |
 
 ---
 
@@ -72,13 +72,16 @@ python main.py
 
 ### 发布与部署约定
 
-- **只以 main 分支发布。** 本地通过全量回归测试后，按用户授权提交并推送到 GitHub `main`。
+- **只以 main 分支发布。** 改动走分支 → PR → 审查 → 合并；即使有 push 权限也不直接推 `main`。生产只拉取已审查合入的版本。
 - 生产环境统一通过 `git pull --ff-only origin main` 获取更新；禁止日常无备份 reset/force 操作。
 - 生产由 systemd 服务管理，不要在服务运行时另起 screen / nohup 进程；更新后使用对应的 systemd unit 重启，不要用面板内的进程内重启代替版本发布。完整说明见 `README.md` 与外部部署规范。
 
-### 回归测试（唯一的验收手段）
+### 回归测试
+
+开发环境先安装 `python -m pip install -r requirements-dev.txt`。测试不需要生产配置、LLM API Key 或真实机器人连接；使用隔离数据与替身边界。
 
 ```bash
+python -m pytest -q tests --ignore=tests/test_concurrency.py  # 逐用例；pytest.ini 自动 await async 测试
 python tests/_run_all.py          # 全量，从仓库根执行
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
@@ -115,7 +118,35 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
   统计仅表示单轮同历史偏好。聊天 ZIP 备份不包含 persona_ab；独立 JSON 导出，首版无恢复导入。
   单用户 JSON 与统计全量扫描适合首版规模，未来大样本需索引/归档。
 
-**当前基线：`45 passed, 0 failed`**（2026-09-25 实测，含新增的 `test_emotion_webui.py`）。改动后以此为对照。
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` 在 PR、`push main` 和手工触发时执行。只读仓库权限，不使用生产密钥，同一分支的新运行会取消旧运行。
+
+| job | 范围 | 是否阻塞 PR |
+|---|---|---|
+| Tests (Python 3.12) | compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
+| Syntax and control-flow checks | 全仓 Ruff `E9,F63,F7` | 是 |
+| Meme plugin regression | 插件自己的 pytest 和现有 lint 规则 | 是 |
+| Ruff debt report | Ruff `E4,E7,E9,F`（忽略 `E402`）的既有告警，写入 step summary 并上传 artifact | 否（job 保持绿色，见下） |
+
+三个阻塞 job 是 PR 的合并信号；它们失败就是真的失败。所有测试进程都带 `timeout` 与 `faulthandler_timeout`，卡住的用例会先打出线程栈再由超时终止（退出码 124），不会静默挂到 job 超时。
+
+`Ruff debt report` 是**信息性**的：仓库仍有既存告警（当前 159 条，全部来自本 PR 之前的代码），ruff 在这些告警上必然返回非零。若把它当门禁，每个 PR 都会显示一个红色检查，却无法区分"新引入的问题"和"历史债务"。因此它只报告、不判红，条目数写进 step summary，完整清单在该运行的 `ruff-debt-report` artifact 里。清理完债务后再把它升级为阻塞检查——不能靠隐藏告警来变绿。
+
+`.github/workflows/compat.yml` 单独跟踪 Python 兼容性（手工触发、每周日、`push main`），**刻意不挂在 PR 上**：Python 3.10/3.11 上套件曾整体停滞，**根因已定位**——`asyncio.wait_for()` 吞掉调用方取消（issue #25），`tests/test_outbound_cancellation.py::test_cancelled_after_dispatch_is_reported_to_caller` 在 base 3.10/3.11 上**单独跑也会挂死**；此前"跨用例累积"的归因是错的（当时抽样的无关文件本来就快）。修复在 PR #28：该文件三版本均 5 passed。等 #22/#23/#24/#28 合入后应重新确认：去掉 `continue-on-error`、补 3.11 job，再把它升级为阻塞检查——否则 3.10/3.11 回归会被只有 3.12 的门禁静默放过。期间信号仍带线程栈与日志 artifact。
+
+仓库管理员还需设置分支保护并选择上面三个阻塞检查，workflow 本身不会修改保护设置。
+
+meme 插件应在独立目录执行，避免与根测试命名空间混用：
+
+```bash
+(cd plugins/meme_stealer && python -m pytest -q -rs tests)
+(cd plugins/meme_stealer && python -m ruff check --isolated --select E4,E7,E9,F --ignore E402 main.py meme_stealer_core tests)
+```
+
+插件 UMAP 用例和历史 schema 用例会在可选包或原始 Git 对象缺失时明确报告 skip。
+
+**测试前置修复：** PR #22 将四个 qzone 会话用例改为真正的 async 函数；PR #23 将合并回复的过时占位断言改为当前已确定行为。CI 分支包含这两项，不屏蔽失败用例。组合基线（Python 3.12）：pytest `594 passed`，根 runner `66 passed, 0 failed`。
 
 runner 机制（`tests/_run_all.py`）：
 
