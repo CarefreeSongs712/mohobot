@@ -70,7 +70,25 @@
 
 新增两条 P3：**N6**（PR 正文滞后：写"6 个用例/6 passed"，实际 8）→ **已修**，正文已更新为 8 个用例、补上"与 #19 的合并解析要求"一节；**N7**（门禁入口依赖：head 无 `pytest.ini`，裸 pytest 7 failed；`tests/_run_all.py` 与 #24 的 `asyncio_mode=auto` 下才执行）→ 记录，不阻断。
 
-> 说明：`dev` 只在本地，用于验证合并可行性与顺序；**未推送、未动 main**。维护者合并时仍走各 PR。
+### 1.5 dev 分支已推送到远程（2026-10-16，仅含已审查通过的 PR）
+
+按用户要求，`dev` 已推送到 `origin/dev` = **`087a4e2`**（领先 main 46 提交 / 47 个文件，main 未动仍在 `bd9fbd2`）。
+
+**只包含有 PASS 审查记录的 14 个 PR**：#18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #34 #35 #36。
+
+**刻意排除（无正式审查记录）**：#17（relationship 死代码删除）、#20（TODO 文档）、#33（lint/low-risk-3）——这三个没有审查报告，按"只推已审查通过"的口径未纳入。
+
+合并方式：从 `origin/main@bd9fbd2` 逐个 `--no-ff` 合并，唯一冲突仍是 #18↔#19 的 `llm_service.py`，按既定方式解析为 `return LLMDiagnostic(f"[LLM 调用失败: {e}]"), tool_results`（保留 #19 控制流 + #18 的诊断标记）。因此该分支是**可复现的**：合这 14 个分支即得此树。
+
+**推送前实测**（隔离快照 `dev-final`）：裸 pytest **613 passed**；根 runner **69 passed / 0 failed**；并发专项通过；`ruff E9,F63,F7` 与 compileall 通过。
+
+**推 dev 不触发 CI**：`ci.yml` / `compat.yml` 的 push 触发器都限定 `branches: [main]`，实测推送后 `gh run list` 无新运行。若要让维护者看到集成结果并可跑 CI，需要开一个 draft PR（`dev` → `main`），待确认。
+
+**已知缺口（合入后应修，非本分支引入）**：非流式"工具轮无文本"兜底在 #19 里是普通 `str`，而流式同一兜底在 #18 里是 `LLMDiagnostic` → 合并态两者不一致（后者不入上下文，前者会被当正文落盘）。修法：合并后把非流式那行也包成 `LLMDiagnostic`（本次 dev 的一次演练版本曾这么做并全绿，但为保持"纯合并结果可复现"未纳入）。
+
+另外：**#24 最终 head `4fde47c` 的真实 CI 四项全绿**（Tests 3.12 2m46s / Syntax / Meme plugin / Ruff 报告），即本轮对 CI 自身的修改（compat `if: always()`、README 口径、lint 报告三分支）已被真实 Actions 验证。
+
+> 说明：`dev` 是集成预览分支，**不是发布分支**，也**不改变**各 PR 仍需维护者合并的事实。
 
 ### 1.3 分支清理（2026-10-15）
 
