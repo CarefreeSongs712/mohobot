@@ -53,8 +53,11 @@ async def test_partial_batch_failure_returns_summary_without_name_error():
         handled, reply = await plugin.on_message("bot_001", _event("/查看聊天 123456 3"), {})
 
     assert handled is True
-    assert "已转发 3 条" in reply, reply
-    assert "1 批失败" in reply and "成功 2 批" in reply, reply
+    # 不得把"读取条数"说成"已转发条数": 只报批次 + 读取条数, 并提示失败批次可能未送达
+    assert "成功 2 批 / 失败 1 批" in reply, reply
+    assert "本次读取 3 条" in reply, reply
+    assert "未送达" in reply, reply
+    assert "已转发 3 条" not in reply, reply
 
 
 def main():

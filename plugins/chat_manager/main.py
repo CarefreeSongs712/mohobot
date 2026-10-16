@@ -164,7 +164,12 @@ class Plugin:
         if failed and not ok:
             return f"❌ 转发失败(共 {failed} 批), 请检查协议端连接。"
         if failed:
-            return f"⚠️ 已转发 {len(messages)} 条, 其中 {failed} 批失败(成功 {ok} 批)。"
+            # forward_messages 只回 (成功批数, 失败批数), 拿不到精确投递条数;
+            # 因此如实报批次, 不把"读取条数"说成"已送达条数"。
+            return (
+                f"⚠️ 部分转发失败: 成功 {ok} 批 / 失败 {failed} 批"
+                f"(本次读取 {len(messages)} 条, 失败批次中的消息可能未送达)。"
+            )
         return None
 
     # ── /发送消息 ─────────────────────────────────────────────
