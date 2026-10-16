@@ -17,9 +17,8 @@ import hashlib
 import json
 import re
 import time as _time
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote, urlparse
 
 import requests
@@ -186,8 +185,8 @@ class AnubisClient:
         t0 = _time.time()
         nonce, digest = self._solve_pow(ch["randomData"], ch["difficulty"])
 
-        # 挑战过程中服务端会下发验证 cookie(Partitioned; SameSite=None), 保留到 pass 请求
-        cookies = dict(sess.cookies)
+        # 挑战过程中服务端下发的验证 cookie(Partitioned; SameSite=None)留在 sess 的
+        # cookie jar 里, 下面的 pass 请求直接复用该会话, 无需再单独复制一份。
         # 浏览器端(main.mjs)的参数形态: response=中选哈希, redir="/"(无
         # anubis_public_url 元素时 j() 固定返回根路径), elapsedTime=解题耗时 ms
         elapsed_ms = max(1, int((_time.time() - t0) * 1000))
