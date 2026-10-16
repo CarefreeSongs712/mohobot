@@ -202,5 +202,15 @@ async def test_legacy_round_limit_total_failure() -> None:
     print("[4] Legacy 强制文本轮总失败兜底 OK")
 
 
+async def main() -> None:
+    for name in sorted(globals()):
+        if name.startswith("test_"):
+            target = globals()[name]
+            if asyncio.iscoroutinefunction(target):
+                await target()
+            else:
+                target()
+
+
 if __name__ == "__main__":
     asyncio.run(main())
