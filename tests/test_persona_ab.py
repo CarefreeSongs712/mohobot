@@ -19,8 +19,8 @@ from mohobot.llm_service import LLMService
 from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig, PersonaABConfig
 from mohobot.models.onebot import PrivateMessageEvent, GroupMessageEvent, Sender
-from mohobot.persona_service import PersonaService, PersonaInUseError
-from mohobot.services.persona_ab import PersonaABService, content_hash, delivery_status
+from mohobot.persona_service import PersonaService
+from mohobot.services.persona_ab import PersonaABService, delivery_status
 from mohobot.utils.persona_ab_card import render_comparison, wrap_text
 
 
@@ -161,7 +161,7 @@ async def test_votes_owner_idempotency_switch_guards_and_references():
         original = await e.context.load_context("bot_001", "private", "3001")
         await e.service.switch("bot_001", 3001, record["id"], "B")
         assert await e.context.load_context("bot_001", "private", "3001") == original
-        other = await e.context.create_session("bot_001", "private", "3001", "other")
+        await e.context.create_session("bot_001", "private", "3001", "other")
         await rejects(e.service.switch("bot_001", 3001, record["id"], "A"), "活动")
         await e.context.switch_session("bot_001", "private", "3001", record["session_id"])
         snapshot = record["personas"][record["mapping"]["A"]]
@@ -253,7 +253,6 @@ async def test_handler_context_choice_pending_chat_and_vote_bypass():
     with tempfile.TemporaryDirectory() as root:
         e = await setup(root)
         ws = FakeWS(e.manager)
-        emotion = SimpleNamespace(schedule_turn=lambda *a: None)
         handler = MessageHandler(ws, e.context, e.llm, None, data_dir=root, persona_service=e.personas, persona_ab_service=e.service)
         with patch("mohobot.services.persona_ab.render_comparison", return_value=[{"type":"image","data":{"file":"mock"}}]):
             await handler._handle_message("bot_001", event(), {})
@@ -479,9 +478,11 @@ async def test_web_auth_filters_export_and_safe_ui():
             client.headers["Authorization"] = "Bearer mock"
             assert client.get("/api/persona-ab?bot_id=bot_999&version_hash=bad").json()["total"] == 0
             assert client.get("/api/persona-ab/export").headers["content-disposition"].startswith("attachment")
-            invalid = e.cfg.to_dict(); invalid["test_id"] = invalid["baseline_id"]
+            invalid = e.cfg.to_dict()
+            invalid["test_id"] = invalid["baseline_id"]
             assert client.put("/api/config", json={"data":{"persona_ab":invalid}}).status_code == 400
-            valid = e.cfg.to_dict(); valid["probability"] = .25
+            valid = e.cfg.to_dict()
+            valid["probability"] = .25
             assert client.put("/api/config", json={"data":{"persona_ab":valid}}).status_code == 200
             assert e.service.config.probability == .25
             assert client.get("/api/config").json()["persona_ab"]["probability"] == .25
