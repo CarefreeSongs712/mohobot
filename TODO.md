@@ -104,6 +104,8 @@
 | **#28 N1/N2 [P3]** | `enqueue_timeout_sec` 成无效配置却仍被示例配置/文档宣称；`except QueueFull` 不可达、`self._enqueue_timeout` 死状态 | **已修（head `299fb9c`）**：删前置 `queue.full()` 预检，让 `put_nowait` 的 `QueueFull` 成为唯一快速失败路径；删死属性；构造参数保留但 docstring 说明不再影响行为；示例配置 / config 字段注释 / DEVELOPMENT 均标「已废弃、不再生效」。探针实测立即失败 `elapsed=0.000077s`、死属性消失；5 passed |
 | **#26 N2 [P3]** | 部分失败提示把「读取条数」当「已转发条数」，高估投递（实测投递 3/4、文案 5） | **已修（head `8469ece`）**：改为如实报批次 `成功 {ok} 批 / 失败 {failed} 批（本次读取 {len(messages)} 条, 失败批次中的消息可能未送达）`；回归加 `assert "已转发 3 条" not in reply`；变异回旧文案 → 1 failed；21 passed |
 
+| **#28 复审残留（N1 尾行 / 新增 N4）** | `DEVELOPMENT.md` 8.2 节仍写「入队超时也转成这个异常」（与 399 自相矛盾）；快速失败分支零测试 | **已修（head `5a1fbdd`）**：8.2 节改为「已废弃、不影响行为」；新增 `test_full_queue_fails_fast_with_outbound_queue_full`（`queue_maxsize=1`，立即抛错、耗时 <0.1s、失败项不入队），变异「满队列改为等待 0.5s」→ 1 failed；6 passed |
+
 > **关于「改不改会不会让 review 失效」**：这**不是**不修的理由，正确做法是**改完再复审**。本轮已据此执行：#18 补门禁用例后复审 PASS（N1/N2 Closed）、#29 换 head 后复审 PASS、#28 与 #26 改动后各自安排了复审。只有三类是**真延期**：① 目标文件正被其它未合并 PR 重写（`llm_service.py` 的死桩与未使用导入）；② 改了会立刻让门禁变红（#24 给阻塞集加 `F821`，而现有 F821 未清完）；③ 需要维护者拍板（#18 N3「失败轮是否连用户消息一起不落盘」）。
 
 **记录为后续项**
