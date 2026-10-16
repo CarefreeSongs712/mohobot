@@ -101,14 +101,17 @@
 | #28 归因 | 3.10 停滞被归因「跨用例累积」 | 已修 `docs/DEVELOPMENT.md` + `compat.yml` 注释为真因 issue #25 |
 | #22 N1 [P3] | PR 正文 67 passed 未注明异步配置 | 正文已补复现命令与解释 |
 | #26 N3 [P3] | 口径不一致（67/1 vs 66/1、pytest 需 auto） | 已在 PR 评论中更正 |
+| **#28 N1/N2 [P3]** | `enqueue_timeout_sec` 成无效配置却仍被示例配置/文档宣称；`except QueueFull` 不可达、`self._enqueue_timeout` 死状态 | **已修（head `299fb9c`）**：删前置 `queue.full()` 预检，让 `put_nowait` 的 `QueueFull` 成为唯一快速失败路径；删死属性；构造参数保留但 docstring 说明不再影响行为；示例配置 / config 字段注释 / DEVELOPMENT 均标「已废弃、不再生效」。探针实测立即失败 `elapsed=0.000077s`、死属性消失；5 passed |
+| **#26 N2 [P3]** | 部分失败提示把「读取条数」当「已转发条数」，高估投递（实测投递 3/4、文案 5） | **已修（head `8469ece`）**：改为如实报批次 `成功 {ok} 批 / 失败 {failed} 批（本次读取 {len(messages)} 条, 失败批次中的消息可能未送达）`；回归加 `assert "已转发 3 条" not in reply`；变异回旧文案 → 1 failed；21 passed |
 
-**记录为后续项（未改动，避免让已复核 head 失效）**
+> **关于「改不改会不会让 review 失效」**：这**不是**不修的理由，正确做法是**改完再复审**。本轮已据此执行：#18 补门禁用例后复审 PASS（N1/N2 Closed）、#29 换 head 后复审 PASS、#28 与 #26 改动后各自安排了复审。只有三类是**真延期**：① 目标文件正被其它未合并 PR 重写（`llm_service.py` 的死桩与未使用导入）；② 改了会立刻让门禁变红（#24 给阻塞集加 `F821`，而现有 F821 未清完）；③ 需要维护者拍板（#18 N3「失败轮是否连用户消息一起不落盘」）。
 
-- **#28 N1/N2 [P3]**：`enqueue_timeout_sec` / `outbound_enqueue_timeout` 已成无效配置（满队列立即失败），示例配置与开发文档仍在宣称「入队超时(秒)」；`outbound.py:76` 的 `self._enqueue_timeout` 成死状态，`except asyncio.QueueFull` 在单事件循环下不可达。建议独立 follow-up PR 同步配置/文档并清理死状态。
+**记录为后续项**
+
 - **#28 N3 [P3]**：同类「`wait_for` 包住可能同回合完成的 awaitable」模式在 `close()` 及仓内其它位置仍存在（超出本 PR 范围）。
 - **#24 N2 [P2]**：阻塞 Ruff 只选 `E9,F63,F7`，`F821/F811` 不在门禁；待 #17/#26/#29/#32 清掉现有 F821 后（剩 `bot_manager.py` 3 处字符串注解），可把 `F821` 纳入阻塞集——它在本仓抓到过真 bug（`chat_manager` 的 `nodes`）。
 - **#24 N5/N6 [P3]**：`requirements.txt` 全 `>=` 不可复现、缺 `pip check`；Actions 未按 SHA 钉版本。
-- **#26 N1/N2 [P3]**：回归 stub 掉真实分批路径；部分失败提示把「读取条数」当「已转发条数」（实测投递 3/4、文案 5）。
+- **#26 N1 [P3]**：回归替身 stub 掉真实分批路径（真实分批已由独立审查端到端探针覆盖：全成功/全失败/中间批失败/最后不满批次），保留为后续项。
 - **#18 N3/N4/N5 [P3]**：失败轮连用户消息一起不落盘（待维护者确认是否有意）；`emotion/manager.py` 前缀兜底冗余；早退跳过 `ab_service.note_context`（当前不可达）。
 - **#19 N3/N4/N5 [P3]**：`max_tokens` 上限对齐、后续轮异常覆盖正文口径、新文件裸 ruff 告警（RUF100/RUF059）。
 - **知识库 P3**：`mohobot/llm_service.py` 的 `MessageSegment` 未使用导入 + 重复死桩的 `since`（`_compute_session_usage` 定义两次），待 #18/#19 合入后清理。
