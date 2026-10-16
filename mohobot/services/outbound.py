@@ -71,9 +71,11 @@ class OutboundScheduler:
         queue_maxsize: int = 100,
         enqueue_timeout_sec: float = 2.0,
     ) -> None:
+        """``enqueue_timeout_sec`` 仅为兼容既有调用方/配置保留：队列满时
+        ``submit()`` 现在立即抛 ``OutboundQueueFullError``（见那里的快速失败边界），
+        不再有"等待入队"的阶段，因此该参数不影响任何行为。"""
         self._interval = max(0.0, float(send_interval_sec))
         self._maxsize = max(1, int(queue_maxsize))
-        self._enqueue_timeout = max(0.01, float(enqueue_timeout_sec))
         # Messages only: priority queue per bot, drained by a rate-limiting worker.
         self._queues: dict[str, asyncio.PriorityQueue[tuple[int, int, _OutboundItem]]] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
@@ -115,16 +117,12 @@ class OutboundScheduler:
             label=label,
             attempt=attempt,
         )
-        if queue.full():
-            # Fail fast instead of holding the caller only to hit the same
-            # timeout later; the worker is saturated for this bot.
-            raise OutboundQueueFullError(
-                f"outbound queue full for bot {bot_id} ({label})"
-            )
-        # The full check and non-blocking put deliberately form one fast-fail
-        # boundary.  Awaiting queue.put() through asyncio.wait_for() lets Python
-        # 3.10/3.11 swallow caller cancellation when the put completes in the
-        # same loop turn; a cancelled caller would then wait on `future` forever.
+        # 单事件循环下 put_nowait 是唯一的提交点: 队满立即失败(不等待),
+        # 也就不会再出现"等待入队"窗口。这里刻意不再前置 queue.full() 预检——
+        # try/except QueueFull 已经覆盖它, 两处判断只会留下不可达分支。
+        #
+        # 不用 asyncio.wait_for(queue.put(...)): Python 3.10/3.11 的 wait_for 会在
+        # 内层已完成时吞掉调用方取消, 被取消的调用方随后会永久停在 `await future`。
         try:
             queue.put_nowait((item.priority, item.sequence, item))
         except asyncio.QueueFull as exc:
