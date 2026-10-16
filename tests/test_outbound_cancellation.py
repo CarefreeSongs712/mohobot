@@ -16,6 +16,7 @@ import asyncio
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -100,6 +101,43 @@ async def test_cancelled_during_rate_limit_wait_is_not_sent():
         assert calls == ["first"], f"限速期间被取消的项仍被发送: {calls}"
         assert attempt.dispatched is False
     finally:
+        await scheduler.close(drain_timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_full_queue_fails_fast_with_outbound_queue_full():
+    """队列满 → 立刻 OutboundQueueFullError, 不等待、不改写队列状态。
+
+    这是 submit() 里唯一的快速失败判定点（#28 删掉前置 queue.full() 预检后,
+    put_nowait 的 QueueFull 是唯一出口), 之前全仓没有用例覆盖它。
+    """
+    from mohobot.services.outbound import OutboundQueueFullError
+
+    scheduler = OutboundScheduler(send_interval_sec=0.0, queue_maxsize=1)
+    gate = asyncio.Event()
+
+    async def slow():
+        await gate.wait()
+        return "sent"
+
+    first = asyncio.create_task(scheduler.submit("bot_001", slow))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(scheduler.submit("bot_001", slow))  # 占满容量 1
+    await asyncio.sleep(0.05)
+
+    start = time.monotonic()
+    with pytest.raises(OutboundQueueFullError) as excinfo:
+        await scheduler.submit("bot_001", slow)
+    elapsed = time.monotonic() - start
+
+    try:
+        assert elapsed < 0.1, f"队列满应立即失败, 实际 {elapsed:.3f}s"
+        assert "queue full" in str(excinfo.value)
+        # 失败项没有入库: 队列仍只有原先那一条
+        assert scheduler._inflight_count("bot_001") == 1
+    finally:
+        gate.set()
+        await asyncio.gather(first, second, return_exceptions=True)
         await scheduler.close(drain_timeout=0.5)
 
 

@@ -427,7 +427,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | 顶层段 | 关键字段与默认 |
 |---|---|
 | `admins: list[int]` | 全局管理员 QQ（封禁系统与插件共用；回退旧 `ban.admins`） |
-| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`, `outbound_enqueue_timeout=2.0` |
+| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`；`outbound_enqueue_timeout` **已废弃**——队列满时 `submit()` 立即抛 `OutboundQueueFullError`，该值不再影响行为（字段保留仅为兼容旧配置） |
 | `llm` | chat/vision/emotion 三组 model+base_url+api_key+温度+max_tokens；`models: list[str]` 供 WebUI 下拉 |
 | `web_panel` | `enabled/host/port=9090/username/password_hash` |
 | `interceptor` | `keyword_file="./data/keywords.json"` |
@@ -833,7 +833,7 @@ await supervisor.shutdown()
 
 - 每个 bot 一条 `PriorityQueue` + 一个 worker，**串行发送**并强制最小间隔（`server.outbound_interval`，默认 0.5s）。
 - 两个优先级：`CONTROL_PRIORITY=0`（**内联执行**，绕过队列与限速）、`MESSAGE_PRIORITY=10`。
-- 队列满 → 立刻 `OutboundQueueFullError`（快速失败），入队超时也转成这个异常。
+- 队列满 → 立刻 `OutboundQueueFullError`（快速失败）。`server.outbound_enqueue_timeout` **已废弃**：不再有"等待入队"阶段，该值不影响行为。
 - **新消息一律走 `WSServer.send_group_msg/send_private_msg/send_image`**，这样才有限速 + `message_id` 追踪（引用回复识别依赖 `_pending_sent` 的 echo 记录）。
 
 ### 8.3 情感系统 `emotion/`

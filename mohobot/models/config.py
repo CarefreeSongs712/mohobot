@@ -19,6 +19,8 @@ class ServerConfig:
     max_size: int = 10 * 1024 * 1024  # 10 MB max message size
     outbound_interval: float = 0.5
     outbound_maxsize: int = 100
+    # 已废弃: 出站队列满时现在立即抛 OutboundQueueFullError, 不再等待。
+    # 字段保留仅为兼容既有配置文件, 修改它不会改变行为。
     outbound_enqueue_timeout: float = 2.0
 
 
