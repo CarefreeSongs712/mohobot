@@ -27,6 +27,7 @@ from mohobot.models.onebot import (
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
 from mohobot.services.usage import UsageRecorder
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
 
 
 class LLMService:
@@ -221,7 +222,7 @@ class LLMService:
         # Check if LLM is available
         if not self._available or self._chat_client is None:
             logger.warning("LLM not configured — cannot process message")
-            return "LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", None
+            return LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), None
 
         # Determine which model and client to use
         model = self._cfg.llm.chat_model
@@ -253,7 +254,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
-            return f"[LLM 调用失败: {e}]", None
+            return LLMDiagnostic(f"[LLM 调用失败: {e}]"), None
 
         await self._record_usage(
             model, getattr(response, "usage", None), bot_id, event, module="chat"
@@ -265,11 +266,23 @@ class LLMService:
         reply_text = choice.message.content or ""
         tool_calls = choice.message.tool_calls
 
-        # Handle tool calls: 工具结果作为 tool 消息回传 LLM,
-        # 再调用一次生成最终自然语言回复(不向用户输出原始搜索结果)
+        # Handle tool calls: 工具结果作为 tool 消息回传 LLM, 再请求模型生成最终自然语言回复
+        # (不向用户输出原始搜索结果)。模型看到工具结果后可能继续调用工具(如搜索为空时换
+        # 关键词再搜), 因此与 chat_stream 一致做有界多轮: 前 max_tool_rounds 轮跟进仍提供
+        # 工具; 之后的一轮不再提供工具, 强制模型基于已有结果给出文本。
+        # 旧实现只跟进一次, 第二轮的 tool_calls 被直接忽略, 链式工具在非流式模式下静默截断。
         tool_results = None
-        if tool_calls:
-            tool_results = []
+        max_tool_rounds = 4
+        tool_round = 0
+        while tool_calls:
+            if tool_results is None:
+                tool_results = []
+            final_round = tool_round >= max_tool_rounds
+            if final_round:
+                logger.warning(
+                    f"LLM tool rounds hit {max_tool_rounds}, forcing text answer without tools"
+                )
+            tool_round += 1
             messages.append({
                 "role": "assistant",
                 "content": choice.message.content or "",
@@ -294,25 +307,44 @@ class LLMService:
                     "tool_call_id": tc.id,
                     "content": result,
                 })
-            # 二次调用: 基于工具结果生成最终回复
+            # 跟进调用: 基于工具结果生成回复(或继续调用工具)
+            follow_params: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if not final_round:
+                follow_params["tools"] = self._current_tools_schemas()
+                follow_params["tool_choice"] = "auto"
             try:
-                response2 = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=self._current_tools_schemas(),
-                    tool_choice="auto",
-                )
-                choice2 = response2.choices[0] if response2.choices else None
-                await self._record_usage(
-                    model, getattr(response2, "usage", None), bot_id, event,
-                    module="chat", kind="tool_follow_up",
-                )
-                reply_text = (choice2.message.content or "") if choice2 else ""
+                response2 = await client.chat.completions.create(**follow_params)
             except Exception as e:
                 logger.error(f"LLM API call failed (after tools): {e}")
-                reply_text = f"[LLM 调用失败: {e}]"
+                # 合并解析: 保留 #19 的"立即返回并带上已执行工具结果"控制流,
+                # 同时按 #18 把诊断包成 LLMDiagnostic(否则 issue #4 的 P1 会在链式路径复活)。
+                return LLMDiagnostic(f"[LLM 调用失败: {e}]"), tool_results
+            await self._record_usage(
+                model, getattr(response2, "usage", None), bot_id, event,
+                module="chat", kind="tool_follow_up",
+            )
+            choice = response2.choices[0] if response2.choices else None
+            if choice is None:
+                # 空 choices: 结束循环而不是丢弃已累积的正文(流式同场景也是直接收尾)。
+                break
+            # 中间跟进可能同时带可见文本与下一轮 tool_calls。文本已经是模型输出的一部分,
+            # 不能因继续工具循环而被下一轮 reply_text 覆盖; chat_stream 也会按同样顺序
+            # 把每个文本 chunk 交给调用方。
+            reply_text += choice.message.content or ""
+            # 强制文本轮不再接受工具调用: 即使网关仍返回 tool_calls 也到此为止, 保证有界。
+            tool_calls = None if final_round else choice.message.tool_calls
+
+        # 与 chat_stream 对齐: 工具已执行但模型最终没给出任何文本时不能静默返回空串,
+        # 否则 stream=false 的用户什么也收不到(流式同场景会输出这段兜底文案)。
+        # 该文案是框架占位而非模型输出, 必须与流式一致包成 LLMDiagnostic,
+        # 否则会被当作 assistant 正文写入上下文/数据库并触发情感分析。
+        if tool_results and not reply_text.strip():
+            return LLMDiagnostic("[工具调用完成，但模型未返回文本]"), tool_results
 
         return reply_text, tool_results
 
@@ -331,7 +363,7 @@ class LLMService:
         The caller should send individual chunks as they arrive.
         """
         if not self._available or self._chat_client is None:
-            yield ("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", True)
+            yield (LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), True)
             return
 
         model = self._cfg.llm.chat_model
@@ -369,7 +401,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM stream call failed: {e}")
-            yield (f"[LLM 调用失败: {e}]", True)
+            yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
             return
 
         full_content = ""
@@ -540,11 +572,11 @@ class LLMService:
                         return
                 except Exception as e:
                     logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
-                yield ("[工具调用完成，但模型未返回文本]", True)
+                yield (LLMDiagnostic("[工具调用完成，但模型未返回文本]"), True)
                 return
             except Exception as e:
                 logger.error(f"LLM stream call failed (after tools): {e}")
-                yield (f"[LLM 调用失败: {e}]", True)
+                yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
                 return
 
         # Empty stream guard: some gateways return 0 chunks for unsupported
@@ -554,7 +586,7 @@ class LLMService:
                 f"LLM stream returned NO data (model={model}, max_tokens={max_tokens}) — "
                 "gateway may not support this combo"
             )
-            yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
+            yield (LLMDiagnostic("[模型未返回内容——请检查 max_tokens 或模型配置]"), True)
             return
 
         yield ("", True)  # Signal completion with no extra text

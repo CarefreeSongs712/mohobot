@@ -208,13 +208,17 @@ async def test_build_user_store_with_quote():
 
 
 async def test_build_user_store_quote_only_message():
-    # 引用但无自己的文字: 只存引用块(不把空内容/段列表存进去)
+    # 引用但无自己的文字: 引用块 + 空白消息标注(cq_code.empty_message_placeholder)。
+    # 3c96056 起，空白/仅@ 不再写空 content，而是写类型标注，避免 LLM 收到空 user 消息。
     h = _handler()
     ev = SimpleNamespace(message=[{"type": "reply", "data": {"id": "42"}}])
     out = await h._build_user_store_content(
         "bot_001", ev, "李四(123): 大家好呀",
     )
-    assert out == "【引用消息】\n李四(123): 大家好呀", out
+    assert out == (
+        "【引用消息】\n李四(123): 大家好呀\n\n"
+        "（用户发送了一条空白消息，未包含文字或附件）"
+    ), out
 
 
 async def test_build_user_store_image_sticker():

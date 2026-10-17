@@ -32,6 +32,7 @@ from mohobot.models.onebot import (
 )
 from mohobot.file_store import JSONLWriter
 from mohobot.models.config import is_external_service_group
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
 from mohobot.utils.cq_code import extract_plain_text
 
 
@@ -600,6 +601,15 @@ class MessageHandler:
             full_reply = await self._stream_llm_reply(
                 bot_id, event, context, raw, reply_options=reply_options,
             )
+
+        # LLM 诊断(未配置/调用失败/空响应)已经展示给用户, 但它不是助手回复:
+        # 不写 contexts/ 工作记忆、不落 conversations 表、不触发情感分析。
+        # 标记随返回值传递(而非按会话记共享状态): 同一会话的并发消息互不串扰。
+        if isinstance(full_reply, LLMDiagnostic):
+            logger.warning(
+                f"LLM 未产出有效回复(bot={bot_id} {chat_type}:{chat_id}), 本轮不写入上下文与数据库"
+            )
+            return
 
         # Save context after streaming completes
         if full_reply.strip():
@@ -1251,6 +1261,10 @@ class MessageHandler:
                 raw_event=raw,
                 **options,
             )
+            if isinstance(reply_text, LLMDiagnostic):
+                # 诊断文案照常告知用户(不朗读、不过滤), 标记原样返回给调用方用于跳过持久化。
+                await self._send_full_text(bot_id, event, reply_text)
+                return reply_text
             full_reply = reply_text or ""
             from mohobot.utils.reply_filter import strip_reply_artifacts
             full_reply, tts_text = strip_reply_artifacts(full_reply)
@@ -1267,6 +1281,7 @@ class MessageHandler:
         full_reply = ""
         first_sent = False
         segments_sent = 0
+        diagnostic: LLMDiagnostic | None = None
 
         async for chunk, is_final in self._llm.chat_stream(
             bot_id=bot_id,
@@ -1275,6 +1290,15 @@ class MessageHandler:
             raw_event=raw,
             **options,
         ):
+            if isinstance(chunk, LLMDiagnostic):
+                # 诊断不进回复过滤器(过滤后会退化成普通 str 而丢失标记), 单独记下;
+                # 先冲刷此前缓冲的正文, 诊断在最后单独发出。
+                diagnostic = chunk
+                if buffer.strip():
+                    segments_sent += 1
+                    first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                    buffer = ""
+                continue
             if chunk:
                 # 标签/产物剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
                 chunk = artifact_filter.feed(chunk)
@@ -1301,6 +1325,12 @@ class MessageHandler:
         if rest.strip():
             segments_sent += 1
             first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+        if diagnostic is not None:
+            # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
+            # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
+            await self._send_segment(bot_id, event, diagnostic, first_sent)
+            logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
+            return diagnostic
         self._submit_tts(bot_id, event, tts_text)
 
         logger.debug(
@@ -1317,6 +1347,7 @@ class MessageHandler:
         """
         options = reply_options if reply_options is not None else {"bot_config": self._bot_config(bot_id)}
         full_reply = ""
+        diagnostic: LLMDiagnostic | None = None
         async for chunk, _ in self._llm.chat_stream(
             bot_id=bot_id,
             event=event,
@@ -1324,10 +1355,26 @@ class MessageHandler:
             raw_event=raw,
             **options,
         ):
+            if isinstance(chunk, LLMDiagnostic):
+                diagnostic = chunk
+                continue
             if chunk:
                 full_reply += chunk
 
         from mohobot.utils.reply_filter import strip_reply_artifacts
+        if diagnostic is not None:
+            # 生成未正常完成: 把已收到的正文与诊断一并发出, 不朗读、不持久化。
+            display, _ = strip_reply_artifacts(full_reply)
+            text = "\n".join(part for part in (display.strip(), diagnostic) if part)
+            if self._reply_quote:
+                message = [
+                    {"type": "reply", "data": {"id": str(event.message_id)}},
+                    {"type": "text", "data": {"text": text}},
+                ]
+            else:
+                message = text
+            await self._send_message(bot_id, event, message, source="llm")
+            return diagnostic
         full_reply, tts_text = strip_reply_artifacts(full_reply)
 
         text = full_reply.strip()

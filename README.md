@@ -4,12 +4,21 @@
 
 基于 Python 异步框架 + [OneBot v11](https://github.com/botuniverse/onebot-11) 标准的**多 Bot AI 框架**。支持同时接入多个 QQ 机器人，通过 LLM 驱动对话。
 
+## 📚 项目文档与接手
+
+- [接手与开发守则](AGENTS.md)：数据边界、消息主链、扩展契约、验证和发布授权。
+- [项目接手说明](docs/HANDOVER.md)：2026-10-12 对照 `b63ad48` 的架构索引、文档校核、验证记录与后续准备；这是历史快照，不代表当前 main。
+- [开发指南](docs/DEVELOPMENT.md)：插件、配置、LLM 工具、数据库和面板修改清单。
+- [缺陷审查与修复方案](docs/AUDIT-2026-10-12.md)：以 `b63ad48` 为基点的已复现缺陷、影响、修复设计与验收用例。
+
+接手说明和审计报告是带代码基点的历史快照，不代表生产实时状态或发布授权；当前状态以代码、开放 PR、issue 和 CI 为准。文档与实现冲突应核查后报告，现有生产操作仍遵循下方发布流程。
+
 ## ✨ 功能特性
 
 - **多 Bot 接入** — 反向 WebSocket (Reverse WebSocket) 服务端，一个进程同时服务多个机器人
 - **LLM 驱动对话** — OpenAI 兼容 API，支持流式回复（标点+长度分段发送）、函数调用（Tools）、视觉识别（Vision）
 - **会话上下文管理** — 私聊支持多会话切换，群聊单一会话；记录每条消息的说话人（QQ号-昵称）
-- **上下文 AI 总结压缩** — 上下文满 40 轮时，用 AI 总结最早的 15 轮并作为"总结块"插入对话最前（不参与后续总结的只有它自己，可嵌套再总结）；总结失败自动降级为直接裁剪
+- **上下文 AI 总结压缩** — 上下文满 40 轮时，用 AI 总结最早的 15 轮并作为“总结块”插入对话最前（总结块记 1 轮，可与后续旧对话一同再总结；周期压缩不单独反复总结孤立块）；满轮总结失败自动降级为直接裁剪
 - **群聊最近消息** — 回复时临时注入群内最近 10 条消息（仅内存、不写入上下文、不参与总结），感知群聊氛围
 - **历史对话入库** — 聊天记录写入独立 SQLite `conversations` 表（`mohobot.db`），原始事件另以 JSONL 只读归档
 - **智能群聊触发** — 群聊中仅在 @机器人、引用机器人消息、命令或 `ping` 时触发 LLM 回复；`ping`（忽略大小写，无需斜杠）直接回复 `PONG`
@@ -53,7 +62,7 @@
 
 | 分类 | 技术 |
 |------|------|
-| 语言 | Python 3.10+ |
+| 语言 | Python 3.12（CI 实际验证版本）；声明支持 3.10+，但 3.10/3.11 **尚未验证**，见 [开发指南](docs/DEVELOPMENT.md) |
 | 异步 | asyncio |
 | WebSocket | websockets |
 | Web 面板 | FastAPI + SSE |
@@ -153,13 +162,14 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 | 主进程端口 | 8081（OneBot）、9090（管理面板）、9092（表情包插件启用时） |
 | review | 独立子进程，端口 9091；可能随同一 systemd unit 重启 |
 
-**仅以 main 发布。** 本地完成测试后，按用户授权提交、推送，再同步生产。远程变更必须已获明确授权；只改文档不代表授权部署。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
+**迁移完成前仅以 main 发布；迁移完成后仅以 master 发布。** 只有在管理员已完成 `main → master` 默认分支重命名、分支保护配置和生产拉取切换后，才可把生产目标从 `main` 改为 `master`。本地完成测试后，按用户授权提交、推送，再同步生产；远程变更必须已获明确授权。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
 
 ```bash
 # 生产只读预检：检查输出，保留未跟踪的配置备份
 ssh -p 10139 root@103.236.75.12 'cd /root/QQBot/mohobot && git status --short && git branch --show-current && git log -1 --oneline && systemctl show migration-mohobot.service -p ActiveState -p MainPID -p WorkingDirectory -p ExecStart'
 
 # 确认已授权、目标正确且没有待处理修改后同步
+# 迁移前使用 main；只有管理员完成 main -> master 切换并授权后，才将两处 main 改为 master。
 ssh -p 10139 root@103.236.75.12 'set -eu; cd /root/QQBot/mohobot; test "$(git branch --show-current)" = main; test -z "$(git status --porcelain --untracked-files=no)"; git pull --ff-only origin main; git log -1 --oneline'
 
 # 确认配置有效、所需依赖已具备后，重启现有 unit
@@ -191,7 +201,7 @@ global 重写影响该用户所有匹配的 GitHub HTTPS 地址，不作用于 S
 ```bash
 # Python 3.12（示例用 pyenv）
 sudo apt update
-curl -fsSL https://pyenv.run | bash   # 或直接使用系统 Python 3.10+
+curl -fsSL https://pyenv.run | bash   # 建议 3.12（3.10+ 虽声明支持但未验证）
 pyenv install 3.12.13
 pyenv global 3.12.13
 
@@ -295,7 +305,7 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 - 日志确认插件加载：`grep "Loaded plugin" logs/mohobot_*.log`
 - Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
 - 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
-- 更新部署：参见上方“现有生产环境与发布流程”；常规使用 `git pull --ff-only origin main`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
+- 更新部署：参见上方“现有生产环境与发布流程”；迁移完成前使用 `git pull --ff-only origin main`，迁移完成并获授权后才改用 `origin master`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
 - **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码默认 `history_dual_write: true` 双写过渡，确认稳定后在 WebUI 关闭
 
 ### 上下文压缩与群聊最近消息
@@ -398,7 +408,7 @@ database:
 
 ## 🎵 歌曲知识（全局歌曲识别 + LLM 前注入）
 
-歌曲知识为全局能力（私聊+群聊）：用户消息里含歌曲信息（歌名或歌词）时，在发送给 LLM 之前识别出是哪首歌，把「歌曲介绍 + 词/曲/混/调等创作人员 + 完整歌词」作为一段注脚，**紧跟该条用户消息下方**拼进 LLM 请求（仅请求级注入，不写入 context 文件）；不再输出 `[sing]` 唱歌文本。
+歌曲知识为全局能力（私聊+群聊）：用户消息里含歌曲信息（歌名或歌词）时，在发送给 LLM 之前识别出是哪首歌，把「歌曲介绍 + 词/曲/混/调等创作人员 + 完整歌词」加入本轮主系统提示的 **【歌曲参考资料（服务端检索）】**。它是请求级服务端参考，不属于用户发言，不写入 context 文件；不再输出 `[sing]` 唱歌文本。
 
 实现位于 `mohobot/music_knowledge/`：
 
@@ -431,14 +441,14 @@ music_knowledge:
 
 两条通路（与后端无关）：
 
-- **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注想朗读的内容——**尽量每条回复都标注，长短与多少由模型自行决定**（可一句、多段甚至整条回复，不限字数）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后把所有标注**合并为一条语音**（按出现顺序拼接），经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。标签支持**模糊识别**：`< tts >` 空格、`<voice>/<speech>/<say>` 别名（大小写不敏感）、`【tts】/[tts]` 方括号；带属性或 `<ttsx>` 等不误判，正文 `a < b` 原样透传。
-- **`/tts <文本>` 指令**（群聊多 bot 由 bot_id 最小者响应）：文本直接转语音；非管理员限 30 字 + 120 秒冷却（全局配置可改），管理员不限。
+- **LLM 自动朗读**：系统提示词引导模型用 `<tts></tts>` 标注想朗读的内容——**尽量每条回复都标注，长短与多少由模型自行决定**（可一句、多段甚至整条回复，不限字数）。框架剥掉标签后文本照常分段发送，标注内容**仍显示**；全文发送完毕后把所有标注**合并为一条语音**（按出现顺序拼接），经全局单飞行队列合成，语音跟在最后一个文本段之后由回复的 bot 单独发出。没标注/合成失败/队列满 → 当轮无语音，文本不受影响。主回复产物过滤支持**模糊识别**：`< tts >` 空格、`<voice>/<speech>/<say>` 等别名（大小写不敏感）、`【tts】/[tts]` 方括号及圆括号变体；已知尖括号标签可带属性，近似未知名如 `<ttsx>` 不计入朗读、按格式标签剥壳保正文。工具/内部块按过滤策略丢弃；普通比较文本不会按朗读标签处理，具体边界见回复过滤回归样本。
+- **`/tts <文本>` 指令**（群聊多 bot 按全局命令机制抽签去重）：文本直接转语音；非管理员限 30 字 + 120 秒冷却（全局配置可改），管理员不限。
 
 **并发与用量**：全局 FIFO 队列单飞行串行；队列满（上限可配，默认 16）**丢弃最新**请求。每次成功合成把字符数记入用量统计（`module="tts"`，按 bot 维度），WebUI 用量页可见。
 
 **WebUI「🔊 TTS 语音」独立板块**：服务与队列状态（后端/配置完整度/当前合成/队列深度/成功·失败·丢弃·字符计数，5 秒自动刷新）+ 合成配置表单（后端切换、API Key 掩码、超时、mp3 转码开关、队列上限、指令限制、标注提示词模板、MiniMax 参数组）+ **测试合成**按钮（绕过队列直调后端，显示延迟并可在浏览器试听）。
 
-**配置**（WebUI 独立板块可编辑；API Key/Token 也可用环境变量 `MOHOBOT_TTS_API_KEY` 兜底）：
+**配置**（WebUI 独立板块可编辑；HTTP Token 用 MOHOBOT_TTS_API_KEY 兜底，MiniMax 用 MOHOBOT_MINIMAX_API_KEY；队列容量修改需重启，启动时未装配 TTS 服务则后续启用也需重新装配/重启）：
 
 ```yaml
 tts:
@@ -462,7 +472,7 @@ tts:
   format: "mp3"
 ```
 
-实现在 `mohobot/services/tts.py`（HttpTTSClient + 可切换后端的 TTSService + ffmpeg 转码）、`mohobot/services/minimax_tts.py`（MiniMax 客户端，保留仅下线）、`mohobot/utils/tts_marker.py`（流式标签模糊剥离）。
+主服务在 [tts.py](mohobot/services/tts.py)（HttpTTSClient + 可切换后端的 TTSService + ffmpeg 转码）、[minimax_tts.py](mohobot/services/minimax_tts.py)（MiniMax 客户端）。主回复过滤使用 [reply_filter.py](mohobot/utils/reply_filter.py)，[tts_marker.py](mohobot/utils/tts_marker.py) 保留兼容解析；行为边界参见 [回复过滤回归](tests/test_reply_filter.py)。
 
 ## 🚫 封禁系统（参考 astrbot_plugin_reneban 移植）
 
@@ -543,7 +553,7 @@ mohobot/
 
 ## 📋 聊天记录审核面板（review/, 端口 9091）
 
-半独立 WebUI：**独立进程**（mohobot 启动时若 `review/config.yaml` 存在且 `enabled: true` 则拉起，mohobot 退出不影响它）、独立端口（默认 9091）、独立配置与独立 SQLite（`review/data/review.db`），对 mohobot 的 `data/` **严格只读**。
+半独立 WebUI：**独立进程**（mohobot 启动时若 `review/config.yaml` 存在且 `enabled: true` 则拉起；手工退出主进程通常不影响它，但现有 systemd unit 操作可能一并停止同 cgroup 子进程，重启后须检查 9091 恢复）、独立端口（默认 9091）、独立配置与独立 SQLite（`review/data/review.db`），对 mohobot 的 `data/` **严格只读**。
 
 - **数据源**：`data/history` 消息事件流（唯一来源）。history 只增不删，消息身份用 **message_id** —— 审核结论永不因上下文压缩/改写而失联
 - **审核范围（面板侧过滤，归档保持完整）**：群聊只审 **bot 的发言** 与 **用户 @ 某只 bot 或引用某只 bot 发言** 的消息；私聊全部审
@@ -619,17 +629,18 @@ class Plugin:
 - [x] 上下文 AI 总结压缩（满 40 轮裁剪 15 轮，总结块插入最前，失败降级直接裁剪）
 - [x] 群聊最近消息注入（可配置条数，不写上下文、不参与总结）
 - [x] 群聊触发门控（@机器人 / 引用机器人消息）+ 戳一戳固定回复 + ping/PONG
-- [x] 全局指令去重（群内多 bot 只由最小 bot_id 回复，支持命令+空格参数）
-- [x] Web 管理面板（7 板块：总览/配置/模型/插件/对话/日志/设置；模型页含可用模型列表）
+- [x] 全局指令去重（群内多 bot 按消息抽签选择一只回复，支持命令+空格参数）
+- [x] Web 管理面板（总览/配置/模型/插件/对话/日志/设置及 TTS/数据/封禁/情感/人设管理/人设评估）
 - [x] 插件系统（status / praise / divination / neteasemusic / wifepicker / relationship / song_sync / qzone / chat_manager）
 - [x] /help 图片渲染（PIL 深色卡片，按插件分组 + 管理员标注）
-- [ ] 消息发送限流与队列（当前仅图片突发限流）
-- [ ] 单元测试与 CI（当前为本地冒烟测试 `tests/`）
+- [x] 每 bot 消息发送限流与出站队列（容量/间隔可配置）
+- [x] 本地回归 runner、并发专项与离线装配冒烟测试（参见开发指南；当前环境验证状态见接手说明）
+- [ ] 自动化 CI（PR #24 已添加但尚未合入；合入后 PR 门禁为 Python 3.12 测试、语法检查、meme 插件回归与信息性 Ruff 债务报告；3.10/3.11 兼容性由 `compat.yml` 跟踪）
 - [ ] Docker 部署
 
 ## 📄 License
 
-[MIT](LICENSE)
+核心框架采用 [MIT](LICENSE)。移植插件保留各自上游许可；表情包插件与主动聊天插件分别有 [AGPL-3.0](plugins/meme_stealer/LICENSE)、[AGPL-3.0](plugins/proactive_chat/LICENSE)，其他模块参见其声明。分发或提供网络服务前应核对对应义务，不能把全部插件统一视为 MIT。
 
 ## 🙏 致谢
 

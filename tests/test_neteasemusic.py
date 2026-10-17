@@ -8,7 +8,6 @@
 """
 
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -245,7 +244,7 @@ async def test_expire_and_errors():
     mod, inst, ws = make_plugin()
     # 过期
     await inst.on_message("bot_001", make_group_event(2001, "/点歌 晴天"), {})
-    key = (bot_id := "bot_001", "group", "888888")
+    key = ("bot_001", "group", "888888")
     inst._waiting_users[key]["expire"] = 1  # 已过期
     handled, _ = await inst.on_message_observed("bot_001", make_group_event(2002, "1"), {})
     assert not handled, "过期会话不应消费"
@@ -274,7 +273,7 @@ async def test_expire_and_errors():
 
 
 class FailingAPI:
-    async def get(self, url, **kw):
+    def get(self, url, **kw):
         raise RuntimeError("connection refused")
 
 

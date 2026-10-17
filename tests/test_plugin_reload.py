@@ -1,7 +1,6 @@
 """插件热加载测试: 新增/修改/启停无需重启即生效。"""
 
 import asyncio
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -49,7 +48,6 @@ async def main() -> None:
     print("[2] 新增插件热加载 OK")
 
     # 3. 注入引用: 热重载后自动重新注入
-    injected = {"ws": None}
     ps.set_runtime_refs(ws_server="FAKE_WS")
     await ps.reload_plugins()
     inst = ps._plugins[0]["instance"]

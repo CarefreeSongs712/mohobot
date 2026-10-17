@@ -231,74 +231,66 @@ def _cookie_resp(uin=123456):
             "data": {"cookies": f"uin=o{uin}; skey=abc; p_skey=xyz"}}
 
 
-def test_session_fetch_and_cache():
-    async def run():
-        with tempfile.TemporaryDirectory() as td:
-            ws = _FakeWS(_cookie_resp(123456))
-            sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
-                                cfg_get=lambda k, d: d)
-            ctx = await sess.get_ctx()
-            assert ctx.uin == 123456
-            assert ws.calls and ws.calls[0][1] == "get_cookies"
-            cache = Path(td) / "plugins_data" / "qzone" / "cookies_bot_001.json"
-            assert cache.exists()
+async def test_session_fetch_and_cache():
+    with tempfile.TemporaryDirectory() as td:
+        ws = _FakeWS(_cookie_resp(123456))
+        sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
+                            cfg_get=lambda k, d: d)
+        ctx = await sess.get_ctx()
+        assert ctx.uin == 123456
+        assert ws.calls and ws.calls[0][1] == "get_cookies"
+        cache = Path(td) / "plugins_data" / "qzone" / "cookies_bot_001.json"
+        assert cache.exists()
 
-            # 协议端不可用时复用缓存
-            ws2 = _FakeWS(RuntimeError("offline"))
-            sess2 = QzoneSession(bot_id="bot_001", ws_server=ws2, data_dir=td,
-                                 cfg_get=lambda k, d: d)
-            ctx2 = await sess2.get_ctx()
-            assert ctx2.uin == 123456
-            assert not ws2.calls
-    return run()
+        # 协议端不可用时复用缓存
+        ws2 = _FakeWS(RuntimeError("offline"))
+        sess2 = QzoneSession(bot_id="bot_001", ws_server=ws2, data_dir=td,
+                             cfg_get=lambda k, d: d)
+        ctx2 = await sess2.get_ctx()
+        assert ctx2.uin == 123456
+        assert not ws2.calls
 
 
-def test_session_reset_clears_cache():
-    async def run():
-        with tempfile.TemporaryDirectory() as td:
-            ws = _FakeWS(_cookie_resp(123456))
-            sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
-                                cfg_get=lambda k, d: d)
+async def test_session_reset_clears_cache():
+    with tempfile.TemporaryDirectory() as td:
+        ws = _FakeWS(_cookie_resp(123456))
+        sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
+                            cfg_get=lambda k, d: d)
+        await sess.get_ctx()
+        await sess.reset_login_state(clear_cookies=True)
+        cache = Path(td) / "plugins_data" / "qzone" / "cookies_bot_001.json"
+        assert not cache.exists()
+        # 重新获取需要协议端
+        ws.resp = {"status": "ok", "retcode": 0, "data": {}}
+        try:
             await sess.get_ctx()
-            await sess.reset_login_state(clear_cookies=True)
-            cache = Path(td) / "plugins_data" / "qzone" / "cookies_bot_001.json"
-            assert not cache.exists()
-            # 重新获取需要协议端
-            ws.resp = {"status": "ok", "retcode": 0, "data": {}}
-            try:
-                await sess.get_ctx()
-                raise AssertionError("应当因空 Cookies 抛错")
-            except RuntimeError as e:
-                assert "Cookies" in str(e)
-    return run()
+            raise AssertionError("应当因空 Cookies 抛错")
+        except RuntimeError as e:
+            assert "Cookies" in str(e)
 
 
-def test_session_invalid_uin():
-    async def run():
-        with tempfile.TemporaryDirectory() as td:
-            ws = _FakeWS({"status": "ok", "retcode": 0,
-                          "data": {"cookies": "skey=abc"}})
-            sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
-                                cfg_get=lambda k, d: d)
-            try:
-                await sess.get_ctx()
-                raise AssertionError("应当因缺少 uin 抛错")
-            except RuntimeError as e:
-                assert "uin" in str(e)
-    return run()
+async def test_session_invalid_uin():
+    with tempfile.TemporaryDirectory() as td:
+        ws = _FakeWS({"status": "ok", "retcode": 0,
+                      "data": {"cookies": "skey=abc"}})
+        sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
+                            cfg_get=lambda k, d: d)
+        try:
+            await sess.get_ctx()
+            raise AssertionError("应当因缺少 uin 抛错")
+        except RuntimeError as e:
+            assert "uin" in str(e)
 
 
-def test_session_no_o_prefix_uin():
+async def test_session_no_o_prefix_uin():
     """uin cookie 无 o 前缀时不应砍掉首位数字(原版 [1:] 的缺陷)。"""
-    async def run():
-        with tempfile.TemporaryDirectory() as td:
-            ws = _FakeWS({"status": "ok", "retcode": 0,
-                          "data": {"cookies": "uin=987654; skey=a; p_skey=b"}})
-            sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
-                                cfg_get=lambda k, d: d)
-            ctx = await sess.get_ctx()
-            assert ctx.uin == 987654
-    return run()
+    with tempfile.TemporaryDirectory() as td:
+        ws = _FakeWS({"status": "ok", "retcode": 0,
+                      "data": {"cookies": "uin=987654; skey=a; p_skey=b"}})
+        sess = QzoneSession(bot_id="bot_001", ws_server=ws, data_dir=td,
+                            cfg_get=lambda k, d: d)
+        ctx = await sess.get_ctx()
+        assert ctx.uin == 987654
 
 
 # ── 插件命令路由 ──────────────────────────────────────────────

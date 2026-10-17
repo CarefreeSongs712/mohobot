@@ -29,7 +29,6 @@ def make_group_event(user_id, text, group_id=888888, time=1000000, card="张三"
 # ── 1. praise 插件配置化 ─────────────────────────────────────
 
 async def test_praise_configurable():
-    import sys
     # 用独立模块名加载, 避免把 sys.modules["main"] 覆盖为 praise 的 main
     # (test_wifepicker 也用 from main import Plugin, 全量跑时互相冲突)
     import importlib.util
