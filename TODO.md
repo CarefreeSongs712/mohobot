@@ -3,58 +3,56 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后删除已完成条目，历史留在 PR 中。
 
-> 原始事实基线：2026-10-14，`main` = `b4548cd`。历史静态检查数字基于此提交；PR #22–#24 的组合测试/CI 结果另列，不与 main 基线混用。
+> 历史基线：2026-10-14 `main` = `b4548cd`；当前 `main` = `bd9fbd2`。所有历史数字都绑定其基线提交，不作为当前验收结论。
 
-## 工作约定
+## 1. 当前仍开放的 PR
 
-- 所有改动走 **分支 → PR → 审查 → 合并**。即使有 push 权限，也不直接推 `main`。
+> 快照：2026-10-17。`main` = `bd9fbd2`，`dev` = `24f62e2`。这里只列 GitHub 当前 OPEN 且尚未进入 main 的 PR；已关闭或只存在于 `dev` 的 PR 归入 §1.0.2 历史表，不再出现在待合入队列。
+
+| PR | 目标 | 内容 | 状态 |
+|---|---|---|---|
+| #17 | `main` | 删除 `RequestConfig._clean()` 后残留的 4 行不可达代码 | 审查 PASS；已进入 `dev`，未进入 main |
+| #20 | `main` | 本 TODO 清单 | 修复 P1 后待复审 |
+| #33 | `main` | 第三批低风险 Ruff 告警清理 | 审查 PASS；已进入 `dev`，未进入 main |
+| #38 | `dev` | 分支模型（master/dev/feat/bugfix/gh-pages）与 CI 迁移期双分支监听 | 待维护者审查 |
+
+### 1.0 分支模型（目标态，带前置条件）
+
+| 分支 | 用途 | 生效条件 |
+|---|---|---|
+| `master` | 目标发布分支 | 仅当管理员把默认分支 `main` 重命名为 `master`、并配置好分支保护后才作为发布线；在此之前生产仍按 `main` 操作 |
+| `main` | 迁移期兼容分支 | 与 `master` 同步；切换完成后可保留只读或删除 |
+| `dev` | 集成分支 | 汇聚已审查 PR 做联调与 CI 预验收，不对应生产 |
+| `feat/<topic>` | 功能分支 | 例 `feat/ctx-restore`；走 PR |
+| `bugfix/<topic>` | 缺陷修复分支 | 例 `bugfix/outbound-cancel`；走 PR |
+| `gh-pages` | Pages 静态站点 | 仅在确有 Pages 产物时创建 |
+
+约束：
+
+1. `main → master` 是仓库引用操作（重命名默认分支、改分支保护），**文件 PR 无法完成**，需管理员在维护窗口执行；PR #38 只改文档与 CI 触发配置。
+2. CI 迁移期双监听：`ci.yml` 与 `compat.yml` 的 `push` 同时监听 `main` 与 `master`，切换前后都不会出现门禁空窗；切换完成后可移除 `main`。
+3. Git **不允许** `feat` 与 `feat/<topic>` 并存（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）；若要用字面 `feat`/`bugfix`，必须先把 `feat/knowledge-base` 等嵌套分支改名。
+4. 分支名不带前导 `/`：写 `feat/login`，不是 `/feat/login`。
+
+### 1.0.1 工作约定
+
+- 所有改动走 **分支 → PR → 审查 → 合并**；即使有 push 权限也不直接推 `main`/`master`，也不在未授权时直接创建/重命名远程分支。
 - 每个修复 PR 附带：先失败后通过的回归用例（RED/GREEN）、全量根回归结果、触发条件的如实说明。
 - 改动消息发送 / 上下文 / 存储语义时，补跑 `tests/test_concurrency.py`（根 runner 不包含它）。
 
----
+### 1.0.2 已关闭/已整合 PR（历史，不要重复合入）
 
-## 1. 等待处理的 PR
+#18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #34 #35 #36 已关闭，其内容已进入 `origin/dev@24f62e2`。这些 PR 及远程分支不属于当前待合入队列；需要恢复时应从本地保留分支重新推送，并先确认不会重复合入。
 
-| PR | 内容 | 备注 |
-|---|---|---|
-| #17 | 删除 `RequestConfig._clean()` 后残留的 4 行不可达代码 | 纯删除；修复 ruff `F821` |
-| #18 | #4 P1：LLM 诊断文案不再写入上下文 / 数据库 / 情感分析 | 独立复审通过，流式诊断前正文顺序缺陷已修复 |
-| #19 | #4 P2：非流式模式支持链式多轮工具调用 | 独立复审通过；与 #18 在 `llm_service.py` 有文本冲突，后合并的一方需 rebase |
-| #20 | 本 TODO 清单与 CI 接入计划 | 按已验证测试和 GitHub PR 状态更新，待维护者审查 |
-| #26 | chat-manager 部分批次失败时修复 `nodes` NameError | 直接基于 main，替代已关闭的叠放 PR #21；独立审查通过，待维护者合入 |
-| #28 | 修复 Python 3.10/3.11 `wait_for` 吞取消 | 独立复核 PASS；3.10/3.11/3.12 出站测试均 5 passed，待维护者合入。`enqueue_timeout_sec` 参数暂保兼容但不再控制入队等待，后续可清理文档/配置 |
-| #29 | 清理三个失效/错误形状的 P3 回归测试 | 新 head `35f75f4` 已补 `await run()`；独立复核 PASS，19 个 pytest、原生入口和 Ruff 通过，待维护者合入 |
-| #30 | 第一批低风险 Ruff 测试债务清理 | 独立复核 PASS；5 个独立测试文件，12 个 pytest、原生入口、Ruff 均通过，待维护者合入 |
-| #32 | 第二批低风险 Ruff 核心导入清理（替代已关闭的 #31） | 独立复核 PASS；直接基于 main，仅 6 个核心文件；29 个 pytest、Ruff 通过，待维护者合入 |
-| #33 | 第三批低风险 Ruff 告警清理 | 独立核验 PASS；3 个文件，24 个 pytest、Ruff、compileall 通过，待维护者合入 |
-| #34 | 第四批低风险 Ruff 清理（persona_ab） | 独立复核 PASS（base 6 条对应告警 → head 0）；17 个 pytest、Ruff 通过，待维护者合入 |
-| #35 | 第五批低风险 Ruff 清理（wifepicker） | 独立复核 PASS（base 3×F841 → head 0，AST 确认无副作用）；16 个 pytest，待维护者合入 |
-| #36 | 第六批：核心模块残留局部与导入清理 | 独立复核 PASS（7 文件命中 0 条告警、53 passed）；内含两处需单独处理的问题（见第 3 节），待维护者合入 |
-| #22 | 修复 4 个未 await 的 qzone 会话测试 | 独立审查通过，67 个 qzone 用例通过 |
-| #23 | 修正 #10 过时的 merged-reply 占位断言 | 独立复审通过；最新补充断言非选中 bot 不发普通回复 |
-| #24 | GitHub Actions CI、根开发依赖、pytest 配置 | 依赖 #22/#23；真实 Actions 已全绿（3.12 测试 / 语法 / meme 插件 / Ruff 债务报告），3.10 移出 PR 门禁到 `compat.yml` |
+### 1.2 dev 集成历史（旧快照）
 
-**正式审查（pr-review-report 规范，2026-10-15）**：
-
-| PR | 结论 | 要点 |
-|---|---|---|
-| #19 | PASS（0 P1 / 1 P2 / 4 P3） | N1 [P2]：非流式缺终态兜底——工具跑完但模型不返文本时 `chat()` 返回空串，`stream=false` 下用户完全静默，而流式有 `[工具调用完成，但模型未返回文本]`；新用例把 `reply == ""` 固化为期望，与"语义一致"自述矛盾（**base 同样为空，非本 PR 引入**）。已提交 review（COMMENTED） |
-| #26 | PASS（0 P1 / 0 P2 / 3 P3） | base RED `NameError` @ main.py:167、head GREEN、变异杀死、四种批次情形端到端核对；与已关闭 #21 的两文件 blob 完全相同（替换忠实）。P3：回归 stub 掉真实分批；提示把"读取条数"当"已转发条数"（实测投递 3/4 vs 文案 5）；commit 称根 runner 67/1 实测 66/1。已提交 review（COMMENTED） |
-| #18 | 原 **CHANGES REQUESTED**（N1 [P1·合并流程] + N2 [P2]）→ **N2 已落地，N1 已转为门禁** | 代码本身在其 base 上无缺陷（8 个诊断出口全标记、3 个消费点、真实链路 71/71 断言）；阻断点是**合并解析**：照搬 #19 那一侧会把标记退回 `str`，静默重开 issue #4 的 P1（naive 合并下测试全绿但链路探针 5 项失败）。**已在 head `6c32dce` 补上 N2 门禁用例**（见 §1.2），naive 解析会被测试杀死。原 review 以 COMMENTED 提交（GitHub 不允许对自建 PR 投 request-changes） |
-| #24 | PASS（0 P1；P2×3、P3×5） | 合入最新 main（含 ctx_restore）**无冲突**，合并快照上阻塞入口全绿：pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过 → 合入后首次 `push: main` 预计绿。纠正了作者三处结论，见 §1.1。已提交 review（COMMENTED）。**已修**：`docs/DEVELOPMENT.md` 与 `compat.yml` 里"3.10 停滞=跨用例累积"的归因改为真因 issue #25（head `79bb18f`） |
-| #28 | PASS（0 阻断；3 P3） | 跨版本实测：base 3.10/3.11 该文件**挂死 exit 124**（含单跑 issue 点名用例），head 三版本均 5 passed；issue #25 三种现象在 base 全部复现、head 全部消除；根因行号本地核实（3.10 `tasks.py:433-435`、3.11 `:477-479`、3.12 `:519` 已重写）。P3：`enqueue_timeout_sec` 成为死状态但文档/配置仍宣称该超时（建议独立 follow-up）；compat.yml 时机建议；根因归因更正。已提交 review（COMMENTED） |
-| #22 | PASS（0 阻断；1 P3） | AST 证明 base 是"普通 def 返回协程"、head 为真 async 且函数体逐语句全等；**决定性变异**：把 `session.py:90` 改回缺陷 `[1:]`，base 根 runner 仍 PASS（变异逃逸）、head 变 FAIL → 证明用例现在真的执行；根 runner 的 4 条 never-awaited 消失。P3：PR 正文的 "67 passed" 需注明 `-o asyncio_mode=auto`。已提交 review（COMMENTED） |
-| #23 | PASS（0 阻断；1 P2） | base 复现 issue #10（根 runner 65/1、`IndexError`），head 66/0；交叉实验（base 生产代码 + head 测试）66/0 → 只改期望；变异 mut1/mut2 均被杀死，且证明 #24 带回的副本在同样变异下会漏（`5701be49` 是净增覆盖）。P2：issue #10 方案第 2 条"全部 bot 无回复时静默"零覆盖（`message_handler.py:1780-1782`），建议补用例或在关闭 #10 时记录缺口。已提交 review（COMMENTED） |
-
-### 1.2 dev 集成分支（本地演练，不动 main）
-
-按用户要求建了 `dev` 分支把已审查的 PR 全部合并演练：起点 `origin/main@2b95bf0`，**17 个分支零冲突合入**（唯一冲突是 #18↔#19 的 `llm_service.py`，按审查结论解析为 `return LLMDiagnostic(...), tool_results`），随后并入维护者新提交（`origin/main` 已到 **`bd9fbd2`**，仍只动 `plugins/ctx_restore/`），当前领先 main **75 个提交**。
+历史记录：旧 dev 快照曾从 `origin/main@2b95bf0` 起步并入维护者提交至 `bd9fbd2`，当时领先 main 较多提交。以下数字属于那次历史快照，不代表当前 dev 或当前 main。
 
 实测（隔离快照，含门禁用例后）：
 
 | 入口 | 结果 |
 |---|---|
-| 裸 `pytest tests`（靠 `pytest.ini` 的 asyncio auto） | **610 passed**（main 为 5 failed/589 passed） |
+| 裸 `pytest tests`（靠 `pytest.ini` 的 asyncio auto） | **610 passed**（当时 main 基线：5 failed / 589 passed） |
 | 根 runner `tests/_run_all.py` | **69 passed / 0 failed**（main 为 65/1；issue #10 已修） |
 | `tests/test_concurrency.py` | 全部通过 |
 | `ruff E9,F63,F7` / `compileall` | 通过 |
@@ -70,19 +68,14 @@
 
 新增两条 P3：**N6**（PR 正文滞后：写"6 个用例/6 passed"，实际 8）→ **已修**，正文已更新为 8 个用例、补上"与 #19 的合并解析要求"一节；**N7**（门禁入口依赖：head 无 `pytest.ini`，裸 pytest 7 failed；`tests/_run_all.py` 与 #24 的 `asyncio_mode=auto` 下才执行）→ 记录，不阻断。
 
-### 1.5 dev 分支已推送到远程（2026-10-16，仅含已审查通过的 PR）
+### 1.5 dev 集成分支现状
 
-按用户要求，`dev` 已推送到 `origin/dev` = **`087a4e2`**（领先 main 46 提交 / 47 个文件，main 未动仍在 `bd9fbd2`）。
+`origin/dev` 当前为 **`24f62e2`**（领先 `main@bd9fbd2` 50 个提交）。该分支包含 16 个已审查通过的 PR：#17 #18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #33 #34 #35 #36。
 
-**只包含有 PASS 审查记录的 14 个 PR**：#18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #34 #35 #36。
-
-**刻意排除（无正式审查记录）**：#17（relationship 死代码删除）、#20（TODO 文档）、#33（lint/low-risk-3）——这三个没有审查报告，按"只推已审查通过"的口径未纳入。
-
-合并方式：从 `origin/main@bd9fbd2` 逐个 `--no-ff` 合并，唯一冲突仍是 #18↔#19 的 `llm_service.py`，按既定方式解析为 `return LLMDiagnostic(f"[LLM 调用失败: {e}]"), tool_results`（保留 #19 控制流 + #18 的诊断标记）。因此该分支是**可复现的**：合这 14 个分支即得此树。
-
-**推送前实测**（隔离快照 `dev-final`）：裸 pytest **613 passed**；根 runner **69 passed / 0 failed**；并发专项通过；`ruff E9,F63,F7` 与 compileall 通过。
-
-**推 dev 不触发 CI**：`ci.yml` / `compat.yml` 的 push 触发器都限定 `branches: [main]`，实测推送后 `gh run list` 无新运行。若要让维护者看到集成结果并可跑 CI，需要开一个 draft PR（`dev` → `main`），待确认。
+- 合并方式：从 `origin/main@bd9fbd2` 逐个 `--no-ff` 合并；#18↔#19 的 `llm_service.py` 冲突按 `return LLMDiagnostic(...), tool_results` 解析。
+- 实测（隔离快照）：裸 pytest **613 passed**；根 runner **69 passed / 0 failed**；并发专项、`ruff E9,F63,F7`、compileall 均通过。
+- CI：draft PR #37（`dev → main`）上四项检查已全绿；推送到 `dev` 本身不触发 `push` 门禁（触发器限定发布分支）。
+- 未进入 dev：#20（本 PR，修复中）、#38（分支模型，待审）。
 
 **已知缺口（合入后应修，非本分支引入）**：非流式"工具轮无文本"兜底在 #19 里是普通 `str`，而流式同一兜底在 #18 里是 `LLMDiagnostic` → 合并态两者不一致（后者不入上下文，前者会被当正文落盘）。修法：合并后把非流式那行也包成 `LLMDiagnostic`（本次 dev 的一次演练版本曾这么做并全绿，但为保持"纯合并结果可复现"未纳入）。
 
@@ -92,7 +85,7 @@
 
 ### 1.3 分支清理（2026-10-15）
 
-本地分支 **28 → 19**（= 17 个开放 PR 分支 + `main` + `dev`）。删除的是：
+历史：本地分支曾从 28 收敛到 19（当时 = 17 个开放 PR 分支 + `main` + `dev`）。删除的是：
 - 已关闭 PR 的分支：#12 `fix/meme-list-scope`、#15 `fix/sqlite-legacy-wal-migration`、#21 `fix/chat-manager-partial-forward`、#31 `lint/core-unused-imports-2`（后两个同时删了 origin 远程分支）；
 - 已合并 PR 的本地残留：#11 `fix/reply-filter-nesting`、#13 `fix/relationship-kick-blacklist`、#14 `fix/qzone-per-post-reply-cap`、#16 `fix/outbound-cancellation-state`（origin 侧早已随合并删除）；
 - 历史快照：本地 `docs/handover-audit-main`、`docs/audit-handover-and-rules`（内容已重放进 #27 / #24）。
@@ -138,37 +131,28 @@
 - **#19 N3/N4/N5 [P3]**：`max_tokens` 上限对齐、后续轮异常覆盖正文口径、新文件裸 ruff 告警（RUF100/RUF059）。
 - **知识库 P3**：`mohobot/llm_service.py` 的 `MessageSegment` 未使用导入 + 重复死桩的 `since`（`_compute_session_usage` 定义两次），待 #18/#19 合入后清理。
 
-### 1.1 合并顺序与合并后果（基于当前 head 实测）
+### 1.1 合并顺序（历史快照，已完成）
 
-> **⚠️ main 已前进（2026-10-16 复核）**：`origin/main` = **`bd9fbd2`**，比本文档最初引用的 `b4548cd` 多 6 个提交，**全部只新增/修改 `plugins/ctx_restore/`**（维护者 10-15 晚 22:49–23:23 连推 6 次，直接推 main、无 PR、无测试），与所有开放 PR 零重叠。因此各 PR 记录的 base `b4548cd` 已过期；此前"main 未动"的说法作废。
+> 以下顺序是 2026-10-15 的合并历史：`#22/#23 → #24 → 独立修复 → #18/#19`，已全部整合进 `dev@24f62e2`，**不要按此表重复合入**。
 
-**最新 main 的实测基线（`2b95bf0`，本机隔离快照）**：`pytest -o asyncio_mode=auto tests` = **5 failed / 589 passed**；根 runner = **65 passed / 1 failed**；`ruff E9,F63,F7` 与 compileall 通过。**这 5 个失败正是 #22（4 个 qzone 假通过）与 #23（#10 占位断言）要修的**——即当前 main 上若已有 CI，阻塞测试 job 会是红的，#22/#23（或带这两项修复的 #24）是让 main 变绿的前提。
+当前可执行路径：
 
-**裸 `pytest tests/` 的真实数字（更正）**：无根配置时 pytest-asyncio 1.4 默认 strict，实测 **378 failed / 221 passed**（不是此前记的 13 failed——那是 53 个用例的子集口径）；加 `-o asyncio_mode=auto` 后 main = 5 failed/589 passed，`#24` head = **594 passed**。所以 `pytest.ini` 的作用是让 378 个 async 用例真正执行，而不是"修 13 个失败"。
+1. 维护者审查本 PR（#20）与 #38（分支模型），按需先合 #38 到 `dev`；
+2. 管理员在维护窗口完成 `main → master` 重命名与分支保护配置；
+3. 审查 draft PR #37（`dev → main`，或切换后 `dev → master`）后再进入发布线。
 
-**没有任何堆叠 PR**：除 #18/#19 的历史关系外，全部开放 PR 的 base 都是 `main@b4548cd`。
-
-**文件重叠矩阵**（全仓只有 3 个文件被多个开放 PR 触碰）：
+**文件重叠矩阵**（历史，仅作冲突排查参考）：
 
 | 文件 | PR | 后果 |
 |---|---|---|
-| `mohobot/llm_service.py` | #18、#19 | **真冲突，且只有 1 个冲突块**：位于 `chat()` 的跟进 `except` 分支（#19 的 `return f"[LLM 调用失败…]", tool_results` ↔ #18 的 `reply_text = LLMDiagnostic(...)`），#18 其余 8 处自动合并。**rebase 时必须改成 `return LLMDiagnostic(...), tool_results`**，否则 #18 的 P1（诊断文案当正文落盘）会在链式路径重现；而 #19 把这个返回点从 1 处扩到最多 5 轮，等于把 P1 暴露面复制多份 |
-| `tests/test_merged_group_reply.py` | #23、#24 | **更正**：#24 分支里的副本是 #23 的**旧版**（`test_merged_group_reply.py:129` 少 `ws.replies == []`），且 `merge-base(#23head, #24head)` 仍是 `b4548cd` → 先合 #23 **不会**让 #24 的展示 diff 自动收缩（需 rebase / "Update branch"）。若直接按现状合 #24，冲突解决必须**保留 main 侧（带 `ws.replies == []` 的那版）**，否则会把这行断言改弱 |
-| `tests/test_qzone.py` | #22、#24 | #24 里的副本与 #22 head **逐字节相同**（`08ca85f`），内容无分歧；但同样因为 merge-base 未变而不会自动收缩，合并时该文件实际是空操作。推荐做法：**先合 #22、#23，再 rebase/Update branch #24**，让它只剩 CI 文件 |
+| `mohobot/llm_service.py` | #18、#19 | 曾真冲突 1 块，已按 `return LLMDiagnostic(...), tool_results` 解析 |
+| `tests/test_merged_group_reply.py` | #23、#24 | #24 携带旧版断言；三分合并保留 main 侧强版本 |
+| `tests/test_qzone.py` | #22、#24 | #24 副本与 #22 逐字节相同，合并为空操作 |
 
-其余生产文件各自只被一个 PR 触碰（`outbound.py`←#28、`chat_manager/main.py`←#26、`relationship config`←#17、`llm_service/message_handler/llm_diagnostic/engine`←#18、`ban/store`+`file_store`+`image_cache` 等←#32、`ban_filter`+`vcpedia`+`app.py` 等←#36）。
+维护者已表态暂缓、相关 PR 已关闭：
 
-**建议顺序与合入后立即发生的变化**：
-
-1. **#22、#23 先合**（测试可信度）：#23 让 main 根 runner 从 `65 passed/1 failed` 变 **`66 passed/0 failed`**，issue #10 可关；#22 让 4 个此前从未真正执行的 qzone 用例开始执行。两者都只改测试文件。
-2. **#24 再合**（CI + `pytest.ini`）：推荐**先合 #22/#23，再 rebase / Update branch #24**，让它只剩 CI 文件（否则见上表：展示 diff 不收缩，且可能把 #23 的断言改弱）。合入后 `push: main` 立即触发 CI；审查员在"最新 main + #24"的合并快照上实测阻塞入口全绿（pytest 594 passed、根 runner 66/0、并发通过、meme 488/2 skipped、ruff `E9,F63,F7` 通过），预计首次运行即绿。`pytest.ini` 的作用是让 **378 个 async 用例真正执行**（无配置时裸跑 378 failed/221 passed），不是"修 13 个失败"。3.10/3.11 走独立 `compat.yml`（手工/每周/`push main`）；注意该 workflow **至今 0 次真实运行**，且上次 py310 job 在 pytest exit 124 后跳过了 runner/concurrency 步骤、artifact 只剩半份——合入后应手工 dispatch 一次确认端到端。
-3. **#26、#28、#32–#36、#30、#29、#17、#27、#20** 可独立合入，互不冲突（见上表）。
-4. **#18/#19 最后处理**：两者都在 `llm_service.py`，必须串行 + rebase；建议先合 #18（P1：诊断不落盘，涉及数据正确性），再 rebase #19 并重跑 `tests/test_llm_nonstream_tool_chain.py` 与 `tests/test_llm_runtime_tools.py`。只合其中之一不会让 main 语义不一致（各自自洽），但两个都未合时 issue #4 仍未关闭。
-
-维护者已表态暂缓，相关 PR 已关闭：
-
-- #12（meme 列表作用域）—— "meme 后面要大改一次……相关的先不用修了"
-- #15（旧库 WAL 迁移）—— "感觉没什么必要，先不合并吧"
+- #12（meme 列表作用域）——「meme 后面要大改一次……相关的先不用修了」
+- #15（旧库 WAL 迁移）——「感觉没什么必要，先不合并吧」
 
 ## 2. 接入 CI
 
@@ -177,7 +161,7 @@
 
 **当前 main 仍未接入 CI**，但两个测试前置 PR 已验证可组合变绿：PR #22 修复 qzone async 测试，PR #23 修复 #10 过时断言；组合基线 pytest `594 passed`、根 runner `66 passed, 0 failed`。CI workflow 已在 PR #24，真实 Actions 已**全绿**：3.12 测试、语法检查、meme 插件、Ruff 债务报告（信息性）四项均成功。
 
-### 2.1 已完成/待维护者合入的前置项
+### 2.1 已完成的前置项（历史）
 
 - [x] **#10**：PR #23 将 `tests/test_merged_group_reply.py` 的占位断言更新为当前“静默 bot 不生成节点”行为；组合根 runner `66 passed, 0 failed`。
 - [x] **4 个 qzone 用例**：PR #22 将 `test_session_fetch_and_cache` / `test_session_reset_clears_cache` / `test_session_invalid_uin` / `test_session_no_o_prefix_uin` 改为真正的 `async def`，pytest qzone `67 passed`，根 runner 不再出现其 never-awaited 警告。
@@ -243,9 +227,9 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 | #7 | 审批文本换行注入；批量任务未纳入生命周期管理 | 被踢拉黑部分已由 #13 修复 |
 | #8 | review 面板：历史缓存身份、作用域约束、审核状态并发 | 未开始 |
 | #9 | 插件送达回执、运行时生命周期策略 | 单帖回复上限已由 #14 修复 |
-| #10 | 根回归基线失败 | PR #23 已实现并审查通过，待维护者合入后才在 main 上解决 |
+| #10 | 根回归基线失败 | #23 已进入 `dev@24f62e2`；main 要等 #37 合入后才解决 |
 | #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | 修复已在 PR #28；3.10/3.11/3.12 出站取消测试均 5 passed，待独立审查与维护者合入 |
-| #26 | chat-manager 部分转发失败时的 `nodes` NameError | 直接基于 main，独立审查通过，待维护者合入 |
+| #26 | chat-manager 部分转发失败时的 `nodes` NameError | 修复已进入 `dev@24f62e2`；待 #37 验收 |
 | #2 | 旧库迁移丢 WAL | 维护者暂缓，PR #15 已关闭 |
 | #6 | meme 作用域与图片来源边界 | 维护者表示 meme 将重写，PR #12 已关闭 |
 
@@ -257,18 +241,18 @@ PR #24 依赖 #22/#23 合入后再以 `main` 为基线启用 workflow。以下�
 ## 6. 文档
 
 - [ ] 仿照 [Agent-LuoTianyi 的 docs 组织](https://github.com/SheepLiu712/Agent-LuoTianyi/tree/dev/docs) 完善本项目文档体系：补齐/统一 `TODO.md`、代码地图、开发守则、规格文档模板、开发进程/实现计划、项目说明与贡献指南等职责。参考目录结构和文档职责，不直接复制其他项目内容；按模块和当前代码逐项核对。
-- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）已从历史 fork 分支整理到 PR #27（docs 分支 head `c17fea0`），新建独立审查 PASS 后待维护者合入。审计快照基于 `b63ad48`，已标注历史边界；后续修复以当前 TODO、issue、PR 和 CI 为准。
+- [ ] 交接与审计文档（`AGENTS.md`、`docs/HANDOVER.md`、`docs/AUDIT-2026-10-12.md`）曾整理到已关闭的 PR #27（分支 head `c17fea0`），但尚未进入当前 main；需要时从本地分支恢复或另行提交。审计快照基于 `b63ad48`，已标注历史边界；后续修复以当前 TODO、issue、PR 和 CI 为准。
 - [ ] **审计完整性的已知缺口**：`/查看聊天` 部分转发失败的 `nodes` NameError（引入于 `115ac17`，早于审计基点 `b63ad48`）**没有被那份审计报告收录**，是后来从 CI 基线的 `F821` 检查发现的（修复见 #26）。说明该审计的 P1/P2 清单不是完备清单；若将来把 `AUDIT-2026-10-12.md` 当作"已审计范围"引用，需同时说明这一点。
 
-### 1.6 开放 PR 收敛：14 个已关闭，dev 成为唯一集成分支（2026-10-16）
+### 1.6 开放 PR 收敛记录（2026-10-16，历史）
 
 **平台事实**：GitHub **不支持删除 PR**（`gh pr` 只有 `close`/`reopen`，REST 也没有删除端点，实测 `DELETE /repos/.../pulls/24` 返回 404）。能删的只有分支，关闭的 PR 会永久保留在 Closed 列表里。
 
-**已执行**：把 14 个已整合进 `dev` 的 PR **关闭 + 删除其远程分支**——#18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #34 #35 #36（每个 PR 留了说明评论，指向 `dev@087a4e2`）。
+**已执行**：把 16 个已整合进 `dev` 的 PR **关闭 + 删除其远程分支**——#17 #18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #33 #34 #35 #36（每个 PR 留了说明评论，指向当时的 dev 集成快照）。
 
-**未动（保持开放）**：#17、#20、#33 —— 它们既没有正式审查报告、也不在 `dev` 里，关掉会让这部分工作落空。
+**仍开放**：#17、#20、#33、#38；其中 #17/#33 已进入 `dev`，#20 修复中，#38 待审查。
 
-**可恢复性**：17 个本地分支全部保留（含已关闭的 14 个），需要单独合并时 `git push origin <branch>` 即可恢复远程分支，再 Reopen PR 即可；`dev` 本身不受影响（仍在 `origin/dev`，领先 main 46 提交）。
+**可恢复性**：17 个本地分支全部保留（含已关闭的 14 个），需要单独合并时 `git push origin <branch>` 即可恢复远程分支，再 Reopen PR 即可；`dev` 本身不受影响（当前 `origin/dev@24f62e2`）。
 
 **副作用提醒**：`main` 上没有 `.github/`，**CI 目前只存在于 `dev`**（#24 的内容）。要让 CI 真正作用于 main，必须先把 dev（或至少那 5 个 CI/配置文件）合进 main。
 
