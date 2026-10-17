@@ -1278,6 +1278,12 @@ class LLMService:
                 # 视觉不可用或描述失败: 降级为占位文本
                 user_content = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
 
+        # 空白消息(纯 @/空内容/纯非文本段)用标注替代, 不给 LLM 发空 user 消息
+        if not user_content:
+            from mohobot.utils.cq_code import empty_message_placeholder
+            chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+            user_content = empty_message_placeholder(chat_type, event.message)
+
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:
             try:

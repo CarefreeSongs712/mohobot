@@ -895,6 +895,11 @@ class MessageHandler:
         own = await self._render_message_content(
             bot_id, getattr(event, "message", ""), describe_missing=False,
         )
+        if not own:
+            # 仅 @/空白消息: 以标注代替空内容写入上下文(与 LLM 当轮标注一致)
+            from mohobot.utils.cq_code import empty_message_placeholder
+            chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+            own = empty_message_placeholder(chat_type, getattr(event, "message", ""))
         if not quote_display:
             return own
         if own:
