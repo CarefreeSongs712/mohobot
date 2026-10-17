@@ -11,7 +11,6 @@ Cache size limit: 300 MB (LRU eviction).
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path

@@ -11,8 +11,6 @@ import json
 import sys
 import tempfile
 from pathlib import Path
-from unittest import mock
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent, Sender
@@ -51,7 +49,6 @@ async def test_no_prefix_triggers():
     assert handled and reply and ("财运" in reply or "今日" in reply or "占卜" in reply), reply
 
     # 赞我(无 /) → praise 消费
-    from mohobot.interceptors.plugin_system import PluginSystem as _PS
     # praise 需要 ws(否则提示未配置) — 至少验证被消费(handled=True)
     handled2, reply2 = await ps.dispatch_observed(
         "bot_001", make_group_event(2002, "赞我"), {},
@@ -313,8 +310,9 @@ async def test_usage_stats():
     inst._admin_ids = ["1001"]
 
     async def run():
-        return
-
+        handled, reply = await inst.on_message(
+            "bot_001", make_private_event(1001, "/用量"), {},
+        )
         assert handled and "今日" in reply
         assert "bot_001" in reply and "bot_002" in reply
         assert "主回复" in reply and "话题提取" in reply and "记忆写入" in reply
@@ -331,6 +329,8 @@ async def test_usage_stats():
             "bot_001", make_private_event(1001, "/用量 7d"), {},
         )
         assert handled3 and "近 7 天" in reply3
+
+    await run()
     print("[+] 用量统计 OK")
 
 

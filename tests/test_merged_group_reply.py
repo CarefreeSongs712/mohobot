@@ -1,13 +1,12 @@
 """群聊多 bot 合并回复测试:
 
 1. 触发匹配: 精确/带参数命中, 无关文本不命中
-2. 多 bot 群: 非选中 bot 静默跳过; 被选中的 bot 收集全部 bot 回复并发合并转发
+2. 多 bot 群: 非选中 bot 静默跳过; 被选中的 bot 收集有实际回复的 bot 并发合并转发
 3. 节点署名: user_id/nickname 为各 bot 自己, 顺序按 bot_id
 4. 单 bot 群 / 未命中: 走原流程(返回 False)
 5. 合并转发发送失败: 退化为发送者自己的普通回复
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -127,7 +126,7 @@ async def test_merged_reply_multi_bot():
         # 非选中 bot: 静默跳过(返回 True, 不发送任何东西)
         event = _make_event()
         assert await h._try_merged_group_reply("bot_002", event, {}) is True
-        assert ws.forwards == [] and plugins.called == []
+        assert ws.forwards == [] and ws.replies == [] and plugins.called == []
 
         # 选中 bot: 收集全部 bot 回复, 发合并转发
         assert await h._try_merged_group_reply("bot_001", event, {}) is True
@@ -143,7 +142,7 @@ async def test_merged_reply_multi_bot():
     await run()
 
 
-async def test_merged_reply_failed_bot_placeholder():
+async def test_merged_reply_omits_failed_bot():
     bots = {
         "bot_001": _FakeInstance("bot_001", 111, "大乔"),
         "bot_002": _FakeInstance("bot_002", 222, "小乔"),
@@ -157,8 +156,10 @@ async def test_merged_reply_failed_bot_placeholder():
         event = _make_event(text="/好感度")
         assert await h._try_merged_group_reply("bot_001", event, {}) is True
         _, _, nodes = ws.forwards[0]
+        # 静默失败的 bot 不生成节点; 只转发实际有回复的 bot。
+        assert len(nodes) == 1
         assert nodes[0]["data"]["content"][0]["data"]["text"] == "来自 bot_001 的回复"
-        assert nodes[1]["data"]["content"][0]["data"]["text"] == "(无响应)"
+        assert plugins.called == ["bot_001", "bot_002"]
 
     await run()
 
@@ -203,5 +204,49 @@ async def test_merged_reply_forward_failure_fallback():
         fb_bot, gid, text = ws.replies[0]
         assert fb_bot == "bot_001" and str(gid) == "888"
         assert "bot_001" in text
+
+    await run()
+
+
+class _SilentPlugins:
+    """所有 bot 都不回复(intercept / dispatch_observed 均未处理)。"""
+
+    def __init__(self):
+        self.called = []
+
+    async def intercept(self, bot_id, event, raw):
+        self.called.append(bot_id)
+        return (False, None)
+
+    async def dispatch_observed(self, bot_id, event, raw):
+        return (False, None)
+
+
+async def test_merged_reply_all_bots_silent_sends_nothing():
+    """issue #10 方案第 2 条: 全部 bot 均无回复时静默跳过。
+
+    这是 b6e0bf6 的语义核心之一(不再用"(无响应)"占位撑满转发), 此前零覆盖:
+    若实现改成"没人回复也发一条占位转发", 本用例必须失败。
+    """
+    bots = {
+        "bot_001": _FakeInstance("bot_001", 111, "大乔"),
+        "bot_002": _FakeInstance("bot_002", 222, "小乔"),
+    }
+    bm = _FakeBotManager(bots, {"888": {"bot_001", "bot_002"}})
+    ws = _FakeWS(bm)
+    plugins = _SilentPlugins()
+    h = _make_handler(ws, plugins)
+
+    async def run():
+        event = _make_event()
+        # 被选中的 bot 收集全部 bot, 但没有任何回复 → 消费消息且一条都不发
+        assert await h._try_merged_group_reply("bot_001", event, {}) is True
+        assert plugins.called == ["bot_001", "bot_002"], plugins.called
+        assert ws.forwards == [] and ws.replies == []
+
+        # 非选中的 bot 仍然静默跳过(不收集、不发送)
+        plugins.called.clear()
+        assert await h._try_merged_group_reply("bot_002", event, {}) is True
+        assert plugins.called == [] and ws.forwards == [] and ws.replies == []
 
     await run()

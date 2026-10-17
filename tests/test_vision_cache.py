@@ -7,14 +7,12 @@
 
 import asyncio
 import io
-import json
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import mohobot.image_cache as ic_mod
 
 
 def make_png(color: tuple, gradient: bool = False) -> bytes:

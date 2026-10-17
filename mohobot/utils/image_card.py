@@ -169,7 +169,6 @@ def render_help_card(sections: list[dict]) -> str | None:
     fg = (214, 219, 228)       # 正文
     dim = (148, 155, 168)      # 次要文字
     accent = (102, 204, 255)   # 标题/强调 #66CCFF
-    warn = (255, 170, 90)      # 管理员标记 #FFAA5A
 
     width = 880
     pad_x, pad_y = 30, 26

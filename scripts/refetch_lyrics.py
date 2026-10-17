@@ -6,7 +6,6 @@
 
 import argparse
 import json
-import re
 import sqlite3
 import sys
 import time
@@ -40,7 +39,7 @@ def main() -> None:
     cj = json.load(open(cookie_path, encoding="utf-8"))
     UA = "Mozilla/5.0"
 
-    added = updated = failed = still_no_nl = 0
+    updated = failed = still_no_nl = 0
     fail_list: list[str] = []
 
     for name in names:

@@ -19,6 +19,7 @@ from loguru import logger
 
 from mohobot.file_store import json_update
 from mohobot.models.onebot import PrivateMessageEvent, Sender
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
 
 from .schedule import is_quiet_time, random_interval_seconds, render_prompt
 
@@ -362,9 +363,14 @@ class ProactiveEngine:
             except Exception as exc:
                 logger.warning(f"[主动消息] {key} LLM 生成失败: {exc}")
                 reply = None
+            # 诊断文案(未配置/调用失败/空响应)不是主动消息正文: 不发送、不计数、正常重排。
+            # 必须在 strip() 之前判断, 字符串运算会丢掉 LLMDiagnostic 标记。
+            if isinstance(reply, LLMDiagnostic):
+                logger.warning(f"[主动消息] {key} LLM 未产出有效内容, 本次不发送: {reply[:80]}")
+                await self._reschedule(key, cfg, self._clock())
+                return
             reply = (reply or "").strip()
-            # 生成报错字符串(LLM 未配置等)不当作内容发送
-            if not reply or reply.startswith("LLM 服务未配置"):
+            if not reply:
                 await self._reschedule(key, cfg, self._clock())
                 return
 
