@@ -16,7 +16,9 @@ on:
   schedule:
     - cron: "0 21 * * 0"   # Sundays 21:00 UTC
   push:
-    branches: [main]
+    # Transitional: run on both the current default branch and the target release
+    # branch; drop `main` after the main -> master rename.
+    branches: [main, master]
 
 permissions:
   contents: read

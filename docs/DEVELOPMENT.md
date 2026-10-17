@@ -70,10 +70,28 @@ python main.py
 #   面板  http://127.0.0.1:9090 ｜ 审核面板 http://127.0.0.1:9091 ｜ 表情包插件 http://127.0.0.1:9092
 ```
 
+### 分支模型
+
+| 分支 | 用途 | 说明 |
+|---|---|---|
+| `master` | 发布分支 | 目标发布线；只接受走完 PR、审查与 CI 的合并，生产按此分支拉取 |
+| `main` | 迁移期兼容分支 | 旧的默认发布分支；迁移完成前与 `master` 并存，CI 同时监听两者 |
+| `dev` | 集成分支 | 汇聚多个已审查 PR 做联调与 CI 预验收，再经 PR 进入 `master` |
+| `feat/<topic>` | 功能分支 | 例如 `feat/ctx-restore`；合入 `dev` 或经 PR 进入发布线 |
+| `bugfix/<topic>` | 缺陷修复分支 | 例如 `bugfix/outbound-cancel`；同样走 PR |
+| `gh-pages` | 静态站点分支 | 仅 GitHub Pages 产物；无 Pages 产物时不创建 |
+
+约定要点：
+
+- 任何改动都走 **分支 → PR → 审查 → 合并**，即使有 push 权限也不直接推 `master` / `main`。
+- 分支名不使用前导 `/`：写 `feat/login` 而不是 `/feat/login`。
+- Git **不允许** 同一仓库同时存在 `feat` 与 `feat/<topic>`（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）；因此 `feat`、`bugfix` 采用前缀形式。若团队决定使用字面 `feat` / `bugfix` 分支，必须先把现存 `feat/*`、`bugfix/*` 改名。
+- `main → master` 的切换属于仓库引用操作（重命名默认分支、调整分支保护），无法通过文件 PR 完成，需仓库管理员在维护窗口执行；本仓库的 CI 在迁移期同时监听 `main` 与 `master`，切换完成后可移除 `main`。
+
 ### 发布与部署约定
 
-- **只以 main 分支发布。** 改动走分支 → PR → 审查 → 合并；即使有 push 权限也不直接推 `main`。生产只拉取已审查合入的版本。
-- 生产环境统一通过 `git pull --ff-only origin main` 获取更新；禁止日常无备份 reset/force 操作。
+- **以 `master` 分支发布。** 改动走分支 → PR → 审查 → 合并；即使有 push 权限也不直接推 `master`。生产只拉取已审查合入的版本。
+- 迁移完成前生产仍可按 `git pull --ff-only origin main` 获取更新；`main` 与 `master` 在切换窗口内保持同步，切换后改为 `git pull --ff-only origin master`；禁止日常无备份 reset/force 操作。
 - 生产由 systemd 服务管理，不要在服务运行时另起 screen / nohup 进程；更新后使用对应的 systemd unit 重启，不要用面板内的进程内重启代替版本发布。完整说明见 `README.md` 与外部部署规范。
 
 ### 回归测试
@@ -120,7 +138,7 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` 在 PR、`push main` 和手工触发时执行。只读仓库权限，不使用生产密钥，同一分支的新运行会取消旧运行。
+`.github/workflows/ci.yml` 在 PR、`push main`/`push master` 和手工触发时执行。只读仓库权限，不使用生产密钥，同一分支的新运行会取消旧运行。
 
 | job | 范围 | 是否阻塞 PR |
 |---|---|---|
@@ -133,7 +151,7 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
 
 `Ruff debt report` 是**信息性**的：仓库仍有既存告警（当前 159 条，全部来自本 PR 之前的代码），ruff 在这些告警上必然返回非零。若把它当门禁，每个 PR 都会显示一个红色检查，却无法区分"新引入的问题"和"历史债务"。因此它只报告、不判红，条目数写进 step summary，完整清单在该运行的 `ruff-debt-report` artifact 里。清理完债务后再把它升级为阻塞检查——不能靠隐藏告警来变绿。
 
-`.github/workflows/compat.yml` 单独跟踪 Python 兼容性（手工触发、每周日、`push main`），**刻意不挂在 PR 上**：Python 3.10/3.11 上套件曾整体停滞，**根因已定位**——`asyncio.wait_for()` 吞掉调用方取消（issue #25），`tests/test_outbound_cancellation.py::test_cancelled_after_dispatch_is_reported_to_caller` 在 base 3.10/3.11 上**单独跑也会挂死**；此前"跨用例累积"的归因是错的（当时抽样的无关文件本来就快）。修复在 PR #28：该文件三版本均 5 passed。等 #22/#23/#24/#28 合入后应重新确认：去掉 `continue-on-error`、补 3.11 job，再把它升级为阻塞检查——否则 3.10/3.11 回归会被只有 3.12 的门禁静默放过。期间信号仍带线程栈与日志 artifact。
+`.github/workflows/compat.yml` 单独跟踪 Python 兼容性（手工触发、每周日、`push main`/`push master`），**刻意不挂在 PR 上**：Python 3.10/3.11 上套件曾整体停滞，**根因已定位**——`asyncio.wait_for()` 吞掉调用方取消（issue #25），`tests/test_outbound_cancellation.py::test_cancelled_after_dispatch_is_reported_to_caller` 在 base 3.10/3.11 上**单独跑也会挂死**；此前"跨用例累积"的归因是错的（当时抽样的无关文件本来就快）。修复在 PR #28：该文件三版本均 5 passed。等 #22/#23/#24/#28 合入后应重新确认：去掉 `continue-on-error`、补 3.11 job，再把它升级为阻塞检查——否则 3.10/3.11 回归会被只有 3.12 的门禁静默放过。期间信号仍带线程栈与日志 artifact。
 
 仓库管理员还需设置分支保护并选择上面三个阻塞检查，workflow 本身不会修改保护设置。
 

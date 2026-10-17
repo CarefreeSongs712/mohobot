@@ -162,13 +162,14 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 | 主进程端口 | 8081（OneBot）、9090（管理面板）、9092（表情包插件启用时） |
 | review | 独立子进程，端口 9091；可能随同一 systemd unit 重启 |
 
-**仅以 main 发布。** 本地完成测试后，按用户授权提交、推送，再同步生产。远程变更必须已获明确授权；只改文档不代表授权部署。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
+**迁移完成前仅以 main 发布；迁移完成后仅以 master 发布。** 只有在管理员已完成 `main → master` 默认分支重命名、分支保护配置和生产拉取切换后，才可把生产目标从 `main` 改为 `master`。本地完成测试后，按用户授权提交、推送，再同步生产；远程变更必须已获明确授权。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
 
 ```bash
 # 生产只读预检：检查输出，保留未跟踪的配置备份
 ssh -p 10139 root@103.236.75.12 'cd /root/QQBot/mohobot && git status --short && git branch --show-current && git log -1 --oneline && systemctl show migration-mohobot.service -p ActiveState -p MainPID -p WorkingDirectory -p ExecStart'
 
 # 确认已授权、目标正确且没有待处理修改后同步
+# 迁移前使用 main；只有管理员完成 main -> master 切换并授权后，才将两处 main 改为 master。
 ssh -p 10139 root@103.236.75.12 'set -eu; cd /root/QQBot/mohobot; test "$(git branch --show-current)" = main; test -z "$(git status --porcelain --untracked-files=no)"; git pull --ff-only origin main; git log -1 --oneline'
 
 # 确认配置有效、所需依赖已具备后，重启现有 unit
@@ -304,7 +305,7 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 - 日志确认插件加载：`grep "Loaded plugin" logs/mohobot_*.log`
 - Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
 - 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
-- 更新部署：参见上方“现有生产环境与发布流程”；常规使用 `git pull --ff-only origin main`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
+- 更新部署：参见上方“现有生产环境与发布流程”；迁移完成前使用 `git pull --ff-only origin main`，迁移完成并获授权后才改用 `origin master`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
 - **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码默认 `history_dual_write: true` 双写过渡，确认稳定后在 WebUI 关闭
 
 ### 上下文压缩与群聊最近消息
