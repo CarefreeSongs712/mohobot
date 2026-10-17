@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    # master is the target release line; main is kept during the main -> master
-    # migration window so pushes to either branch still run the gate. Drop `main`
-    # once the default branch has been renamed.
-    branches: [main, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
