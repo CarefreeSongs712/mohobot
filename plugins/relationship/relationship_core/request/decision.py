@@ -114,12 +114,7 @@ class RequestDecision:
         result.user_reply = "好友申请已收到，正在审核中，请耐心等待"
 
     def _decide_group(self, req: GroupRequest, result: RequestResult):
-        if self.cfg.manage_group:
-            result.user_reply = (
-                f"群邀请已收到，需要在审核群 {self.cfg.manage_group} 审批后才能加入"
-            )
-        else:
-            result.user_reply = "群邀请已收到，需要审核通过后才能加入"
+        result.user_reply = "群邀请已收到，需要审批后才能加入。拉群需要向管理员3831097597报备，详见/help中的网站"
 
         if self.cfg.is_black_group(req.group_id):
             result.admin_reply += "\n警告: 该群为黑名单群聊，请谨慎通过"

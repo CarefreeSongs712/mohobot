@@ -24,8 +24,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: compat-${{ github.ref }}
-  cancel-in-progress: true
+  # 同 ci.yml: PR 可取消，push 到发布分支不取消，避免留下未验证的提交。
+  group: compat-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Python 3.10 is the minimum version declared in README. It is tracked here
