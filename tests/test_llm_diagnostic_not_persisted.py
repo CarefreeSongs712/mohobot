@@ -360,3 +360,56 @@ async def test_nonstream_tool_followup_failure_keeps_diagnostic_marker():
         assert await context.load_context(bot, "private", "3001") == []
         assert db.rows == [] and emotion.turns == [], (db.rows, emotion.turns)
         await handler.close()
+
+
+class _ToolThenSilentCompletions:
+    """第 1 次返回工具调用, 跟进轮只返回空文本 —— 非流式"工具跑完但模型无文本"出口。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[SimpleNamespace(
+                        id="call_1", type="function",
+                        function=SimpleNamespace(name="unknown_test_tool", arguments="{}"),
+                    )],
+                ))],
+                usage=None,
+            )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None))],
+            usage=None,
+        )
+
+
+async def test_nonstream_tool_no_text_fallback_is_diagnostic_not_persisted():
+    """非流式"工具调用完成，但模型未返回文本"兜底必须与流式同一兜底一致: 是 LLMDiagnostic。
+
+    该文案是框架占位, 不是模型说的话。若返回普通 str, MessageHandler 会把它当正文
+    写进上下文/数据库并触发情感分析, 下一轮模型会把占位当作"自己说过的话"。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        handler, _, _, _, _, bot = await _setup(
+            td, stream=False, segment=True, completions=_ToolThenSilentCompletions(),
+        )
+        reply, tool_results = await handler._llm.chat(bot, _event(), [], {})
+        assert isinstance(reply, LLMDiagnostic), type(reply)
+        assert reply == "[工具调用完成，但模型未返回文本]", reply
+        assert isinstance(tool_results, list) and tool_results, tool_results
+        await handler.close()
+
+    with tempfile.TemporaryDirectory() as td:
+        handler, context, ws, db, emotion, bot = await _setup(
+            td, stream=False, segment=True, completions=_ToolThenSilentCompletions(),
+        )
+        await handler._handle_message(bot, _event(), {})
+        shown = " ".join(_sent_text(m) for m in ws.sent)
+        assert "工具调用完成" in shown, ws.sent
+        assert await context.load_context(bot, "private", "3001") == []
+        assert db.rows == [] and emotion.turns == [], (db.rows, emotion.turns)
+        await handler.close()

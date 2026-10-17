@@ -333,8 +333,10 @@ class LLMService:
 
         # 与 chat_stream 对齐: 工具已执行但模型最终没给出任何文本时不能静默返回空串,
         # 否则 stream=false 的用户什么也收不到(流式同场景会输出这段兜底文案)。
+        # 该文案是框架占位而非模型输出, 必须与流式一致包成 LLMDiagnostic,
+        # 否则会被当作 assistant 正文写入上下文/数据库并触发情感分析。
         if tool_results and not reply_text.strip():
-            return "[工具调用完成，但模型未返回文本]", tool_results
+            return LLMDiagnostic("[工具调用完成，但模型未返回文本]"), tool_results
 
         return reply_text, tool_results
 
