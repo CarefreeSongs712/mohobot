@@ -69,7 +69,7 @@
 
 - 不提交 API Key、密码、Cookies、本地配置、运行数据或日志；不在交接材料里复制真实秘密。
 - WebUI 无默认密码，首次按文档初始化；默认本机访问，不直接公网裸露。主面板的密钥掩码不代表插件配置也会掩码。
-- **迁移完成前只以 main 发布；迁移完成后只以 master 发布**。只有管理员完成 `main → master` 默认分支重命名、分支保护和生产拉取切换后，才可更换发布目标。提交、推送、SSH、重启生产、数据库同步及数据恢复都要有对应明确授权。
-- 生产按 [README.md](README.md) 的条件化流程只读预检：迁移前 `git pull --ff-only origin main`，迁移完成并获授权后才改为 `origin master`；遇脏工作区/分叉/服务不符立即暂停，不能自动强推/reset。
+- **只以 main 发布**。提交、推送、SSH、重启生产、数据库同步及数据恢复都要有对应明确授权。
+- 生产按 [README.md](README.md) 的流程只读预检后 `git pull --ff-only origin main`；遇脏工作区/分叉/服务不符立即暂停，不能自动强推/reset。
 - 管理已核实的 systemd unit；不另起 screen/nohup/手工主进程，不影响其他项目。验收新 MainPID、端口与本次启动日志，review 是否随 unit 重启取决于 cgroup。
 - 核心为 [MIT](LICENSE)，表情包与主动聊天插件各有 [AGPL-3.0](plugins/meme_stealer/LICENSE)、[AGPL-3.0](plugins/proactive_chat/LICENSE) 许可，其他移植模块保留上游声明；不能把全部插件统一当 MIT。

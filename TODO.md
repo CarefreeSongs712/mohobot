@@ -17,25 +17,24 @@
 - 验证：main 上 `pytest tests` 614 passed、根 runner 69/0、concurrency 通过、ban pipeline 14 OK、Ruff `E9,F63,F7` 与 compileall 通过
 - CI：main 首次获得 `.github/workflows/`；`36bf56a` 的 CI 与 Compatibility 均 success
 
-### 1.1 分支模型（目标态，带前置条件）
-| 分支 | 用途 | 生效条件 |
+### 1.1 分支模型
+| 分支 | 用途 | 说明 |
 |---|---|---|
-| `master` | 目标发布分支 | 仅当管理员把默认分支 `main` 重命名为 `master`、并配置好分支保护后才作为发布线；在此之前生产仍按 `main` 操作 |
-| `main` | 迁移期兼容分支 | 与 `master` 同步；切换完成后可保留只读或删除 |
-| `dev` | 集成分支 | 汇聚已审查 PR 做联调与 CI 预验收，不对应生产 |
+| `main` | 发布分支 | 唯一发布线；生产按此分支拉取 |
+| `dev` | 集成分支 | 汇聚已审查 PR 做联调与 CI 预验收，再经 PR 进入 `main` |
 | `feat/<topic>` | 功能分支 | 例 `feat/ctx-restore`；走 PR |
 | `bugfix/<topic>` | 缺陷修复分支 | 例 `bugfix/outbound-cancel`；走 PR |
 | `gh-pages` | Pages 静态站点 | 仅在确有 Pages 产物时创建 |
 
 约束：
 
-1. `main → master` 是仓库引用操作（重命名默认分支、改分支保护），**文件 PR 无法完成**，需管理员在维护窗口执行；PR #38 只改文档与 CI 触发配置。
-2. CI 迁移期双监听：`ci.yml` 与 `compat.yml` 的 `push` 同时监听 `main` 与 `master`，切换前后都不会出现门禁空窗；切换完成后可移除 `main`。
+1. 默认分支与分支保护属于仓库设置，**文件 PR 无法修改**，需要时由管理员在维护窗口调整。
+2. CI 只监听 `main`（发布分支）与 PR；发布分支的 push 不取消进行中的运行。
 3. Git **不允许** `feat` 与 `feat/<topic>` 并存（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）；若要用字面 `feat`/`bugfix`，必须先把 `feat/knowledge-base` 等嵌套分支改名。
 4. 分支名不带前导 `/`：写 `feat/login`，不是 `/feat/login`。
 
 ### 1.2 工作约定
-- 所有改动走 **分支 → PR → 审查 → 合并**；即使有 push 权限也不直接推 `main`/`master`，也不在未授权时直接创建/重命名远程分支。
+- 所有改动走 **分支 → PR → 审查 → 合并**；即使有 push 权限也不直接推 `main`，也不在未授权时直接创建/重命名远程分支。
 - 每个修复 PR 附带：先失败后通过的回归用例（RED/GREEN）、全量根回归结果、触发条件的如实说明。
 - 改动消息发送 / 上下文 / 存储语义时，补跑 `tests/test_concurrency.py`（根 runner 不包含它）。
 
@@ -131,8 +130,8 @@
 当前可执行路径：
 
 1. 维护者审查本 PR（#20）与 #38（分支模型），按需先合 #38 到 `dev`；
-2. 管理员在维护窗口完成 `main → master` 重命名与分支保护配置；
-3. 审查 draft PR #37（`dev → main`，或切换后 `dev → master`）后再进入发布线。
+2. 管理员按需配置分支保护（要求 CI 通过 + 审查）；
+3. 后续改动继续走 `dev → main` 的 PR 流程。
 
 **文件重叠矩阵**（历史，仅作冲突排查参考）：
 
@@ -164,7 +163,7 @@
 **上述 main 基线没有项目 CI。** 没有 `.github/workflows/`，也没有 pytest / ruff 配置或 `pyproject.toml`。`main` 未设分支保护。
 （CI PR 之前的唯一 Actions 记录是 GitHub 托管的 Copilot PR 审查，属于平台功能。）
 
-**main 已接入 CI**（随 #37 合入）：`.github/workflows/ci.yml` 与 `compat.yml` 已进入 main；`36bf56a` 的 CI 四项检查与 Compatibility 均 success。
+**main 已接入 CI**（随 #37 合入）：`.github/workflows/ci.yml` 已进入 main；`067522a` 的 CI 四项检查均 success。**Python 支持范围已收敛为 3.12+**，`compat.yml` 已删除。
 
 ### 2.1 已完成的前置项（历史）
 
@@ -183,7 +182,7 @@ CI workflow 已随 #37 进入 main。以下原始诊断作为历史记录保留�
 
 ### 2.2 workflow 设计（已在 main 生效）
 
-`main` 变绿后，新增 `.github/workflows/ci.yml`，`push main/master` 与 `pull_request` 触发：
+`.github/workflows/ci.yml`：`push main` 与 `pull_request` 触发：
 
 | job | 内容 | 是否阻塞合并 |
 |---|---|---|
@@ -191,12 +190,12 @@ CI workflow 已随 #37 进入 main。以下原始诊断作为历史记录保留�
 | `meme-plugin` | 在 `plugins/meme_stealer/` 下按其 `CLAUDE.md` 跑 `pytest tests` 与 `ruff check` | 是 |
 | `syntax` | Ruff `E9,F63,F7`：阻塞语法和控制流错误 | 是 |
 | `Ruff debt report` | 既有 `E4,E7,E9,F` 告警：计数进 step summary + 完整 artifact；job 保持绿色 | 否（信息性，不隐藏告警） |
-| `compat.yml` (Python 3.10) | 手工触发 / 每周日 / `push main/master`，带线程栈与日志 artifact | 否（刻意不挂 PR） |
+
 
 选型依据：
 
 - **Python 3.12**：生产实际运行 3.12.13（README 部署章节）；
-- **3.10 / 3.11**：README 声明支持 3.10+，但兼容性**未验证**——套件会挂死，已定位到根因并开 **#25**（见第 3 节 P2）。放在 PR 门禁上只会让每个 PR 变红，因此移到独立 `compat.yml`（手工触发 / 每周日 / `push main/master`），保留线程栈与日志 artifact 继续采样；#25 修好后可把 3.10/3.11 重新纳入；
+- **3.10 / 3.11**：**不再支持**。原 `compat.yml` 已删除，README 与开发指南统一为 Python 3.12+；历史上 3.10/3.11 的停滞根因是 issue #25（已由 #28 修复），修复后 3.10 也能通过，但项目不承诺旧版本；
 - **两个 runner 都跑**：根 runner 是项目文档里的入口，但它按**文件**计数、文件内首个失败即中止、并且会漏掉"返回协程"的用例；pytest 能逐用例报告。等 pytest 稳定后可以只保留 pytest。
 
 当前基线耗时（本地）：根 runner 约 70s，pytest 约 86s，meme 插件约 8s。
@@ -213,7 +212,7 @@ CI workflow 已随 #37 进入 main。以下原始诊断作为历史记录保留�
 
 | 级别 | 位置 | 问题 | 证据 |
 |---|---|---|---|
-| **P2** | `mohobot/services/outbound.py:125` 的 `asyncio.wait_for(queue.put(...))` / 首次由 #16 引入 | Python **3.10 与 3.11** 上，调用方在"入队完成→开始等结果"窗口被取消时，取消被 `wait_for` 吞掉：调用方拿不到 `CancelledError`，会永久挂起或返回自己以为已取消的结果。生产跑 3.12 不受影响，但 README 声明的 3.10+ 属未验证 | 已开 **#25**（含最小复现、任务栈、3.10/3.11/3.12 状态对照、`wait_for` 源码定位：`except CancelledError: if fut.done(): return fut.result()`；3.12 用 `asyncio.timeout` 重写后正常） |
+| **P2** | `mohobot/services/outbound.py:125` 的 `asyncio.wait_for(queue.put(...))` / 首次由 #16 引入 | Python **3.10 与 3.11** 上，调用方在"入队完成→开始等结果"窗口被取消时，取消被 `wait_for` 吞掉：调用方拿不到 `CancelledError`，会永久挂起或返回自己以为已取消的结果。生产跑 3.12 不受影响；3.10/3.11 已不在支持范围内 | 已开 **#25**（含最小复现、任务栈、3.10/3.11/3.12 状态对照、`wait_for` 源码定位：`except CancelledError: if fut.done(): return fut.result()`；3.12 用 `asyncio.timeout` 重写后正常） |
 | **P2** | `plugins/chat_manager/main.py:167` | `/查看聊天` 在部分批次失败时引用未定义 `nodes` | PR #26 直接基于 main 修复，独立审查中；历史探针明确 `NameError`，全成功/全失败正常 |
 | P3 | `tests/test_new_features_2.py:316-323` | `run()` 开头就 `return`，后面的断言**从未执行**——这个用例实际已失效 | ruff `F821`（`handled` / `reply` 未定义） |
 | P3 | `tests/test_tool_followup.py:206` | `__main__` 入口调用未定义的 `main()`，直接执行该文件会 `NameError` | ruff `F821` |
