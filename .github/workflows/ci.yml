@@ -13,8 +13,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR 上保留「新推送取消旧运行」以省资源；但 push 到发布分支不能取消，
+  # 否则连续合并两次会让前一个提交的门禁被 cancel，留下未验证的提交（显示为红叉）。
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   tests:

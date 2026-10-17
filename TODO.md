@@ -3,20 +3,19 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后删除已完成条目，历史留在 PR 中。
 
-> 历史基线：2026-10-14 `main` = `b4548cd`；当前 `main` = `bd9fbd2`。所有历史数字都绑定其基线提交，不作为当前验收结论。
+> 历史基线：2026-10-14 `main` = `b4548cd`。当前 `main` = `36bf56a`（2026-10-17 集成完成），`dev` = `c800886`。所有历史数字都绑定其基线提交，不作为当前验收结论。
 
 ## 1. 当前仍开放的 PR
 
-> 快照：2026-10-17。`main` = `0e87ea2`，`dev` = `24f62e2`。这里只列 GitHub 当前 OPEN 且尚未进入 main 的 PR；已关闭或只存在于 `dev` 的 PR 归入 §1.3 历史表，不再出现在待合入队列。
+> 快照：2026-10-17 集成完成后。`main` = `36bf56a`，`dev` = `c800886`。当前**没有开放 PR**；本轮的 #17 #20 #33 #37 #38 #39 #40 已全部合入 main 并标记 MERGED。
 
-| PR | 目标 | 内容 | 状态 |
-|---|---|---|---|
-| #17 | `main` | 删除 `RequestConfig._clean()` 后残留的 4 行不可达代码 | 审查 PASS；内容已在 `dev`；PR 的 base 仍是旧 main，合入前需按当前 main 复核 |
-| #20 | `main` | 本 TODO 清单 | 本轮修正后 head `ff6352b`，待复审 |
-| #33 | `main` | 第三批低风险 Ruff 告警清理 | 审查 PASS；内容已在 `dev`；PR 的 base 仍是旧 main，合入前需按当前 main 复核 |
-| #38 | `dev` | 分支模型（master/dev/feat/bugfix/gh-pages）与 CI 迁移期双分支监听 | PASS；P2 已修，待维护者审查 |
-| #37 | `main` | dev 集成 PR | draft，待 #39/#38 合入 dev 后更新 |
-| #39 | `dev` | 非流式工具轮无文本兜底改为 LLMDiagnostic | PASS，待合入 dev 后刷新 #37 |
+### 1.0 本轮集成记录（2026-10-17）
+
+- 集成前锚点：tag `integration-before-2026-10-17` → `main@0e87ea2`
+- 集成后锚点：tag `integration-after-2026-10-17` → `main@36bf56a`
+- 路径：`#38`、`#39` 先合入 `dev`；`#37`（dev → main）合入 main；随后合入 `#20`（TODO.md）；`#40` 修复 main 自身红灯（引用+空白消息断言）
+- 验证：main 上 `pytest tests` 614 passed、根 runner 69/0、concurrency 通过、ban pipeline 14 OK、Ruff `E9,F63,F7` 与 compileall 通过
+- CI：main 首次获得 `.github/workflows/`；`36bf56a` 的 CI 与 Compatibility 均 success
 
 ### 1.1 分支模型（目标态，带前置条件）
 | 分支 | 用途 | 生效条件 |
@@ -67,12 +66,12 @@
 新增两条 P3：**N6**（PR 正文滞后：写"6 个用例/6 passed"，实际 8）→ **已修**，正文已更新为 8 个用例、补上"与 #19 的合并解析要求"一节；**N7**（门禁入口依赖：head 无 `pytest.ini`，裸 pytest 7 failed；`tests/_run_all.py` 与 #24 的 `asyncio_mode=auto` 下才执行）→ 记录，不阻断。
 
 ### 1.5 dev 集成分支现状
-`origin/dev` 当前为 **`24f62e2`**（领先当前 `main@0e87ea2` 50 个提交；main 还有两条维护者提交未进入 dev）。该分支包含 16 个已审查通过的 PR：#17 #18 #19 #22 #23 #24 #26 #27 #28 #29 #30 #32 #33 #34 #35 #36。
+`origin/dev` 当前为 **`c800886`**，已与 `main@36bf56a` 同步。dev 累计包含本轮全部已审查 PR：#17 #18 #19 #20 #22 #23 #24 #26 #27 #28 #29 #30 #32 #33 #34 #35 #36 #38 #39。
 
 - 合并方式：从 `origin/main@bd9fbd2` 逐个 `--no-ff` 合并；#18↔#19 的 `llm_service.py` 冲突按 `return LLMDiagnostic(...), tool_results` 解析。
 - 实测（隔离快照）：裸 pytest **613 passed**；根 runner **69 passed / 0 failed**；并发专项、`ruff E9,F63,F7`、compileall 均通过。
 - CI：draft PR #37（`dev → main`）旧 head 四项检查已全绿；PR #39 修复合入后需刷新 #37 再重跑。
-- 未进入 dev：#20（本 PR，复审中）、#38（PASS，待合入 dev）、#39（PASS，待合入 dev）。
+- 未进入 dev：无；#20 随其 PR 合入 main 后也已同步。
 
 **已知缺口（合入后应修，非本分支引入）**：非流式"工具轮无文本"兜底在 #19 里是普通 `str`，而流式同一兜底在 #18 里是 `LLMDiagnostic` → 合并态两者不一致（后者不入上下文，前者会被当正文落盘）。修法：合并后把非流式那行也包成 `LLMDiagnostic`（本次 dev 的一次演练版本曾这么做并全绿，但为保持"纯合并结果可复现"未纳入）。
 
@@ -165,14 +164,14 @@
 **上述 main 基线没有项目 CI。** 没有 `.github/workflows/`，也没有 pytest / ruff 配置或 `pyproject.toml`。`main` 未设分支保护。
 （CI PR 之前的唯一 Actions 记录是 GitHub 托管的 Copilot PR 审查，属于平台功能。）
 
-**当前 main 仍未接入 CI**；CI workflow 在 `dev`（来自已关闭的 #24），draft PR #37 的检查已全绿，但 main 自身没有 `.github/workflows/`。合入 #37 后 main 才会获得 CI。
+**main 已接入 CI**（随 #37 合入）：`.github/workflows/ci.yml` 与 `compat.yml` 已进入 main；`36bf56a` 的 CI 四项检查与 Compatibility 均 success。
 
 ### 2.1 已完成的前置项（历史）
 
 - [x] **#10**：PR #23 将 `tests/test_merged_group_reply.py` 的占位断言更新为当前“静默 bot 不生成节点”行为；组合根 runner `66 passed, 0 failed`。
 - [x] **4 个 qzone 用例**：PR #22 将 `test_session_fetch_and_cache` / `test_session_reset_clears_cache` / `test_session_invalid_uin` / `test_session_no_o_prefix_uin` 改为真正的 `async def`，pytest qzone `67 passed`，根 runner 不再出现其 never-awaited 警告。
 
-PR #24 的 workflow 当前在 `dev`，main 尚未接入；draft #37 合入前需刷新至最新 dev。以下原始诊断作为历史记录保留：
+CI workflow 已随 #37 进入 main。以下原始诊断作为历史记录保留：
 
 - 原 qzone 用例是**普通函数却返回协程**（`return run()`）。
   - 根 runner 只对 `async def` 做 `await`，所以这 4 个协程被直接丢弃（日志里是 `coroutine '...run' was never awaited`），整个文件却记为 `PASS`；
@@ -182,7 +181,7 @@ PR #24 的 workflow 当前在 `dev`，main 尚未接入；draft #37 合入前需
 - [x] **根目录开发依赖清单**：PR #24 新增根 `requirements-dev.txt`，固定 pytest / pytest-asyncio / ruff；全新虚拟环境安装后 `pip check` 无冲突。
 - [ ] **清理剩余静态告警**：当前 `main@0e87ea2` 实测 160 条、`dev@24f62e2` 实测 87 条（`E4,E7,E9,F`，忽略 E402），全部来自既有代码。CI 只阻塞 `E9,F63,F7`；完整 `E4,E7,E9,F` 由信息性 job 报告（计数进 step summary + artifact），避免把已知债务显示成 PR 的失败，也避免隐藏告警。
 
-### 2.2 workflow 设计（已在 dev，未进入 main）
+### 2.2 workflow 设计（已在 main 生效）
 
 `main` 变绿后，新增 `.github/workflows/ci.yml`，`push main/master` 与 `pull_request` 触发：
 
@@ -234,8 +233,8 @@ PR #24 的 workflow 当前在 `dev`，main 尚未接入；draft #37 合入前需
 | #8 | review 面板：历史缓存身份、作用域约束、审核状态并发 | 未开始 |
 | #9 | 插件送达回执、运行时生命周期策略 | 单帖回复上限已由 #14 修复 |
 | #10 | 根回归基线失败 | #23 已进入 `dev@24f62e2`；main 要等 #37 合入后才解决 |
-| #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | 修复已在 PR #28；3.10/3.11/3.12 出站取消测试均 5 passed，已独立审查，待 #37/维护者验收 |
-| #26 | chat-manager 部分转发失败时的 `nodes` NameError | 修复已进入 `dev@24f62e2`；待 #37 验收 |
+| #25 | Python 3.10/3.11 取消被 `wait_for` 吞掉，调用方可能永久挂起 | 修复已在 PR #28；3.10/3.11/3.12 出站取消测试均 5 passed，已独立审查并随 #37 合入 main |
+| #26 | chat-manager 部分转发失败时的 `nodes` NameError | 修复已随 #37 合入 main |
 | #2 | 旧库迁移丢 WAL | 维护者暂缓，PR #15 已关闭 |
 | #6 | meme 作用域与图片来源边界 | 维护者表示 meme 将重写，PR #12 已关闭 |
 
