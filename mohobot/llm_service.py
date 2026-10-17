@@ -188,6 +188,14 @@ class LLMService:
             and (tool["function"]["name"] != "anysearch_search"
                  or getattr(self, "_anysearch_client", None) is not None)
         ]
+        # 实时检查内置工具的插件启停状态(anysearch_search ↔ 插件 anysearch)
+        try:
+            from mohobot.services.llm_tools import plugin_enabled
+            if any(tool["function"]["name"] == "anysearch_search" for tool in tools) and not plugin_enabled("anysearch"):
+                logger.debug("anysearch 插件已禁用, 本次不暴露 anysearch_search 工具")
+                tools = [t for t in tools if t["function"]["name"] != "anysearch_search"]
+        except Exception as exc:
+            logger.debug(f"插件启停状态检查失败(跳过内置工具联动): {exc}")
         try:
             from mohobot.services.llm_tools import registry
             names = self._BUILTIN_TOOL_NAMES | {tool["function"]["name"] for tool in tools}
