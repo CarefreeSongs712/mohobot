@@ -161,3 +161,39 @@ def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
                 pass
             urls.append(f"data:{mime};base64,{b64}")
     return urls
+
+
+def empty_message_placeholder(chat_type: str, message: str | list[dict[str, Any]]) -> str:
+    """空白/仅@消息的提示性标注(替代空 content, 避免 LLM 收到空 user 消息)。
+
+    chat_type: "group" / "private"。message 为原始消息段(或字符串)。
+    有非文本段时(表情/语音/视频等)按类型说明, 否则视为纯 @ 或真空消息。
+    """
+    if isinstance(message, str):
+        segments = parse_cq_code(message) if message else []
+    elif isinstance(message, list):
+        segments = message
+    else:
+        segments = []
+    non_text = [
+        seg.get("type") for seg in segments
+        if isinstance(seg, dict)
+        and seg.get("type") not in ("text", "reply", "at")
+    ]
+    if "face" in non_text:
+        return "（用户只发送了表情，没有附加文字）"
+    if "record" in non_text:
+        return "（用户只发送了语音，没有附加文字）"
+    if "video" in non_text:
+        return "（用户只发送了视频，没有附加文字）"
+    if "json" in non_text:
+        return "（用户只发送了卡片/结构化消息，没有文字）"
+    if "forward" in non_text:
+        return "（用户转发了合并转发消息，没有附加文字）"
+    if "file" in non_text:
+        return "（用户只发送了一个文件，没有附加文字）"
+    if non_text:
+        return f"（用户只发送了非文本内容（{'/'.join(non_text)}），没有附带文字）"
+    if chat_type == "group":
+        return "（该用户在群里 @ 了机器人，但未附带任何文字内容）"
+    return "（用户发送了一条空白消息，未包含文字或附件）"

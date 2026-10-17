@@ -189,6 +189,14 @@ class LLMService:
             and (tool["function"]["name"] != "anysearch_search"
                  or getattr(self, "_anysearch_client", None) is not None)
         ]
+        # 实时检查内置工具的插件启停状态(anysearch_search ↔ 插件 anysearch)
+        try:
+            from mohobot.services.llm_tools import plugin_enabled
+            if any(tool["function"]["name"] == "anysearch_search" for tool in tools) and not plugin_enabled("anysearch"):
+                logger.debug("anysearch 插件已禁用, 本次不暴露 anysearch_search 工具")
+                tools = [t for t in tools if t["function"]["name"] != "anysearch_search"]
+        except Exception as exc:
+            logger.debug(f"插件启停状态检查失败(跳过内置工具联动): {exc}")
         try:
             from mohobot.services.llm_tools import registry
             names = self._BUILTIN_TOOL_NAMES | {tool["function"]["name"] for tool in tools}
@@ -1309,6 +1317,12 @@ class LLMService:
             else:
                 # 视觉不可用或描述失败: 降级为占位文本
                 user_content = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
+
+        # 空白消息(纯 @/空内容/纯非文本段)用标注替代, 不给 LLM 发空 user 消息
+        if not user_content:
+            from mohobot.utils.cq_code import empty_message_placeholder
+            chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+            user_content = empty_message_placeholder(chat_type, event.message)
 
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:

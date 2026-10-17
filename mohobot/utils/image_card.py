@@ -46,8 +46,8 @@ def find_cjk_font() -> str | None:
             path = os.path.join(d, name)
             if os.path.exists(path):
                 return path
-        # 目录里放了其他字体文件也接受(首个 ttf/otf)
-        for pattern in ("*.ttf", "*.otf"):
+        # 目录里放了其他字体文件也接受(首个 ttf/ttc/otf)
+        for pattern in ("*.ttf", "*.otf", "*.ttc"):
             hits = sorted(glob.glob(os.path.join(d, pattern)))
             if hits:
                 return hits[0]

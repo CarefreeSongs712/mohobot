@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -20,6 +21,58 @@ class LLMTool:
     @property
     def name(self) -> str:
         return self.schema["function"]["name"]
+
+
+# ── 插件启用状态(data/plugins_state.json, Web 面板开关的落点) ──
+
+_STATE_PATH = Path("data/plugins_state.json")
+_state_cache: dict[str, float] = {"mtime": -1.0}
+_state_data: dict[str, Any] = {}
+
+
+def _read_plugin_state() -> dict[str, Any]:
+    """读取插件启停状态, 按 mtime 缓存(schemas()/execute 每次请求都会查询)。"""
+    try:
+        mtime = _STATE_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if mtime != _state_cache["mtime"]:
+        try:
+            data = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _state_data.clear()
+                _state_data.update(data)
+        except Exception:
+            pass
+        _state_cache["mtime"] = mtime
+    return _state_data
+
+
+def plugin_enabled(name: str) -> bool:
+    """插件是否启用；plugins_state.json 未登记的视为启用。"""
+    try:
+        mtime = _STATE_PATH.stat().st_mtime
+    except OSError:
+        return True
+    if mtime != _state_cache["mtime"]:
+        _read_plugin_state()
+    entry = _state_data.get(name)
+    if isinstance(entry, dict):
+        return bool(entry.get("enabled", True))
+    return True
+
+
+def owner_plugin_of(tool: LLMTool) -> str | None:
+    """根据 handler 来源模块推导所属插件(plugins.<name>), 内置工具返回 None。"""
+    mod = getattr(tool.handler, "__module__", "") or ""
+    if mod.startswith("plugins."):
+        return mod[len("plugins."):].split(".")[0]
+    return None
+
+
+def _tool_allowed(tool: LLMTool) -> bool:
+    owner = owner_plugin_of(tool)
+    return owner is None or plugin_enabled(owner)
 
 
 class LLMToolRegistry:
@@ -41,7 +94,8 @@ class LLMToolRegistry:
         return name in self._tools
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [tool.schema for tool in self._tools.values()]
+        """当前可暴露给 LLM 的 schema; 所属插件被禁用的工具不会出现。"""
+        return [tool.schema for tool in self._tools.values() if _tool_allowed(tool)]
 
     async def execute(
         self, name: str, arguments: str | dict[str, Any] | None,
@@ -50,6 +104,9 @@ class LLMToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+        if not _tool_allowed(tool):
+            owner = owner_plugin_of(tool) or "未知"
+            return json.dumps({"error": f"插件 {owner} 已禁用, 工具 {name} 不可用"}, ensure_ascii=False)
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
         except json.JSONDecodeError:
