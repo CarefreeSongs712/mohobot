@@ -164,28 +164,6 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 
 **仅以 main 发布。** 本地完成测试后，按用户授权提交、推送，再同步生产。远程变更必须已获明确授权；只改文档不代表授权部署。部署前检查工作区、分支和服务归属，不能直接用本地目录覆盖生产配置或 data。
 
-#### 分支模型（迁移中，带前置条件）
-
-目标分支模型如下；**在下列条件满足前，生产仍按 `main` 操作**：
-
-| 分支 | 用途 | 启用条件 |
-|---|---|---|
-| `master` | 目标发布分支 | 仅当管理员已把默认分支 `main` 重命名为 `master`、并完成分支保护配置后，生产才改为 `git pull --ff-only origin master` |
-| `main` | 迁移期兼容分支 | 迁移窗口内与 `master` 保持同步；切换完成后可保留只读或删除 |
-| `dev` | 集成分支 | 用于汇聚已审查 PR 做联调与 CI 预验收，不直接对应生产 |
-| `feat/<topic>` | 功能分支 | 例：`feat/ctx-restore`；走 PR 进入 `dev` 或发布线 |
-| `bugfix/<topic>` | 缺陷修复分支 | 例：`bugfix/outbound-cancel`；走 PR |
-| `gh-pages` | Pages 静态站点 | 仅在确有 Pages 产物时创建 |
-
-前置条件与易踩点：
-
-1. **`main → master` 不能靠文件 PR 完成**：它涉及重命名默认分支与调整分支保护，属于仓库管理员操作；本 PR 只改文档与 CI 触发配置。
-2. **CI 迁移期双监听**：`.github/workflows/ci.yml` 与 `compat.yml` 的 `push` 同时监听 `main` 与 `master`，因此上表切换前后都不会出现门禁空窗；切换完成后可移除 `main`。
-3. **Git 不允许 `feat` 与 `feat/<topic>` 并存**（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）。若团队要用字面 `feat` / `bugfix` 分支，必须先把现存 `feat/knowledge-base` 等嵌套分支改名。
-4. **分支名不带前导 `/`**：写 `feat/login`，不是 `/feat/login`。
-5. 生产操作仍需单独授权；分支改名、分支保护调整都属于需要维护窗口的仓库级变更，不能与代码发布混在一步。
-
-
 ```bash
 # 生产只读预检：检查输出，保留未跟踪的配置备份
 ssh -p 10139 root@103.236.75.12 'cd /root/QQBot/mohobot && git status --short && git branch --show-current && git log -1 --oneline && systemctl show migration-mohobot.service -p ActiveState -p MainPID -p WorkingDirectory -p ExecStart'
