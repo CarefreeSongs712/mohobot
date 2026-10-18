@@ -1026,11 +1026,17 @@ class MessageHandler:
         own = await self._render_message_content(
             bot_id, getattr(event, "message", ""), describe_missing=False,
         )
-        if not own:
-            # 仅 @/空白消息: 以标注代替空内容写入上下文(与 LLM 当轮标注一致)
-            from mohobot.utils.cq_code import empty_message_placeholder
-            chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
-            own = empty_message_placeholder(chat_type, getattr(event, "message", ""))
+        from mohobot.utils.cq_code import (
+            empty_message_placeholder, has_meaningful_text, symbol_only_placeholder,
+        )
+        chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+        if not has_meaningful_text(own):
+            # 空白/纯符号消息: 以标注代替, 否则下一轮重放历史时会再次触发
+            # 网关的"内容为空或只有空白/标点"拒绝。
+            if own.strip():
+                own = symbol_only_placeholder(chat_type, own)
+            else:
+                own = empty_message_placeholder(chat_type, getattr(event, "message", ""))
         if not quote_display:
             return own
         if own:

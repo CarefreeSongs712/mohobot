@@ -119,6 +119,22 @@ def extract_plain_text(message: str | list[dict[str, Any]]) -> str:
     return "".join(text_parts).strip()
 
 
+def has_meaningful_text(text: str) -> bool:
+    """文本是否含可被模型理解的内容(字母/数字/汉字等), 而非纯空白/标点/表情。
+
+    上游网关会以 400 拒绝"内容为空或只有空白/标点"的请求, 因此发请求前
+    必须区分"有实质内容"与"只有符号"。Unicode 类别 L(字母)、N(数字)、
+    S(符号中的 emoji/货币等)中, 只有 L/N 视为有实质语义; 纯 emoji 串
+    (如 👍👀)属于 So, 对文本模型同样没有可回应内容, 归为无实质内容。
+    """
+    import unicodedata
+
+    for ch in text or "":
+        if unicodedata.category(ch)[0] in ("L", "N"):
+            return True
+    return False
+
+
 def extract_at_targets(message: str | list[dict[str, Any]]) -> list[str]:
     """返回消息里被 @ 的 QQ 号列表(按出现顺序, 去重)。
 
@@ -224,3 +240,15 @@ def empty_message_placeholder(chat_type: str, message: str | list[dict[str, Any]
     if chat_type == "group":
         return "（该用户在群里 @ 了机器人，但未附带任何文字内容）"
     return "（用户发送了一条空白消息，未包含文字或附件）"
+
+
+def symbol_only_placeholder(chat_type: str, text: str) -> str:
+    """纯符号消息(标点/emoji, 无字母数字)的标注文本。
+
+    上游网关会拒绝"只有空白/标点"的请求; 这类消息本身也没有可回应的语义,
+    用一条说明替代原文, 既让请求合法, 也让模型知道用户只发了符号/表情。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return empty_message_placeholder(chat_type, "")
+    return f"（用户只发送了表情/符号，没有文字内容：{stripped}）"
