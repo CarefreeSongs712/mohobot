@@ -126,10 +126,24 @@ def has_meaningful_text(text: str) -> bool:
     必须区分"有实质内容"与"只有符号"。Unicode 类别 L(字母)、N(数字)、
     S(符号中的 emoji/货币等)中, 只有 L/N 视为有实质语义; 纯 emoji 串
     (如 👍👀)属于 So, 对文本模型同样没有可回应内容, 归为无实质内容。
+
+    入参不保证是 str: 历史 context 来自磁盘 JSON, 旧版本/插件可能写入 None、
+    数字或 OpenAI 多模态的 list[dict]。非字符串按其文本内容判断, 绝不抛异常 ——
+    这个函数在每次 LLM 请求构建的热路径上, 一个 TypeError 就会让整轮回复失败。
     """
     import unicodedata
 
-    for ch in text or "":
+    if text is None:
+        return False
+    if isinstance(text, list):
+        # 多模态: 任一文本段有实质内容即可
+        return any(
+            has_meaningful_text(part.get("text") if isinstance(part, dict) else part)
+            for part in text
+        )
+    if not isinstance(text, str):
+        text = str(text)
+    for ch in text:
         if unicodedata.category(ch)[0] in ("L", "N"):
             return True
     return False
