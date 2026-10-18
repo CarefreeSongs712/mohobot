@@ -107,6 +107,30 @@ database:
   folder: "./data/database"   # SQLite 文件所在目录
   file: "mohobot.db"          # 独立数据库文件
 
+# ── 虚拟歌手知识库(RAG: embedding 语义检索 + 可选 rerank) ──────
+# LLM 工具接入(knowledge_search 语义检索 / knowledge_lookup 别名查档案),
+# 与歌曲知识库(music_knowledge, 关键词匹配自动注入)互补并存。
+# 知识源放 data/knowledge_db/(markdown 条目 + index.json), 向量索引
+# 落在 data/knowledge_index/(可整目录删除重建); 启动后台增量索引,
+# 管理面板「知识库」页可看状态/强制重建/测试检索。
+# enabled 开关启动时读取; 其余字段 WebUI 保存热同步(embedding 模型
+# 变更会自动重建索引)。密钥回退: embedding_api_key → 环境变量
+# MOHOBOT_EMBEDDING_API_KEY → chat key; rerank_api_key →
+# MOHOBOT_RERANK_API_KEY → embedding key。rerank_model 留空 = 不重排。
+knowledge:
+  enabled: false
+  source_dir: "./data/knowledge_db"
+  index_dir: "./data/knowledge_index"
+  embedding_model: "BAAI/bge-m3"                 # 硅基流动免费 embedding
+  embedding_base_url: "https://api.siliconflow.cn/v1"
+  embedding_api_key: ""                          # 必填(或设 MOHOBOT_EMBEDDING_API_KEY)
+  rerank_model: ""                               # 如 BAAI/bge-reranker-v2-m3, 留空不重排
+  rerank_base_url: "https://api.siliconflow.cn/v1"
+  rerank_api_key: ""
+  search_top_k: 20                               # 余弦召回数(rerank 候选池)
+  search_top_n: 5                                # 最终返回给模型的块数
+  max_chars_per_result: 800                      # 单块注入正文的字符截断
+
 # ── 歌曲知识库（全局歌曲识别 + LLM 前注入）─────────────────────
 # SQLite 事实库(songs 表, 新 schema): 歌名/歌词识别不再依赖关键词 txt,
 # 直接和爬取库比对。首次启动建空库(不再复制 res 内置库);

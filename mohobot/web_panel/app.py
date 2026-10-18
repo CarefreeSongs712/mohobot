@@ -159,6 +159,7 @@ class WebPanel:
         restart_callback=None,
         emotion_manager=None,
         tts_service=None,
+        knowledge_service=None,
         config_update_callback=None,
         persona_service=None,
         persona_ab_service=None,
@@ -201,6 +202,7 @@ class WebPanel:
         self._restart_callback = restart_callback
         self._emotion_manager = emotion_manager
         self._tts_service = tts_service
+        self._knowledge_service = knowledge_service
         self._config_update_callback = config_update_callback
         self._persona_service = persona_service
 
@@ -441,7 +443,7 @@ class WebPanel:
             # 不下发给 WebUI —— 只在本地 config 文件里读写。
             result.pop("server", None)
             result["web_panel"]["password_hash"] = self._mask_secret(cfg.web_panel.password_hash)
-            for section in ("llm", "anysearch", "tts"):
+            for section in ("llm", "anysearch", "tts", "knowledge"):
                 for key, value in list(result.get(section, {}).items()):
                     if any(marker in key.lower() for marker in ("key", "token", "secret", "password")):
                         result[section][key] = self._mask_secret(value)
@@ -487,6 +489,19 @@ class WebPanel:
                 for k, v in tts_data.items():
                     if hasattr(cfg.tts, k):
                         setattr(cfg.tts, k, v)
+            if "knowledge" in data:
+                knowledge_data = data["knowledge"] or {}
+                # source_dir/index_dir 为服务端运行路径, 仅本地配置文件可改
+                # (与 database/data_dir 同策略); api_key 留空或掩码原样 → 保持原 key
+                for k, v in knowledge_data.items():
+                    if not hasattr(cfg.knowledge, k) or k in ("source_dir", "index_dir"):
+                        continue
+                    if k.endswith("api_key"):
+                        sv = str(v or "")
+                        if sv and sv != self._MASK:
+                            setattr(cfg.knowledge, k, sv)
+                        continue
+                    setattr(cfg.knowledge, k, v)
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]
@@ -956,6 +971,52 @@ class WebPanel:
                 f"Web panel: TTS test synth ok={result.get('ok')} "
                 f"({result.get('latency_ms')}ms, {result.get('format')})"
             )
+            return result
+
+        # ── 3.6 知识库(虚拟歌手 RAG: 状态/重建/测试检索) ────
+
+        @app.get("/api/knowledge/status")
+        async def knowledge_status(request: Request):
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                return {
+                    "enabled": False, "configured": False,
+                    "ready": False, "indexing": False, "error": None,
+                    "chunks": 0, "files": 0, "last_indexed_at": None,
+                    "last_stats": None, "embedding_model": "", "rerank_model": "",
+                    "rerank_enabled": False, "source_dir": "",
+                }
+            return await self._knowledge_service.service_status()
+
+        @app.post("/api/knowledge/rebuild")
+        async def knowledge_rebuild(request: Request):
+            """强制全量重建索引(重嵌所有知识块)。"""
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                raise HTTPException(status_code=400, detail="知识库未启用(knowledge.enabled=false)")
+            stats = await self._knowledge_service.reindex(force=True)
+            if stats.get("error"):
+                raise HTTPException(status_code=500, detail=f"重建失败: {stats['error']}")
+            logger.info(f"Web panel: knowledge index rebuilt ({stats.get('chunks')} chunks)")
+            return {"status": "ok", "stats": stats}
+
+        @app.post("/api/knowledge/test_search")
+        async def knowledge_test_search(request: Request, body: ConfigUpdateRequest):
+            """面板「测试检索」: 直接跑一次语义检索, 返回命中块。"""
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                raise HTTPException(status_code=400, detail="知识库未启用(knowledge.enabled=false)")
+            data = body.data or {}
+            query = str(data.get("query", "") or "").strip()
+            if not query:
+                raise HTTPException(status_code=400, detail="查询不能为空")
+            try:
+                top_k = max(1, min(int(data.get("top_k", 5) or 5), 10))
+            except (TypeError, ValueError):
+                top_k = 5
+            result = await self._knowledge_service.search(query, top_n=top_k)
+            if result.get("error"):
+                raise HTTPException(status_code=500, detail=result["error"])
             return result
 
         # ── 4. Plugins (插件管理) ────────────────────────────
