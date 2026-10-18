@@ -279,6 +279,8 @@ class MohobotApplication:
 
         # Wire up circular references
         self._message_handler._ws = self._ws_server
+        # 归档去重的发送侧指纹登记(与 WSServer 共用同一份窗口)
+        self._message_handler._sent_claims = self._ws_server._sent_claims
         command_handler._ws = self._ws_server
         # 工具(如告状 snitch)需要主动发消息/查 bot 信息: 注入 llm_service
         self._llm_service.attach_ws(self._ws_server)

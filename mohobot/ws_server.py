@@ -22,6 +22,7 @@ from mohobot.models.onebot import Event
 from mohobot.models.config import is_external_service_group
 from mohobot.bot_manager import BotManager
 from mohobot.file_store import JSONLWriter
+from mohobot.history_dedup import SentMessageClaims, signature_for_send
 from mohobot.services.outbound import ChatAddress, DispatchAttempt, OutboundScheduler, ReplySender
 from mohobot.services.task_supervisor import TaskSupervisor, TaskSupervisorClosed
 from mohobot.utils.cq_code import extract_plain_text
@@ -68,6 +69,8 @@ class WSServer:
         # (群聊写合并文件 data/history/group/{群号}.jsonl, 私聊与收到的消息
         # 同一目录/文件), 供审核面板识别"bot 说过什么"。
         self._archive_writers: dict[str, JSONLWriter] = {}
+        # 发送侧跨账号指纹登记: 供入站归档识别"这是我方发言的副本"
+        self._sent_claims = SentMessageClaims()
         self._outbound_scheduler = outbound_scheduler or OutboundScheduler(
             send_interval_sec=outbound_interval,
             queue_maxsize=outbound_maxsize,
@@ -323,6 +326,9 @@ class WSServer:
         future = self._bot_manager.create_response_future(bot_id, echo)
         payload = {"action": action, "params": params, "echo": echo}
         attempt = DispatchAttempt()
+        # 发送前登记指纹: 其他 bot 会收到这条消息的入站副本(message_id 按
+        # 账号分配, 无法靠 id 判重), 据此跳过, 避免同一句 bot 发言存两行。
+        claimed = self._claim_sent_signature(instance, chat_type, chat_id, action, params)
         try:
             result = await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
@@ -341,16 +347,19 @@ class WSServer:
                     owns_response=True,
                 ))
             else:
+                self._release_sent_signature(claimed)
                 self._bot_manager.drop_pending_sent(echo)
                 self._bot_manager.remove_response_future(bot_id, echo)
                 future.cancel()
             raise
         except Exception:
             # Send failed — don't leave the tracked entry dangling
+            self._release_sent_signature(claimed)
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
         if result is _BLOCKED_GROUP_SEND:
+            self._release_sent_signature(claimed)
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             future.cancel()
@@ -381,6 +390,34 @@ class WSServer:
             except TaskSupervisorClosed:
                 pass
         asyncio.create_task(coro)
+
+    # ── 发送侧指纹登记(入站归档去重) ─────────────────────────
+
+    def _claim_sent_signature(
+        self, instance, chat_type: str, chat_id: int | str,
+        action: str, params: dict[str, Any],
+    ) -> tuple[Any, ...] | None:
+        """登记本次发送的跨账号指纹; 非群聊或内容为空时不登记。
+
+        返回可用于 ``_release_sent_signature`` 的登记句柄(或 None)。
+        """
+        claims = getattr(self, "_sent_claims", None)
+        if claims is None or chat_type != "group":
+            return None
+        signature = signature_for_send(action, params)
+        if not signature[0] and not signature[1]:
+            return None
+        sender = str(getattr(instance, "qq", "") or "")
+        claims.claim(chat_id, sender, signature)
+        return (chat_id, sender, signature)
+
+    def _release_sent_signature(self, claimed: tuple[Any, ...] | None) -> None:
+        """发送未真正发生(取消/失败/被拦)时撤销登记, 保留真实入站记录。"""
+        if claimed is None:
+            return
+        claims = getattr(self, "_sent_claims", None)
+        if claims is not None:
+            claims.release(*claimed)
 
     # 归档等待 echo 响应的超时(秒); 超时用本地标记 id 兜底
     _ARCHIVE_ECHO_TIMEOUT = 8.0
