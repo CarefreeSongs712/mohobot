@@ -1178,6 +1178,9 @@ class MoegirlAdapter(SourceAdapter):
                 titles = parse_category_titles(body)
                 next_cursor = parse_next_pagefrom(body)
                 pages += 1
+                # 注意: category_count 统计的是"跨分类去重后的净增", 因此
+                # 它小于 total 属于正常现象(同一首歌可属多个歌姬分类),
+                # 不能用它判断页面是否残缺。
                 if not titles:
                     if total is not None and category_count < total and next_cursor:
                         # 空页但站点仍给出下一页游标: 换游标再试, 不能当成枚举结束
@@ -1215,10 +1218,12 @@ class MoegirlAdapter(SourceAdapter):
                 # 中文标题按拼音排序, 标题作游标会原地打转导致枚举提前结束。
                 # 站点没有下一页链接时, 若仍未取满标称数量则记录告警。
                 if not next_cursor or next_cursor == from_title:
-                    if total is not None and category_count < total:
+                    # 站点已无下一页: 若本分类页面总数(含跨分类重复)仍少于
+                    # 标称值, 说明页面可能不完整, 记录告警便于补跑排查。
+                    if total is not None and pages * 200 < total:
                         logger.warning(
-                            f"萌娘百科: 分类「{category}」枚举结束但只拿到 "
-                            f"{category_count}/{total} 首(站点未提供下一页游标)"
+                            f"萌娘百科: 分类「{category}」枚举结束, 已取 {pages} 页 "
+                            f"(标称 {total} 首), 可能不完整"
                         )
                     break
                 from_title = next_cursor
