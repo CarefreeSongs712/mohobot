@@ -99,6 +99,8 @@ class MohobotApplication:
                 db_file = song_db_cfg.get("db_file", "knowledge_db.db")
                 self._song_matcher = SongInfoMatcher(
                     db_folder=db_folder, db_file=db_file,
+                    fuzzy=bool(music_cfg.get("fuzzy_enabled", True)),
+                    min_confidence=float(music_cfg.get("min_confidence", 0.8) or 0.8),
                 )
                 self._song_info_service: SongInfoService | None = SongInfoService(music_cfg)
                 if not self._song_matcher._index:
@@ -443,7 +445,11 @@ class MohobotApplication:
         logger.info("Mohobot restarted successfully")
 
     def _make_song_annotator(self):
-        """构造 legacy 路径用的歌曲注解回调(event → 注解文本)。"""
+        """构造 legacy 路径用的歌曲注解回调(event → 注解文本)。
+
+        注入预算(annotation_max_chars)与模糊匹配阈值(min_confidence)取自
+        music_knowledge 配置; 预算 > 0 时只给介绍摘要 + 歌词命中片段。
+        """
         matcher = self._song_matcher
 
         async def annotator(event) -> str:
@@ -457,7 +463,13 @@ class MohobotApplication:
                 match = matcher.match(text)
                 if match is None:
                     return ""
-                return match.build_annotation()
+                music_cfg = (self._config.music_knowledge or {}) if self._config else {}
+                injection = music_cfg.get("injection") or {}
+                max_chars = int(injection.get("max_chars", 1200) or 0)
+                context_lines = int(injection.get("lyric_context_lines", 4) or 0)
+                return match.build_annotation(
+                    max_chars=max_chars, lyric_context_lines=context_lines,
+                )
             except Exception as e:
                 logger.debug(f"歌曲注解失败: {e}")
                 return ""
