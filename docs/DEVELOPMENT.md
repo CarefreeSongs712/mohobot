@@ -40,7 +40,8 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 | `mohobot/services/` | 横切服务：用量、出站队列、TTS、任务监管、审计、LLM 工具注册表 |
 | `mohobot/emotion/` | 情感系统（好感度/亲密度/关系阶段/长期记忆） |
 | `mohobot/ban/` | 全局封禁名单 |
-| `mohobot/music_knowledge/` | 歌曲知识库（SQLite 事实库 + 匹配 + VCPedia 同步） |
+| `mohobot/music_knowledge/` | 歌曲知识库（SQLite 事实库 + 模糊匹配 + 多源定时同步） |
+| `mohobot/knowledge/` | 虚拟歌手知识库（RAG 文档分块 + 向量索引 + 语义检索与 Rerank） |
 | `mohobot/db/` | 独立 SQLite（`conversations` 表） |
 | `mohobot/web_panel/` | 主管理面板（FastAPI + 单文件前端 `static/index.html`） |
 | `plugins/` | 动态加载插件 |
