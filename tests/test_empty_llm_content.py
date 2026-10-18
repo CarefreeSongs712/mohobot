@@ -206,6 +206,22 @@ async def test_history_non_string_content_does_not_crash():
     print("[5c] 非字符串历史 content 不崩溃 OK")
 
 
+def test_history_symbol_placeholder_is_bounded():
+    """刷屏式超长符号串不能在每轮请求里被完整复现(token 与成本)。"""
+    from mohobot.llm_service import _HISTORY_SYMBOL_MAX_CHARS, _history_symbol_placeholder
+
+    for role in ("user", "assistant"):
+        out = _history_symbol_placeholder(role, "👍" * 5000, is_group=False)
+        assert len(out) < 200, (role, len(out))
+        assert has_meaningful_text(out), out
+        assert "已截断" in out, out
+        # 未超限的短符号原样保留
+        short = _history_symbol_placeholder(role, "👍" * 3, is_group=False)
+        assert "👍👍👍" in short and "已截断" not in short, short
+    assert _HISTORY_SYMBOL_MAX_CHARS >= 10
+    print("[5e] 超长符号历史占位被截断 OK")
+
+
 def test_has_meaningful_text_tolerates_non_strings():
     """has_meaningful_text 对 None/数字/列表这类非字符串输入不得抛 TypeError。"""
     assert has_meaningful_text(None) is False
