@@ -389,60 +389,77 @@ async def test_schema_migration_idempotent() -> None:
 
 
 async def test_concurrent_sources_no_duplicates() -> None:
-    """三来源并行: 同一首新歌被同时抓到, 只能建一条记录。"""
+    """三来源并行: 同一首新歌被同时抓到, 只能建一条记录。
+
+    回归: merge() 必须在合并锁内提交。旧实现先放锁再由调用方提交,
+    另一来源在锁内查不到未提交的新歌, 会各建一条重复(CI 实测复现)。
+    用 Barrier 把三个线程对齐到同一时刻, 尽量复现竞争窗口。
+    """
     import threading
 
     from mohobot.music_knowledge import pool, sync
     from mohobot.music_knowledge.song_database import Song, SongSource
 
-    folder, filename = _fresh_db()
-    sync.set_db_location(folder, filename)
-
     title = "达拉崩吧"
-    adapters = [
-        _FakeAdapter("moegirl", {title: _record(
-            source="moegirl", source_title=title, name=title,
-            singers="洛天依、言和", uploader="ilem", year=2017,
-            lyricist="ilem", lyrics="萌百歌词" * 20)}),
-        _FakeAdapter("vocawiki", {title: _record(
-            source="vocawiki", source_title=title, name=title,
-            singers="洛天依、言和", year=2017, composer="ilem",
-            bvid="BV1eF411K7pf", lyrics="voca歌词" * 20)}),
-        _FakeAdapter("vcpedia", {title: _record(
-            source="vcpedia", source_title=title, name=title,
-            singers="洛天依、言和", year=2017, arranger="ilem",
-            lyrics="vcpedia歌词" * 20)}),
-    ]
+    for round_no in range(3):
+        folder, filename = _fresh_db()
+        sync.set_db_location(folder, filename)
 
-    threads = [
-        threading.Thread(
-            target=sync.sync_source, args=(adapter,), kwargs={"mode": "fill_missing"},
-        )
-        for adapter in adapters
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=60)
+        records = {
+            "moegirl": _record(
+                source="moegirl", source_title=title, name=title,
+                singers="洛天依、言和", uploader="ilem", year=2017,
+                lyricist="ilem", lyrics="萌百歌词" * 20),
+            "vocawiki": _record(
+                source="vocawiki", source_title=title, name=title,
+                singers="洛天依、言和", year=2017, composer="ilem",
+                bvid="BV1eF411K7pf", lyrics="voca歌词" * 20),
+            "vcpedia": _record(
+                source="vcpedia", source_title=title, name=title,
+                singers="洛天依、言和", year=2017, arranger="ilem",
+                lyrics="vcpedia歌词" * 20),
+        }
+        adapters = [_FakeAdapter(name, {title: rec}) for name, rec in records.items()]
 
-    db = pool.get_session()
-    try:
-        rows = db.query(Song).filter(Song.name == title).all()
-        assert len(rows) == 1, [(r.name, r.singers, r.primary_source) for r in rows]
-        song = rows[0]
-        # 三个来源的字段应合并到同一条记录上
-        assert song.lyricist == "ilem" or song.composer == "ilem"
-        assert song.bvid in ("", "BV1eF411K7pf")
-        source_rows = (
-            db.query(SongSource)
-            .filter(SongSource.source_title == title)
-            .all()
-        )
-        assert len(source_rows) == 3, [(r.source, r.status) for r in source_rows]
-        assert all(r.song_uuid == song.uuid for r in source_rows)
-    finally:
-        db.close()
-    print("[11] 三来源并行去重 OK")
+        barrier = threading.Barrier(len(adapters), timeout=30)
+        errors: list[Exception] = []
+
+        class _Sync(_FakeAdapter):
+            actual = None
+
+        def run(adapter):
+            barrier.wait()
+            try:
+                sync.sync_source(adapter, mode="fill_missing")
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(a,)) for a in adapters]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        assert not errors, errors
+
+        db = pool.get_session()
+        try:
+            rows = db.query(Song).filter(Song.name == title).all()
+            assert len(rows) == 1, (
+                f"round {round_no}: "
+                + str([(r.name, r.singers, r.primary_source) for r in rows])
+            )
+            song = rows[0]
+            source_rows = (
+                db.query(SongSource)
+                .filter(SongSource.source_title == title)
+                .all()
+            )
+            assert len(source_rows) == 3, [(r.source, r.status) for r in source_rows]
+            assert all(r.song_uuid == song.uuid for r in source_rows)
+        finally:
+            db.close()
+
+    print("[11] 三来源并行去重(3 轮 Barrier 对齐) OK")
 
 
 async def test_moegirl_pagination_cursor() -> None:

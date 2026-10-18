@@ -328,8 +328,12 @@ class SongMerger:
     def merge(self, record: SourceRecord, result: MergeResult) -> Song | None:
         """合并一条来源记录; 返回目标歌曲(歧义/无法对齐时返回 None)。
 
-        临界区(查重 + 新建/更新 + 溯源行)由类级锁串行化, 因此多个来源
-        可以并行抓取、并发调用本方法而不会产生重复歌曲。
+        临界区(查重 + 新建/更新 + 溯源行 + 提交)由类级锁串行化, 因此多个
+        来源可以并行抓取、并发调用本方法而不会产生重复歌曲。
+
+        提交必须在锁内完成: 并行时其它来源要靠"能看到本来源已提交的行"
+        才能去重。若先释放锁再由调用方提交, 另一来源会在锁内查不到尚未
+        提交的新歌, 从而各建一条重复记录(CI 实测复现过)。
         """
         with self._merge_lock:
             candidates = self.find_matches(record)
@@ -347,12 +351,14 @@ class SongMerger:
                     if len(result.created_names) < 20:
                         result.created_names.append(f"{song.name}({record.singers})")
                     self._save_source(record, song, "matched")
+                    self._db.commit()
                     return song
                 else:
                     result.unmatched += 1
                     if len(result.unmatched_titles) < 20:
                         result.unmatched_titles.append(record.source_title)
                     self._save_source(record, None, reason)
+                    self._db.commit()
                     return None
             else:
                 changed = self._apply_fields(song, record, result)
@@ -362,6 +368,7 @@ class SongMerger:
                     result.unchanged += 1
 
             self._save_source(record, song, "matched")
+            self._db.commit()
             return song
 
     def _create(self, record: SourceRecord) -> Song:

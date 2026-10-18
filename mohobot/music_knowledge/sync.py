@@ -346,8 +346,8 @@ def sync_source(
                     stats.skipped_unchanged += 1
                     done.add(title)
                     continue
+                # merge() 内部已在合并锁内提交(并行去重依赖"锁内可见已提交行")
                 merger.merge(record, stats.merge)
-                db.commit()
                 done.add(title)
             except SourceError as e:
                 stats.failed += 1
