@@ -80,3 +80,27 @@ def test_failed_submit_does_not_count_as_progress():
         worker.log_rec = original_log
     assert result == 0
     assert worker.STATS["normal"] == 0
+
+
+def test_failed_bot_only_submit_does_not_count_as_progress():
+    worker = worker_module()
+    worker.STATS.clear()
+    original_submit = worker.submit
+    original_log = worker.log_rec
+    worker.submit = lambda *args, **kwargs: False
+    worker.log_rec = lambda *args, **kwargs: None
+    try:
+        result = worker.handle({
+            "s": {"display_name": "test", "page": 1, "pages": 1},
+            "sk": "bot/group/1",
+            "user_fps": [],
+            "bot_fps": ["bot-fp-1"],
+            "err": "",
+            "verdict": None,
+            "text": "",
+        })
+    finally:
+        worker.submit = original_submit
+        worker.log_rec = original_log
+    assert result == 0
+    assert worker.STATS["bot_only"] == 0

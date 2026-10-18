@@ -244,7 +244,8 @@ def handle(r):
     head = f"{s['display_name']} · 第 {s['page']}/{s['pages']} 页 · 待审 用户 {len(user_fps)}/bot {len(bot_fps)}"
     if not user_fps:
         done = submit(sk, "normal", bot_fps)
-        STATS["bot_only"] += 1
+        if done:
+            STATS["bot_only"] += 1
         print(f"  ✓ {head}\n    → 只有 bot 回复待审, 直接标正常 ({len(bot_fps)} 条)" + ("" if done else " ✗ 提交失败"))
         log_rec(sk, s, {"action": "normal", "note": "仅 bot 待审, 直接标正常"})
         return s["page"] + 1 if done else 0
