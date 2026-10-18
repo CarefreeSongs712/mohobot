@@ -32,11 +32,14 @@ def safe_name_of(name: str) -> str:
 
 
 def _query_by_name(db: Session, song_name: str) -> Optional[Song]:
-    """精确匹配优先(含 safe_name), 兜底包含匹配。
+    """精确匹配优先(含 safe_name/别名/去括号核名), 兜底包含匹配。
 
-    顺序: 1) 全等(name/safe_name) 2) 包含(like)。SQLite 的 OR 顺序不保证走
-    左侧精确分支, 因此把"全等"与"包含"分成两次查询, 确保精确优先。
+    顺序: 1) 全等(name/safe_name/别名) 2) 去括号核名全等 3) 包含。
+    第 2 步解决"库内只存《九九八十一(乐正绫)》而用户只说《九九八十一》";
+    第 3 步按"名字更短优先"排序, 避免《千本樱》命中《千本樱/HHHone版》。
     """
+    from mohobot.music_knowledge.normalize import bracket_core, normalize_name
+
     safe = safe_name_of(song_name)
     exact = (
         db.query(Song)
@@ -45,12 +48,52 @@ def _query_by_name(db: Session, song_name: str) -> Optional[Song]:
     )
     if exact is not None:
         return exact
+
+    target = normalize_name(song_name)
+    if target:
+        core_hits = db.query(Song).filter(Song.normalized_name == target).all()
+        if core_hits:
+            return _pick_best(core_hits, song_name)
+
+        # 别名/核名: 只在候选量不大时做 Python 侧过滤(库为数千首量级)
+        like_hits = (
+            db.query(Song)
+            .filter(Song.name.like(f"%{_escape_like(song_name)}%"))
+            .limit(50)
+            .all()
+        )
+        if like_hits:
+            return _pick_best(like_hits, song_name, target)
+        return None
+
     return (
         db.query(Song)
         .filter(Song.name.like(f"%{_escape_like(song_name)}%"))
-        .order_by(Song.name == song_name, Song.name)
+        .order_by(Song.name)
         .first()
     )
+
+
+def _pick_best(rows: list[Song], query: str, target: str = "") -> Optional[Song]:
+    """在候选里挑最贴近查询名的: 全等 > 核名全等 > 前缀 > 名字更短。"""
+    from mohobot.music_knowledge.normalize import bracket_core, normalize_name
+
+    target = target or normalize_name(query)
+
+    def rank(song: Song) -> tuple:
+        norm = song.normalized_name or normalize_name(song.name)
+        core = normalize_name(bracket_core(song.name))
+        if norm == target:
+            tier = 0
+        elif core == target:
+            tier = 1
+        elif norm.startswith(target) or core.startswith(target):
+            tier = 2
+        else:
+            tier = 3
+        return (tier, len(song.name or ""), song.name or "")
+
+    return sorted(rows, key=rank)[0] if rows else None
 
 
 def get_song_detail(db: Session, song_name: str) -> Dict[str, str]:

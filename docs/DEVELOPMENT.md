@@ -884,11 +884,19 @@ await supervisor.shutdown()
 
 ### 8.6 歌曲知识 `music_knowledge/`
 
-- SQLite 事实库 `data/song_knowledge/knowledge_db.db`，`songs` 表字段：`name/safe_name/uploader/singers/lyricist/composer/arranger/mixer/tuner/mastering/pv/illustrator/year/introduction/lyrics`。
-- 匹配三级：`《歌名》` 书名号高置信 → 裸歌名（长度 ≥3 且含语境词 唱/听/歌/歌词）→ 歌词片段（10 字滑窗）。
-- 命中后 `build_annotation()` 生成 `【歌曲信息】…`，**仅拼进本轮 LLM 请求的用户消息下方，不写 context**。
-- VCPedia 同步内置 Anubis PoW 反爬解题 + cookie 复用；入口 `/sync-songs`（管理员）或 `scripts/sync_vcpedia.py`。
-- 用**独立的**轻量 engine/pool（`pool.py`），与 `mohobot/db` 无关。
+- SQLite 事实库 `data/song_knowledge/knowledge_db.db`：`songs` 宽表保存合并后的字段（`name/safe_name/uploader/singers/lyricist/composer/arranger/mixer/tuner/mastering/pv/illustrator/year/introduction/lyrics`，另有 `aliases/bvid/lang/normalized_name/primary_source/updated_at`）；`song_sources` 存每个来源的原始记录（溯源、内容哈希、未对齐原因）；`sync_state` 存各来源断点与游标。
+- **匹配（保守优先）**：`《歌名》` → 裸歌名（长度 ≥3 且含语境词，含"库里只有《X(歌手)》而用户只说《X》"的核名）→ 歌词片段（10 字精确滑窗）→ 模糊层（歌名 Damerau 距离 ≤1 且唯一；歌词 6-gram 倒排，长歌词 `cov≥0.3 且 hits≥4`、短歌词 `cov≥0.4 且 hits≥5`）。模糊命中带 `confidence`，低于 `min_confidence` 或候选歧义时不注入。
+- **注入预算**：命中后 `build_annotation(max_chars=…)` 生成 `【歌曲信息】…`；`injection.max_chars > 0` 时只给「介绍摘要 + 歌词命中处前后 N 行」，并提示可用 `song_get_lyrics` 取全文；`max_chars=0` 保留旧的完整歌词行为。注解**只拼进本轮主系统提示，不写 context**。
+- **多来源同步**（`sources/` + `merge.py` + `sync.py`）：
+  - `vcpedia`：包装现有 Anubis PoW 客户端与 wikitext 解析（洛天依曲最全）。
+  - `vocawiki`：MediaWiki API + wikitext（Songbox/LyricsKai/Introduction），接口最稳；中文覆盖薄（洛天依 59、乐正绫 3、言和 7），但可补 BV 号与词曲编。
+  - `moegirl`：桌面 UA 403，必须移动 UA；API 只剩 `extracts/opensearch`，分类与歌词靠 HTML；`?from=` 翻页（robots 禁 `pagefrom`）；实测 5s 间隔 0 次 403、1s/3s 约 25%，默认 `interval=4.5` 单并发。
+  - 字段优先级：歌词/演唱/歌名 `vcpedia > vocawiki > moegirl`；词曲编混调/PV/曲绘/简介/年份 `moegirl > vocawiki > vcpedia`。非空值不被空值覆盖；来源冲突写入 `song_sources`，不静默丢弃。
+  - 身份对齐：BV 号 > 归一化名 + 演唱集合/年份/P主 打分；**同名但演唱集合完全不相交视为不同歌曲**（本地库有 50 组这类同名字），版本名（中文版/翻唱/remix）不同不合并。
+  - 模式：`new_only`（只抓新歌）/ `fill_missing`（默认，补残缺字段）/ `full_refresh`（全量重抓）。断点写在 `sync_state`，进程重启可续跑；单来源连续失败达 `max_fail` 熔断，不影响其它来源。
+  - 入口：`/sync-songs [new|fill|refresh|status|来源名]`（管理员，支持定时）、`python scripts/sync_songs.py [--status]`。定时由 `song_sync` 插件 `on_tick` 驱动，开关在 `music_knowledge.sync.enabled`。
+  - 库为 **WAL + busy_timeout=10s**，同步写库时匹配器仍可读；同步与匹配器共用 `pool.py` 的 engine，不再开第二套连接池。
+- 许可：VCPedia / voca.wiki 为 CC BY-NC-SA 4.0，萌娘百科为 CC BY-NC-SA 3.0 CN；适配器把来源与协议写进 `song_sources.license`，本库为本地非商业自用。
 
 ### 8.7 AnySearch
 
