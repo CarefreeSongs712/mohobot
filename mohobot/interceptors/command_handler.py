@@ -160,6 +160,19 @@ class CommandHandler(Interceptor):
             return "人设评估服务未启用。"
         return await self._persona_ab.command(bot_id, event, args)
 
+    @staticmethod
+    def _mentioned_bot_ids(event: GroupMessageEvent, bot_manager) -> set[str]:
+        """消息里被 @ 的、已绑定且在线的 bot_id 集合(无 @ 返回空集)。"""
+        from mohobot.utils.cq_code import extract_at_targets
+
+        targets = extract_at_targets(getattr(event, "message", None))
+        if not targets:
+            return set()
+        try:
+            return bot_manager.bot_ids_for_qqs(targets)
+        except Exception:  # noqa: BLE001 - 判定失败按"未 @ 任何 bot"处理
+            return set()
+
     async def _handle_unknown_command(
         self, bot_id: str, event: MessageEvent, cmd_name: str
     ) -> tuple[bool, str | None]:
@@ -173,14 +186,25 @@ class CommandHandler(Interceptor):
         if isinstance(event, GroupMessageEvent) and self._ws is not None:
             bm = getattr(self._ws, "_bot_manager", None)
             if bm is not None:
-                chosen = bm.pick_bot_for_group(
-                    str(event.group_id), str(getattr(event, "message_id", "") or ""),
-                )
-                if chosen is not None and chosen != bot_id:
-                    logger.debug(
-                        f"Unknown command '/{cmd_name}' reminder deferred to {chosen}"
+                # @ 定向: 用户点名了 bot 时, 只由被 @ 的 bot 提醒(可能多只),
+                # 不再抽签, 否则可能抽到未被 @ 的 bot。
+                mentioned = self._mentioned_bot_ids(event, bm)
+                if mentioned:
+                    if bot_id not in mentioned:
+                        logger.debug(
+                            f"Unknown command '/{cmd_name}' 定向给被 @ 的 bot, "
+                            f"{bot_id} 跳过"
+                        )
+                        return (True, None)
+                else:
+                    chosen = bm.pick_bot_for_group(
+                        str(event.group_id), str(getattr(event, "message_id", "") or ""),
                     )
-                    return (True, None)
+                    if chosen is not None and chosen != bot_id:
+                        logger.debug(
+                            f"Unknown command '/{cmd_name}' reminder deferred to {chosen}"
+                        )
+                        return (True, None)
 
         # 节流按会话(不含 bot): 多 bot 群里即使每次抽中的 bot 不同, 也只提醒一次
         key = (chat_type, str(chat_id))

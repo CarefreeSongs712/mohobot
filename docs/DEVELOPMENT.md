@@ -2,7 +2,7 @@
 
 > 面向要改这个仓库的人。目标：读完能独立加插件、加配置项、加 LLM 工具、加 DB 字段，并且知道每处改动该动哪些文件。
 >
-> 基于 `main` 分支当前工作区（`__version__ = "0.1.0"`，约 3.7 万行 Python）整理。
+> 这份指南随代码演进，版本号与行数等动态信息不作为验收基线。
 > 文末「已知坑与不一致」一章是实际踩点记录，**建议先读那一章**。
 
 ---
@@ -18,7 +18,7 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
                                      └──▶ review/   http://127.0.0.1:9091  (审核面板, 独立进程)
 ```
 
-技术栈：Python 3.10+ / asyncio / websockets / FastAPI + SSE / SQLAlchemy(SQLite) / OpenAI SDK / loguru / Pillow。
+技术栈：Python 3.12+ / asyncio / websockets / FastAPI + SSE / SQLAlchemy(SQLite) / OpenAI SDK / loguru / Pillow。
 
 三条数据原则（README 明确写的，改代码时必须守住）：
 
@@ -45,7 +45,7 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 | `mohobot/web_panel/` | 主管理面板（FastAPI + 单文件前端 `static/index.html`） |
 | `plugins/` | 动态加载插件 |
 | `review/` | 聊天记录审核面板（半独立进程） |
-| `tests/` | 自研 runner 的回归测试（非 pytest） |
+| `tests/` | 原生 runner 与 pytest 双入口回归测试 |
 
 ---
 
@@ -70,15 +70,35 @@ python main.py
 #   面板  http://127.0.0.1:9090 ｜ 审核面板 http://127.0.0.1:9091 ｜ 表情包插件 http://127.0.0.1:9092
 ```
 
+### 分支模型
+
+| 分支 | 用途 | 说明 |
+|---|---|---|
+| `main` | 发布分支 | 唯一发布线；只接受走完 PR、审查与 CI 的合并，生产按此分支拉取 |
+| `dev` | 集成分支 | 汇聚多个已审查 PR 做联调与 CI 预验收，再经 PR 进入 `main` |
+| `feat/<topic>` | 功能分支 | 例如 `feat/ctx-restore`；走 PR 进入 `dev` 或 `main` |
+| `bugfix/<topic>` | 缺陷修复分支 | 例如 `bugfix/outbound-cancel`；同样走 PR |
+| `gh-pages` | 静态站点分支 | 仅 GitHub Pages 产物；无 Pages 产物时不创建 |
+
+约定要点：
+
+- 任何改动都走 **分支 → PR → 审查 → 合并**，即使有 push 权限也不直接推 `main`。
+- 分支名不使用前导 `/`：写 `feat/login` 而不是 `/feat/login`。
+- Git **不允许** 同一仓库同时存在 `feat` 与 `feat/<topic>`（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）；因此 `feat`、`bugfix` 采用前缀形式。若团队决定使用字面 `feat` / `bugfix` 分支，必须先把现存 `feat/*`、`bugfix/*` 改名。
+- 默认分支与分支保护属于仓库设置，不能通过文件 PR 修改；需要时由仓库管理员在维护窗口调整。
+
 ### 发布与部署约定
 
-- **只以 main 分支发布。** 本地通过全量回归测试后，按用户授权提交并推送到 GitHub `main`。
+- **以 `main` 分支发布。** 改动走分支 → PR → 审查 → 合并；即使有 push 权限也不直接推 `main`。生产只拉取已审查合入的版本。
 - 生产环境统一通过 `git pull --ff-only origin main` 获取更新；禁止日常无备份 reset/force 操作。
 - 生产由 systemd 服务管理，不要在服务运行时另起 screen / nohup 进程；更新后使用对应的 systemd unit 重启，不要用面板内的进程内重启代替版本发布。完整说明见 `README.md` 与外部部署规范。
 
-### 回归测试（唯一的验收手段）
+### 回归测试
+
+开发环境先安装 `python -m pip install -r requirements-dev.txt`。测试不需要生产配置、LLM API Key 或真实机器人连接；使用隔离数据与替身边界。
 
 ```bash
+python -m pytest -q tests --ignore=tests/test_concurrency.py  # 逐用例；pytest.ini 自动 await async 测试
 python tests/_run_all.py          # 全量，从仓库根执行
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
@@ -115,7 +135,35 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
   统计仅表示单轮同历史偏好。聊天 ZIP 备份不包含 persona_ab；独立 JSON 导出，首版无恢复导入。
   单用户 JSON 与统计全量扫描适合首版规模，未来大样本需索引/归档。
 
-**当前基线：`45 passed, 0 failed`**（2026-09-25 实测，含新增的 `test_emotion_webui.py`）。改动后以此为对照。
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` 在 PR、`push main` 和手工触发时执行。只读仓库权限，不使用生产密钥；PR 上同一分支的新运行会取消旧运行，发布分支的 push 不取消。
+
+| job | 范围 | 是否阻塞 PR |
+|---|---|---|
+| Tests (Python 3.12) | compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
+| Syntax and control-flow checks | 全仓 Ruff `E9,F63,F7` | 是 |
+| Meme plugin regression | 插件自己的 pytest 和现有 lint 规则 | 是 |
+| Ruff debt report | Ruff `E4,E7,E9,F`（忽略 `E402`）的既有告警，写入 step summary 并上传 artifact | 否（job 保持绿色，见下） |
+
+三个阻塞 job 是 PR 的合并信号；它们失败就是真的失败。所有测试进程都带 `timeout` 与 `faulthandler_timeout`，卡住的用例会先打出线程栈再由超时终止（退出码 124），不会静默挂到 job 超时。
+
+`Ruff debt report` 是**信息性**的：仓库仍有既存告警（当前 159 条，全部来自本 PR 之前的代码），ruff 在这些告警上必然返回非零。若把它当门禁，每个 PR 都会显示一个红色检查，却无法区分"新引入的问题"和"历史债务"。因此它只报告、不判红，条目数写进 step summary，完整清单在该运行的 `ruff-debt-report` artifact 里。清理完债务后再把它升级为阻塞检查——不能靠隐藏告警来变绿。
+
+**Python 兼容性策略：只支持 3.12+。** 不再提供 3.10/3.11 的兼容 job（原 `compat.yml` 已删除）。此前 3.10/3.11 上套件停滞的根因是 `asyncio.wait_for()` 吞掉调用方取消（issue #25，已由 #28 修复）；修复后 3.10 实测也能通过（614 passed），但项目不承诺旧版本支持，避免维护两份运行时行为。
+
+仓库管理员还需设置分支保护并选择上面三个阻塞检查，workflow 本身不会修改保护设置。
+
+meme 插件应在独立目录执行，避免与根测试命名空间混用：
+
+```bash
+(cd plugins/meme_stealer && python -m pytest -q -rs tests)
+(cd plugins/meme_stealer && python -m ruff check --isolated --select E4,E7,E9,F --ignore E402 main.py meme_stealer_core tests)
+```
+
+插件 UMAP 用例和历史 schema 用例会在可选包或原始 Git 对象缺失时明确报告 skip。
+
+**测试前置修复：** PR #22 将四个 qzone 会话用例改为真正的 async 函数；PR #23 将合并回复的过时占位断言改为当前已确定行为。CI 分支包含这两项，不屏蔽失败用例。组合基线（Python 3.12）：pytest `594 passed`，根 runner `66 passed, 0 failed`。
 
 runner 机制（`tests/_run_all.py`）：
 
@@ -214,14 +262,15 @@ interceptors = [ban_filter, plugin_system, command_handler, keyword_filter]
 1. **记录群内 bot 存在**（`note_group_message`）→ 全局指令去重与合并回复的依据。
 2. **群聊最近消息缓冲**（`_note_group_recent`，内存 `_group_recent_msgs`，单条截断 80 字）。
 3. **环境感知收集**（`plugin_system.collect_perception` → 缓存 `_perception_text`）。
-4. **群聊多 bot 合并回复**（`_try_merged_group_reply`）：命中 `_MERGED_GROUP_TRIGGERS` 且群内多 bot 时，由随机选中的 bot 收集全部 bot 回复，发一条合并转发，其余 bot 静默；返回 `True` 即消费掉。
-5. **插件观察钩子**（`plugin_system.dispatch_observed`）：**所有消息**（含未 @bot 的群消息）在 gate 之前先过一遍插件。返回 `(True, reply)` 即消费。
+4. **群聊多 bot 合并回复**（`_try_merged_group_reply`）：命中 `_MERGED_GROUP_TRIGGERS` 且群内多 bot 时，由随机选中的 bot 收集全部 bot 回复，发一条合并转发，其余 bot 静默；返回 `True` 即消费掉。存在 @ 定向时不做合并。
+5. **插件观察钩子**（`plugin_system.dispatch_observed`）：**所有消息**（含未 @bot 的群消息）在 gate 之前先过一遍插件。返回 `(True, reply)` 即消费。存在 @ 定向时钩子照常运行以保留副作用，但未被 @ 的 bot 的消费结果被丢弃。
 6. **群 gate**（`_should_respond_to_group`）—— 只在以下情况放行：
    - 文本以 `/` 开头（命令）
    - 文本 strip 后 lower == `ping`（全局，无需斜杠）
    - **直接 @ 本 bot 的 QQ**（不是 @all）
    - 引用的消息 id 属于**本 bot 自己发过的**（`BotInstance.is_my_message` 追踪）
-7. **全局指令去重**（`_should_defer_global_command`）：命中全局指令且群内多 bot 时，只有随机抽签选中的 bot 继续。
+6.5. **@ 定向**（`_mention_restricts_command`）：消息里 @ 了**具体 bot**（不含 @全体）时，指令只由被 @ 的 bot 执行；@ 多只则它们各自执行，未被 @ 的 bot 静默跳过。此判断优先于第 7 步抽签；未知指令提醒与 `no_prefix_triggers` 同样遵循。没有 @ 任何 bot 时行为不变。
+7. **全局指令去重**（`_should_defer_global_command`）：命中全局指令且群内多 bot 时，只有随机抽签选中的 bot 继续（存在 @ 定向时不做抽签）。
 8. **私聊图片限流**（`_check_image_rate_limit`，10 秒冷却，超限剥掉 image 段只留文本）。
 9. **图片引用归一化**（`_normalize_image_segments`）：NapCat 群图常只有 `file` 没有 `url`，经 `get_image` API 换 base64 → data URI。
 10. **拦截器链**：`for interceptor in self._interceptors: handled, response = await interceptor.intercept(...)`；`handled=True` 则发回复并 return。
@@ -396,7 +445,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | 顶层段 | 关键字段与默认 |
 |---|---|
 | `admins: list[int]` | 全局管理员 QQ（封禁系统与插件共用；回退旧 `ban.admins`） |
-| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`, `outbound_enqueue_timeout=2.0` |
+| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`；`outbound_enqueue_timeout` **已废弃**——队列满时 `submit()` 立即抛 `OutboundQueueFullError`，该值不再影响行为（字段保留仅为兼容旧配置） |
 | `llm` | chat/vision/emotion 三组 model+base_url+api_key+温度+max_tokens；`models: list[str]` 供 WebUI 下拉 |
 | `web_panel` | `enabled/host/port=9090/username/password_hash` |
 | `interceptor` | `keyword_file="./data/keywords.json"` |
@@ -514,6 +563,10 @@ self._daily_task = self._task_supervisor.create_task(
 | `interval_sec` | 配合 `on_tick`。 |
 
 **群内多 bot 去重机制**：`message_handler._should_defer_global_command` 收集内置 `{"/help","/tts"}` + 所有插件的 `global_triggers` + 前缀集 `("/ban","/pass","/dec-")`，命中后调 `BotManager.pick_bot_for_group(group_id, message_id)` 抽签 —— 抽签结果按 `(群号, message_id)` 缓存 60 秒，所以同一条消息触发的多个 bot 协程得到**同一个**结果，不会出现都回或都不回。
+
+**@ 定向优先于抽签**：消息里只要 @ 了具体 bot（`at` 段的 `qq` 不是 `all`），就只由被 @ 的 bot 执行指令；@ 多只则多只都执行；未被 @ 的 bot 静默。此时不抽签、不合并回复。未 @ 任何 bot 时才走上面的抽签。`qq=0`（未绑定）的 bot 不会被 `@0` 命中。
+
+实现位置：`BotManager.bot_ids_for_qqs()`（QQ→bot_id，只认已绑定且在线的）、`extract_at_targets()`（CQ/数组两种格式解析）、`MessageHandler._mention_restricts_command()`。
 
 ### 6.4 注入 API
 
@@ -794,7 +847,7 @@ await supervisor.shutdown()
 
 - 每个 bot 一条 `PriorityQueue` + 一个 worker，**串行发送**并强制最小间隔（`server.outbound_interval`，默认 0.5s）。
 - 两个优先级：`CONTROL_PRIORITY=0`（**内联执行**，绕过队列与限速）、`MESSAGE_PRIORITY=10`。
-- 队列满 → 立刻 `OutboundQueueFullError`（快速失败），入队超时也转成这个异常。
+- 队列满 → 立刻 `OutboundQueueFullError`（快速失败）。`server.outbound_enqueue_timeout` **已废弃**：不再有"等待入队"阶段，该值不影响行为。
 - **新消息一律走 `WSServer.send_group_msg/send_private_msg/send_image`**，这样才有限速 + `message_id` 追踪（引用回复识别依赖 `_pending_sent` 的 echo 记录）。
 
 ### 8.3 情感系统 `emotion/`
@@ -828,11 +881,19 @@ await supervisor.shutdown()
 
 ### 8.6 歌曲知识 `music_knowledge/`
 
-- SQLite 事实库 `data/song_knowledge/knowledge_db.db`，`songs` 表字段：`name/safe_name/uploader/singers/lyricist/composer/arranger/mixer/tuner/mastering/pv/illustrator/year/introduction/lyrics`。
-- 匹配三级：`《歌名》` 书名号高置信 → 裸歌名（长度 ≥3 且含语境词 唱/听/歌/歌词）→ 歌词片段（10 字滑窗）。
-- 命中后 `build_annotation()` 生成 `【歌曲信息】…`，**仅拼进本轮 LLM 请求的用户消息下方，不写 context**。
-- VCPedia 同步内置 Anubis PoW 反爬解题 + cookie 复用；入口 `/sync-songs`（管理员）或 `scripts/sync_vcpedia.py`。
-- 用**独立的**轻量 engine/pool（`pool.py`），与 `mohobot/db` 无关。
+- SQLite 事实库 `data/song_knowledge/knowledge_db.db`：`songs` 宽表保存合并后的字段（`name/safe_name/uploader/singers/lyricist/composer/arranger/mixer/tuner/mastering/pv/illustrator/year/introduction/lyrics`，另有 `aliases/bvid/lang/normalized_name/primary_source/updated_at`）；`song_sources` 存每个来源的原始记录（溯源、内容哈希、未对齐原因）；`sync_state` 存各来源断点与游标。
+- **匹配（保守优先）**：`《歌名》` → 裸歌名（长度 ≥3 且含语境词，含"库里只有《X(歌手)》而用户只说《X》"的核名）→ 歌词片段（10 字精确滑窗）→ 模糊层（歌名 Damerau 距离 ≤1 且唯一；歌词 6-gram 倒排，长歌词 `cov≥0.3 且 hits≥4`、短歌词 `cov≥0.4 且 hits≥5`）。模糊命中带 `confidence`，低于 `min_confidence` 或候选歧义时不注入。
+- **注入预算**：命中后 `build_annotation(max_chars=…)` 生成 `【歌曲信息】…`；`injection.max_chars > 0` 时只给「介绍摘要 + 歌词命中处前后 N 行」，并提示可用 `song_get_lyrics` 取全文；`max_chars=0` 保留旧的完整歌词行为。注解**只拼进本轮主系统提示，不写 context**。
+- **多来源同步**（`sources/` + `merge.py` + `sync.py`）：
+  - `vcpedia`：包装现有 Anubis PoW 客户端与 wikitext 解析（洛天依曲最全）。
+  - `vocawiki`：MediaWiki API + wikitext（Songbox/LyricsKai/Introduction），接口最稳；中文覆盖薄（洛天依 59、乐正绫 3、言和 7），但可补 BV 号与词曲编。
+  - `moegirl`：桌面 UA 403，必须移动 UA；API 只剩 `extracts/opensearch`，分类与歌词靠 HTML；`?from=` 翻页（robots 禁 `pagefrom`）；实测 5s 间隔 0 次 403、1s/3s 约 25%，默认 `interval=4.5` 单并发。
+  - 字段优先级：歌词/演唱/歌名 `vcpedia > vocawiki > moegirl`；词曲编混调/PV/曲绘/简介/年份 `moegirl > vocawiki > vcpedia`。非空值不被空值覆盖；来源冲突写入 `song_sources`，不静默丢弃。
+  - 身份对齐：BV 号 > 归一化名 + 演唱集合/年份/P主 打分；**同名但演唱集合完全不相交视为不同歌曲**（本地库有 50 组这类同名字），版本名（中文版/翻唱/remix）不同不合并。
+  - 模式：`new_only`（只抓新歌）/ `fill_missing`（默认，补残缺字段）/ `full_refresh`（全量重抓）。断点写在 `sync_state`，进程重启可续跑；单来源连续失败达 `max_fail` 熔断，不影响其它来源。
+  - 入口：`/sync-songs [new|fill|refresh|status|来源名]`（管理员，支持定时）、`python scripts/sync_songs.py [--status]`。定时由 `song_sync` 插件 `on_tick` 驱动，开关在 `music_knowledge.sync.enabled`。
+  - 库为 **WAL + busy_timeout=10s**，同步写库时匹配器仍可读；同步与匹配器共用 `pool.py` 的 engine，不再开第二套连接池。
+- 许可：VCPedia / voca.wiki 为 CC BY-NC-SA 4.0，萌娘百科为 CC BY-NC-SA 3.0 CN；适配器把来源与协议写进 `song_sources.license`，本库为本地非商业自用。
 
 ### 8.7 知识库 `knowledge/`（虚拟歌手 RAG）
 

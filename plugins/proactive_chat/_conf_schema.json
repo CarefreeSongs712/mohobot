@@ -56,6 +56,12 @@
     "hint": "启动后静默达到该时长才自动补建任务; 期间用户来过消息则放弃",
     "slider": {"min": 1, "max": 120, "step": 1}
   },
+  "enable_llm_choice": {
+    "type": "bool",
+    "default": true,
+    "description": "🧠 允许 LLM 自主决定是否发送",
+    "hint": "到期触发时模型结合上下文自主判断: 此刻不合适只回 [SKIP](本次不发, 正常重排不计数); 对方明确不希望被打扰只回 [PAUSE](暂停该会话, 对方回复后自动恢复)。判断指令由服务端固定附加, 不受自定义提示词影响; 连续未回复上限仍作硬保底"
+  },
   "tick_interval_sec": {
     "type": "int",
     "default": 30,

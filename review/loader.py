@@ -794,10 +794,6 @@ class MohobotData:
         self.list_sessions()  # 确保文件索引已加载(幂等)
         out: dict[str, int] = {}
         with self._lock:
-            info_map = {
-                s["session_key"]: s
-                for s in (self._scan_cache[1] if self._scan_cache else [])
-            }
             for path_str, idx in self._file_cache.items():
                 path = Path(path_str)
                 merged_group = (

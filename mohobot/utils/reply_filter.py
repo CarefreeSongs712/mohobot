@@ -50,11 +50,30 @@ _DROP_SALVAGE_CHARS = 2000
 # 方括号/【】/圆括号家族只认 VOICE 别名(含既有 ts/voice/speech/say)
 _VOICE_ALIAS_ALT = "|".join(sorted(VOICE_TAGS, key=len, reverse=True))
 
-# 尖括号标签: 开/闭 + 名字 + 可选属性(属性不参与名判定)。
-# 属性段限定 ASCII 可打印字符: 产物的属性(如 style="...")都是 ASCII,
-# 而正文里 "a < b 且 c > d" 这类比较文本含中文, 借此天然排除。
+# 尖括号语法分两层, 兼顾"不误伤 ASCII 比较式"与"不放过内部块":
+#
+# 1. 通用层(_ANGLE_TAG_RE): 属性必须是 name=value 形态(value 可带引号),
+#    且属性名以字母/下划线/冒号开头。于是 `a < b && c > d`、`a < foo bar > c`
+#    这类比较式不会被当成标签剥掉(旧实现允许任意 ASCII 属性段, 会误删)。
+# 2. DROP 层(_ANGLE_DROP_ATTR_RE): 内部块标签必须尽量认全, 否则"开标签认不出、
+#    闭标签被当游离闭标签丢"会让内部内容直接泄漏给用户。所以对 DROP 家族额外
+#    接受裸 token 属性(`<eot 1>`、`<tool_call foo=bar>`)与紧跟其后的
+#    `name=value`(`<function=search_meme>`), 且属性段引号感知 —— 属性值里的
+#    `>`(如 `<think data="a>b">`)不会被误当作标签结尾。
+_ANGLE_ATTR_NAME = r"[a-zA-Z_:][a-zA-Z0-9_.:-]*"
+_ANGLE_ATTR_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'<>]+)"
 _ANGLE_TAG_RE = re.compile(
-    r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9_-]{0,18})\s*[\x20-\x7e]*?>"
+    r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9_-]{0,18})"
+    r"(?:\s+" + _ANGLE_ATTR_NAME + r"\s*=\s*" + _ANGLE_ATTR_VALUE + r")*\s*/?>"
+)
+_ANGLE_DROP_TOKEN = (
+    r"(?:" + _ANGLE_ATTR_NAME + r"\s*=\s*" + _ANGLE_ATTR_VALUE + r"|[^\s\"'<>]+)"
+)
+_ANGLE_DROP_ATTR_RE = re.compile(
+    r"<\s*(/?)\s*(" + "|".join(sorted(DROP_TAGS, key=len, reverse=True)) + r")"
+    r"(?=[\s/>=])(?:\s*=\s*" + _ANGLE_ATTR_VALUE + r")?"
+    r"(?:\s+" + _ANGLE_DROP_TOKEN + r")*\s*/?>",
+    re.IGNORECASE,
 )
 _BR_VOICE_RE = re.compile(
     r"[\[【]\s*(/?)\s*(" + _VOICE_ALIAS_ALT + r")\s*[\]】]",
@@ -94,8 +113,8 @@ def _partial_tail_hold(buf: str, mode: str | None) -> int | None:
         ch = buf[i]
         if ch == "<":
             tail = buf[i:]
-            if ">" in tail[1:]:
-                return None  # 已有闭定界符却未成完整标签: 不是标签, 放行
+            if _has_unquoted_angle_close(tail):
+                return None  # 引号外已有闭定界符却未成完整标签: 不是标签, 放行
             if len(tail) > _HOLD_CAP_ANGLE:
                 return None
             # 名字可选: 裸 "<" 与 "</" 都可能补全成标签, 也要扣留
@@ -120,6 +139,25 @@ def _partial_tail_hold(buf: str, mode: str | None) -> int | None:
     return None
 
 
+def _has_unquoted_angle_close(tail: str) -> bool:
+    """tail 中是否存在「引号外」的 ``>``。
+
+    属性值里允许出现 ``>``(如 ``<think data="a>b">``): 若把引号内的 ``>``
+    当作标签已闭合, 流式分片一旦落在该位置之后就会把未完成的标签当正文吐出,
+    造成"整段正常、分片泄漏"的不一致。
+    """
+    quote = ""
+    for ch in tail:
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == ">":
+            return True
+    return False
+
+
 def _pick_tts_text(spans: list[str]) -> str:
     """合并全部非空标注为一条朗读文本(多段按出现顺序, 空行分隔)。"""
     parts = [s.strip() for s in spans if s.strip()]
@@ -142,6 +180,9 @@ class ReplyArtifactFilter:
         self._buf = ""
         self._mode: str | None = None      # None=正文 / 'voice' / 'drop'
         self._drop_name = ""
+        self._drop_stack: list[str] = []
+        self._drop_return_mode: str | None = None
+        self._drop_scan_pos = 0
         self._spans: list[str] = []        # 已闭合的完整朗读标注
         self._cur_span: list[str] = []     # 当前未闭合标注的内容分片
 
@@ -172,6 +213,8 @@ class ReplyArtifactFilter:
         out: list[str] = []
         while True:
             if not self._buf:
+                if final and self._mode == "drop":
+                    self._leave_drop()
                 if final and self._mode == "voice":
                     self._close_span()
                 break
@@ -213,14 +256,15 @@ class ReplyArtifactFilter:
         self._mode = None
         self._drop_name = ""
 
-    def _next_tag(self):
+    def _next_tag(self, start: int = 0):
         """buf 中最早的完整标签; 返回 (家族, match) 或 None。
 
         同起点时尖括号优先(形态更明确)。
         """
         best = None  # (start, kind, m)
-        for regex, kind in ((_ANGLE_TAG_RE, "angle"), (_BR_VOICE_RE, "br"), (_PAR_VOICE_RE, "par")):
-            m = regex.search(self._buf)
+        for regex, kind in ((_ANGLE_TAG_RE, "angle"), (_ANGLE_DROP_ATTR_RE, "angle"),
+                            (_BR_VOICE_RE, "br"), (_PAR_VOICE_RE, "par")):
+            m = regex.search(self._buf, start)
             if m and (best is None or m.start() < best[0]):
                 best = (m.start(), kind, m)
         if best is None:
@@ -251,9 +295,11 @@ class ReplyArtifactFilter:
                 self._mode = "voice"
                 self._cur_span = []
                 return True
-            # voice 态内其它家族标签一律按正文(与既有 TTS 过滤的嵌套语义一致)
-            self._emit_content(out, self._buf[:m.end()])
+            # DROP 的不显示/不朗读契约优先于 voice; FORMAT 仍剥壳保正文。
+            self._emit_content(out, self._buf[:m.start()])
             self._buf = self._buf[m.end():]
+            if family == "drop" and not closing:
+                self._enter_drop(name, return_mode="voice")
             return True
 
         # 正文态
@@ -271,8 +317,7 @@ class ReplyArtifactFilter:
             self._buf = self._buf[m.end():]
             if closing:
                 return True  # 游离闭标签: 丢弃
-            self._mode = "drop"
-            self._drop_name = name.lower()
+            self._enter_drop(name, return_mode=None)
             return True
 
         # format(含未知): 剥标签保内容
@@ -280,28 +325,60 @@ class ReplyArtifactFilter:
         self._buf = self._buf[m.end():]
         return True
 
+    def _enter_drop(self, name: str, *, return_mode: str | None) -> None:
+        self._drop_name = name.lower()
+        self._drop_stack = [self._drop_name]
+        self._drop_return_mode = return_mode
+        self._drop_scan_pos = 0
+        self._mode = "drop"
+
+    def _leave_drop(self) -> None:
+        self._mode = self._drop_return_mode
+        self._drop_return_mode = None
+        self._drop_stack = []
+        self._drop_name = ""
+        self._drop_scan_pos = 0
+
     def _consume_drop(self, final: bool, out: list[str]) -> bool:
-        """drop 态: 吞掉内容直到同名闭标签; 返回 True 表示可继续主循环。"""
-        close_re = re.compile(
-            r"<\s*/\s*" + re.escape(self._drop_name) + r"\s*[^<>]*?>",
-            re.IGNORECASE,
-        )
-        m = close_re.search(self._buf)
-        if m:
-            self._buf = self._buf[m.end():]
-            self._close_span()
-            return True
+        """DROP 嵌套压栈, 直到外层闭合后恢复此前正文/VOICE 状态。"""
+        while True:
+            match = self._next_tag(self._drop_scan_pos)
+            if match is None:
+                break
+            kind, m = match
+            self._drop_scan_pos = m.end()
+            if kind != "angle" or _classify(m.group(2)) != "drop":
+                continue
+            closing, name = bool(m.group(1)), m.group(2).lower()
+            if not closing:
+                self._drop_stack.append(name)
+            elif name in self._drop_stack:
+                # 模型工具产物常内层闭标签错配; 祖先闭合时一并吞掉
+                # 未闭合子块。匹配最近同名层, 保持同名嵌套的泄漏保护。
+                matching = len(self._drop_stack) - 1 - self._drop_stack[::-1].index(name)
+                del self._drop_stack[matching:]
+                if not self._drop_stack:
+                    self._buf = self._buf[m.end():]
+                    self._leave_drop()
+                    return True
         if final:
             self._buf = ""
-            self._close_span()
+            self._leave_drop()
             return True
         if len(self._buf) > _DROP_SALVAGE_CHARS and self._drop_name in {
             "tool_call", "function", "parameter", "arg_key", "arg_value",
             "description", "search_meme", "steal_meme", "send_meme",
         }:
-            # 畸形工具块: 不再吞正文, 已吞内容按正文放行
+            # 保留既有超长未闭合工具块救援策略: 内容按正文放行, 不吞掉整条回复。
+            # 但畸形工具块的内容不得进入朗读 —— 否则流式分片大小会改变朗读文本
+            # (实测 chunk=1 时约 500 字工具内容会被读出来)。因此这里结束当前
+            # voice 片段, 并让后续正文留在正文态, 不再累积到朗读。
             salvage, self._buf = self._buf, ""
-            self._close_span()
+            if self._drop_return_mode == "voice":
+                self._spans.append("".join(self._cur_span))
+                self._cur_span = []
+            self._drop_return_mode = None
+            self._leave_drop()
             out.append(salvage)
             return True
         return False

@@ -119,7 +119,7 @@ class Plugin:
                 uptime_str = str(datetime.timedelta(seconds=int(uptime_secs)))
                 lines.append(f"    └ {b.bot_id} (QQ:{b.qq}) — 在线 {uptime_str}")
         else:
-            lines.append(f"  已连接 Bot 数: 未知 (管理器未注入)")
+            lines.append("  已连接 Bot 数: 未知 (管理器未注入)")
 
         uptime_secs = time.time() - self._start_time
         uptime_str = str(datetime.timedelta(seconds=int(uptime_secs)))
@@ -225,7 +225,7 @@ def _clean_status_text(text: str) -> list[str]:
 
 def _event_chat(event: Any) -> tuple[str, str]:
     """从消息事件取 (chat_type, chat_id)。"""
-    from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent
+    from mohobot.models.onebot import GroupMessageEvent
     if isinstance(event, GroupMessageEvent):
         return ("group", str(event.group_id))
     return ("private", str(event.user_id))
@@ -255,7 +255,6 @@ def _render_status_image(text: str) -> str | None:
     accent = (102, 204, 255)      # #66CCFF
     bg = (30, 34, 43)             # #1e222b
     fg = (214, 219, 228)
-    dim = (148, 155, 168)
 
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)

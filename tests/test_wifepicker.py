@@ -157,7 +157,6 @@ async def test_draw_wife_daily_limit() -> None:
     """/今日老婆: 抽取 + 每日次数限制 + 头像。"""
     tmp = tempfile.mkdtemp(prefix="wife_")
     inst = await make_plugin(tmp)
-    ws = inst._ws_server
 
     # 活跃池: 1001/1002/1003 发言
     for uid in (1001, 1002, 1003):
@@ -191,7 +190,6 @@ async def test_force_marry() -> None:
     """/强娶: @ 解析 + 冷却 + 排除列表。"""
     tmp = tempfile.mkdtemp(prefix="wife_")
     inst = await make_plugin(tmp)
-    ws = inst._ws_server
 
     # 强娶 @1002(非管理员用户 2001)
     ev = make_group_event_with_at(2001, "/强娶", 1002)
@@ -308,7 +306,6 @@ async def test_keyword_trigger() -> None:
     """关键词触发开关 + 匹配模式。"""
     tmp = tempfile.mkdtemp(prefix="wife_")
     inst = await make_plugin(tmp, {"keyword_trigger_enabled": True})
-    ws = inst._ws_server
 
     for uid in (1001, 1002, 1003):
         await inst.on_message_observed(BOT, make_group_event(uid, "发言"), {})

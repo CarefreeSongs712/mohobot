@@ -18,10 +18,12 @@ import os
 import threading
 from typing import Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from mohobot.music_knowledge.song_database import Base, migrate_song_schema
+from mohobot.music_knowledge.song_database import (
+    Base, _configure_sqlite, migrate_song_schema,
+)
 
 _lock = threading.Lock()
 _engine = None
@@ -42,9 +44,11 @@ def ensure_init(db_folder: str, db_file: str) -> None:
         # 每线程独立连接: 线程池内各线程各持一个, 天然线程安全
         _engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 10},
             pool_pre_ping=True,
         )
+        # 与 init_song_db 共用 WAL/忙等待设置: 同步任务写库时匹配器仍可读
+        event.listen(_engine, "connect", _configure_sqlite)
         Base.metadata.create_all(bind=_engine)
         migrate_song_schema(_engine)
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)

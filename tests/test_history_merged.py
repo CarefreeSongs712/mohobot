@@ -62,6 +62,7 @@ def _make_handler(tmp: Path, dual_write: bool = True):
     mh._global_config = cfg
     mh._writer_registry = {}
     mh._group_mid_window = {}
+    mh._group_fp_window = {}
     return mh
 
 
@@ -149,7 +150,176 @@ async def test_dedup_window_eviction():
         print("[3] 去重窗口逐出语义 OK")
 
 
-def _make_ws(tmp: Path, dual_write: bool = True):
+async def test_cross_account_mid_dedup():
+    """message_id 按账号分配时(NapCat): 同一消息多 bot 推送只写一行。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        # 同一条用户消息: 同 user/time/内容, 不同 message_id 与 self_id
+        for i, (mid, self_id) in enumerate(((101, 111), (202, 222), (303, 333))):
+            raw = _group_raw(mid, user_id=10001, text="大家好", self_id=self_id)
+            raw["time"] = 1700000500  # 同一秒
+            await mh._archive_event(f"bot_00{i+1}", _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 1, f"跨账号同一消息应只归档一行: {len(merged)}"
+        assert merged[0]["message_id"] == 101, "保留首见者"
+        await _close_writers(mh)
+        print("[6] 跨账号 message_id 不同 → 指纹去重 OK")
+
+
+async def test_same_second_distinct_content_kept():
+    """同一秒内同人不同内容/不同图片必须各自保留(指纹不能过度合并)。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        base = _group_raw(1, user_id=10001, text="第一条")
+        base["time"] = 1700000600
+        second = _group_raw(2, user_id=10001, text="第二条")
+        second["time"] = 1700000600
+        for raw in (base, second):
+            await mh._archive_event("bot_001", _group_event(raw), raw)
+        # 同一秒两张不同图片
+        img1 = _group_raw(3, user_id=10001, text="")
+        img1["time"] = 1700000601
+        img1["message"] = [{"type": "image", "data": {"file": "a.jpg"}}]
+        img2 = _group_raw(4, user_id=10001, text="")
+        img2["time"] = 1700000601
+        img2["message"] = [{"type": "image", "data": {"file": "b.jpg"}}]
+        for raw in (img1, img2):
+            await mh._archive_event("bot_001", _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 4, f"不同内容不得合并: {len(merged)}"
+        await _close_writers(mh)
+        print("[7] 同秒不同内容/不同图片各自保留 OK")
+
+
+async def test_bot_sent_inbound_copy_skipped():
+    """发送侧登记后, 其他 bot 收到的同内容副本不再写 message 行。"""
+    from mohobot.history_dedup import SentMessageClaims, signature_for_send
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        claims = SentMessageClaims()
+        mh._sent_claims = claims
+        text = "今天也要开心呀"
+        # 发送方登记(发送内容与入站副本的非文本段结构一致: 纯文本)
+        claims.claim(20002, "111", signature_for_send("send_group_msg", {"message": text}))
+        # 其他 bot 收到这条发言(不同 message_id)
+        raw = _group_raw(777, user_id=111, text=text, self_id=222)
+        raw["time"] = 1700000700
+        await mh._archive_event("bot_002", _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert merged == [], "已登记为我方发言的入站副本不应归档"
+
+        # 未登记过的 bot 发言(旁路发送/旧数据)仍要保留
+        raw2 = _group_raw(888, user_id=111, text="旁路发出的消息", self_id=222)
+        raw2["time"] = 1700000701
+        await mh._archive_event("bot_002", _group_event(raw2), raw2)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 1 and merged[0]["message_id"] == 888
+        await _close_writers(mh)
+        print("[8] bot 发言副本跳过 + 旁路消息保留 OK")
+
+
+async def test_sent_claim_release_restores_inbound():
+    """发送未发生(取消/被拦)时释放登记, 入站消息必须照常归档。"""
+    from mohobot.history_dedup import SentMessageClaims, signature_for_send
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        claims = SentMessageClaims()
+        mh._sent_claims = claims
+        text = "被拦截的发言"
+        sig = signature_for_send("send_group_msg", {"message": text})
+        claims.claim(20002, "111", sig)
+        claims.release(20002, "111", sig)
+        raw = _group_raw(999, user_id=111, text=text, self_id=222)
+        raw["time"] = 1700000800
+        await mh._archive_event("bot_002", _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 1, "释放后入站消息应正常归档"
+        await _close_writers(mh)
+        print("[9] 登记释放后入站归档恢复 OK")
+
+
+def test_message_signature_shapes():
+    """指纹对文本拆段方式不敏感, 对非文本段内容敏感(严格档)。"""
+    from mohobot.history_dedup import message_signature
+
+    one = [{"type": "text", "data": {"text": "你好"}},
+           {"type": "text", "data": {"text": "世界"}}]
+    two = [{"type": "text", "data": {"text": "你好世界"}}]
+    assert message_signature(one) == message_signature(two), "文本拆段方式不应影响指纹"
+    assert message_signature("你好世界") == message_signature(two), "纯文本与段列表应等价"
+
+    # reply 段各账号 id 不同, 不参与指纹
+    quoted = [{"type": "reply", "data": {"id": "1"}}] + two
+    assert message_signature(quoted) == message_signature(two)
+
+    img_a = [{"type": "image", "data": {"file": "a.jpg"}}]
+    img_b = [{"type": "image", "data": {"file": "b.jpg"}}]
+    assert message_signature(img_a) == message_signature(img_b), "宽松档只比类型"
+    assert message_signature(img_a, strict=True) != message_signature(img_b, strict=True), \
+        "严格档必须区分不同图片"
+    print("[10] 消息指纹规则 OK")
+
+
+async def test_ws_sent_claim_blocks_inbound_copy():
+    """真实发送链路: 发送前登记指纹, 其他 bot 收到的副本不再归档。"""
+    from mohobot.history_dedup import message_signature
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        ws = _make_ws(tmp, dual_write=False, bot_qq=111)
+        mh = _make_handler(tmp, dual_write=False)
+        mh._sent_claims = ws._sent_claims
+        text = "这条会被别的 bot 收到"
+        try:
+            # _send_tracked 会先登记再进入发送队列(此处只有 echo future 等待,
+            # 归档任务在超时后用 local id 兜底写入, 不影响 claim 断言)
+            await ws._send_tracked(
+                "bot_001", "send_group_msg",
+                {"group_id": 20002, "message": text},
+                "group", 20002, wait_response=False,
+            )
+            # 另一只 bot 收到同一句(不同 message_id / self_id)
+            raw = _group_raw(4242, user_id=111, text=text, self_id=222)
+            raw["time"] = 1700000900
+            await mh._archive_event("bot_002", _group_event(raw), raw)
+            # 发送归档是后台任务: 等 echo 超时(0.05s)后落盘
+            await asyncio.sleep(0.3)
+            merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+            inbound = [r for r in merged if r.get("post_type") == "message"]
+            assert inbound == [], f"bot 发言的入站副本不应重复归档: {inbound}"
+            # 发送方自己的 message_sent 仍在(等待 echo 超时后以 local id 兜底)
+            sent = [r for r in merged if r.get("post_type") == "message_sent"]
+            assert len(sent) == 1 and sent[0]["bot_id"] == "bot_001"
+            # 宽松指纹能配对发送内容与入站副本
+            assert message_signature(text) == message_signature(raw["message"])
+        finally:
+            await ws.stop()
+            await _close_writers(mh)
+        print("[11] 发送侧登记拦截入站副本 OK")
+
+
+async def test_same_account_same_second_repeat_kept():
+    """同一 bot 连接同一秒收到两条相同文本 → 是两条真实消息, 都要保留。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        for mid in (11, 12):
+            raw = _group_raw(mid, user_id=10001, text="hello")
+            raw["time"] = 1700000650
+            await mh._archive_event("bot_001", _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 2, f"同账号重复文本不得被合并: {len(merged)}"
+        await _close_writers(mh)
+        print("[12] 同账号同秒重复文本保留 OK")
+
+
+def _make_ws(tmp: Path, dual_write: bool = True, bot_qq: int = 111):
     from mohobot.bot_manager import BotInstance, BotManager
     from mohobot.models.config import BotConfig
     from mohobot.ws_server import WSServer
@@ -160,7 +330,7 @@ def _make_ws(tmp: Path, dual_write: bool = True):
 
     bm = BotManager(data_dir=str(tmp))
     inst = BotInstance("bot_001", _Sock(),
-                       BotConfig(bot_id="bot_001", qq=111, nickname="天依"))
+                       BotConfig(bot_id="bot_001", qq=bot_qq, nickname="天依"))
     bm._bots["bot_001"] = inst
     cfg = BotConfig and type("C", (), {"history_dual_write": dual_write})()
     ws = WSServer(bot_manager=bm, data_dir=str(tmp), global_config=cfg)

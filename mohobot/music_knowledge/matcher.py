@@ -21,11 +21,13 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from mohobot.music_knowledge.fuzzy import LyricGramIndex, SongNameIndex
 from mohobot.music_knowledge.knowledge_service import (
     CREDIT_KEYS,
     _escape_like,
     get_song_detail,
 )
+from mohobot.music_knowledge.normalize import bracket_core, normalize_name
 from mohobot.music_knowledge.pool import ensure_init, get_session
 from mohobot.music_knowledge.song_database import Song
 
@@ -79,18 +81,42 @@ def _sample_substrings(text: str, min_len: int = 8, max_len: int = 20, count: in
 
 
 class SongMatch:
-    """一次歌曲识别结果。"""
+    """一次歌曲识别结果。
 
-    def __init__(self, name: str, detail: Dict[str, str]):
+    confidence/reason 区分"确定命中"与"模糊命中":
+    - 1.0  exact  书名号/歌名精确
+    - 0.95 core   去括号核名精确
+    - 0.9  typo   歌名编辑距离 <= 1 且候选唯一
+    - 0.8  lyric  歌词片段命中
+    调用方按阈值决定是否注入, 保证"宁可漏报"的保守取舍。
+    """
+
+    def __init__(self, name: str, detail: Dict[str, str], *,
+                 confidence: float = 1.0, reason: str = "exact",
+                 lyric_span: str = "", ambiguous: bool = False):
         self.name = name
         self.detail = detail
+        self.confidence = confidence
+        self.reason = reason
+        # 命中的歌词片段(注入时只给这几句附近)
+        self.lyric_span = lyric_span
+        self.ambiguous = ambiguous
 
-    def build_annotation(self) -> str:
-        """格式化为【歌曲信息】注解段(贴用户消息下方发送给 LLM)。"""
+    def build_annotation(self, *, max_chars: int = 0, lyric_context_lines: int = 4) -> str:
+        """格式化为【歌曲信息】注解段(贴在用户消息下方发给 LLM)。
+
+        max_chars > 0 时启用预算控制: 介绍按比例截断, 歌词只给命中片段
+        前后若干行, 并提示可用 `song_get_lyrics` 取完整歌词。
+        max_chars = 0 保持旧行为(完整歌词), 供工具与旧测试使用。
+        """
         d = self.detail
         lines: List[str] = [f"【歌曲信息】消息中提到歌曲《{d.get('name') or self.name}》"]
+        if self.reason != "exact":
+            lines.append(f"识别方式：{self.reason}（置信度 {self.confidence:.2f}）")
         intro = (d.get("introduction") or "").strip()
         if intro:
+            if max_chars > 0:
+                intro = _truncate(intro, max(80, max_chars // 3))
             lines.append(f"歌曲介绍：{intro}")
 
         staff: List[str] = []
@@ -113,13 +139,84 @@ class SongMatch:
 
         lyrics = (d.get("lyrics") or "").strip()
         if lyrics:
-            lines.append("完整歌词：")
-            lines.append(lyrics)
-        return "\n".join(lines)
+            if max_chars > 0:
+                excerpt = _lyric_excerpt(lyrics, self.lyric_span, lyric_context_lines)
+                if excerpt:
+                    lines.append("歌词片段（命中处附近）：")
+                    lines.append(excerpt)
+                else:
+                    lines.append("歌词片段（开头）：")
+                    lines.append(_truncate(lyrics, max(60, max_chars // 3)))
+                lines.append("（需要完整歌词可调用 song_get_lyrics 工具）")
+            else:
+                lines.append("完整歌词：")
+                lines.append(lyrics)
+
+        text = "\n".join(lines)
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "\n…（歌曲资料已按长度预算截断）"
+        return text
+
+
+def _truncate(text: str, limit: int) -> str:
+    """按字符截断, 尽量落在句末。"""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for mark in ("。", "！", "？", "\n"):
+        pos = cut.rfind(mark)
+        if pos >= limit * 0.6:
+            return cut[:pos + 1].rstrip()
+    return cut.rstrip() + "…"
+
+
+def _lyric_excerpt(lyrics: str, span: str, context_lines: int) -> str:
+    """在完整歌词中定位命中片段, 返回其前后各 N 行。
+
+    定位失败(用户输入与库内歌词存在错字/漏字)时退回按字符重叠找最相似行。
+    """
+    lines = (lyrics or "").splitlines()
+    if not lines:
+        return ""
+    needle = "".join((span or "").split())
+    hit_index = -1
+    if needle:
+        for index, line in enumerate(lines):
+            if needle and needle in "".join(line.split()):
+                hit_index = index
+                break
+    if hit_index < 0 and needle and len(needle) >= 4:
+        best_score, best_index = 0.0, -1
+        chars = set(needle)
+        for index, line in enumerate(lines):
+            flat = "".join(line.split())
+            if not flat:
+                continue
+            score = len(chars & set(flat)) / max(1, len(chars))
+            if score > best_score:
+                best_score, best_index = score, index
+        if best_score >= 0.6:
+            hit_index = best_index
+    if hit_index < 0:
+        return ""
+    start = max(0, hit_index - max(0, int(context_lines)))
+    end = min(len(lines), hit_index + max(0, int(context_lines)) + 1)
+    excerpt = "\n".join(line for line in lines[start:end] if line.strip())
+    if start > 0:
+        excerpt = "…\n" + excerpt
+    if end < len(lines):
+        excerpt = excerpt + "\n…"
+    return excerpt
 
 
 class SongInfoMatcher:
-    """全局歌曲匹配器(DB 直查 + 内存歌词索引 + 短时缓存)。"""
+    """全局歌曲匹配器(DB 直查 + 内存索引 + 短时缓存)。
+
+    fuzzy=True 时额外维护歌名/歌词模糊索引(见 fuzzy.py):
+    - 歌名: 精确 → 去括号核名 → Damerau 距离 <= 1 且唯一;
+    - 歌词: 6-gram 倒排, 容忍漏字/错字, 阈值来自 5580 首实测。
+    模糊命中带 confidence, 由调用方按 min_confidence 决定是否注入。
+    """
 
     def __init__(
         self,
@@ -129,15 +226,22 @@ class SongInfoMatcher:
         min_song_name_len: int = 3,
         lyric_min_len: int = 8,
         cache_size: int = 256,
+        fuzzy: bool = True,
+        min_confidence: float = 0.8,
     ):
         self._db_folder = db_folder
         self._db_file = db_file
         self._min_song_name_len = min_song_name_len
         self._lyric_min_len = lyric_min_len
+        self._fuzzy_enabled = bool(fuzzy)
+        self._min_confidence = float(min_confidence)
         ensure_init(db_folder, db_file)
         # 内存歌词索引: [(name, lyrics), ...](懒加载, 同步后 reload)
         self._index: List[Tuple[str, str]] = []
         self._index_loaded = False
+        # 模糊索引(uuid 维度, 与 songs 表一致)
+        self._name_index: Optional[SongNameIndex] = None
+        self._lyric_index: Optional[LyricGramIndex] = None
         # 短时匹配缓存: msg -> SongMatch(避免同文案反复查库)
         self._cache: Dict[str, SongMatch] = {}
         self._cache_size = cache_size
@@ -150,18 +254,28 @@ class SongInfoMatcher:
         """重新加载全部 (歌名, 歌词) 到内存(同步/迁移后调用)。"""
         try:
             with get_session() as db:
-                rows = db.query(Song.name, Song.lyrics).all()
-            new_index = [(name, lyrics or "") for name, lyrics in rows]
+                rows = db.query(Song.uuid, Song.name, Song.lyrics).all()
+            new_index = [(name, lyrics or "") for _uuid, name, lyrics in rows]
+            name_index = None
+            lyric_index = None
+            if self._fuzzy_enabled:
+                name_index = SongNameIndex([(name, uuid) for uuid, name, _lyrics in rows])
+                lyric_index = LyricGramIndex()
+                lyric_index.build([(uuid, name, lyrics or "") for uuid, name, lyrics in rows])
             with self._lock:
                 self._index = new_index
+                self._name_index = name_index
+                self._lyric_index = lyric_index
                 self._index_loaded = True
                 self._cache.clear()
                 count = len(self._index)
-            logger.info(f"歌曲歌词索引已加载: {count} 首")
+            logger.info(f"歌曲歌词索引已加载: {count} 首 (fuzzy={self._fuzzy_enabled})")
         except Exception as e:
             logger.warning(f"歌曲歌词索引加载失败: {e}")
             with self._lock:
                 self._index = []
+                self._name_index = None
+                self._lyric_index = None
                 self._index_loaded = True
                 self._cache.clear()
 
@@ -197,7 +311,13 @@ class SongInfoMatcher:
             if name:
                 detail = self._query_detail(name)
                 if detail:
-                    return SongMatch(detail["name"], detail)
+                    matched = SongMatch(detail["name"], detail)
+                else:
+                    matched = self._match_name_fuzzy(name, allow_core=True)
+                    if matched is None:
+                        matched = None
+                if matched is not None:
+                    return matched
 
         # 2. 裸文本歌名(需歌曲语境词): 消息中去掉"唱一首/点一首/来一首"等
         #    点歌前缀后再做包含匹配(如 "唱一首九九八十一" → "九九八十一")。
@@ -210,20 +330,78 @@ class SongInfoMatcher:
                     return SongMatch(detail["name"], detail)
             # 自然句中歌名可能夹在疑问/助词之间(如"你知道白鸟过河滩吗"),
             # 对库内歌名做最长优先的包含扫描, 避免把整句当成歌名查询。
+            # 也覆盖"库里只有《X(歌手)》而用户只说《X》"的核名情况。
             name = self._find_name_inside(clean)
             if name:
                 detail = self._query_detail(name)
                 if detail:
                     return SongMatch(detail["name"], detail)
+            # 模糊: 整句按"点歌前缀剥离后的候选词"做编辑距离匹配
+            # (抓漏字/错别字, 例如"达拉崩巴"); 仅在语境词存在时启用,
+            # 避免把日常对话当歌名。
+            fuzzy = self._match_name_fuzzy(candidate, allow_core=True)
+            if fuzzy is not None:
+                return fuzzy
 
         # 3. 歌词片段匹配
         hit = self._find_by_lyrics(clean)
         if hit:
             detail = self._query_detail(hit)
             if detail:
-                return SongMatch(detail["name"], detail)
+                return SongMatch(detail["name"], detail, confidence=0.8, reason="lyric",
+                                 lyric_span=clean)
+
+        # 4. 模糊歌词(6-gram 倒排): 容忍漏字/错字
+        lyric_match = self._find_by_lyrics_fuzzy(clean)
+        if lyric_match is not None:
+            return lyric_match
 
         return None
+
+    # ── 模糊匹配 ───────────────────────────────────────────────
+
+    def _match_name_fuzzy(self, text: str, *, allow_core: bool = True) -> Optional[SongMatch]:
+        """歌名模糊匹配: 归一化精确 → 核名精确 → Damerau<=1 且唯一。"""
+        if not self._fuzzy_enabled or not text:
+            return None
+        with self._lock:
+            index = self._name_index
+        if index is None:
+            return None
+        candidates = index.match(text)
+        if not candidates:
+            return None
+        best = candidates[0]
+        if best.ambiguous or best.score < self._min_confidence:
+            logger.debug(f"歌曲模糊匹配放弃(歧义/低置信): {text!r} -> {best.name} {best.score}")
+            return None
+        if best.reason == "core" and not allow_core:
+            return None
+        detail = self._query_detail(best.name)
+        if not detail:
+            return None
+        return SongMatch(detail["name"], detail, confidence=best.score, reason=best.reason)
+
+    def _find_by_lyrics_fuzzy(self, text: str) -> Optional[SongMatch]:
+        """歌词 6-gram 模糊匹配(只在精确歌词未命中时调用)。"""
+        if not self._fuzzy_enabled or len(normalize_name(text)) < 10:
+            return None
+        with self._lock:
+            index = self._lyric_index
+        if index is None:
+            return None
+        candidates = index.match(text)
+        if not candidates:
+            return None
+        best = candidates[0]
+        if best.ambiguous:
+            logger.debug(f"歌词模糊匹配歧义: {text[:20]!r} -> {best.name}")
+            return None
+        detail = self._query_detail(best.name)
+        if not detail:
+            return None
+        return SongMatch(detail["name"], detail, confidence=0.8, reason="lyric",
+                         lyric_span=text)
 
     def _find_by_name(self, text: str) -> Optional[str]:
         """在库内按歌名包含匹配(先精确后包含, 过滤过短歌名)。
@@ -261,17 +439,34 @@ class SongInfoMatcher:
         return None
 
     def _find_name_inside(self, text: str) -> Optional[str]:
-        """在自然语言消息中找库内歌名, 按歌名长度倒序避免短名抢先。"""
+        """在自然语言消息中找库内歌名, 按歌名长度倒序避免短名抢先。
+
+        同时比较歌名的"去括号核名": 库里存《九九八十一(乐正绫)》时,
+        用户只说《九九八十一》也应命中; 但核名与原文同长时优先原文。
+        """
         try:
             with get_session() as db:
                 from sqlalchemy import func
+
                 rows = (
                     db.query(Song.name)
                     .filter(func.length(Song.name) >= self._min_song_name_len)
                     .all()
                 )
-                hits = [name for (name,) in rows if name and name in text]
-                return max(hits, key=len) if hits else None
+                hits: list[tuple[int, int, str]] = []
+                for (name,) in rows:
+                    if not name:
+                        continue
+                    core = bracket_core(name).strip()
+                    if name in text:
+                        hits.append((len(name), 1, name))
+                    elif core and len(core) >= 2 and core in text:
+                        hits.append((len(core), 0, name))
+                if not hits:
+                    return None
+                # 命中片段越长越可信; 同长时优先"原名整段出现在消息里"
+                hits.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                return hits[0][2]
         except Exception as e:
             logger.debug(f"消息内歌名匹配失败: {e}")
             return None

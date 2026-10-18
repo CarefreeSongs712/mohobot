@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -62,7 +61,7 @@ async def test_future_cleanup() -> None:
     from mohobot.bot_manager import BotManager
 
     bm = BotManager(data_dir=tempfile.mkdtemp(prefix="fc_"))
-    fut = bm.create_response_future("bot_001", "echo1")
+    bm.create_response_future("bot_001", "echo1")
     assert "echo1" in bm._pending_responses["bot_001"]
     bm.remove_response_future("bot_001", "echo1")
     assert "echo1" not in bm._pending_responses.get("bot_001", {})

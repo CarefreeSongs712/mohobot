@@ -27,6 +27,36 @@ from mohobot.models.onebot import (
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
 from mohobot.services.usage import UsageRecorder
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
+
+
+# 历史符号条目在占位文本里最多复现的原文长度(超出截断)
+_HISTORY_SYMBOL_MAX_CHARS = 40
+
+
+def _history_symbol_placeholder(role: str, content: Any, *, is_group: bool) -> str:
+    """历史里"无实质内容"条目(纯标点/emoji/空白)的替代文本。
+
+    必须自身含字母/汉字(否则网关仍会 400), 且保留原文符号让模型知道当时
+    发生了什么; 措辞区分发言方: bot 自己的回复不能写成"用户发送了…"。
+    """
+    from mohobot.utils.cq_code import empty_message_placeholder, symbol_only_placeholder
+
+    text = content if isinstance(content, str) else ("" if content is None else str(content))
+    chat_type = "group" if is_group else "private"
+    stripped = text.strip()
+    # 原文只用来让模型知道"当时发的是什么符号"; 刷屏式超长符号串(实测 5000 个
+    # emoji 会让一条历史膨胀成 5000+ 字符)只保留开头, 避免每轮都重放这段 token。
+    if len(stripped) > _HISTORY_SYMBOL_MAX_CHARS:
+        stripped = stripped[:_HISTORY_SYMBOL_MAX_CHARS] + "…(已截断)"
+        text = stripped
+    if role == "assistant":
+        if stripped:
+            return f"（我回复了表情/符号，没有文字：{stripped}）"
+        return "（我这一轮没有输出文字内容）"
+    if stripped:
+        return symbol_only_placeholder(chat_type, text)
+    return empty_message_placeholder(chat_type, "")
 
 
 class LLMService:
@@ -188,6 +218,14 @@ class LLMService:
             and (tool["function"]["name"] != "anysearch_search"
                  or getattr(self, "_anysearch_client", None) is not None)
         ]
+        # 实时检查内置工具的插件启停状态(anysearch_search ↔ 插件 anysearch)
+        try:
+            from mohobot.services.llm_tools import plugin_enabled
+            if any(tool["function"]["name"] == "anysearch_search" for tool in tools) and not plugin_enabled("anysearch"):
+                logger.debug("anysearch 插件已禁用, 本次不暴露 anysearch_search 工具")
+                tools = [t for t in tools if t["function"]["name"] != "anysearch_search"]
+        except Exception as exc:
+            logger.debug(f"插件启停状态检查失败(跳过内置工具联动): {exc}")
         try:
             from mohobot.services.llm_tools import registry
             names = self._BUILTIN_TOOL_NAMES | {tool["function"]["name"] for tool in tools}
@@ -213,7 +251,7 @@ class LLMService:
         # Check if LLM is available
         if not self._available or self._chat_client is None:
             logger.warning("LLM not configured — cannot process message")
-            return "LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", None
+            return LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), None
 
         # Determine which model and client to use
         model = self._cfg.llm.chat_model
@@ -245,7 +283,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
-            return f"[LLM 调用失败: {e}]", None
+            return LLMDiagnostic(f"[LLM 调用失败: {e}]"), None
 
         await self._record_usage(
             model, getattr(response, "usage", None), bot_id, event, module="chat"
@@ -257,11 +295,23 @@ class LLMService:
         reply_text = choice.message.content or ""
         tool_calls = choice.message.tool_calls
 
-        # Handle tool calls: 工具结果作为 tool 消息回传 LLM,
-        # 再调用一次生成最终自然语言回复(不向用户输出原始搜索结果)
+        # Handle tool calls: 工具结果作为 tool 消息回传 LLM, 再请求模型生成最终自然语言回复
+        # (不向用户输出原始搜索结果)。模型看到工具结果后可能继续调用工具(如搜索为空时换
+        # 关键词再搜), 因此与 chat_stream 一致做有界多轮: 前 max_tool_rounds 轮跟进仍提供
+        # 工具; 之后的一轮不再提供工具, 强制模型基于已有结果给出文本。
+        # 旧实现只跟进一次, 第二轮的 tool_calls 被直接忽略, 链式工具在非流式模式下静默截断。
         tool_results = None
-        if tool_calls:
-            tool_results = []
+        max_tool_rounds = 4
+        tool_round = 0
+        while tool_calls:
+            if tool_results is None:
+                tool_results = []
+            final_round = tool_round >= max_tool_rounds
+            if final_round:
+                logger.warning(
+                    f"LLM tool rounds hit {max_tool_rounds}, forcing text answer without tools"
+                )
+            tool_round += 1
             messages.append({
                 "role": "assistant",
                 "content": choice.message.content or "",
@@ -286,25 +336,44 @@ class LLMService:
                     "tool_call_id": tc.id,
                     "content": result,
                 })
-            # 二次调用: 基于工具结果生成最终回复
+            # 跟进调用: 基于工具结果生成回复(或继续调用工具)
+            follow_params: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if not final_round:
+                follow_params["tools"] = self._current_tools_schemas()
+                follow_params["tool_choice"] = "auto"
             try:
-                response2 = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=self._current_tools_schemas(),
-                    tool_choice="auto",
-                )
-                choice2 = response2.choices[0] if response2.choices else None
-                await self._record_usage(
-                    model, getattr(response2, "usage", None), bot_id, event,
-                    module="chat", kind="tool_follow_up",
-                )
-                reply_text = (choice2.message.content or "") if choice2 else ""
+                response2 = await client.chat.completions.create(**follow_params)
             except Exception as e:
                 logger.error(f"LLM API call failed (after tools): {e}")
-                reply_text = f"[LLM 调用失败: {e}]"
+                # 合并解析: 保留 #19 的"立即返回并带上已执行工具结果"控制流,
+                # 同时按 #18 把诊断包成 LLMDiagnostic(否则 issue #4 的 P1 会在链式路径复活)。
+                return LLMDiagnostic(f"[LLM 调用失败: {e}]"), tool_results
+            await self._record_usage(
+                model, getattr(response2, "usage", None), bot_id, event,
+                module="chat", kind="tool_follow_up",
+            )
+            choice = response2.choices[0] if response2.choices else None
+            if choice is None:
+                # 空 choices: 结束循环而不是丢弃已累积的正文(流式同场景也是直接收尾)。
+                break
+            # 中间跟进可能同时带可见文本与下一轮 tool_calls。文本已经是模型输出的一部分,
+            # 不能因继续工具循环而被下一轮 reply_text 覆盖; chat_stream 也会按同样顺序
+            # 把每个文本 chunk 交给调用方。
+            reply_text += choice.message.content or ""
+            # 强制文本轮不再接受工具调用: 即使网关仍返回 tool_calls 也到此为止, 保证有界。
+            tool_calls = None if final_round else choice.message.tool_calls
+
+        # 与 chat_stream 对齐: 工具已执行但模型最终没给出任何文本时不能静默返回空串,
+        # 否则 stream=false 的用户什么也收不到(流式同场景会输出这段兜底文案)。
+        # 该文案是框架占位而非模型输出, 必须与流式一致包成 LLMDiagnostic,
+        # 否则会被当作 assistant 正文写入上下文/数据库并触发情感分析。
+        if tool_results and not reply_text.strip():
+            return LLMDiagnostic("[工具调用完成，但模型未返回文本]"), tool_results
 
         return reply_text, tool_results
 
@@ -323,7 +392,7 @@ class LLMService:
         The caller should send individual chunks as they arrive.
         """
         if not self._available or self._chat_client is None:
-            yield ("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。", True)
+            yield (LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), True)
             return
 
         model = self._cfg.llm.chat_model
@@ -361,7 +430,7 @@ class LLMService:
             )
         except Exception as e:
             logger.error(f"LLM stream call failed: {e}")
-            yield (f"[LLM 调用失败: {e}]", True)
+            yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
             return
 
         full_content = ""
@@ -532,11 +601,11 @@ class LLMService:
                         return
                 except Exception as e:
                     logger.warning(f"LLM tool-follow non-stream retry failed: {e}")
-                yield ("[工具调用完成，但模型未返回文本]", True)
+                yield (LLMDiagnostic("[工具调用完成，但模型未返回文本]"), True)
                 return
             except Exception as e:
                 logger.error(f"LLM stream call failed (after tools): {e}")
-                yield (f"[LLM 调用失败: {e}]", True)
+                yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
                 return
 
         # Empty stream guard: some gateways return 0 chunks for unsupported
@@ -546,7 +615,7 @@ class LLMService:
                 f"LLM stream returned NO data (model={model}, max_tokens={max_tokens}) — "
                 "gateway may not support this combo"
             )
-            yield ("[模型未返回内容——请检查 max_tokens 或模型配置]", True)
+            yield (LLMDiagnostic("[模型未返回内容——请检查 max_tokens 或模型配置]"), True)
             return
 
         yield ("", True)  # Signal completion with no extra text
@@ -1175,6 +1244,8 @@ class LLMService:
         perception_parts: list[str] = []
         emotion_parts: list[str] = []
 
+        from mohobot.utils.cq_code import has_meaningful_text
+
         # 1. System prompt
         system_content = ""
 
@@ -1227,6 +1298,14 @@ class LLMService:
                 # 临时注入段(如群聊最近消息): 直接作为 system 消息
                 messages.append({"role": "system", "content": content})
             elif role in ("user", "assistant"):
+                # 历史里的空白/纯符号条目(如「？」「👍」, 或 bot 自己的「……」「~~~」)
+                # 原样发出会让网关以 400 拒绝整个请求。这里**替换**成带语义的标注而
+                # 不是丢弃: 丢弃会抹掉 bot 自己的回复(模型看到用户连说几遍却没人
+                # 回应, 会误判上一轮没答)并破坏 user/assistant 的角色交替。
+                if not has_meaningful_text(content):
+                    content = _history_symbol_placeholder(
+                        role, content, is_group=isinstance(event, GroupMessageEvent),
+                    )
                 messages.append({"role": role, "content": content})
             else:
                 # Named speaker role, e.g. "3831097597-墨染荷韵"
@@ -1277,6 +1356,19 @@ class LLMService:
             else:
                 # 视觉不可用或描述失败: 降级为占位文本
                 user_content = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
+
+        # 空白/纯符号消息用标注替代, 不给 LLM 发空或只有标点的 user 消息。
+        # 部分网关会直接 400 拒绝"内容为空或只有空白/标点"的请求, 因此判据是
+        # "有无字母/数字", 而不是 strip() 后是否非空(纯 emoji/标点同样会触发)。
+        from mohobot.utils.cq_code import (
+            empty_message_placeholder, has_meaningful_text, symbol_only_placeholder,
+        )
+        chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+        if not has_meaningful_text(user_content):
+            if user_content.strip():
+                user_content = symbol_only_placeholder(chat_type, user_content)
+            else:
+                user_content = empty_message_placeholder(chat_type, event.message)
 
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:

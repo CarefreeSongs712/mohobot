@@ -23,7 +23,7 @@ BAN_COMMANDS = {
     "ban-reset", "banlist", "ban-enable", "ban-disable", "ban-help",
 }
 
-HELP_TEXT = f"""🚫 封禁系统使用指南:
+HELP_TEXT = """🚫 封禁系统使用指南:
 
 📒 查询:
   /banlist            — 查看当前会话与全局的封禁/解禁名单

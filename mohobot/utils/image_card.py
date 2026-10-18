@@ -46,8 +46,8 @@ def find_cjk_font() -> str | None:
             path = os.path.join(d, name)
             if os.path.exists(path):
                 return path
-        # 目录里放了其他字体文件也接受(首个 ttf/otf)
-        for pattern in ("*.ttf", "*.otf"):
+        # 目录里放了其他字体文件也接受(首个 ttf/ttc/otf)
+        for pattern in ("*.ttf", "*.otf", "*.ttc"):
             hits = sorted(glob.glob(os.path.join(d, pattern)))
             if hits:
                 return hits[0]
@@ -145,7 +145,7 @@ def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = 
 HELP_GROUP_TEXT = "交流群 398870315"
 HELP_LINKS_TEXT = (
     "介绍 / 使用须知  https://7121099.xyz/\n"
-    "备用  http://103.236.75.12:10712/"
+    "管理员 3831097597"
 )
 HELP_INFO_TEXT = f"{HELP_GROUP_TEXT}\n{HELP_LINKS_TEXT}"
 
@@ -169,7 +169,6 @@ def render_help_card(sections: list[dict]) -> str | None:
     fg = (214, 219, 228)       # 正文
     dim = (148, 155, 168)      # 次要文字
     accent = (102, 204, 255)   # 标题/强调 #66CCFF
-    warn = (255, 170, 90)      # 管理员标记 #FFAA5A
 
     width = 880
     pad_x, pad_y = 30, 26

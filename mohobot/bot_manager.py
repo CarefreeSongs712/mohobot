@@ -410,6 +410,21 @@ class BotManager:
                 return inst
         return None
 
+    def bot_ids_for_qqs(self, qqs) -> set[str]:
+        """被 @ 的 QQ 号 → 已绑定且当前在线的 bot_id 集合。
+
+        只认已绑定实例: 未绑定连接不处理消息, 也不该被当作"被 @ 的 bot"。
+        qq=0 表示未绑定 QQ, 不能与真实 QQ 0 混淆, 一并排除。
+        """
+        wanted = {str(q) for q in qqs if str(q).strip() and str(q) != "all"}
+        if not wanted:
+            return set()
+        return {
+            bot_id for bot_id, inst in self._bots.items()
+            if str(getattr(inst, "qq", "") or "") in wanted
+            and str(getattr(inst, "qq", "") or "") not in ("", "0")
+        }
+
     @property
     def all_bots(self) -> list[BotInstance]:
         return list(self._bots.values())

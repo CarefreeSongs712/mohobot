@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -18,6 +19,7 @@ from loguru import logger
 
 from mohobot.file_store import json_update
 from mohobot.models.onebot import PrivateMessageEvent, Sender
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
 
 from .schedule import is_quiet_time, random_interval_seconds, render_prompt
 
@@ -25,6 +27,20 @@ from .schedule import is_quiet_time, random_interval_seconds, render_prompt
 _STALE_GRACE_SECONDS = 60
 # bot 离线时到期任务的顺延(秒): 避免重连后瞬间补发过期窗口
 _OFFLINE_POSTPONE_SECONDS = 300
+
+# LLM 自主决策协议: 模型可在生成阶段选择本次不发([SKIP])或暂停该会话([PAUSE])。
+# 指令作为服务端固定段附加(不进可编辑提示词), 避免用户配置覆盖导致协议丢失;
+# 标记必须独占整条回复, 解析端容忍括号/空白/大小写变体。
+_DECISION_GUIDANCE = (
+    "\n\n【发送前自主判断】\n"
+    "你并不一定要发送这条主动消息。先结合最近的聊天上下文、当前时间与未回复状态"
+    "(当前连续未回复次数: {{unanswered_count}}), 判断现在主动开口是否合适:\n"
+    "- 若只是此刻不合适(对方可能在忙、情绪不适合、话题没到开口的时候), "
+    "整条回复只输出 [SKIP]: 本轮不发, 稍后会有新机会;\n"
+    "- 若上下文已经清楚表明对方不希望你主动打扰(比如连续多次没回复、上次不欢而散、"
+    "对方明确说过别再发), 整条回复只输出 [PAUSE]: 主动消息将暂停, 直到对方再回复你;\n"
+    "- 标记必须独占整条回复; 若你决定主动开口, 就按前述要求正常生成开场白, 不输出标记。"
+)
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "enable": True,
@@ -37,6 +53,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "enable_auto_trigger": False,
     "auto_trigger_after_minutes": 5,
     "tick_interval_sec": 30,
+    "enable_llm_choice": True,
 }
 
 
@@ -346,9 +363,14 @@ class ProactiveEngine:
             except Exception as exc:
                 logger.warning(f"[主动消息] {key} LLM 生成失败: {exc}")
                 reply = None
+            # 诊断文案(未配置/调用失败/空响应)不是主动消息正文: 不发送、不计数、正常重排。
+            # 必须在 strip() 之前判断, 字符串运算会丢掉 LLMDiagnostic 标记。
+            if isinstance(reply, LLMDiagnostic):
+                logger.warning(f"[主动消息] {key} LLM 未产出有效内容, 本次不发送: {reply[:80]}")
+                await self._reschedule(key, cfg, self._clock())
+                return
             reply = (reply or "").strip()
-            # 生成报错字符串(LLM 未配置等)不当作内容发送
-            if not reply or reply.startswith("LLM 服务未配置"):
+            if not reply:
                 await self._reschedule(key, cfg, self._clock())
                 return
 
@@ -357,6 +379,21 @@ class ProactiveEngine:
             if latest.get("last_message_time", 0) > gen_start_message_time:
                 logger.info(f"[主动消息] {key} 生成期间用户发来新消息, 丢弃本次主动消息")
                 return
+
+            # LLM 自主决策(可关): [SKIP]=本次不发(不计数, 正常重排);
+            # [PAUSE]=暂停该会话(待发任务已消耗, 不再重排即暂停, 对方回复后自动恢复);
+            # 标记附带正文时剥标记按正文发送, 不视为拒绝。
+            reply_after_marker = reply
+            if self._cfg().get("enable_llm_choice", True):
+                choice, reply_after_marker = self._parse_choice(reply)
+                if choice and not reply_after_marker:
+                    if choice == "skip":
+                        logger.info(f"[主动消息] {key} 模型判断此刻不适合主动开口, 本次跳过")
+                        await self._reschedule(key, cfg, self._clock())
+                    else:
+                        logger.info(f"[主动消息] {key} 模型判断对方不希望被打扰, 暂停主动消息(对方回复后恢复)")
+                    return
+                reply = reply_after_marker or reply
 
             display = await self._send(bot_id, user_id, event, reply)
             if not display:
@@ -418,6 +455,9 @@ class ProactiveEngine:
         prompt = render_prompt(
             self._cfg().get("proactive_prompt", ""), unanswered_count,
         )
+        if self._cfg().get("enable_llm_choice", True):
+            # 自主决策协议是服务端固定段: 渲染占位符后整体附加
+            prompt += render_prompt(_DECISION_GUIDANCE, unanswered_count)
         sender_name = str(entry.get("sender_name") or f"User-{user_id}")
         event = PrivateMessageEvent(
             time=int(self._clock()),
@@ -430,6 +470,31 @@ class ProactiveEngine:
             sender=Sender(user_id=int(user_id), nickname=sender_name),
         )
         return event, prompt
+
+    _CHOICE_RE = re.compile(r"[\[【(（]\s*(skip|pause)\s*[\]】)）]", re.IGNORECASE)
+
+    def _parse_choice(self, reply: str) -> tuple[str | None, str]:
+        """解析 LLM 的自主决策标记。
+
+        返回 (choice, 剥除标记后的剩余文本):
+        - choice='skip'/'pause': 剩余文本为空 → 按决策处理;
+        - choice=None: 无标记, 剩余文本即原回复;
+        标记附带正文时返回剩余正文, 由调用方按普通消息发送。
+        """
+        markers = self._CHOICE_RE.findall(reply)
+        if not markers:
+            # 容忍无括号的裸标记(去空白/标点后精确等于 skip/pause)
+            normalized = re.sub(r"[\s\[\]【】()（）。，,!！?？:：;；]+", "", reply).lower()
+            if normalized == "skip":
+                return "skip", ""
+            if normalized == "pause":
+                return "pause", ""
+            return None, reply
+        remaining = self._CHOICE_RE.sub("", reply).strip()
+        kind = markers[-1].lower()
+        if remaining:
+            return kind, remaining  # 标记附带正文: 按正文发送
+        return kind, ""
 
     async def _send(self, bot_id: str, user_id: str, event: PrivateMessageEvent,
                     reply: str) -> str:

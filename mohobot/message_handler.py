@@ -31,8 +31,10 @@ from mohobot.models.onebot import (
     RequestEvent,
 )
 from mohobot.file_store import JSONLWriter
+from mohobot.history_dedup import message_signature
 from mohobot.models.config import is_external_service_group
-from mohobot.utils.cq_code import extract_plain_text
+from mohobot.utils.llm_diagnostic import LLMDiagnostic
+from mohobot.utils.cq_code import extract_at_targets, extract_plain_text
 
 
 class MessageHandler:
@@ -77,8 +79,13 @@ class MessageHandler:
         self._ban_interceptor = None  # BanInterceptor 引用(归档后只做消息策略检查)
         self._global_config = global_config  # 与 main/WS/LLM 共用, sync_config 原位更新
         self._writer_registry: dict[str, JSONLWriter] = {}
-        # 群合并归档的 message_id 去重窗口: {group_id: OrderedDict[mid, None]}
+        # 群合并归档的去重窗口: {group_id: OrderedDict[mid, None]}
         self._group_mid_window: dict[Any, OrderedDict] = {}
+        # 跨账号内容指纹窗口: {group_id: OrderedDict[(sender, time, sig), set[bot_id]]}
+        # (message_id 按账号分配的协议端上, 同一条群消息的多份推送靠这个去重)
+        self._group_fp_window: dict[str, OrderedDict] = {}
+        # 发送侧指纹登记: 供入站归档识别"这是我方发言的副本"(WSServer 注入)
+        self._sent_claims = None
         # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
         self._song_matcher = song_matcher
         # 情感系统(注入 + 后台分析; 未启用时为 None)
@@ -233,9 +240,9 @@ class MessageHandler:
         """Write raw event to history JSONL.
 
         群聊合并存储: 所有 bot 收到的群消息写进同一个
-        data/history/group/{群号}.jsonl, 写入时按 message_id 去重(同一条群
-        消息会经每个 bot 的连接各推送一次), 行内 bot_id 标注接收 bot;
-        私聊仍按 bot 分目录(不同 bot 与同一用户的私聊是不同对话)。
+        data/history/group/{群号}.jsonl, 写入时去重(同一条群消息会经每个
+        bot 的连接各推送一次), 行内 bot_id 标注接收 bot; 私聊仍按 bot 分目录
+        (不同 bot 与同一用户的私聊是不同对话)。
         history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
         一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
         """
@@ -245,7 +252,7 @@ class MessageHandler:
             await self._get_or_create_writer(file_path).append(raw)
         elif isinstance(event, GroupMessageEvent):
             group_id = event.group_id
-            if self._claim_group_mid(group_id, str(raw.get("message_id") or "")):
+            if self._claim_group_message(group_id, raw, bot_id):
                 payload = dict(raw)
                 payload["bot_id"] = bot_id
                 file_path = f"{self._data_dir}/history/group/{group_id}.jsonl"
@@ -256,7 +263,7 @@ class MessageHandler:
         else:
             return
 
-    # 群合并归档的 message_id 去重窗口(每群保留最近 N 条): 重复推送只发生在
+    # 群合并归档的去重窗口(每群保留最近 N 条): 重复推送只发生在
     # 多 bot 同时收到同一条群消息(毫秒级间隔)与重连重推(秒级), 窗口足够覆盖;
     # 窗口仅存内存, 重启后理论上有一次重复写入的可能, 消费方(review)读侧仍
     # 按 message_id 兜底去重。
@@ -274,6 +281,71 @@ class MessageHandler:
         if message_id in window:
             return False
         window[message_id] = None
+        if len(window) > self._GROUP_MID_WINDOW:
+            window.popitem(last=False)
+        return True
+
+    def _claim_group_message(self, group_id, raw: dict, bot_id: str = "") -> bool:
+        """判断一条群消息是否应写入合并归档: True=写入, False=重复跳过。
+
+        三步判据:
+
+        1. 发送侧登记 —— bot 自己的发言已由 WSServer 以 ``message_sent``
+           归档, 其他 bot 收到的同内容副本不再写入。
+        2. ``message_id`` —— 单账号场景下精确(重连重推、多连接同账号)。
+        3. 跨账号指纹 ``(发送者, 时间, 消息段类型, 文本)`` —— NapCat 的
+           ``message_id`` 按账号分配, 同一条消息经不同 bot 推送时 id 不同,
+           仅靠第 2 级会把一条消息写成 N 行。
+
+        第 3 级按 **bot 账号** 记账: 同一条物理消息每个账号只会收到一次,
+        因此"该指纹已由**别的**账号写入"才是重复。同一账号再次收到同样
+        内容(用户同一秒连发两条相同文本)属于新消息, 必须保留。
+
+        检查与登记之间无 await, 多 bot 协程并发调用时天然互斥。
+        """
+        sender = str(raw.get("user_id") or "")
+        # 1) 我这句发言的入站副本(发送侧按宽松指纹登记)
+        claims = getattr(self, "_sent_claims", None)
+        if claims is not None:
+            loose = message_signature(raw.get("message"))
+            if claims.matches(group_id, sender, loose):
+                return False
+        # 2) 同一账号的 message_id 重复(重连重推)
+        message_id = str(raw.get("message_id") or "")
+        if message_id and not self._claim_group_mid(group_id, message_id):
+            return False
+        # 3) 跨账号: 同一内容已由别的 bot 归档过
+        signature = message_signature(raw.get("message"), strict=True)
+        return self._claim_group_fingerprint(group_id, sender, raw, signature, bot_id)
+
+    def _claim_group_fingerprint(
+        self, group_id, sender: str, raw: dict, signature: tuple, bot_id: str = "",
+    ) -> bool:
+        """按 (发送者, 时间, 内容指纹) 记账; 别的 bot 已写过才判重复。
+
+        时间取原始 ``time``(秒)。多账号推送同一条消息时该值一致(生产实测)。
+        无 time 的消息退回消息 id 判重, 不参与指纹记账。
+        """
+        try:
+            ts = int(raw.get("time") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0:
+            return True
+        key = (sender, ts, signature)
+        windows = getattr(self, "_group_fp_window", None)
+        if windows is None:
+            windows = self._group_fp_window = {}
+        window = windows.setdefault(str(group_id), OrderedDict())
+        seen_bots = window.get(key)
+        if seen_bots is not None and bot_id not in seen_bots:
+            # 别的账号已经归档过这条消息 → 本账号收到的是同一条的推送
+            return False
+        if seen_bots is None:
+            seen_bots = window[key] = set()
+        else:
+            window.move_to_end(key)
+        seen_bots.add(bot_id)
         if len(window) > self._GROUP_MID_WINDOW:
             window.popitem(last=False)
         return True
@@ -335,6 +407,39 @@ class MessageHandler:
             return True
 
         return False
+
+    def _mentioned_bot_ids(self, event: GroupMessageEvent) -> set[str]:
+        """消息里被 @ 的、已绑定且在线的 bot_id 集合。
+
+        群聊多 bot 共用一条消息: 用户 @ 了某只(或几只)bot 时, 只有它们应当
+        执行指令; 没有被 @ 的 bot 静默跳过。@全体不算点名任何 bot。
+        """
+        if not (self._ws and getattr(self._ws, "_bot_manager", None)):
+            return set()
+        targets = extract_at_targets(event.message)
+        if not targets:
+            return set()
+        try:
+            return self._ws._bot_manager.bot_ids_for_qqs(targets)
+        except Exception as e:  # noqa: BLE001 - 判定失败不应中断主链
+            logger.debug(f"解析被 @ 的 bot 失败: {e}")
+            return set()
+
+    def _mention_restricts_command(
+        self, bot_id: str, event: GroupMessageEvent,
+    ) -> bool:
+        """该指令是否应因"@ 了别的 bot 而不是我"被跳过。
+
+        规则: 群消息里只要 @ 了至少一只已绑定的 bot, 指令就只由被 @ 的 bot
+        执行(@ 多只则多只各自执行); 未被 @ 的 bot 一律跳过。没有 @ 任何 bot
+        时返回 False, 保持原有抽签/全执行语义不变。
+        """
+        mentioned = self._mentioned_bot_ids(event)
+        if not mentioned:
+            return False
+        if bot_id in mentioned:
+            return False
+        return True
 
     async def _is_reply_to_bot(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """Check if the message quotes a message that the bot itself sent.
@@ -487,15 +592,25 @@ class MessageHandler:
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
         # 插件明确消费时发送回复并结束; 否则继续正常流程。
+        # @ 定向: 点名叫了别的 bot 时, 观察钩子仍运行(保留活跃记录等副作用),
+        # 但它的"消费"结果不生效 —— 不由本 bot 回复, 继续交由 gate 判定。
         if not ban_command and self._plugins is not None:
             try:
                 observed_handled, observed_reply = await self._plugins.dispatch_observed(
                     bot_id, event, raw
                 )
                 if observed_handled:
-                    if observed_reply:
-                        await self._send_reply(bot_id, event, observed_reply)
-                    return
+                    if isinstance(event, GroupMessageEvent) and self._mention_restricts_command(
+                        bot_id, event
+                    ):
+                        logger.debug(
+                            f"观察钩子消费被忽略: 指令定向给被 @ 的 bot, {bot_id} "
+                            f"(group={event.group_id})"
+                        )
+                    else:
+                        if observed_reply:
+                            await self._send_reply(bot_id, event, observed_reply)
+                        return
             except Exception as e:
                 logger.exception(f"Plugin observe dispatch error: {e}")
 
@@ -503,6 +618,13 @@ class MessageHandler:
         if isinstance(event, GroupMessageEvent):
             if not ban_command and not await self._should_respond_to_group(bot_id, event):
                 logger.debug(f"Skipping group message (not mentioned): user={event.user_id}")
+                return
+            # ── @ 定向: 消息里 @ 了具体 bot 时, 指令只由被 @ 的 bot 执行 ──
+            # (@ 多只则它们各自执行; 未被 @ 的 bot 静默跳过, 不再参与抽签)
+            if self._mention_restricts_command(bot_id, event):
+                logger.debug(
+                    f"指令定向给被 @ 的 bot, {bot_id} 跳过 (group={event.group_id})"
+                )
                 return
             # ── 全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复 ──
             # (如 /占卜 /help; 插件可通过类属性 global_triggers 声明)
@@ -600,6 +722,15 @@ class MessageHandler:
             full_reply = await self._stream_llm_reply(
                 bot_id, event, context, raw, reply_options=reply_options,
             )
+
+        # LLM 诊断(未配置/调用失败/空响应)已经展示给用户, 但它不是助手回复:
+        # 不写 contexts/ 工作记忆、不落 conversations 表、不触发情感分析。
+        # 标记随返回值传递(而非按会话记共享状态): 同一会话的并发消息互不串扰。
+        if isinstance(full_reply, LLMDiagnostic):
+            logger.warning(
+                f"LLM 未产出有效回复(bot={bot_id} {chat_type}:{chat_id}), 本轮不写入上下文与数据库"
+            )
+            return
 
         # Save context after streaming completes
         if full_reply.strip():
@@ -895,6 +1026,17 @@ class MessageHandler:
         own = await self._render_message_content(
             bot_id, getattr(event, "message", ""), describe_missing=False,
         )
+        from mohobot.utils.cq_code import (
+            empty_message_placeholder, has_meaningful_text, symbol_only_placeholder,
+        )
+        chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+        if not has_meaningful_text(own):
+            # 空白/纯符号消息: 以标注代替, 否则下一轮重放历史时会再次触发
+            # 网关的"内容为空或只有空白/标点"拒绝。
+            if own.strip():
+                own = symbol_only_placeholder(chat_type, own)
+            else:
+                own = empty_message_placeholder(chat_type, getattr(event, "message", ""))
         if not quote_display:
             return own
         if own:
@@ -1246,6 +1388,10 @@ class MessageHandler:
                 raw_event=raw,
                 **options,
             )
+            if isinstance(reply_text, LLMDiagnostic):
+                # 诊断文案照常告知用户(不朗读、不过滤), 标记原样返回给调用方用于跳过持久化。
+                await self._send_full_text(bot_id, event, reply_text)
+                return reply_text
             full_reply = reply_text or ""
             from mohobot.utils.reply_filter import strip_reply_artifacts
             full_reply, tts_text = strip_reply_artifacts(full_reply)
@@ -1262,6 +1408,7 @@ class MessageHandler:
         full_reply = ""
         first_sent = False
         segments_sent = 0
+        diagnostic: LLMDiagnostic | None = None
 
         async for chunk, is_final in self._llm.chat_stream(
             bot_id=bot_id,
@@ -1270,6 +1417,15 @@ class MessageHandler:
             raw_event=raw,
             **options,
         ):
+            if isinstance(chunk, LLMDiagnostic):
+                # 诊断不进回复过滤器(过滤后会退化成普通 str 而丢失标记), 单独记下;
+                # 先冲刷此前缓冲的正文, 诊断在最后单独发出。
+                diagnostic = chunk
+                if buffer.strip():
+                    segments_sent += 1
+                    first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                    buffer = ""
+                continue
             if chunk:
                 # 标签/产物剥除(防跨 chunk 撕裂), 只把显示文本送入分段缓冲
                 chunk = artifact_filter.feed(chunk)
@@ -1296,6 +1452,12 @@ class MessageHandler:
         if rest.strip():
             segments_sent += 1
             first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+        if diagnostic is not None:
+            # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
+            # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
+            await self._send_segment(bot_id, event, diagnostic, first_sent)
+            logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
+            return diagnostic
         self._submit_tts(bot_id, event, tts_text)
 
         logger.debug(
@@ -1312,6 +1474,7 @@ class MessageHandler:
         """
         options = reply_options if reply_options is not None else {"bot_config": self._bot_config(bot_id)}
         full_reply = ""
+        diagnostic: LLMDiagnostic | None = None
         async for chunk, _ in self._llm.chat_stream(
             bot_id=bot_id,
             event=event,
@@ -1319,10 +1482,26 @@ class MessageHandler:
             raw_event=raw,
             **options,
         ):
+            if isinstance(chunk, LLMDiagnostic):
+                diagnostic = chunk
+                continue
             if chunk:
                 full_reply += chunk
 
         from mohobot.utils.reply_filter import strip_reply_artifacts
+        if diagnostic is not None:
+            # 生成未正常完成: 把已收到的正文与诊断一并发出, 不朗读、不持久化。
+            display, _ = strip_reply_artifacts(full_reply)
+            text = "\n".join(part for part in (display.strip(), diagnostic) if part)
+            if self._reply_quote:
+                message = [
+                    {"type": "reply", "data": {"id": str(event.message_id)}},
+                    {"type": "text", "data": {"text": text}},
+                ]
+            else:
+                message = text
+            await self._send_message(bot_id, event, message, source="llm")
+            return diagnostic
         full_reply, tts_text = strip_reply_artifacts(full_reply)
 
         text = full_reply.strip()
@@ -1711,6 +1890,10 @@ class MessageHandler:
                     break
         if not is_global:
             return False
+        # @ 定向优先于抽签: 被 @ 的 bot 都应执行(可能多只), 未被 @ 的已在
+        # gate 阶段跳过, 这里不能再抽签削掉其中一部分。
+        if self._mentioned_bot_ids(event):
+            return False
         # 随机选中的 bot 才回复(同一条消息多 bot 协程共享同一抽签结果)
         chosen = self._ws._bot_manager.pick_bot_for_group(
             str(event.group_id), str(event.message_id),
@@ -1749,12 +1932,18 @@ class MessageHandler:
         bots = bm.bots_in_group(group_id)
         if len(bots) <= 1:
             return False  # 单 bot 群: 走原流程即可
+        # @ 定向: 用户点名了具体 bot 时, 由被 @ 的 bot 各自正常回复
+        # (不合并成一条转发, 否则"@ A"却收到包含 A 与 B 的合并消息)。
+        if self._mentioned_bot_ids(event):
+            return False
         sender = bm.pick_bot_for_group(group_id, str(event.message_id)) or bots[0]
         if bot_id != sender:
             logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")
             return True
 
-        # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串)
+        # 逐 bot 收集回复(每个 bot 以自己的身份执行, 数据/动作互不串);
+        # 没有回复的 bot 不进节点, 不用占位(修三条独立回复都只见一条后的
+        # "后续 bot 全部静默" 情况下满屏"(无响应)"的问题)
         replies: dict[str, str] = {}
         for b in bots:
             reply = await self._collect_merged_reply(b, event, raw, text)
@@ -1763,16 +1952,21 @@ class MessageHandler:
 
         nodes = []
         for b in bots:
+            if b not in replies:
+                continue
             bot_qq, bot_nick = self._bot_identity(b)
-            content = replies.get(b) or "(无响应)"
             nodes.append({
                 "type": "node",
                 "data": {
                     "user_id": str(bot_qq),
                     "nickname": bot_nick,
-                    "content": [{"type": "text", "data": {"text": content}}],
+                    "content": [{"type": "text", "data": {"text": replies[b]}}],
                 },
             })
+
+        if not nodes:
+            logger.debug(f"合并回复 {text!r}: 所有 bot 均无回复, 静默跳过(群 {group_id})")
+            return True
 
         try:
             await self._ws.send_group_forward_msg(sender, event.group_id, nodes)
@@ -1780,7 +1974,7 @@ class MessageHandler:
                 f"合并回复 {text!r}: {len(nodes)} 个 bot 的回复已合并发送(群 {group_id})"
             )
         except Exception as e:
-            # 合并转发失败 → 退化为发送者自己的那条普通回复
+            # 合并转发发送失败 → 发送者自己的那条普通回复
             logger.warning(f"合并转发发送失败, 退化为普通回复: {e}")
             own = replies.get(sender)
             if own:

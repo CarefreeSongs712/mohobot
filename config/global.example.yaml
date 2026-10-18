@@ -52,7 +52,7 @@ server:
   max_size: 10485760  # 10 MB
   outbound_interval: 0.5         # 每个 bot 的消息发送间隔(秒)
   outbound_maxsize: 100          # 每个 bot 的发送队列容量
-  outbound_enqueue_timeout: 2.0  # 队列入队超时(秒)
+  outbound_enqueue_timeout: 2.0  # 已废弃, 不再生效: 队列满时立即失败(保留字段兼容旧配置)
 
 llm:
   # Chat model
@@ -148,6 +148,63 @@ music_knowledge:
       - "Category:洛天依歌曲"
       - "Category:殿堂曲"
       - "Category:传说曲"
+  # 模糊识别: 歌名允许 1 字差(漏字/错别字/相邻颠倒), 歌词用 6-gram 倒排。
+  # min_confidence 越低召回越高、误报越多(0.9 只认精确与核名, 0.8 含歌词命中)。
+  fuzzy_enabled: true
+  min_confidence: 0.8
+  # 注入 LLM 的资料预算: max_chars=0 注入完整歌词(旧行为);
+  # >0 时给「介绍摘要 + 歌词命中处附近 N 行」, 完整歌词走 song_get_lyrics 工具。
+  injection:
+    max_chars: 1200
+    lyric_context_lines: 4
+  # 多来源同步: 定时任务由 song_sync 插件执行, 也可手动 /sync-songs。
+  sync:
+    enabled: false             # 开启后按 interval_hours 自动同步
+    interval_hours: 24
+    check_interval_sec: 600    # 框架轮询间隔(实际触发仍看 interval_hours)
+    mode: fill_missing         # new_only / fill_missing / full_refresh
+    max_fail: 30               # 单来源连续失败上限(熔断)
+    quiet_hours_start: 2       # 静默时段(避免与白天业务抢带宽); 省略则不限制
+    quiet_hours_end: 7
+    order: [vcpedia, vocawiki, moegirl]
+    sources:
+      vcpedia:
+        enabled: true
+        base_url: "https://vcpedia.cn"
+        interval: 0.8
+        categories:
+          - "Category:洛天依歌曲"
+          - "Category:殿堂曲"
+          - "Category:传说曲"
+      vocawiki:
+        enabled: true
+        base_url: "https://voca.wiki"
+        interval: 0.4
+        categories:
+          - "Category:洛天依歌曲"
+          - "Category:乐正绫歌曲"
+          - "Category:言和歌曲"
+          - "Category:星尘歌曲"
+          - "Category:心华歌曲"
+          - "Category:使用VOCALOID的歌曲"
+      moegirl:
+        enabled: true
+        base_url: "https://mzh.moegirl.org.cn"
+        interval: 4.5            # 实测 1s/3s 间隔约 25% 403, 5s 为 0
+        categories:
+          - "洛天依歌曲"
+          - "乐正绫歌曲"
+          - "言和歌曲"
+          - "乐正龙牙歌曲"
+          - "徵羽摩柯歌曲"
+          - "墨清弦歌曲"
+          - "星尘歌曲"
+          - "心华歌曲"
+          - "赤羽歌曲"
+          - "海伊歌曲"
+          - "诗岸歌曲"
+          - "苍穹歌曲"
+          - "初音未来歌曲"
 
 # ── 情感系统(好感度/亲密度/关系阶段/长期记忆) ──────────────────
 # pre-LLM 注入情感状态与语气指导, 回复后按需调用情感分析 LLM 更新状态。

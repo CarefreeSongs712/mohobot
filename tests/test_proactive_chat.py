@@ -403,6 +403,114 @@ async def test_user_reply_during_send_keeps_observe_schedule():
         assert entry["next_trigger_time"] == clock.now + 50 + 60
 
 
+# ── LLM 自主决策(SKIP/PAUSE) ─────────────────────────────────
+
+async def test_llm_choice_skip():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        llm.reply = "[SKIP]"
+
+        await engine.tick()
+
+        assert mh.sent == [] and ctx.appended == []  # 不发送不回写
+        state = await _read_state(state_path)
+        entry = state["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 0  # 拒绝不计数
+        assert entry["next_trigger_time"] == clock.now + 60  # 正常重排
+
+
+async def test_llm_choice_pause():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now, unanswered=2))
+        llm.reply = "[PAUSE]"
+
+        await engine.tick()
+
+        assert mh.sent == [] and ctx.appended == []
+        state = await _read_state(state_path)
+        entry = state["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 2  # 保持
+        assert "next_trigger_time" not in entry  # 暂停: 待发任务已消耗不再重排
+        # 对方回复后恢复(观察钩子归零+重排)
+        await engine.on_private_message("bot_001", "123", "回来了")
+        state = await _read_state(state_path)
+        entry = state["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 0
+        assert entry["next_trigger_time"] == clock.now + 60
+
+
+async def test_llm_choice_marker_variants():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        for variant in ("【SKIP】", "(skip)", "  skip  ", "PAUSE"):
+            await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+            llm.reply = variant
+            await engine.tick()
+        state = await _read_state(state_path)
+        entry = state["sessions"]["bot_001:123"]
+        assert mh.sent == []
+        # 末次为 PAUSE: 待发任务不再重排
+        assert "next_trigger_time" not in entry
+
+
+async def test_llm_choice_marker_with_content_sends_content():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        llm.reply = "[skip] 其实还是想说: 好久不见"
+
+        await engine.tick()
+
+        assert len(mh.sent) == 1 and mh.sent[0]["text"] == "其实还是想说: 好久不见"
+        state = await _read_state(state_path)
+        assert state["sessions"]["bot_001:123"]["unanswered_count"] == 1
+
+
+async def test_llm_choice_disabled_treats_marker_as_text():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        engine.update_config({"enable_llm_choice": False})
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        llm.reply = "[SKIP]"
+
+        await engine.tick()
+
+        # 开关关闭: 无决策指令, 标记按普通文本原样发送
+        assert len(mh.sent) == 1 and mh.sent[0]["text"] == "[SKIP]"
+
+
+async def test_decision_guidance_in_prompt():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock()
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+
+        await engine.tick()
+
+        raw = llm.calls[0]["event"].raw_message
+        assert "【发送前自主判断】" in raw and "[SKIP]" in raw and "[PAUSE]" in raw
+        assert "已未回复 0 次" in raw  # 未回复状态注入决策依据
+
+        # 关闭开关后不再附加
+        engine.update_config({"enable_llm_choice": False})
+        await engine._mutate_state(_seed_due("bot_001", "456", clock.now))
+        await engine.tick()
+        assert "【发送前自主判断】" not in llm.calls[-1]["event"].raw_message
+
+
 # ── 启动恢复与冷启动自动触发 ─────────────────────────────────
 
 async def test_startup_cleans_stale_and_keeps_fresh():

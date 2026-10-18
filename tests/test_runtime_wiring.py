@@ -3,12 +3,10 @@
 import asyncio
 import base64
 import io
-import json
 import sys
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

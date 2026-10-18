@@ -119,6 +119,63 @@ def extract_plain_text(message: str | list[dict[str, Any]]) -> str:
     return "".join(text_parts).strip()
 
 
+def has_meaningful_text(text: str) -> bool:
+    """文本是否含可被模型理解的内容(字母/数字/汉字等), 而非纯空白/标点/表情。
+
+    上游网关会以 400 拒绝"内容为空或只有空白/标点"的请求, 因此发请求前
+    必须区分"有实质内容"与"只有符号"。Unicode 类别 L(字母)、N(数字)、
+    S(符号中的 emoji/货币等)中, 只有 L/N 视为有实质语义; 纯 emoji 串
+    (如 👍👀)属于 So, 对文本模型同样没有可回应内容, 归为无实质内容。
+
+    入参不保证是 str: 历史 context 来自磁盘 JSON, 旧版本/插件可能写入 None、
+    数字或 OpenAI 多模态的 list[dict]。非字符串按其文本内容判断, 绝不抛异常 ——
+    这个函数在每次 LLM 请求构建的热路径上, 一个 TypeError 就会让整轮回复失败。
+    """
+    import unicodedata
+
+    if text is None:
+        return False
+    if isinstance(text, list):
+        # 多模态: 任一文本段有实质内容即可
+        return any(
+            has_meaningful_text(part.get("text") if isinstance(part, dict) else part)
+            for part in text
+        )
+    if not isinstance(text, str):
+        text = str(text)
+    for ch in text:
+        if unicodedata.category(ch)[0] in ("L", "N"):
+            return True
+    return False
+
+
+def extract_at_targets(message: str | list[dict[str, Any]]) -> list[str]:
+    """返回消息里被 @ 的 QQ 号列表(按出现顺序, 去重)。
+
+    纯字符串消息会先按 CQ 码解析; `at` 段的 ``data.qq`` 为 "all" 时跳过
+    (@全体不是对某个 bot 的点名)。无法解析的段忽略, 不抛异常。
+    """
+    if isinstance(message, str):
+        try:
+            segments = parse_cq_code(message)
+        except Exception:  # noqa: BLE001 - 畸形 CQ 码不应中断主链
+            return []
+    elif isinstance(message, list):
+        segments = message
+    else:
+        return []
+
+    targets: list[str] = []
+    for seg in segments:
+        if not isinstance(seg, dict) or seg.get("type") != "at":
+            continue
+        qq = str((seg.get("data") or {}).get("qq") or "").strip()
+        if not qq or qq == "all" or qq in targets:
+            continue
+        targets.append(qq)
+    return targets
+
+
 def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
     """Extract usable image references from a message.
 
@@ -161,3 +218,51 @@ def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
                 pass
             urls.append(f"data:{mime};base64,{b64}")
     return urls
+
+
+def empty_message_placeholder(chat_type: str, message: str | list[dict[str, Any]]) -> str:
+    """空白/仅@消息的提示性标注(替代空 content, 避免 LLM 收到空 user 消息)。
+
+    chat_type: "group" / "private"。message 为原始消息段(或字符串)。
+    有非文本段时(表情/语音/视频等)按类型说明, 否则视为纯 @ 或真空消息。
+    """
+    if isinstance(message, str):
+        segments = parse_cq_code(message) if message else []
+    elif isinstance(message, list):
+        segments = message
+    else:
+        segments = []
+    non_text = [
+        seg.get("type") for seg in segments
+        if isinstance(seg, dict)
+        and seg.get("type") not in ("text", "reply", "at")
+    ]
+    if "face" in non_text:
+        return "（用户只发送了表情，没有附加文字）"
+    if "record" in non_text:
+        return "（用户只发送了语音，没有附加文字）"
+    if "video" in non_text:
+        return "（用户只发送了视频，没有附加文字）"
+    if "json" in non_text:
+        return "（用户只发送了卡片/结构化消息，没有文字）"
+    if "forward" in non_text:
+        return "（用户转发了合并转发消息，没有附加文字）"
+    if "file" in non_text:
+        return "（用户只发送了一个文件，没有附加文字）"
+    if non_text:
+        return f"（用户只发送了非文本内容（{'/'.join(non_text)}），没有附带文字）"
+    if chat_type == "group":
+        return "（该用户在群里 @ 了机器人，但未附带任何文字内容）"
+    return "（用户发送了一条空白消息，未包含文字或附件）"
+
+
+def symbol_only_placeholder(chat_type: str, text: str) -> str:
+    """纯符号消息(标点/emoji, 无字母数字)的标注文本。
+
+    上游网关会拒绝"只有空白/标点"的请求; 这类消息本身也没有可回应的语义,
+    用一条说明替代原文, 既让请求合法, 也让模型知道用户只发了符号/表情。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return empty_message_placeholder(chat_type, "")
+    return f"（用户只发送了表情/符号，没有文字内容：{stripped}）"

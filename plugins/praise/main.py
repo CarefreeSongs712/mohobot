@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 
 from loguru import logger
@@ -43,6 +44,39 @@ class Plugin:
     # 判定"已达上限"的错误关键词(平台返回)
     _LIMIT_HINTS = ("频繁", "上限", "过快", "too many", "频繁操作", "操作过快")
 
+    # 一分钟全局节流: 用户 QQ -> 上次触发时间戳(类级 = 跨 bot/群/私聊全局)。
+    # 触发即占用(无论点赞成败), 60s 内再次触发直接提示, 不调 API。
+    _THROTTLE_WINDOW = 60.0
+    _throttle_cache: dict[int, float] = {}
+
+    # 同一消息事件的节流提示去重: message_id -> 占用时间戳。
+    # 每条消息上提示语只出一次(由先到的 bot 出, 其余静默); 点赞本身不做
+    # 主权声明 —— 每个 bot 都以自己的身份点赞并汇报各自结果。
+    _event_owner_cache: dict[str, float] = {}
+
+    @staticmethod
+    def _claim_event(raw_event: dict) -> bool:
+        """声明本条消息事件提示类的唯一发言权; 已被占用的 message_id 返回 False。"""
+        try:
+            mid = str(raw_event.get("message_id") or "")
+        except AttributeError:
+            return True  # 拿不到 id(非标准事件)时保持旧行为
+        if not mid:
+            return True
+        now = time.time()
+        stale = [k for k, ts in Plugin._event_owner_cache.items() if now - ts > 120]
+        for k in stale:
+            del Plugin._event_owner_cache[k]
+        if mid in Plugin._event_owner_cache:
+            return False
+        Plugin._event_owner_cache[mid] = now
+        return True
+
+    @staticmethod
+    def _set_throttle(user_id: int, mid: str) -> None:
+        """写入节流窗口(带来源的 message_id, 用于区分"同一条消息的兄弟 bot")。"""
+        Plugin._throttle_cache[int(user_id)] = {"ts": time.time(), "mid": mid}
+
     # 默认配置(_conf_schema.json 注入覆盖; 无 schema 时的兜底)
     _DEFAULTS = {
         "like_total": 20,
@@ -50,6 +84,7 @@ class Plugin:
         "success_msg": "✅ 已给你点了 {count} 个赞~",
         "fail_msg": "❌ 点赞失败: {detail}",
         "limit_msg": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
+        "throttle_msg": "bot一次点赞就会把所有的赞点完，不需要发送多次。反复点赞可能导致bot风控",
         # 每日定时点赞
         "daily_like_enabled": True,
         "daily_like_time": "08:00",
@@ -207,6 +242,34 @@ class Plugin:
         user_id = event.user_id
         logger.info(f"Praise request from {user_id} (bot {bot_id})")
 
+        # 一分钟全局节流(触发即占用窗口, 成败与否):
+        # - 窗口内的新消息 → 提示语每条消息只由一个 bot 出一次, 其余静默;
+        # - 窗口内的同一条消息(兄弟 bot) → 继续执行点赞, 每个 bot 都要赞;
+        # - 无窗口/已过期 → 点赞。
+        throttle_msg = self._cfg("throttle_msg", self._DEFAULTS["throttle_msg"])
+        now_ts = time.time()
+        raw_mid = ""
+        try:
+            raw_mid = str(raw_event.get("message_id") or "")
+        except AttributeError:
+            raw_mid = ""
+        entry = Plugin._throttle_cache.get(int(user_id))
+        if entry is not None and now_ts - entry["ts"] < Plugin._THROTTLE_WINDOW:
+            if entry.get("mid") != raw_mid:
+                if self._claim_event(raw_event):
+                    logger.debug(f"Praise throttled(new msg): {user_id} (retry in "
+                                 f"{Plugin._THROTTLE_WINDOW - (now_ts - entry['ts']):.0f}s)")
+                    return (True, throttle_msg)
+                logger.debug(f"Praise throttled silent: {user_id} (hint claimed)")
+                return (True, None)
+            # 同一条消息: 兄弟 bot 放行去点赞
+        else:
+            # 顺手清理过期条目, 防长驻进程下缓存膨胀
+            expired = [k for k, v in Plugin._throttle_cache.items()
+                       if time.time() - v["ts"] > 3600]
+            for k in expired:
+                del Plugin._throttle_cache[k]
+
         ws_server = self._ws_server
         if ws_server is None:
             return (True, "点赞服务未配置,无法发送点赞。")
@@ -223,6 +286,7 @@ class Plugin:
         # 当日已达上限 → 直接提示, 不再调用 API
         if self._like_limit_cache.get(cache_key) == today:
             logger.debug(f"Praise daily limit cached: {user_id}")
+            self._set_throttle(int(user_id), raw_mid)
             return (True, limit_msg)
 
         # 按配置的每次点数分批调用(QQ 单次上限 10)。
@@ -252,6 +316,7 @@ class Plugin:
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"send_like failed: {e}")
+            self._set_throttle(int(user_id), raw_mid)
             return (True, f"❌ 点赞失败: {e}")
 
         if errors:
@@ -260,6 +325,8 @@ class Plugin:
             # 平台拒绝(如已达上限) → 缓存当天, 之后不再重复调用 API
             if any(hint in detail for hint in self._LIMIT_HINTS):
                 self._mark_like_limit(cache_key, today)
+            self._set_throttle(int(user_id), raw_mid)
             return (True, self._render(fail_msg, detail=detail))
         total_sent = ok_count * times_per_call
+        self._set_throttle(int(user_id), raw_mid)
         return (True, self._render(success_msg, count=total_sent))
