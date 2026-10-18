@@ -407,18 +407,25 @@ database:
 
 ## 🎵 歌曲知识（全局歌曲识别 + LLM 前注入）
 
-歌曲知识为全局能力（私聊+群聊）：用户消息里含歌曲信息（歌名或歌词）时，在发送给 LLM 之前识别出是哪首歌，把「歌曲介绍 + 词/曲/混/调等创作人员 + 完整歌词」加入本轮主系统提示的 **【歌曲参考资料（服务端检索）】**。它是请求级服务端参考，不属于用户发言，不写入 context 文件；不再输出 `[sing]` 唱歌文本。
+歌曲知识为全局能力（私聊+群聊）：用户消息里含歌曲信息（歌名或歌词）时，在发送给 LLM 之前识别出是哪首歌，把「歌曲介绍 + 词/曲/混/调等创作人员 + 歌词」加入本轮主系统提示的 **【歌曲参考资料（服务端检索）】**。它是请求级服务端参考，不属于用户发言，不写入 context 文件；不再输出 `[sing]` 唱歌文本。
 
 实现位于 `mohobot/music_knowledge/`：
 
-1. **SQLite 事实库**（`song_database.py`，新 schema）— `songs` 表字段：`name / safe_name / uploader(UP主) / singers(演唱) / lyricist(作词) / composer(作曲) / arranger(编曲) / mixer(混音) / tuner(调教) / mastering(母带) / pv / illustrator(曲绘) / year(年份) / introduction(介绍) / lyrics(完整歌词，保留换行)`；启动时按新 schema 建空库（不再复制内置库）
-2. **匹配器**（`matcher.py`）— `SongInfoMatcher` 直接和爬取库比对（不再依赖 FlashText/关键词 txt）：`《歌名》` 书名号高置信命中 → 裸文本含歌名（长度≥3）且含歌曲语境词（唱/听/歌/歌词等）→ 歌词片段（采样 3 个 12–20 字子串做包含检测）。命中即取详情节并格式化为 `【歌曲信息】` 注解段（介绍 + 演唱/UP主 + 词/曲/编/混/调 + 完整歌词）
-3. **VCPedia 新歌同步**（`vcpedia.py`，重写）— 站点现为 **Anubis PoW 反爬**（明文请求 403），同步器内置 PoW 解题 + auth cookie 持久化复用；列表走 `api.php list=categorymembers` 全量分页；词条优先 `rest.php` wikitext（兜底渲染 HTML）；解析完整创作人员与完整歌词。手动触发：`/sync-songs`（管理员）或 `python scripts/sync_vcpedia.py`
-4. **旧数据迁移** — `python scripts/migrate_legacy_songs.py` 把旧版 3412 首（name/uploader/singers/introduction/lyrics）迁移进新 schema（credits 留空）
+1. **SQLite 事实库**（`song_database.py`）— `songs` 宽表存合并后的歌曲字段（`name / safe_name / uploader / singers / lyricist / composer / arranger / mixer / tuner / mastering / pv / illustrator / year / introduction / lyrics`，以及 `aliases / bvid / lang / normalized_name / primary_source`）；`song_sources` 记录每个来源的原始抓取结果与许可，`sync_state` 记录同步断点。
+2. **匹配器**（`matcher.py` + `fuzzy.py`，保守优先）— `《歌名》` → 裸文本歌名（长度≥3 且含语境词）→ 歌词片段 → **模糊层**：歌名允许漏字/错字/相邻颠倒（编辑距离 ≤1 且候选唯一），歌词用 6-gram 倒排索引（漏字、错字仍可命中）。模糊命中带置信度，低置信或候选歧义时不注入，避免把日常聊天误认成歌曲。
+3. **多来源同步**（`sources/` + `merge.py` + `sync.py`）— 三个来源：
+   - **VCPedia**：原有来源，洛天依曲最全，内置 Anubis PoW 反爬与 cookie 复用；
+   - **voca.wiki**：MediaWiki API + wikitext，结构最干净，可补 BV 号与词曲编；
+   - **萌娘百科**：中文曲覆盖最厚（洛天依 3524、乐正绫 1026、言和 1000），分类与歌词走 HTML，需移动 UA 与 4–5 秒间隔。
+
+   合并时按字段分来源优先级（歌词/演唱取 VCPedia 或 voca.wiki；词曲编混调/PV/曲绘/简介/年份取萌娘百科），**只补空字段、不覆盖非空值**，同名不同歌手的歌不会被误合并。支持三种模式：`new_only`（补未收录）、`fill_missing`（补残缺字段，默认）、`full_refresh`（全量重抓），断点续跑、单来源熔断。
+4. **定时与手动触发** — 在 `music_knowledge.sync` 打开 `enabled` 后由 `song_sync` 插件按 `interval_hours` 自动同步；也可手动 `/sync-songs [new|fill|refresh|status|vcpedia|vocawiki|moegirl]`（管理员）或 `python scripts/sync_songs.py`。
+5. **注入预算** — 默认只注入「介绍摘要 + STAFF + 歌词命中处前后几行」，完整歌词由 LLM 调 `song_get_lyrics` 工具按需获取；改 `music_knowledge.injection.max_chars` 可调大或设为 0 恢复完整歌词。
+6. **旧数据迁移** — `python scripts/migrate_legacy_songs.py` 把旧版数据迁移进新 schema。
 
 **网易云点歌插件（`/点歌`）不受影响**：仍走独立命令路径，不进入本歌曲知识链路。
 
-配置在顶层 `music_knowledge`：
+配置在顶层 `music_knowledge`（完整示例见 `config/global.example.yaml`）：
 
 ```yaml
 music_knowledge:
@@ -426,9 +433,20 @@ music_knowledge:
   song_database:
     db_folder: "./data/song_knowledge"
     db_file: "knowledge_db.db"
-  crawler:
-    base_url: "https://vcpedia.cn"
-    category: "Category:洛天依歌曲"
+  fuzzy_enabled: true
+  min_confidence: 0.8
+  injection:
+    max_chars: 1200        # 0 = 注入完整歌词
+    lyric_context_lines: 4
+  sync:
+    enabled: false         # 定时同步开关
+    interval_hours: 24
+    mode: fill_missing     # new_only / fill_missing / full_refresh
+    order: [vcpedia, vocawiki, moegirl]
+    sources:
+      vcpedia: {enabled: true, interval: 0.8}
+      vocawiki: {enabled: true, interval: 0.4}
+      moegirl: {enabled: true, interval: 4.5}   # 实测更快会触发 403
 ```
 
 ## 🔊 TTS 语音（可切换后端：自建 HTTP / MiniMax）

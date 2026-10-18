@@ -1215,6 +1215,8 @@ class LLMService:
         perception_parts: list[str] = []
         emotion_parts: list[str] = []
 
+        from mohobot.utils.cq_code import has_meaningful_text
+
         # 1. System prompt
         system_content = ""
 
@@ -1267,6 +1269,10 @@ class LLMService:
                 # 临时注入段(如群聊最近消息): 直接作为 system 消息
                 messages.append({"role": "system", "content": content})
             elif role in ("user", "assistant"):
+                # 历史里的空白/纯符号条目(如只有「？」「👍」)既无可回应语义,
+                # 又会让网关以 400 拒绝整个请求, 直接跳过。
+                if not has_meaningful_text(content):
+                    continue
                 messages.append({"role": role, "content": content})
             else:
                 # Named speaker role, e.g. "3831097597-墨染荷韵"
@@ -1318,11 +1324,18 @@ class LLMService:
                 # 视觉不可用或描述失败: 降级为占位文本
                 user_content = f"{user_text}（用户发送了图片）" if user_text else "（用户发送了图片）"
 
-        # 空白消息(纯 @/空内容/纯非文本段)用标注替代, 不给 LLM 发空 user 消息
-        if not user_content:
-            from mohobot.utils.cq_code import empty_message_placeholder
-            chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
-            user_content = empty_message_placeholder(chat_type, event.message)
+        # 空白/纯符号消息用标注替代, 不给 LLM 发空或只有标点的 user 消息。
+        # 部分网关会直接 400 拒绝"内容为空或只有空白/标点"的请求, 因此判据是
+        # "有无字母/数字", 而不是 strip() 后是否非空(纯 emoji/标点同样会触发)。
+        from mohobot.utils.cq_code import (
+            empty_message_placeholder, has_meaningful_text, symbol_only_placeholder,
+        )
+        chat_type = "group" if isinstance(event, GroupMessageEvent) else "private"
+        if not has_meaningful_text(user_content):
+            if user_content.strip():
+                user_content = symbol_only_placeholder(chat_type, user_content)
+            else:
+                user_content = empty_message_placeholder(chat_type, event.message)
 
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:
