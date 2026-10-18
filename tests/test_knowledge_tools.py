@@ -1,6 +1,5 @@
 """知识库工具注册回归: 注册/摘除/执行契约(假服务, 无网络)。"""
 
-import asyncio
 import json
 import sys
 from pathlib import Path

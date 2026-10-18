@@ -101,7 +101,7 @@ def chunk_markdown(path: Path, rel_path: str) -> list[Chunk]:
         # 导言块里通常只有文档大标题, 无正文则跳过
         if not h2:
             body = "\n".join(
-                l for l in body_lines if not l.strip().startswith("# ")
+                line for line in body_lines if not line.strip().startswith("# ")
             ).strip()
         if not body:
             continue
