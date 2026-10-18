@@ -30,6 +30,35 @@ from mohobot.services.usage import UsageRecorder
 from mohobot.utils.llm_diagnostic import LLMDiagnostic
 
 
+# 历史符号条目在占位文本里最多复现的原文长度(超出截断)
+_HISTORY_SYMBOL_MAX_CHARS = 40
+
+
+def _history_symbol_placeholder(role: str, content: Any, *, is_group: bool) -> str:
+    """历史里"无实质内容"条目(纯标点/emoji/空白)的替代文本。
+
+    必须自身含字母/汉字(否则网关仍会 400), 且保留原文符号让模型知道当时
+    发生了什么; 措辞区分发言方: bot 自己的回复不能写成"用户发送了…"。
+    """
+    from mohobot.utils.cq_code import empty_message_placeholder, symbol_only_placeholder
+
+    text = content if isinstance(content, str) else ("" if content is None else str(content))
+    chat_type = "group" if is_group else "private"
+    stripped = text.strip()
+    # 原文只用来让模型知道"当时发的是什么符号"; 刷屏式超长符号串(实测 5000 个
+    # emoji 会让一条历史膨胀成 5000+ 字符)只保留开头, 避免每轮都重放这段 token。
+    if len(stripped) > _HISTORY_SYMBOL_MAX_CHARS:
+        stripped = stripped[:_HISTORY_SYMBOL_MAX_CHARS] + "…(已截断)"
+        text = stripped
+    if role == "assistant":
+        if stripped:
+            return f"（我回复了表情/符号，没有文字：{stripped}）"
+        return "（我这一轮没有输出文字内容）"
+    if stripped:
+        return symbol_only_placeholder(chat_type, text)
+    return empty_message_placeholder(chat_type, "")
+
+
 class LLMService:
     """LLM interaction service with prompt assembly and vision support."""
 
@@ -1269,10 +1298,14 @@ class LLMService:
                 # 临时注入段(如群聊最近消息): 直接作为 system 消息
                 messages.append({"role": "system", "content": content})
             elif role in ("user", "assistant"):
-                # 历史里的空白/纯符号条目(如只有「？」「👍」)既无可回应语义,
-                # 又会让网关以 400 拒绝整个请求, 直接跳过。
+                # 历史里的空白/纯符号条目(如「？」「👍」, 或 bot 自己的「……」「~~~」)
+                # 原样发出会让网关以 400 拒绝整个请求。这里**替换**成带语义的标注而
+                # 不是丢弃: 丢弃会抹掉 bot 自己的回复(模型看到用户连说几遍却没人
+                # 回应, 会误判上一轮没答)并破坏 user/assistant 的角色交替。
                 if not has_meaningful_text(content):
-                    continue
+                    content = _history_symbol_placeholder(
+                        role, content, is_group=isinstance(event, GroupMessageEvent),
+                    )
                 messages.append({"role": role, "content": content})
             else:
                 # Named speaker role, e.g. "3831097597-墨染荷韵"
