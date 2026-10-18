@@ -235,6 +235,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="personas"><span class="icon">P</span> 人设管理</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
+    <div class="nav-item" data-page="knowledge"><span class="icon">📚</span> 知识库</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
     <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
@@ -437,6 +438,43 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       </div>
       <div class="hint" id="tts-test-result" style="margin-top:8px"></div>
       <audio id="tts-test-audio" controls style="display:none;width:100%;margin-top:8px"></audio>
+    </div>
+  </div>
+
+  <!-- 3.6 知识库 -->
+  <div class="page" id="page-knowledge">
+    <h2>📚 知识库</h2>
+    <div class="subtitle">虚拟歌手 RAG · embedding 语义检索 + 可选 rerank · LLM 工具接入（knowledge_search / knowledge_lookup）</div>
+
+    <div class="card">
+      <div class="card-title">📊 索引状态</div>
+      <div id="knowledge-status" class="stat-label">⏳ 加载中…</div>
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="loadKnowledgePage()">🔄 刷新状态</button>
+        <button class="btn btn-sm" id="knowledge-rebuild-btn" onclick="knowledgeRebuild()">🏗️ 强制重建索引</button>
+      </div>
+      <div class="small" style="color:var(--text-dim);margin-top:8px">
+        知识源目录与索引路径在本地 config 文件（knowledge.source_dir / knowledge.index_dir）配置，不在 WebUI 修改。启动时自动增量索引；手改知识源文件后重启或点「强制重建索引」。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🧪 测试检索（语义搜索）</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="knowledge-test-query" placeholder="如：洛天依的代表曲 / 五维介质有哪些歌手"
+          style="flex:1;min-width:240px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <button class="btn" id="knowledge-test-btn" onclick="knowledgeTestSearch()">🔍 检索</button>
+      </div>
+      <div id="knowledge-test-result" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⚙️ 检索配置</div>
+      <div id="knowledge-config-form"></div>
+      <button class="btn" onclick="saveKnowledgeConfig()">保存配置</button>
+      <div class="small" style="color:var(--text-dim);margin-top:6px">
+        API Key 留空保持原值；enabled 开关修改后需重启生效，其余保存即热同步；embedding 模型变更会自动重建索引。
+      </div>
     </div>
   </div>
 
@@ -730,6 +768,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
       case 'personas': loadPersonasPage(); break;
       case 'models': loadModels(); break;
       case 'tts': loadTtsPage(); break;
+      case 'knowledge': loadKnowledgePage(); break;
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
       case 'ban': loadBanPage(); break;
@@ -743,6 +782,92 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function init() {
   loadDashboard();
   startLogStream();
+}
+
+// ═══════════════ 3.6 知识库 ═══════════════
+async function loadKnowledgePage() {
+  try {
+    const s = await apiJSON('/api/knowledge/status');
+    const el = document.getElementById('knowledge-status');
+    if (!s.enabled) {
+      el.innerHTML = '⛔ 知识库未启用（knowledge.enabled=false，重启生效）';
+    } else {
+      const state = s.indexing ? '🔄 索引重建中…'
+        : (s.ready ? '✅ 就绪' : `⚠️ 未就绪${s.error ? '：' + s.error : ''}`);
+      el.innerHTML =
+        `${state} · ${s.files} 个文件 / ${s.chunks} 个知识块` +
+        (s.last_indexed_at ? ` · 上次索引 ${s.last_indexed_at}` : '') +
+        `<br>embedding: ${s.embedding_model || '—'} · rerank: ${s.rerank_enabled ? s.rerank_model : '关闭'}` +
+        (s.source_dir ? ` · 知识源: ${s.source_dir}` : '');
+    }
+    const cfg = await apiJSON('/api/config');
+    document.getElementById('knowledge-config-form').innerHTML =
+      checkField('knowledge.enabled', '启用知识库', cfg.knowledge?.enabled, 'LLM 工具 knowledge_search / knowledge_lookup；开关修改后需重启生效') +
+      formField('knowledge.embedding_model', 'Embedding 模型', cfg.knowledge?.embedding_model) +
+      formField('knowledge.embedding_base_url', 'Embedding Base URL', cfg.knowledge?.embedding_base_url) +
+      formField('knowledge.embedding_api_key', 'Embedding API Key', cfg.knowledge?.embedding_api_key, { type: 'password', hint: '留空保持原值；回退 MOHOBOT_EMBEDDING_API_KEY → chat key' }) +
+      formField('knowledge.rerank_model', 'Rerank 模型', cfg.knowledge?.rerank_model, { hint: '如 BAAI/bge-reranker-v2-m3；留空=不重排' }) +
+      formField('knowledge.rerank_base_url', 'Rerank Base URL', cfg.knowledge?.rerank_base_url) +
+      formField('knowledge.rerank_api_key', 'Rerank API Key', cfg.knowledge?.rerank_api_key, { type: 'password', hint: '留空保持原值；回退 embedding key' }) +
+      formField('knowledge.search_top_k', '召回数 top_k', cfg.knowledge?.search_top_k, { hint: '余弦召回候选池大小' }) +
+      formField('knowledge.search_top_n', '返回块数 top_n', cfg.knowledge?.search_top_n) +
+      formField('knowledge.max_chars_per_result', '单块截断(字符)', cfg.knowledge?.max_chars_per_result);
+  } catch (e) { showToast('加载知识库状态失败: ' + e.message, false); }
+}
+
+async function saveKnowledgeConfig() {
+  const num = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? def : v;
+  };
+  const data = { knowledge: {
+    enabled: document.getElementById('cfg-knowledge.enabled')?.checked ?? false,
+    embedding_model: document.getElementById('cfg-knowledge.embedding_model')?.value ?? '',
+    embedding_base_url: document.getElementById('cfg-knowledge.embedding_base_url')?.value ?? '',
+    embedding_api_key: document.getElementById('cfg-knowledge.embedding_api_key')?.value ?? '',
+    rerank_model: document.getElementById('cfg-knowledge.rerank_model')?.value ?? '',
+    rerank_base_url: document.getElementById('cfg-knowledge.rerank_base_url')?.value ?? '',
+    rerank_api_key: document.getElementById('cfg-knowledge.rerank_api_key')?.value ?? '',
+    search_top_k: num('cfg-knowledge.search_top_k', 20),
+    search_top_n: num('cfg-knowledge.search_top_n', 5),
+    max_chars_per_result: num('cfg-knowledge.max_chars_per_result', 800),
+  } };
+  try {
+    await apiJSON('/api/config', { method: 'PUT', body: { data } });
+    showToast('知识库配置已保存');
+    loadKnowledgePage();
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function knowledgeRebuild() {
+  if (!confirm('强制全量重建索引？将重新嵌入全部知识块（调用 embedding API）。')) return;
+  const btn = document.getElementById('knowledge-rebuild-btn');
+  btn.disabled = true;
+  try {
+    const r = await apiJSON('/api/knowledge/rebuild', { method: 'POST' });
+    const s = r.stats || {};
+    showToast(`索引已重建: ${s.chunks} 块 / ${s.files} 文件 (${s.elapsed_sec}s)`);
+  } catch (e) { showToast('重建失败: ' + e.message, false); }
+  btn.disabled = false;
+  loadKnowledgePage();
+}
+
+async function knowledgeTestSearch() {
+  const q = document.getElementById('knowledge-test-query').value.trim();
+  if (!q) return;
+  const el = document.getElementById('knowledge-test-result');
+  el.innerHTML = '<div class="hint">⏳ 检索中…</div>';
+  try {
+    const r = await apiJSON('/api/knowledge/test_search', { method: 'POST', body: { data: { query: q, top_k: 5 } } });
+    const esc = s => String(s == null ? '' : s).replace(/</g, '&lt;');
+    el.innerHTML = (r.results || []).map(x =>
+      `<div class="card" style="margin-bottom:8px;padding:8px 10px">
+        <div class="small" style="color:var(--text-dim)">${esc(x.title)} · ${esc(x.source)} · ${esc(x.score)}${r.reranked ? ' (rerank)' : ''}</div>
+        <div style="white-space:pre-wrap;margin-top:4px">${esc(String(x.text || '').slice(0, 400))}</div>
+      </div>`).join('') || '<div class="hint">无结果</div>';
+  } catch (e) { el.innerHTML = `<div class="hint">检索失败: ${e.message}</div>`; }
 }
 
 // ═══════════════ 1. Dashboard ═══════════════
