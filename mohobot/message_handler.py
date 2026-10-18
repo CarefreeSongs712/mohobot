@@ -31,6 +31,7 @@ from mohobot.models.onebot import (
     RequestEvent,
 )
 from mohobot.file_store import JSONLWriter
+from mohobot.history_dedup import message_signature
 from mohobot.models.config import is_external_service_group
 from mohobot.utils.llm_diagnostic import LLMDiagnostic
 from mohobot.utils.cq_code import extract_plain_text
@@ -78,8 +79,13 @@ class MessageHandler:
         self._ban_interceptor = None  # BanInterceptor 引用(归档后只做消息策略检查)
         self._global_config = global_config  # 与 main/WS/LLM 共用, sync_config 原位更新
         self._writer_registry: dict[str, JSONLWriter] = {}
-        # 群合并归档的 message_id 去重窗口: {group_id: OrderedDict[mid, None]}
+        # 群合并归档的去重窗口: {group_id: OrderedDict[mid, None]}
         self._group_mid_window: dict[Any, OrderedDict] = {}
+        # 跨账号内容指纹窗口: {group_id: OrderedDict[(sender, time, sig), set[bot_id]]}
+        # (message_id 按账号分配的协议端上, 同一条群消息的多份推送靠这个去重)
+        self._group_fp_window: dict[str, OrderedDict] = {}
+        # 发送侧指纹登记: 供入站归档识别"这是我方发言的副本"(WSServer 注入)
+        self._sent_claims = None
         # 全局歌曲匹配器(识别 + 注解; 未注入时降级)
         self._song_matcher = song_matcher
         # 情感系统(注入 + 后台分析; 未启用时为 None)
@@ -234,9 +240,9 @@ class MessageHandler:
         """Write raw event to history JSONL.
 
         群聊合并存储: 所有 bot 收到的群消息写进同一个
-        data/history/group/{群号}.jsonl, 写入时按 message_id 去重(同一条群
-        消息会经每个 bot 的连接各推送一次), 行内 bot_id 标注接收 bot;
-        私聊仍按 bot 分目录(不同 bot 与同一用户的私聊是不同对话)。
+        data/history/group/{群号}.jsonl, 写入时去重(同一条群消息会经每个
+        bot 的连接各推送一次), 行内 bot_id 标注接收 bot; 私聊仍按 bot 分目录
+        (不同 bot 与同一用户的私聊是不同对话)。
         history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
         一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
         """
@@ -246,7 +252,7 @@ class MessageHandler:
             await self._get_or_create_writer(file_path).append(raw)
         elif isinstance(event, GroupMessageEvent):
             group_id = event.group_id
-            if self._claim_group_mid(group_id, str(raw.get("message_id") or "")):
+            if self._claim_group_message(group_id, raw, bot_id):
                 payload = dict(raw)
                 payload["bot_id"] = bot_id
                 file_path = f"{self._data_dir}/history/group/{group_id}.jsonl"
@@ -257,7 +263,7 @@ class MessageHandler:
         else:
             return
 
-    # 群合并归档的 message_id 去重窗口(每群保留最近 N 条): 重复推送只发生在
+    # 群合并归档的去重窗口(每群保留最近 N 条): 重复推送只发生在
     # 多 bot 同时收到同一条群消息(毫秒级间隔)与重连重推(秒级), 窗口足够覆盖;
     # 窗口仅存内存, 重启后理论上有一次重复写入的可能, 消费方(review)读侧仍
     # 按 message_id 兜底去重。
@@ -275,6 +281,71 @@ class MessageHandler:
         if message_id in window:
             return False
         window[message_id] = None
+        if len(window) > self._GROUP_MID_WINDOW:
+            window.popitem(last=False)
+        return True
+
+    def _claim_group_message(self, group_id, raw: dict, bot_id: str = "") -> bool:
+        """判断一条群消息是否应写入合并归档: True=写入, False=重复跳过。
+
+        三步判据:
+
+        1. 发送侧登记 —— bot 自己的发言已由 WSServer 以 ``message_sent``
+           归档, 其他 bot 收到的同内容副本不再写入。
+        2. ``message_id`` —— 单账号场景下精确(重连重推、多连接同账号)。
+        3. 跨账号指纹 ``(发送者, 时间, 消息段类型, 文本)`` —— NapCat 的
+           ``message_id`` 按账号分配, 同一条消息经不同 bot 推送时 id 不同,
+           仅靠第 2 级会把一条消息写成 N 行。
+
+        第 3 级按 **bot 账号** 记账: 同一条物理消息每个账号只会收到一次,
+        因此"该指纹已由**别的**账号写入"才是重复。同一账号再次收到同样
+        内容(用户同一秒连发两条相同文本)属于新消息, 必须保留。
+
+        检查与登记之间无 await, 多 bot 协程并发调用时天然互斥。
+        """
+        sender = str(raw.get("user_id") or "")
+        # 1) 我这句发言的入站副本(发送侧按宽松指纹登记)
+        claims = getattr(self, "_sent_claims", None)
+        if claims is not None:
+            loose = message_signature(raw.get("message"))
+            if claims.matches(group_id, sender, loose):
+                return False
+        # 2) 同一账号的 message_id 重复(重连重推)
+        message_id = str(raw.get("message_id") or "")
+        if message_id and not self._claim_group_mid(group_id, message_id):
+            return False
+        # 3) 跨账号: 同一内容已由别的 bot 归档过
+        signature = message_signature(raw.get("message"), strict=True)
+        return self._claim_group_fingerprint(group_id, sender, raw, signature, bot_id)
+
+    def _claim_group_fingerprint(
+        self, group_id, sender: str, raw: dict, signature: tuple, bot_id: str = "",
+    ) -> bool:
+        """按 (发送者, 时间, 内容指纹) 记账; 别的 bot 已写过才判重复。
+
+        时间取原始 ``time``(秒)。多账号推送同一条消息时该值一致(生产实测)。
+        无 time 的消息退回消息 id 判重, 不参与指纹记账。
+        """
+        try:
+            ts = int(raw.get("time") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0:
+            return True
+        key = (sender, ts, signature)
+        windows = getattr(self, "_group_fp_window", None)
+        if windows is None:
+            windows = self._group_fp_window = {}
+        window = windows.setdefault(str(group_id), OrderedDict())
+        seen_bots = window.get(key)
+        if seen_bots is not None and bot_id not in seen_bots:
+            # 别的账号已经归档过这条消息 → 本账号收到的是同一条的推送
+            return False
+        if seen_bots is None:
+            seen_bots = window[key] = set()
+        else:
+            window.move_to_end(key)
+        seen_bots.add(bot_id)
         if len(window) > self._GROUP_MID_WINDOW:
             window.popitem(last=False)
         return True
