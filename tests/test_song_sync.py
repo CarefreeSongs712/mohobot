@@ -445,6 +445,139 @@ async def test_concurrent_sources_no_duplicates() -> None:
     print("[11] 三来源并行去重 OK")
 
 
+async def test_merge_commit_is_visible_before_lock_release() -> None:
+    """确定性回归: 提交必须发生在合并锁内, 另一来源才不会重复建歌。
+
+    旧实现 merge() 在锁内 flush 并写共享索引, 锁释放后才由调用方 commit。
+    这个窗口里第二个来源按索引命中后用自己的 Session 查不到那行, 于是又建一条。
+    这里不靠线程碰运气: 持锁调用 merge_and_commit(), 然后立刻用另一个 Session
+    查询, 必须已经能看到。
+    """
+    from mohobot.music_knowledge import pool, sync
+    from mohobot.music_knowledge.merge import MergeResult, SongMerger
+
+    folder, filename = _fresh_db()
+    sync.set_db_location(folder, filename)
+    title = "达拉崩吧"
+    rec_a = _record(source="moegirl", source_title=title, name=title,
+                    singers="洛天依、言和", year=2017, lyricist="ilem",
+                    lyrics="萌百歌词" * 20)
+    rec_b = _record(source="vocawiki", source_title=title, name=title,
+                    singers="洛天依、言和", year=2017, composer="ilem",
+                    lyrics="voca歌词" * 20)
+
+    db_a, db_b = pool.get_session(), pool.get_session()
+    merger_a, merger_b = SongMerger(db_a), SongMerger(db_b)
+    try:
+        merger_a.load_index()
+        merger_b.load_index()
+        result_a, result_b = MergeResult(), MergeResult()
+
+        merger_a.merge_and_commit(rec_a, result_a)
+        # A 的 merge_and_commit 返回后, B 立刻查, 必须能对齐到同一条
+        assert len(merger_b.find_matches(rec_b)) == 1, "提交未发生在锁内, B 看不到 A 的新歌"
+
+        merger_b.merge_and_commit(rec_b, result_b)
+        assert (result_a.created, result_b.created) == (1, 0), (result_a.created, result_b.created)
+        assert result_b.updated + result_b.unchanged == 1
+
+        check = pool.get_session()
+        try:
+            from mohobot.music_knowledge.song_database import Song
+            assert check.query(Song).filter(Song.name == title).count() == 1
+        finally:
+            check.close()
+    finally:
+        merger_a.close()
+        merger_b.close()
+        db_a.close()
+        db_b.close()
+    print("[11b] 锁内提交: 第二来源立即可见 OK")
+
+
+async def test_update_song_stats_concurrent_no_integrity_error() -> None:
+    """确定性回归: 两个会话同时发现 song_stats 缺行时, 只能有一行且都不抛异常。"""
+    import threading
+
+    from mohobot.music_knowledge import pool, sync
+    from mohobot.music_knowledge.song_database import SongStats, update_song_stats
+
+    folder, filename = _fresh_db()
+    sync.set_db_location(folder, filename)
+
+    sessions = [pool.get_session() for _ in range(6)]
+    for session in sessions:
+        # 让每个会话都先观察到"没有 default 行", 再同时写入(旧实现必撞唯一约束)
+        assert session.query(SongStats).filter(SongStats.id == "default").first() is None
+
+    barrier = threading.Barrier(len(sessions))
+    errors: list[str] = []
+
+    def run(session) -> None:
+        try:
+            barrier.wait(timeout=10)
+            update_song_stats(session)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=run, args=(s,)) for s in sessions]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    for session in sessions:
+        session.close()
+
+    assert not errors, errors
+    check = pool.get_session()
+    try:
+        assert check.query(SongStats).filter(SongStats.id == "default").count() == 1
+    finally:
+        check.close()
+    print("[11c] song_stats 并发写入幂等 OK")
+
+
+async def test_set_sync_state_concurrent_same_key_no_integrity_error() -> None:
+    """同类先查后插: 并发写同一个 sync_state key 不能因唯一约束失败。"""
+    import threading
+
+    from mohobot.music_knowledge import pool, sync
+    from mohobot.music_knowledge.song_database import SyncState, set_sync_state
+
+    folder, filename = _fresh_db()
+    sync.set_db_location(folder, filename)
+
+    sessions = [pool.get_session() for _ in range(6)]
+    for session in sessions:
+        assert session.query(SyncState).filter(SyncState.key == "k").first() is None
+
+    barrier = threading.Barrier(len(sessions))
+    errors: list[str] = []
+
+    def run(index, session) -> None:
+        try:
+            barrier.wait(timeout=10)
+            set_sync_state(session, "k", {"writer": index})
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=run, args=(i, s)) for i, s in enumerate(sessions)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    for session in sessions:
+        session.close()
+
+    assert not errors, errors
+    check = pool.get_session()
+    try:
+        assert check.query(SyncState).filter(SyncState.key == "k").count() == 1
+    finally:
+        check.close()
+    print("[11d] sync_state 同 key 并发写入幂等 OK")
+
+
 async def test_moegirl_pagination_cursor() -> None:
     """萌百分类翻页必须用站点给出的 pagefrom, 而不是本页最后一个标题。
 

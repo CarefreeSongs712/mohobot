@@ -364,6 +364,32 @@ class SongMerger:
             self._save_source(record, song, "matched")
             return song
 
+    def merge_and_commit(self, record: SourceRecord, result: MergeResult) -> Song | None:
+        """合并并在**同一把锁内**提交; 并行来源必须用它而不是 merge()+外部 commit()。
+
+        `merge()` 在锁内 flush 并把新歌写进进程级共享索引, 但事务仍未提交。
+        若调用方在锁释放之后才 commit, 另一来源这时按共享索引命中该歌, 却用自己
+        的 Session 查不到那行(事务隔离), 于是又新建一条, 产生重复歌曲。
+        所以"查重 → 写入 → 提交"必须是同一个临界区。
+
+        提交失败时回滚 Session, 并按库内真实状态重建共享索引: `_create()` 已把
+        未落库的歌写进索引, 不清理会让其它来源命中一个不存在的 uuid。
+        """
+        with self._merge_lock:
+            try:
+                song = self.merge(record, result)
+                self._db.commit()
+                return song
+            except Exception:
+                self._db.rollback()
+                # 回滚后库里没有本次新建的行; 索引必须与库一致。重建失败不能盖住
+                # 原始异常(调用方要看到真正的提交/合并错误)。
+                try:
+                    self.load_index(force=True)
+                except Exception as reload_error:  # noqa: BLE001
+                    logger.warning(f"提交失败后重建身份索引也失败: {reload_error}")
+                raise
+
     def _create(self, record: SourceRecord) -> Song:
         fields = record.fields()
         name = (record.name or record.source_title).strip()

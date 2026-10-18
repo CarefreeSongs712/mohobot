@@ -182,14 +182,21 @@ def get_sync_state(db: Session, key: str) -> Dict:
 
 
 def set_sync_state(db: Session, key: str, value: Dict) -> None:
-    """写入同步状态(合并覆盖后提交)。"""
+    """写入同步状态(整体覆盖后提交)。
+
+    用 SQLite 原生 upsert 而不是"先查再 add": 多个来源/进程同时第一次写同一个
+    key 时, 先查再插会双双看到"没有"并撞 `sync_state.key` 唯一约束。
+    """
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     payload = json.dumps(value or {}, ensure_ascii=False, default=str)
-    row = db.query(SyncState).filter(SyncState.key == key).first()
-    if row is None:
-        db.add(SyncState(key=key, value_json=payload, updated_at=datetime.now()))
-    else:
-        row.value_json = payload
-        row.updated_at = datetime.now()
+    now = datetime.now()
+    stmt = sqlite_insert(SyncState).values(key=key, value_json=payload, updated_at=now)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[SyncState.key],
+        set_={"value_json": payload, "updated_at": now},
+    )
+    db.execute(stmt)
     db.commit()
 
 
@@ -274,12 +281,20 @@ def get_song_session() -> Session:
 
 
 def update_song_stats(db: Session) -> None:
-    """刷新 song_stats(歌曲总数/更新时间)。"""
+    """刷新 song_stats(歌曲总数/更新时间)。
+
+    原子 upsert: 三个来源并行同步结束时会同时调用本函数, "先查再 add" 会让
+    它们同时看到"没有 default 行"并撞唯一约束, 异常发生在 finally 之前,
+    还会让整个来源的收尾(进度状态、断点)丢失。
+    """
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     total = db.query(Song).count()
-    stats = db.query(SongStats).filter(SongStats.id == "default").first()
-    if stats is None:
-        db.add(SongStats(id="default", total_songs=total, updated_at=datetime.now()))
-    else:
-        stats.total_songs = total
-        stats.updated_at = datetime.now()
+    now = datetime.now()
+    stmt = sqlite_insert(SongStats).values(id="default", total_songs=total, updated_at=now)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[SongStats.id],
+        set_={"total_songs": total, "updated_at": now},
+    )
+    db.execute(stmt)
     db.commit()
