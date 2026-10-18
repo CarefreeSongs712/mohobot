@@ -119,6 +119,33 @@ def extract_plain_text(message: str | list[dict[str, Any]]) -> str:
     return "".join(text_parts).strip()
 
 
+def extract_at_targets(message: str | list[dict[str, Any]]) -> list[str]:
+    """返回消息里被 @ 的 QQ 号列表(按出现顺序, 去重)。
+
+    纯字符串消息会先按 CQ 码解析; `at` 段的 ``data.qq`` 为 "all" 时跳过
+    (@全体不是对某个 bot 的点名)。无法解析的段忽略, 不抛异常。
+    """
+    if isinstance(message, str):
+        try:
+            segments = parse_cq_code(message)
+        except Exception:  # noqa: BLE001 - 畸形 CQ 码不应中断主链
+            return []
+    elif isinstance(message, list):
+        segments = message
+    else:
+        return []
+
+    targets: list[str] = []
+    for seg in segments:
+        if not isinstance(seg, dict) or seg.get("type") != "at":
+            continue
+        qq = str((seg.get("data") or {}).get("qq") or "").strip()
+        if not qq or qq == "all" or qq in targets:
+            continue
+        targets.append(qq)
+    return targets
+
+
 def extract_image_urls(message: str | list[dict[str, Any]]) -> list[str]:
     """Extract usable image references from a message.
 

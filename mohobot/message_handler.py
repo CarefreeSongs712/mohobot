@@ -34,7 +34,7 @@ from mohobot.file_store import JSONLWriter
 from mohobot.history_dedup import message_signature
 from mohobot.models.config import is_external_service_group
 from mohobot.utils.llm_diagnostic import LLMDiagnostic
-from mohobot.utils.cq_code import extract_plain_text
+from mohobot.utils.cq_code import extract_at_targets, extract_plain_text
 
 
 class MessageHandler:
@@ -408,6 +408,39 @@ class MessageHandler:
 
         return False
 
+    def _mentioned_bot_ids(self, event: GroupMessageEvent) -> set[str]:
+        """消息里被 @ 的、已绑定且在线的 bot_id 集合。
+
+        群聊多 bot 共用一条消息: 用户 @ 了某只(或几只)bot 时, 只有它们应当
+        执行指令; 没有被 @ 的 bot 静默跳过。@全体不算点名任何 bot。
+        """
+        if not (self._ws and getattr(self._ws, "_bot_manager", None)):
+            return set()
+        targets = extract_at_targets(event.message)
+        if not targets:
+            return set()
+        try:
+            return self._ws._bot_manager.bot_ids_for_qqs(targets)
+        except Exception as e:  # noqa: BLE001 - 判定失败不应中断主链
+            logger.debug(f"解析被 @ 的 bot 失败: {e}")
+            return set()
+
+    def _mention_restricts_command(
+        self, bot_id: str, event: GroupMessageEvent,
+    ) -> bool:
+        """该指令是否应因"@ 了别的 bot 而不是我"被跳过。
+
+        规则: 群消息里只要 @ 了至少一只已绑定的 bot, 指令就只由被 @ 的 bot
+        执行(@ 多只则多只各自执行); 未被 @ 的 bot 一律跳过。没有 @ 任何 bot
+        时返回 False, 保持原有抽签/全执行语义不变。
+        """
+        mentioned = self._mentioned_bot_ids(event)
+        if not mentioned:
+            return False
+        if bot_id in mentioned:
+            return False
+        return True
+
     async def _is_reply_to_bot(self, bot_id: str, event: GroupMessageEvent) -> bool:
         """Check if the message quotes a message that the bot itself sent.
 
@@ -559,15 +592,25 @@ class MessageHandler:
         # ── 插件观察钩子: 所有消息(含未 @bot 的群消息)先过一遍插件 ──
         # (活跃记录 / 求婚"同意/拒绝"回复 / 无前缀关键词触发)。
         # 插件明确消费时发送回复并结束; 否则继续正常流程。
+        # @ 定向: 点名叫了别的 bot 时, 观察钩子仍运行(保留活跃记录等副作用),
+        # 但它的"消费"结果不生效 —— 不由本 bot 回复, 继续交由 gate 判定。
         if not ban_command and self._plugins is not None:
             try:
                 observed_handled, observed_reply = await self._plugins.dispatch_observed(
                     bot_id, event, raw
                 )
                 if observed_handled:
-                    if observed_reply:
-                        await self._send_reply(bot_id, event, observed_reply)
-                    return
+                    if isinstance(event, GroupMessageEvent) and self._mention_restricts_command(
+                        bot_id, event
+                    ):
+                        logger.debug(
+                            f"观察钩子消费被忽略: 指令定向给被 @ 的 bot, {bot_id} "
+                            f"(group={event.group_id})"
+                        )
+                    else:
+                        if observed_reply:
+                            await self._send_reply(bot_id, event, observed_reply)
+                        return
             except Exception as e:
                 logger.exception(f"Plugin observe dispatch error: {e}")
 
@@ -575,6 +618,13 @@ class MessageHandler:
         if isinstance(event, GroupMessageEvent):
             if not ban_command and not await self._should_respond_to_group(bot_id, event):
                 logger.debug(f"Skipping group message (not mentioned): user={event.user_id}")
+                return
+            # ── @ 定向: 消息里 @ 了具体 bot 时, 指令只由被 @ 的 bot 执行 ──
+            # (@ 多只则它们各自执行; 未被 @ 的 bot 静默跳过, 不再参与抽签)
+            if self._mention_restricts_command(bot_id, event):
+                logger.debug(
+                    f"指令定向给被 @ 的 bot, {bot_id} 跳过 (group={event.group_id})"
+                )
                 return
             # ── 全局指令去重: 群内多 bot 时只由随机选中的一个 bot 回复 ──
             # (如 /占卜 /help; 插件可通过类属性 global_triggers 声明)
@@ -1834,6 +1884,10 @@ class MessageHandler:
                     break
         if not is_global:
             return False
+        # @ 定向优先于抽签: 被 @ 的 bot 都应执行(可能多只), 未被 @ 的已在
+        # gate 阶段跳过, 这里不能再抽签削掉其中一部分。
+        if self._mentioned_bot_ids(event):
+            return False
         # 随机选中的 bot 才回复(同一条消息多 bot 协程共享同一抽签结果)
         chosen = self._ws._bot_manager.pick_bot_for_group(
             str(event.group_id), str(event.message_id),
@@ -1872,6 +1926,10 @@ class MessageHandler:
         bots = bm.bots_in_group(group_id)
         if len(bots) <= 1:
             return False  # 单 bot 群: 走原流程即可
+        # @ 定向: 用户点名了具体 bot 时, 由被 @ 的 bot 各自正常回复
+        # (不合并成一条转发, 否则"@ A"却收到包含 A 与 B 的合并消息)。
+        if self._mentioned_bot_ids(event):
+            return False
         sender = bm.pick_bot_for_group(group_id, str(event.message_id)) or bots[0]
         if bot_id != sender:
             logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")

@@ -262,14 +262,15 @@ interceptors = [ban_filter, plugin_system, command_handler, keyword_filter]
 1. **记录群内 bot 存在**（`note_group_message`）→ 全局指令去重与合并回复的依据。
 2. **群聊最近消息缓冲**（`_note_group_recent`，内存 `_group_recent_msgs`，单条截断 80 字）。
 3. **环境感知收集**（`plugin_system.collect_perception` → 缓存 `_perception_text`）。
-4. **群聊多 bot 合并回复**（`_try_merged_group_reply`）：命中 `_MERGED_GROUP_TRIGGERS` 且群内多 bot 时，由随机选中的 bot 收集全部 bot 回复，发一条合并转发，其余 bot 静默；返回 `True` 即消费掉。
-5. **插件观察钩子**（`plugin_system.dispatch_observed`）：**所有消息**（含未 @bot 的群消息）在 gate 之前先过一遍插件。返回 `(True, reply)` 即消费。
+4. **群聊多 bot 合并回复**（`_try_merged_group_reply`）：命中 `_MERGED_GROUP_TRIGGERS` 且群内多 bot 时，由随机选中的 bot 收集全部 bot 回复，发一条合并转发，其余 bot 静默；返回 `True` 即消费掉。存在 @ 定向时不做合并。
+5. **插件观察钩子**（`plugin_system.dispatch_observed`）：**所有消息**（含未 @bot 的群消息）在 gate 之前先过一遍插件。返回 `(True, reply)` 即消费。存在 @ 定向时钩子照常运行以保留副作用，但未被 @ 的 bot 的消费结果被丢弃。
 6. **群 gate**（`_should_respond_to_group`）—— 只在以下情况放行：
    - 文本以 `/` 开头（命令）
    - 文本 strip 后 lower == `ping`（全局，无需斜杠）
    - **直接 @ 本 bot 的 QQ**（不是 @all）
    - 引用的消息 id 属于**本 bot 自己发过的**（`BotInstance.is_my_message` 追踪）
-7. **全局指令去重**（`_should_defer_global_command`）：命中全局指令且群内多 bot 时，只有随机抽签选中的 bot 继续。
+6.5. **@ 定向**（`_mention_restricts_command`）：消息里 @ 了**具体 bot**（不含 @全体）时，指令只由被 @ 的 bot 执行；@ 多只则它们各自执行，未被 @ 的 bot 静默跳过。此判断优先于第 7 步抽签；未知指令提醒与 `no_prefix_triggers` 同样遵循。没有 @ 任何 bot 时行为不变。
+7. **全局指令去重**（`_should_defer_global_command`）：命中全局指令且群内多 bot 时，只有随机抽签选中的 bot 继续（存在 @ 定向时不做抽签）。
 8. **私聊图片限流**（`_check_image_rate_limit`，10 秒冷却，超限剥掉 image 段只留文本）。
 9. **图片引用归一化**（`_normalize_image_segments`）：NapCat 群图常只有 `file` 没有 `url`，经 `get_image` API 换 base64 → data URI。
 10. **拦截器链**：`for interceptor in self._interceptors: handled, response = await interceptor.intercept(...)`；`handled=True` 则发回复并 return。
@@ -562,6 +563,10 @@ self._daily_task = self._task_supervisor.create_task(
 | `interval_sec` | 配合 `on_tick`。 |
 
 **群内多 bot 去重机制**：`message_handler._should_defer_global_command` 收集内置 `{"/help","/tts"}` + 所有插件的 `global_triggers` + 前缀集 `("/ban","/pass","/dec-")`，命中后调 `BotManager.pick_bot_for_group(group_id, message_id)` 抽签 —— 抽签结果按 `(群号, message_id)` 缓存 60 秒，所以同一条消息触发的多个 bot 协程得到**同一个**结果，不会出现都回或都不回。
+
+**@ 定向优先于抽签**：消息里只要 @ 了具体 bot（`at` 段的 `qq` 不是 `all`），就只由被 @ 的 bot 执行指令；@ 多只则多只都执行；未被 @ 的 bot 静默。此时不抽签、不合并回复。未 @ 任何 bot 时才走上面的抽签。`qq=0`（未绑定）的 bot 不会被 `@0` 命中。
+
+实现位置：`BotManager.bot_ids_for_qqs()`（QQ→bot_id，只认已绑定且在线的）、`extract_at_targets()`（CQ/数组两种格式解析）、`MessageHandler._mention_restricts_command()`。
 
 ### 6.4 注入 API
 
