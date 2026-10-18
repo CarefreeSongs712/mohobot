@@ -269,18 +269,21 @@ class MessageHandler:
     # 按 message_id 兜底去重。
     _GROUP_MID_WINDOW = 2048
 
-    def _claim_group_mid(self, group_id, message_id: str) -> bool:
-        """认领群合并归档的 message_id: True=首次(应写入), False=重复(跳过)。
+    def _claim_group_mid(self, group_id, message_id: str, bot_id: str = "") -> bool:
+        """按接收 bot 认领群消息的 message_id: True=首次, False=重复。
 
-        纯同步操作(检查与登记之间无 await), 多 bot 派发任务并发调用时天然
-        互斥, 无需加锁。无 message_id 的消息无法去重, 恒返回 True。
+        OneBot 实现可能按账号分配 message_id，同一个数字不能跨 bot 账号去重；
+        跨账号的相同消息由后续稳定指纹判据处理。纯同步操作(检查与登记之间无
+        await)，多 bot 派发任务并发调用时天然互斥，无需加锁。无 message_id 的
+        消息无法按本级去重，恒返回 True。
         """
         if not message_id:
             return True
         window = self._group_mid_window.setdefault(group_id, OrderedDict())
-        if message_id in window:
+        key = (str(bot_id), str(message_id))
+        if key in window:
             return False
-        window[message_id] = None
+        window[key] = None
         if len(window) > self._GROUP_MID_WINDOW:
             window.popitem(last=False)
         return True
@@ -312,7 +315,7 @@ class MessageHandler:
                 return False
         # 2) 同一账号的 message_id 重复(重连重推)
         message_id = str(raw.get("message_id") or "")
-        if message_id and not self._claim_group_mid(group_id, message_id):
+        if message_id and not self._claim_group_mid(group_id, message_id, bot_id):
             return False
         # 3) 跨账号: 同一内容已由别的 bot 归档过
         signature = message_signature(raw.get("message"), strict=True)

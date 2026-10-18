@@ -167,6 +167,24 @@ async def test_cross_account_mid_dedup():
         print("[6] 跨账号 message_id 不同 → 指纹去重 OK")
 
 
+async def test_same_mid_different_accounts_distinct_content_kept():
+    """不同账号可能复用同一 message_id, 内容不同的消息不得因 mid 被误删。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        mh = _make_handler(tmp, dual_write=False)
+        for bot_id, self_id, text in (
+            ("bot_001", 111, "第一条"), ("bot_002", 222, "第二条"),
+        ):
+            raw = _group_raw(500, user_id=10001, text=text, self_id=self_id)
+            raw["time"] = 1700000550
+            await mh._archive_event(bot_id, _group_event(raw), raw)
+        merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
+        assert len(merged) == 2, "不同账号复用 mid 但内容不同, 两条都必须保留"
+        assert {row["message"][0]["data"]["text"] for row in merged} == {"第一条", "第二条"}
+        await _close_writers(mh)
+        print("[6b] 不同账号复用 message_id 且内容不同 → 均保留 OK")
+
+
 async def test_same_second_distinct_content_kept():
     """同一秒内同人不同内容/不同图片必须各自保留(指纹不能过度合并)。"""
     with tempfile.TemporaryDirectory() as td:
