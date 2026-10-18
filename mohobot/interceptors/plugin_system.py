@@ -761,6 +761,9 @@ class PluginSystem(Interceptor):
         bm = self._bot_manager
         if bm is None:
             return True
+        # @ 定向优先: 被 @ 的 bot 都应执行, 不再抽签
+        if self._mentioned_bot_ids(event, bm):
+            return True
         chosen = bm.pick_bot_for_group(
             str(event.group_id), str(getattr(event, "message_id", "") or ""),
         )
@@ -768,6 +771,19 @@ class PluginSystem(Interceptor):
             return True
         logger.debug(f"无前缀全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")
         return False
+
+    @staticmethod
+    def _mentioned_bot_ids(event, bot_manager) -> set[str]:
+        """消息里被 @ 的、已绑定且在线的 bot_id 集合(无 @ 返回空集)。"""
+        from mohobot.utils.cq_code import extract_at_targets
+
+        targets = extract_at_targets(getattr(event, "message", None))
+        if not targets:
+            return set()
+        try:
+            return bot_manager.bot_ids_for_qqs(targets)
+        except Exception:  # noqa: BLE001 - 判定失败按"未 @ 任何 bot"处理
+            return set()
 
     async def collect_perception(self, bot_id: str, event, raw: dict) -> str:
         """收集"环境感知"文本: 遍历插件调用 on_perception(bot_id, event, raw)。
