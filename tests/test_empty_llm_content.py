@@ -121,8 +121,12 @@ async def test_empty_message_replaced_in_request():
     print("[4] 空白/仅 @ 消息占位 OK")
 
 
-async def test_symbol_history_entries_skipped():
-    """历史里的纯符号条目在重放时跳过; 正常历史不受影响。"""
+async def test_symbol_history_entries_replaced_not_sent_raw():
+    """历史里的纯符号条目不能原样发给网关(会 400); 正常历史不受影响。
+
+    注意: 条目是被**替换为带语义的标注**而不是丢弃, 理由见
+    test_symbol_history_keeps_role_alternation_and_bot_replies。
+    """
     service = _StubLLM()
     from mohobot.llm_service import LLMService
 
@@ -139,12 +143,77 @@ async def test_symbol_history_entries_skipped():
         context=context, group_id=2001,
     )
     contents = [m["content"] for m in messages if m["role"] in ("user", "assistant")]
-    assert "？" not in contents, "纯符号历史条目应被跳过"
-    assert "👍" not in contents, "纯 emoji 历史条目应被跳过"
+    assert "？" not in contents, "纯符号历史条目不得原样发送"
+    assert "👍" not in contents, "纯 emoji 历史条目不得原样发送"
+    assert all(has_meaningful_text(c) for c in contents), contents
     assert any("怎么了呀" in c for c in contents), "正常历史不得被丢弃"
     assert any("辛苦啦" in c for c in contents), "正常历史不得被丢弃"
     assert any("今天好累" in c for c in contents), "具名发言历史不得被丢弃"
-    print("[5] 纯符号历史条目跳过 OK")
+    print("[5] 纯符号历史条目替换而非原样发送 OK")
+
+
+async def test_symbol_history_keeps_role_alternation_and_bot_replies():
+    """历史里的纯符号条目必须"替换"而不是"丢弃"。
+
+    丢弃会带来两个后果(实测):
+    1. bot 自己的回复(如「……」「~~~」「♪」)消失, 模型看到用户连说几遍却没有任何
+       回应, 容易误判上一轮没答而重复解释/道歉;
+    2. user/assistant 角色交替被破坏(user,user,user / assistant,assistant)。
+    替换为带语义的标注则两者都保留, 且仍不会触发网关"只有空白/标点"的 400。
+    """
+    service = _StubLLM()
+    from mohobot.llm_service import LLMService
+
+    service._prepare_messages = LLMService._prepare_messages.__get__(service)
+    context = [
+        {"role": "user", "content": "你生气了吗"},
+        {"role": "assistant", "content": "……"},
+        {"role": "user", "content": "你说话呀"},
+        {"role": "assistant", "content": "~~~"},
+        {"role": "user", "content": "？"},
+        {"role": "assistant", "content": "怎么了呀"},
+    ]
+    messages = await _prepare(
+        service, [{"type": "text", "data": {"text": "在吗"}}], context=context,
+    )
+    turns = [m for m in messages if m["role"] in ("user", "assistant")]
+    roles = [m["role"] for m in turns]
+    assert roles == ["user", "assistant", "user", "assistant", "user", "assistant", "user"], roles
+    assert all(has_meaningful_text(m["content"]) for m in turns), [m["content"] for m in turns]
+    # 原文符号仍可见(模型知道对方发/回了什么), 而不是被抹掉
+    assert "……" in turns[1]["content"] and "~~~" in turns[3]["content"], turns
+    assert "？" in turns[4]["content"], turns[4]
+    print("[5b] 纯符号历史替换后角色交替与 bot 回复保留 OK")
+
+
+async def test_history_non_string_content_does_not_crash():
+    """历史 content 不是字符串(旧数据/插件写入)时不能让整轮回复崩溃。"""
+    service = _StubLLM()
+    from mohobot.llm_service import LLMService
+
+    service._prepare_messages = LLMService._prepare_messages.__get__(service)
+    context = [
+        {"role": "user", "content": None},
+        {"role": "assistant", "content": 123},
+        {"role": "user", "content": [{"type": "text", "text": "旧格式多模态"}]},
+        {"role": "assistant", "content": "正常回复"},
+    ]
+    messages = await _prepare(
+        service, [{"type": "text", "data": {"text": "在吗"}}], context=context,
+    )
+    contents = [m["content"] for m in messages if m["role"] in ("user", "assistant")]
+    assert any("正常回复" in str(c) for c in contents), contents
+    print("[5c] 非字符串历史 content 不崩溃 OK")
+
+
+def test_has_meaningful_text_tolerates_non_strings():
+    """has_meaningful_text 对 None/数字/列表这类非字符串输入不得抛 TypeError。"""
+    assert has_meaningful_text(None) is False
+    assert has_meaningful_text(123) is True
+    assert has_meaningful_text([]) is False
+    assert has_meaningful_text([{"type": "text", "text": "看图"}]) is True
+    assert has_meaningful_text({"a": 1}) is True
+    print("[5d] has_meaningful_text 容忍非字符串 OK")
 
 
 async def test_store_content_not_symbol_only():
