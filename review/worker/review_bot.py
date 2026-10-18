@@ -58,14 +58,20 @@ STATS = Counter()
 
 
 def curl(method, url, body=None, auth=None):
-    """用 curl 发请求, 返回 (status, json); curl 本身失败时 status=0。"""
-    args = ["curl", "-sS", "-X", method, url, "-w", "\n%{http_code}"]
+    """用 curl 发请求, 返回 (status, json); 网络失败/超时返回 status=0。"""
+    args = [
+        "curl", "-sS", "--connect-timeout", "10", "--max-time", "120",
+        "-X", method, url, "-w", "\n%{http_code}",
+    ]
     if auth: args += ["-H", f"Authorization: Bearer {auth}"]
     data = None
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         args += ["-H", "Content-Type: application/json", "--data-binary", "@-"]
-    r = subprocess.run(args, input=data, capture_output=True)
+    try:
+        r = subprocess.run(args, input=data, capture_output=True, timeout=125)
+    except subprocess.TimeoutExpired:
+        return 0, {"detail": "curl request timed out"}
     text, _, code = r.stdout.decode("utf-8", "replace").rpartition("\n")
     if r.returncode: return 0, {"detail": r.stderr.decode("utf-8", "replace").strip()}
     try: js = json.loads(text) if text else {}
@@ -293,11 +299,14 @@ def handle(r):
     v = v["all"]
     conf = f" conf={v['conf']:.2f}" if v["conf"] is not None else " conf=?"
     if v["action"] == "normal":
-        STATS["normal"] += 1; done = submit(sk, "normal", user_fps)
+        done = submit(sk, "normal", user_fps)
+        if done:
+            STATS["normal"] += 1
         print(f"    ✓ 正常 {conf} → {len(user_fps)} 条标正常" + ("" if done else " ✗ 提交失败"))
     elif v["action"] == "abnormal":
-        STATS["abnormal"] += 1
         done = submit(sk, "abnormal", user_fps, tags=v["tags"], note="[LLM] " + v["note"])
+        if done:
+            STATS["abnormal"] += 1
         print(f"    ⚑ 异常 {conf} [{'/'.join(v['tags'])}] {v['note']}")
         print("      【LLM】" + text.replace("\n", "\n      "))
         if not done: print("    ✗ 提交失败")
