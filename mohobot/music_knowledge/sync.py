@@ -346,8 +346,9 @@ def sync_source(
                     stats.skipped_unchanged += 1
                     done.add(title)
                     continue
-                merger.merge(record, stats.merge)
-                db.commit()
+                # 查重 + 写入 + 提交在同一把合并锁内完成: 并行来源之间
+                # 不能出现"索引已命中、行尚未提交"的窗口(见 merge_and_commit)。
+                merger.merge_and_commit(record, stats.merge)
                 done.add(title)
             except SourceError as e:
                 stats.failed += 1
