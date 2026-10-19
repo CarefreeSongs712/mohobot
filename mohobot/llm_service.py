@@ -127,6 +127,10 @@ class LLMService:
         # 歌曲信息注解器(全局): 回调 (event) -> 注解文本 或 None。
         # 在发送给 LLM 前把歌曲信息注入用户消息下方(不写入 context)。
         self._song_annotator = song_annotator
+        # 新闻/动态注解器(全局, REQ-6): 回调 () -> 已审核动态片段 或 ""。
+        # 仅在 news.enabled 且 inject_enabled 时由 main.py 注入;
+        # 与歌曲注解同理, 只作本次请求的服务端参考资料, 不写入 context。
+        self._news_annotator = None
         self._retired_clients: list[AsyncOpenAI] = []
         identities, clients = self._prepare_clients(self._cfg.llm, [])
         self._install_clients(self._cfg.llm, identities, clients)
@@ -1467,6 +1471,18 @@ class LLMService:
                 user_content = symbol_only_placeholder(chat_type, user_content)
             else:
                 user_content = empty_message_placeholder(chat_type, event.message)
+
+        # 近期动态(新闻)注入: 只含管理员已审核且未过期的条目, 属服务端参考资料,
+        # 不写入用户发言或持久化上下文(与歌曲注解同一边界)。
+        # 测试替身可能没设该属性; 取不到时按"未注入"处理, 不能因此打崩既有调用方
+        news_annotator = getattr(self, "_news_annotator", None)
+        if news_annotator is not None:
+            try:
+                news_block = await news_annotator()
+                if news_block:
+                    messages[0]["content"] += "\n\n" + news_block
+            except Exception as e:
+                logger.debug(f"News annotation failed: {e}")
 
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:

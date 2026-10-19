@@ -142,6 +142,26 @@ class DatabaseConfig:
 
 
 @dataclass
+class NewsConfig:
+    """新闻/动态知识库(REQ-6) — 采集入库 → 管理员审核 → 检索与提示词注入。
+
+    默认关闭(enabled=False), 开启后:
+    - 只有**已审核通过**且未过期的条目会进入 LLM 上下文或工具结果;
+    - 新条目(采集/LLM 提取/人工)一律以 pending 入库, 需 WebUI 管理员通过;
+    - inject_* 控制被动注入, 工具 news_recent/news_search 由模型主动调用。
+    db_path 留空 = <data_dir>/news/news.db。
+    """
+    enabled: bool = False
+    db_path: str = ""
+    inject_enabled: bool = True          # 是否在 system prompt 注入近期动态
+    inject_limit: int = 3                # 注入条数
+    inject_window_days: int = 7          # 只注入最近 N 天发布的
+    inject_header: str = ""              # 留空用内置表头
+    default_ttl_days: float = 14.0       # 条目默认有效期(天), <=0 表示不自动过期
+    tool_enabled: bool = True            # 是否注册 news_recent/news_search 工具
+
+
+@dataclass
 class AnySearchConfig:
     """Anysearch 实时联网搜索配置。api_key 为空时搜索自动降级为空结果。"""
     enabled: bool = True
@@ -347,6 +367,7 @@ class GlobalConfig:
     persona_ab: PersonaABConfig = field(default_factory=PersonaABConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     ban: BanConfig = field(default_factory=BanConfig)
     # 情感系统(好感度/亲密度/关系阶段/长期记忆; emotion.enabled 开关)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
@@ -406,6 +427,7 @@ class GlobalConfig:
         reply_raw = raw.get("reply", {})
         db_raw = raw.get("database", {})
         anysearch_raw = raw.get("anysearch", {})
+        news_raw = raw.get("news", {})
         ban_raw = raw.get("ban", {})
         emotion_raw = raw.get("emotion", {})
         tts_raw = raw.get("tts", {})
@@ -502,6 +524,16 @@ class GlobalConfig:
                 enabled=db_raw.get("enabled", True),
                 folder=db_raw.get("folder", "./data/database"),
                 file=db_raw.get("file", "luotianyi.db"),
+            ),
+            news=NewsConfig(
+                enabled=bool(news_raw.get("enabled", False)),
+                db_path=str(news_raw.get("db_path", "") or ""),
+                inject_enabled=bool(news_raw.get("inject_enabled", True)),
+                inject_limit=int(news_raw.get("inject_limit", 3)),
+                inject_window_days=int(news_raw.get("inject_window_days", 7)),
+                inject_header=str(news_raw.get("inject_header", "") or ""),
+                default_ttl_days=float(news_raw.get("default_ttl_days", 14.0)),
+                tool_enabled=bool(news_raw.get("tool_enabled", True)),
             ),
             anysearch=AnySearchConfig(
                 enabled=anysearch_raw.get("enabled", True),
@@ -657,6 +689,16 @@ class GlobalConfig:
                 "folder": self.database.folder,
                 "file": self.database.file,
             },
+            "news": {
+                "enabled": self.news.enabled,
+                "db_path": self.news.db_path,
+                "inject_enabled": self.news.inject_enabled,
+                "inject_limit": self.news.inject_limit,
+                "inject_window_days": self.news.inject_window_days,
+                "inject_header": self.news.inject_header,
+                "default_ttl_days": self.news.default_ttl_days,
+                "tool_enabled": self.news.tool_enabled,
+            },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
                 "api_key": self.anysearch.api_key,
@@ -802,6 +844,16 @@ class GlobalConfig:
                 "enabled": self.database.enabled,
                 "folder": self.database.folder,
                 "file": self.database.file,
+            },
+            "news": {
+                "enabled": self.news.enabled,
+                "db_path": self.news.db_path,
+                "inject_enabled": self.news.inject_enabled,
+                "inject_limit": self.news.inject_limit,
+                "inject_window_days": self.news.inject_window_days,
+                "inject_header": self.news.inject_header,
+                "default_ttl_days": self.news.default_ttl_days,
+                "tool_enabled": self.news.tool_enabled,
             },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
