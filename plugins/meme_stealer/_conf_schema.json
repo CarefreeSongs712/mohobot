@@ -3,7 +3,7 @@
     "type": "bool",
     "default": false,
     "description": "【偷图】开启表情包偷取",
-    "hint": "开启后监听聊天中的表情包，由视觉模型一次完成内容审核与语义标注后入库。需先配置视觉模型。群里只有 @ 或引用不影响偷图，所有消息都会被观察。也可用 /meme on、/meme off 开关。"
+    "hint": "控制 LLM 工具(steal_meme)与管理命令的入库能力。注意：本开关不再触发「观察聊天所有消息」的自动偷图；是否需要被动抓取由「【偷图】概览式被动抓取」单独控制。也可用 /meme on、/meme off 开关。"
   },
   "steal_mode": {
     "type": "string",
@@ -383,5 +383,17 @@
     "default": "balanced",
     "description": "【检索】文字距离融合预设",
     "hint": "语义向量不可用、退回关键词检索时使用：balanced（均衡）/ keyword（关键词优先）/ semantic（语义优先）/ strict（严格匹配）。"
+  },
+  "passive_steal_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "【偷图】概览式被动抓取（默认关闭）",
+    "hint": "开启后监听聊天中的所有图片并按概率静默标注入库（旧行为）。默认关闭：只保留 LLM 工具显式抓取与 WebUI 手动上传，避免全量偷图带来的 VLM 调用浪费与脏数据。"
+  },
+  "tool_capture_requires_review": {
+    "type": "bool",
+    "default": true,
+    "description": "【偷图】LLM 工具抓取需管理员审核",
+    "hint": "开启（默认）：LLM 调用 steal_meme 后，VLM 标注结果先进入 WebUI「待审核」区，管理员通过后才真正入库参与检索与发送。关闭：标注完成即入库。"
   }
 }

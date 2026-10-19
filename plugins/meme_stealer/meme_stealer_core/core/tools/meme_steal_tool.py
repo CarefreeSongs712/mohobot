@@ -110,7 +110,13 @@ class MemeStealToolWorkflow:
             before_paths = set(idx_before.keys()) if idx_before else set()
 
             # 统一走 VLM 流水线
-            logger.info(f"[Tool] VLM 分析入库: {temp_path}")
+            # tool_capture_requires_review(默认 True): 模型标注完成后只进待审池,
+            # 由 WebUI 管理员通过后才真正入库(不进索引/不参与检索发送)。
+            cfg = getattr(self, "plugin_config", None)
+            to_pending = bool(getattr(cfg, "tool_capture_requires_review", True))
+            logger.info(
+                f"[Tool] VLM 分析{'入待审池' if to_pending else '入库'}: {temp_path}"
+            )
             extra_meta = self._build_steal_tool_extra_meta(
                 event, image_ref, source=source
             )
@@ -119,11 +125,23 @@ class MemeStealToolWorkflow:
                 temp_path,
                 is_temp=is_temp,
                 extra_meta=extra_meta,
+                to_pending=to_pending,
                 chat_context=event_handler.build_chat_context(event),
             )
 
             if not success:
                 yield "偷取失败：VLM 分析未通过（可能已存在、内容不合适或无法识别为表情包）"
+                return
+
+            if to_pending:
+                # 待审路径: 标注结果照常回给模型(便于向用户说明), 但不入库、
+                # 不进索引, 也不能声称"已入库"。
+                detail = self._format_steal_tool_result(merged_idx, before_paths)
+                suffix = "图片已提交管理员审核，通过后会加入表情包库"
+                if detail:
+                    yield "偷取成功！VLM 分析结果：\n" + detail + "\n- 状态：" + suffix
+                else:
+                    yield "偷取成功！" + suffix
                 return
 
             if merged_idx:
@@ -154,6 +172,32 @@ class MemeStealToolWorkflow:
             logger.error(f"[Tool] 偷取表情包失败: {e}", exc_info=True)
             yield f"偷取出错：{e}"
             return
+
+    @staticmethod
+    def _format_steal_tool_result(
+        merged_idx: dict[str, Any] | None, before_paths: set[str],
+    ) -> str:
+        """把新条目的 VLM 标注格式化为给模型看的多行摘要; 无新条目返回空串。"""
+        if not isinstance(merged_idx, dict):
+            return ""
+        new_paths = set(merged_idx.keys()) - before_paths
+        new_entry = next(
+            (merged_idx[p] for p in new_paths if isinstance(merged_idx.get(p), dict)), None,
+        )
+        if not isinstance(new_entry, dict):
+            return ""
+        overlay = str(new_entry.get("overlay_text", "") or "")
+        tag_list = new_entry.get("tags", [])
+        tags_str = ", ".join(tag_list) if isinstance(tag_list, list) else str(tag_list)
+        desc_text = new_entry.get("desc", "")
+        scene_list = new_entry.get("scenes", [])
+        scenes_str = ", ".join(scene_list) if isinstance(scene_list, list) else str(scene_list)
+        return (
+            f"- 图上文字：{overlay or '无'}\n"
+            f"- 标签：{tags_str or '无'}\n"
+            f"- 描述：{desc_text or '无'}\n"
+            f"- 场景：{scenes_str or '无'}"
+        )
 
     async def _resolve_steal_image_ref(
         self,

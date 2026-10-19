@@ -19,6 +19,9 @@ class DummyConfig:
         self.categories_dir = None
         self.smart_meme_selection = False
         self.audit_required = True
+        # 这些用例覆盖的是"概览式被动抓取"链路, 需显式打开;
+        # 生产默认关闭(只保留 LLM 工具/WebUI 上传)。
+        self.passive_steal_enabled = True
 
     def get_event_target(self, event):
         raw_target = getattr(event, "target", self.target)

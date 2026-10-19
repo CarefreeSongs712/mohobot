@@ -48,6 +48,9 @@ def _build_main(chance: float) -> Main:
         meme_query_rewrite=False,
         meme_send_delay=0.0,
         meme_send_char_delay=0.0,
+        # 本组用例覆盖"工具直接入库"路径; 默认(需审核)的行为另有用例覆盖
+        tool_capture_requires_review=False,
+        passive_steal_enabled=False,
     )
 
     async def _async_empty_dict():
