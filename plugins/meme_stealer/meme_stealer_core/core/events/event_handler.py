@@ -822,9 +822,16 @@ class EventHandler:
             return
         if not plugin_instance.steal_meme and not force_active:
             return
-        # audit_required=False（默认）→ VLM 审核通过即入库
-        # audit_required=True → 自动偷取进 pending 池等待人工审核
         cfg = getattr(plugin_instance, "plugin_config", None)
+        # 概览式被动抓取开关(默认关闭): 关闭时不再观察聊天里的任意图片,
+        # 只保留 LLM 工具显式抓取(steal_meme)、管理员强制收录与 WebUI 上传。
+        # 纯上下文记录已在函数开头完成, 表情包发送/检索不受影响。
+        passive_enabled = bool(getattr(cfg, "passive_steal_enabled", False)) if cfg else False
+        if not force_active and not passive_enabled:
+            logger.debug("[Stealer] 概览式被动抓取已关闭, 跳过聊天图片")
+            return
+        # audit_required=False → VLM 审核通过即入库
+        # audit_required=True → 自动偷取进 pending 池等待人工审核
         audit_required = bool(getattr(cfg, "audit_required", False)) if cfg else False
         to_pending = audit_required
         imgs: list[Image] = [comp for comp in event.get_messages() if isinstance(comp, Image)]

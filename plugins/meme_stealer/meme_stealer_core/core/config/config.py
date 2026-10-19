@@ -17,7 +17,13 @@ from ..util.normalization import (
 
 class PluginConfig(BaseModel):
     # === 基础功能 ===
+    # 偷图总开关: 控制 LLM 工具(steal_meme)与管理员命令的入库能力。
+    # 注意它**不再**决定是否观察聊天里的任意图片 —— 那是 passive_steal_enabled。
     steal_meme: bool = False
+    # 概览式被动抓取: 开启后观察聊天中的所有图片并按概率静默入库。
+    # 默认关闭: 只保留 LLM 工具显式抓取 + WebUI 手动上传, 避免全量偷图
+    # 造成 VLM 资源浪费与脏数据。需要旧行为时显式打开。
+    passive_steal_enabled: bool = False
     steal_mode: str = "probability"  # "probability" 或 "cooldown"
     steal_chance: float = 0.3  # 概率模式下的偷图概率
     auto_send_meme: bool = True
@@ -152,10 +158,14 @@ class PluginConfig(BaseModel):
     character_info: dict[str, dict[str, str]] = {}
 
     # === 待审核池 ===
-    # 自动偷取时是否进入待审核池等待人工通过。
-    # False：VLM 审核通过即入库（默认）。
+    # 被动抓取时是否进入待审核池等待人工通过。
+    # False：VLM 审核通过即入库。
     # True：进入 pending，需在 WebUI 审核区通过后才入库。
     audit_required: bool = False
+    # LLM 工具抓取(steal_meme)是否必须先经管理员审核。
+    # 默认 True：模型标注(分类/标签/描述/场景)完成后只进 pending 池,
+    # WebUI 管理员通过后才真正入库并参与检索发送。
+    tool_capture_requires_review: bool = True
 
     # === WebUI（独立端口）===
     webui_enabled: bool = False
