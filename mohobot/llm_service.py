@@ -34,6 +34,24 @@ from mohobot.utils.llm_diagnostic import LLMDiagnostic
 _HISTORY_SYMBOL_MAX_CHARS = 40
 
 
+def _normalize_vision_mode(value: Any) -> str:
+    """识图模式归一化: 只接受 describe / direct, 其余(含空)回退 describe。"""
+    from mohobot.models.config import _normalize_vision_mode as _normalize
+
+    return _normalize(value)
+
+
+def _uses_direct_image(messages: list[dict[str, Any]]) -> bool:
+    """本次请求是否以 direct 模式携带了原始图片(用于失败后回退 describe)。"""
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        ):
+            return True
+    return False
+
+
 def _history_symbol_placeholder(role: str, content: Any, *, is_group: bool) -> str:
     """历史里"无实质内容"条目(纯标点/emoji/空白)的替代文本。
 
@@ -282,8 +300,27 @@ class LLMService:
                 tool_choice="auto",
             )
         except Exception as e:
-            logger.error(f"LLM API call failed: {e}")
-            return LLMDiagnostic(f"[LLM 调用失败: {e}]"), None
+            # direct 识图模式下, 主模型不支持视觉会在这里失败: 回退 describe 再试一次。
+            if _uses_direct_image(messages):
+                logger.warning(f"direct 识图请求失败, 回退 describe 重试: {e}")
+                messages = await self._build_messages(
+                    bot_id, event, context, bot_config, persona_content, force_describe=True,
+                )
+                try:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tools=self._current_tools_schemas(),
+                        tool_choice="auto",
+                    )
+                except Exception as retry_error:
+                    logger.error(f"LLM API call failed (describe fallback): {retry_error}")
+                    return LLMDiagnostic(f"[LLM 调用失败: {retry_error}]"), None
+            else:
+                logger.error(f"LLM API call failed: {e}")
+                return LLMDiagnostic(f"[LLM 调用失败: {e}]"), None
 
         await self._record_usage(
             model, getattr(response, "usage", None), bot_id, event, module="chat"
@@ -429,9 +466,30 @@ class LLMService:
                 stream_options={"include_usage": True},
             )
         except Exception as e:
-            logger.error(f"LLM stream call failed: {e}")
-            yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
-            return
+            # direct 识图模式下, 主模型不支持视觉会在这里失败: 回退 describe 再试一次。
+            if not _uses_direct_image(messages):
+                logger.error(f"LLM stream call failed: {e}")
+                yield (LLMDiagnostic(f"[LLM 调用失败: {e}]"), True)
+                return
+            logger.warning(f"direct 识图流式请求失败, 回退 describe 重试: {e}")
+            messages = await self._build_messages(
+                bot_id, event, context, bot_config, persona_content, force_describe=True,
+            )
+            try:
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=self._current_tools_schemas(),
+                    tool_choice="auto",
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+            except Exception as retry_error:
+                logger.error(f"LLM stream call failed (describe fallback): {retry_error}")
+                yield (LLMDiagnostic(f"[LLM 调用失败: {retry_error}]"), True)
+                return
 
         full_content = ""
         tool_calls_buffer: dict[int, dict] = {}
@@ -1217,9 +1275,11 @@ class LLMService:
             raise RuntimeError("Empty A/B text")
         return text
 
-    async def _build_messages(self, bot_id, event, context, bot_config=None, persona_content=None):
+    async def _build_messages(self, bot_id, event, context, bot_config=None, persona_content=None, *, force_describe=False):
         persona = persona_content if persona_content is not None else self.resolve_bot_persona(bot_config)["content"]
-        messages = await self._prepare_messages(bot_id, event, context, bot_config)
+        messages = await self._prepare_messages(
+            bot_id, event, context, bot_config, force_describe=force_describe,
+        )
         messages[0]["content"] = persona + messages[0]["content"]
         return messages
 
@@ -1229,7 +1289,7 @@ class LLMService:
         event: MessageEvent,
         context: list[dict[str, Any]],
         bot_config: BotConfig | None = None,
-        *, allow_tts: bool = True,
+        *, allow_tts: bool = True, force_describe: bool = False,
     ) -> list[dict[str, Any]]:
         """Build the complete messages array for the LLM call.
 
@@ -1345,7 +1405,22 @@ class LLMService:
 
         user_content = user_text or ""
 
-        if image_urls:
+        # 识图模式:
+        #   describe(默认) —— 先调独立视觉模型转述, 主模型只收文本(兼容纯文本主模型)
+        #   direct         —— 图片随文本直接发给主模型, 省一次视觉模型调用;
+        #                     要求 chat 模型本身支持视觉, 失败时由调用方回退 describe
+        direct_image: list[dict[str, Any]] | None = None
+        # _cfg.llm 在某些测试替身里可能不存在; 取不到时按默认 describe 处理,
+        # 不能因为新增配置把既有调用方(含旧配置对象)弄崩。
+        vision_mode = _normalize_vision_mode(
+            getattr(getattr(self._cfg, "llm", None), "vision_mode", "describe")
+        )
+        if image_urls and vision_mode == "direct" and not force_describe:
+            direct_image = [
+                {"type": "image_url", "image_url": {"url": image_urls[0]}},
+            ]
+
+        if image_urls and direct_image is None:
             # 与 beta(Agent)路径一致的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
             vision_desc = await self._describe_image_for_text(image_urls[0])
@@ -1380,6 +1455,15 @@ class LLMService:
                 logger.debug(f"Song annotation failed: {e}")
 
         messages.append({"role": "user", "content": user_content})
+
+        if direct_image is not None:
+            # 多模态: 文本 + 图片一起发给主模型(direct 模式)。
+            # 纯图片无文字时也要给一个文本块, 否则部分网关会拒绝只有 image 的 user 消息。
+            parts: list[dict[str, Any]] = [
+                {"type": "text", "text": user_content or "（用户发送了图片）"},
+                *direct_image,
+            ]
+            messages[-1]["content"] = parts
 
         return messages
 
