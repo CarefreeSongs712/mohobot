@@ -894,30 +894,40 @@ async def test_auto_publish_tick_end_to_end():
         plugin._apis["bot_001"] = api
         plugin._services["bot_001"] = _FakeService()
 
-        # 预置当日计划: 一个已到点(00:01), 一个未来(23:59 之外不存在 → 用 23:59 但可能已过)
-        store = plugin._get_pub_store("bot_001")
-        from mohobot.utils.time_utils import format_utc8
-        today = format_utc8("%Y-%m-%d")
-        now_hhmm = format_utc8("%H:%M")
-        past = "00:01" if now_hhmm > "00:01" else "23:58"
-        future = "23:59" if now_hhmm <= "23:58" else "00:01"
-        await store.ensure_plan(today, [past, future])
-        await store.save()
+        # 预置当日计划: 一个已到点(00:01), 一个未来(23:59)。
+        # 必须冻结时钟: 旧写法读真实时间并在 00:00~00:01 / 23:59 附近把"已到点"
+        # 算成未来(或两条都到点), 导致这几个时刻的 CI 随机变红。
+        # 注意: 整段(含后续重复 tick 与排除名单断言)都要在冻结时钟内, 否则后面的
+        # tick 仍按真实时间判断, 在 23:59 会多发布一条。
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
 
-        await plugin._auto_publish_tick("bot_001")
-        assert len(published) == 1
-        assert published[0] == "今天天气不错，出去走走。"
-        hist = store._data["history"]
-        assert len(hist) == 1 and hist[0]["text"] == published[0]
-        # 已到点条目标记 done: 再 tick 不重复发布
-        await plugin._auto_publish_tick("bot_001")
-        assert len(published) == 1
-        # 排除名单生效
-        plugin.plugin_config["auto_publish_exclude_bots"] = ["bot_001"]
-        await store.ensure_plan(today, [past])  # 重建计划(同日不重建 → 手动重置)
-        store._data["plan"]["done"] = [False]
-        await plugin._auto_publish_tick("bot_001")
-        assert len(published) == 1
+        fixed_now = datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+
+        def _fake_format_utc8(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+            return fixed_now.strftime(fmt)
+
+        with patch("mohobot.utils.time_utils.format_utc8", _fake_format_utc8):
+            store = plugin._get_pub_store("bot_001")
+            today = _fake_format_utc8("%Y-%m-%d")
+            past, future = "00:01", "23:59"
+            await store.ensure_plan(today, [past, future])
+            await store.save()
+
+            await plugin._auto_publish_tick("bot_001")
+            assert len(published) == 1
+            assert published[0] == "今天天气不错，出去走走。"
+            hist = store._data["history"]
+            assert len(hist) == 1 and hist[0]["text"] == published[0]
+            # 已到点条目标记 done: 再 tick 不重复发布
+            await plugin._auto_publish_tick("bot_001")
+            assert len(published) == 1
+            # 排除名单生效
+            plugin.plugin_config["auto_publish_exclude_bots"] = ["bot_001"]
+            await store.ensure_plan(today, [past])  # 重建计划(同日不重建 → 手动重置)
+            store._data["plan"]["done"] = [False]
+            await plugin._auto_publish_tick("bot_001")
+            assert len(published) == 1
 
 
 async def test_cmd_publish_log_shape():
