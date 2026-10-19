@@ -41,6 +41,22 @@ def _normalize_vision_mode(value: Any) -> str:
     return _normalize(value)
 
 
+def _optional_penalties(llm: Any) -> dict[str, float]:
+    """采样惩罚参数: 仅当配置值非 0 时下发。
+
+    部分网关/模型不支持 frequency_penalty / presence_penalty, 传 0 也可能报错;
+    因此默认(0.0)下完全不下发, 保持既有请求形状不变。
+    """
+    kwargs: dict[str, float] = {}
+    frequency = float(getattr(llm, "frequency_penalty", 0.0) or 0.0)
+    presence = float(getattr(llm, "presence_penalty", 0.0) or 0.0)
+    if frequency:
+        kwargs["frequency_penalty"] = frequency
+    if presence:
+        kwargs["presence_penalty"] = presence
+    return kwargs
+
+
 def _uses_direct_image(messages: list[dict[str, Any]]) -> bool:
     """本次请求是否以 direct 模式携带了原始图片(用于失败后回退 describe)。"""
     for message in messages:
@@ -284,10 +300,11 @@ class LLMService:
 
         # Build messages array
         messages = await self._build_messages(bot_id, event, context, bot_config, persona_content)
+        penalty_kwargs = _optional_penalties(self._cfg.llm)
 
         logger.debug(
             f"LLM call: model={model}, messages={len(messages)}, "
-            f"context_len={len(context)}"
+            f"context_len={len(context)}, penalties={penalty_kwargs or None}"
         )
 
         try:
@@ -298,6 +315,7 @@ class LLMService:
                 max_tokens=max_tokens,
                 tools=self._current_tools_schemas(),
                 tool_choice="auto",
+                **penalty_kwargs,
             )
         except Exception as e:
             # direct 识图模式下, 主模型不支持视觉会在这里失败: 回退 describe 再试一次。
@@ -314,6 +332,7 @@ class LLMService:
                         max_tokens=max_tokens,
                         tools=self._current_tools_schemas(),
                         tool_choice="auto",
+                        **penalty_kwargs,
                     )
                 except Exception as retry_error:
                     logger.error(f"LLM API call failed (describe fallback): {retry_error}")
@@ -448,10 +467,12 @@ class LLMService:
         # Cap max_tokens — some gateways return an EMPTY stream for huge values
         # (verified: 409600 → 0 chunks, 4096~131072 all work)
         max_tokens = min(self._cfg.llm.chat_max_tokens, 131072)
+        penalty_kwargs = _optional_penalties(self._cfg.llm)
 
         logger.debug(
             f"LLM stream call: model={model}, messages={len(messages)}, "
-            f"context_len={len(context)}, max_tokens={max_tokens}"
+            f"context_len={len(context)}, max_tokens={max_tokens}, "
+            f"penalties={penalty_kwargs or None}"
         )
 
         try:
@@ -464,6 +485,7 @@ class LLMService:
                 tool_choice="auto",
                 stream=True,
                 stream_options={"include_usage": True},
+                **penalty_kwargs,
             )
         except Exception as e:
             # direct 识图模式下, 主模型不支持视觉会在这里失败: 回退 describe 再试一次。
@@ -485,6 +507,7 @@ class LLMService:
                     tool_choice="auto",
                     stream=True,
                     stream_options={"include_usage": True},
+                    **penalty_kwargs,
                 )
             except Exception as retry_error:
                 logger.error(f"LLM stream call failed (describe fallback): {retry_error}")

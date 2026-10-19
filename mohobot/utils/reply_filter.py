@@ -384,13 +384,149 @@ class ReplyArtifactFilter:
         return False
 
 
+# ── 无标签推理/自查块 (Issue #57) ────────────────────────────
+#
+# 生产事故: 模型把"检查系统约束 / 编写回复 / 字数检查 / 符合要求"这类
+# 内部自查过程当成正文输出, 且没有包在 <think> 等标签里, 标签过滤器完全
+# 抓不到, 分段逻辑还会把它拆成十几个气泡直接发给用户。
+#
+# 这类块只出现在回复的**开头**, 且有稳定的中文表头。清洗策略:
+#   1. 若末尾出现"符合要求。"类自检结论, 取它之后的正文(模型常会把最终
+#      回复在自查后再输出一遍);
+#   2. 否则取"编写回复：/生成回复："之后的草稿;
+#   3. 再否则把开头的自查块整段剔除。
+# 非"开头 + 表头 + 冒号"三重命中不动原文, 避免误伤正常聊天。
+
+# 可能出现在推理块开头的表头(必须紧跟冒号才判定)
+_REASONING_HEADERS = (
+    "检查系统约束", "系统约束检查", "检查约束", "约束检查", "规则检查",
+    "检查规则", "思考过程", "分析思路", "自我检查", "自查内容",
+    "字数检查", "字数统计", "格式检查", "输出检查", "编写回复", "生成回复",
+    "拟定回复", "实际回复",
+)
+# 草稿分隔标记: 其后为模型拟定的回复正文
+_DRAFT_MARKERS = ("编写回复", "生成回复", "拟定回复", "实际回复")
+# 自检通过标记: 其后常跟着真正要发出的回复
+_PASS_MARKERS = ("符合要求", "检查通过", "满足要求", "符合规范")
+# 尾部检查块表头(出现在草稿之后)
+_TAIL_CHECK_HEADERS = ("字数检查", "字数统计", "格式检查", "输出检查")
+
+
+def looks_like_unwrapped_reasoning(text: str) -> bool:
+    """回复是否以无标签的自查/推理块开头(流式门控用)。
+
+    要求"开头 + 已知表头 + 紧跟冒号"三重命中。冒号是必要条件: 像
+    "检查系统约束很严格" 这种正常口语不会被误判。
+    """
+    stripped = (text or "").lstrip()
+    for header in _REASONING_HEADERS:
+        if stripped.startswith(header):
+            rest = stripped[len(header):].lstrip()
+            if rest.startswith(("：", ":")):
+                return True
+            # 表头后面可能先跟换行再写冒号(如"检查系统约束\n：")
+            if rest[:1] in ("\n", "\r") and rest.lstrip().startswith(("：", ":")):
+                return True
+    return False
+
+
+def _strip_tail_check_block(text: str) -> str:
+    """剔除草稿之后的自检块(字数检查…符合要求), 保留其余正文。"""
+    out = text
+    for header in _TAIL_CHECK_HEADERS:
+        idx = out.find(header + "：")
+        if idx < 0:
+            idx = out.find(header + ":")
+        if idx < 0:
+            continue
+        tail = out[idx:]
+        cut = -1
+        for marker in _PASS_MARKERS:
+            pos = tail.find(marker)
+            if pos >= 0:
+                cut = pos + len(marker)
+                break
+        if cut >= 0:
+            # 自检结论之后可能还有正文(最终回复): 有实质内容才保留, 否则只留结论前正文
+            remainder = tail[cut:].strip(" \t\r\n。.！!，,：:")
+            head = out[:idx].rstrip()
+            if _has_substance(remainder):
+                out = f"{head}\n{remainder}" if head else remainder
+            else:
+                out = head
+        else:
+            # 没有结论标记: 认为该块一直到结尾都是自检, 丢弃
+            out = out[:idx].rstrip()
+    return out
+
+
+def _has_substance(text: str) -> bool:
+    """正文是否有实质内容(至少一个字母/数字/汉字)；纯标点/空白不算。"""
+    return any(ch.isalnum() for ch in (text or ""))
+
+
+def strip_unwrapped_reasoning(text: str) -> str:
+    """剔除未包裹在标签里的模型自查/推理过程, 只保留真正要发出的回复。
+
+    仅在"回复以已知自查表头 + 冒号开头"时生效; 否则原样返回, 不影响正常聊天。
+    无法确定正文时返回空串(宁可这条不发, 也不把内心戏发给用户)。
+    """
+    if not text:
+        return ""
+    if not looks_like_unwrapped_reasoning(text):
+        return text
+
+    body = text.lstrip()
+
+    # 策略 1: 末尾自检通过后模型又输出了一遍最终回复 —— 取最后一个结论标记之后
+    best_tail = ""
+    for marker in _PASS_MARKERS:
+        pos = body.rfind(marker)
+        if pos < 0:
+            continue
+        tail = body[pos + len(marker):].lstrip(" \t\r\n。.！!，,：:")
+        if _has_substance(tail) and len(tail) > len(best_tail):
+            best_tail = tail
+    if _has_substance(best_tail):
+        return best_tail.strip()
+
+    # 策略 2: "编写回复：/生成回复：" 之后的草稿(可能有多个, 取最后一个)
+    draft_pos = -1
+    for marker in _DRAFT_MARKERS:
+        for sep in ("：", ":"):
+            pos = body.rfind(marker + sep)
+            if pos > draft_pos:
+                draft_pos = pos + len(marker) + 1
+    if draft_pos >= 0:
+        draft = body[draft_pos:].strip()
+        draft = _strip_tail_check_block(draft).strip()
+        if _has_substance(draft):
+            return draft
+
+    # 策略 3: 没有草稿标记 —— 剔除开头的自查块(到首个空行为止), 保留后续正文
+    lines = body.split("\n")
+    idx = 0
+    while idx < len(lines) and lines[idx].strip():
+        idx += 1
+    rest = "\n".join(lines[idx:]).strip()
+    if not rest:
+        return ""
+    # 剩余部分若仍是自查(如 字数检查…), 继续剥
+    rest = _strip_tail_check_block(rest).strip()
+    # 剥完只剩标点(如"符合要求。"的残留句号)视为无正文
+    return rest if _has_substance(rest) else ""
+
+
 def strip_reply_artifacts(text: str) -> tuple[str, str]:
     """非流式全文处理: 剥除所有可识别产物。
 
     返回 (显示文本, 朗读文本) — 显示文本 = voice/format 标签已剥、drop 块已弃的
     全文; 朗读文本按顺序合并全部 voice 标注(含变体), 无标注时为空串。
+
+    标签剥除后再做一次无标签自查块清洗(Issue #57): 模型会绕过标签把
+    "检查约束/编写回复/字数检查" 直接写成正文, 必须在这一层兜住。
     """
     f = ReplyArtifactFilter()
     display = f.feed(text or "")
     rest, tts_text = f.finish()
-    return display + rest, tts_text
+    return strip_unwrapped_reasoning(display + rest), tts_text

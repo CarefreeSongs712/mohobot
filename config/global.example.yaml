@@ -61,6 +61,10 @@ llm:
   chat_api_key: ""           # 必填，或设置环境变量 MOHOBOT_LLM_API_KEY
   chat_max_tokens: 131072    # 注意：过大的 max_tokens 会导致部分网关返回空流
   chat_temperature: 0.7
+  # 重复惩罚(OOC 治理): 抑制复读死循环与模板化套话; 0 = 关闭(不下发该参数)
+  # 部分网关/模型不支持这两个参数, 保持 0 即完全不改变请求形状
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
 
   # Vision model
   vision_model: "Qwen3.5-122B-A10B"
