@@ -89,6 +89,12 @@ class LLMConfig:
     vision_max_tokens: int = 2048
     vision_temperature: float = 0.3
 
+    # 识图模式:
+    #   describe(默认) = 先调独立视觉模型转述成文本, 主模型只收文本(兼容纯文本主模型)
+    #   direct         = 把图片原始内容随文本一起发给主模型(要求 chat 模型本身支持视觉,
+    #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
+    vision_mode: str = "describe"
+
     # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
     models: list[str] = field(default_factory=lambda: [
         "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -249,6 +255,12 @@ class KnowledgeConfig:
 
 
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
+
+
+def _normalize_vision_mode(value) -> str:
+    """识图模式归一化: 只接受 describe / direct, 其余(含空)回退 describe。"""
+    mode = str(value or "").strip().lower()
+    return mode if mode in ("describe", "direct") else "describe"
 
 
 def _int_list(value) -> list[int]:
@@ -448,6 +460,7 @@ class GlobalConfig:
                 vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
                 vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
                 vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
+                vision_mode=_normalize_vision_mode(llm_raw.get("vision_mode")),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 emotion_model=str(llm_raw.get("emotion_model", "") or ""),
@@ -601,6 +614,7 @@ class GlobalConfig:
                 "vision_prompt": self.llm.vision_prompt,
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
+                "vision_mode": self.llm.vision_mode,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,
@@ -744,6 +758,7 @@ class GlobalConfig:
                 "vision_prompt": self.llm.vision_prompt,
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
+                "vision_mode": self.llm.vision_mode,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,

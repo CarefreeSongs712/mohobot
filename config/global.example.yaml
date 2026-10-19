@@ -67,6 +67,12 @@ llm:
   vision_base_url: "https://api.openai.com/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 
+  # 识图模式:
+  #   describe(默认) = 先用上面的视觉模型转述成文本, 主模型只收文本(主模型无视觉能力时用这个)
+  #   direct         = 把图片随文本一起直接发给主模型(要求 chat_model 本身支持视觉,
+  #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
+  vision_mode: "describe"
+
   # 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
   emotion_model: ""
   emotion_base_url: ""
