@@ -33,6 +33,10 @@ class LLMConfig:
     chat_api_key: str = ""
     chat_max_tokens: int = 4096
     chat_temperature: float = 0.7
+    # 重复惩罚(OOC 治理): 抑制复读死循环与模板化套话。0 = 关闭, 推荐 0.1~0.4。
+    # 部分网关/模型不支持这两个参数, 留 0 时不传参(保持旧请求形状)。
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
 
     # 上下文 AI 总结(压缩早期对话, 默认复用 chat 模型)
     summarize_temperature: float = 0.3
@@ -453,6 +457,8 @@ class GlobalConfig:
                 chat_api_key=llm_raw.get("chat_api_key", ""),
                 chat_max_tokens=llm_raw.get("chat_max_tokens", 4096),
                 chat_temperature=llm_raw.get("chat_temperature", 0.7),
+                frequency_penalty=float(llm_raw.get("frequency_penalty", 0.0) or 0.0),
+                presence_penalty=float(llm_raw.get("presence_penalty", 0.0) or 0.0),
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
                 vision_base_url=llm_raw.get("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
                 vision_api_key=llm_raw.get("vision_api_key", ""),
@@ -608,6 +614,8 @@ class GlobalConfig:
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
                 "chat_temperature": self.llm.chat_temperature,
+                "frequency_penalty": self.llm.frequency_penalty,
+                "presence_penalty": self.llm.presence_penalty,
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
@@ -752,6 +760,8 @@ class GlobalConfig:
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
                 "chat_temperature": self.llm.chat_temperature,
+                "frequency_penalty": self.llm.frequency_penalty,
+                "presence_penalty": self.llm.presence_penalty,
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,

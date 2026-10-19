@@ -1409,6 +1409,11 @@ class MessageHandler:
         first_sent = False
         segments_sent = 0
         diagnostic: LLMDiagnostic | None = None
+        # Issue #57: 模型可能把"检查约束/编写回复/字数检查"写成无标签正文。
+        # 这类块只出现在回复开头且被分段逻辑拆成多气泡直发用户, 因此在流式阶段
+        # 一旦识别到开头是自查块, 就停止逐段发送、改为整条累积, 结束时清洗后
+        # 单条发出(降级为非流式, 牺牲极少数异常回复的流式体验换取不泄漏)。
+        reasoning_suppress = False
 
         async for chunk, is_final in self._llm.chat_stream(
             bot_id=bot_id,
@@ -1433,6 +1438,19 @@ class MessageHandler:
                     buffer += chunk
                     full_reply += chunk
 
+            if not reasoning_suppress and not first_sent and buffer:
+                from mohobot.utils.reply_filter import looks_like_unwrapped_reasoning
+                if looks_like_unwrapped_reasoning(buffer):
+                    reasoning_suppress = True
+                    logger.warning(
+                        f"检测到无标签自查/推理块(bot={bot_id}), 该轮降级为单条发送并清洗"
+                    )
+
+            if reasoning_suppress:
+                # 自查块内容既不逐段发送也不进入分段缓冲, 全部留到流结束统一清洗
+                buffer = ""
+                continue
+
             # Flush complete segments from the buffer
             flushed = self._flush_ready_segments(buffer)
             buffer = flushed["rest"]
@@ -1449,6 +1467,22 @@ class MessageHandler:
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
         rest, tts_text = artifact_filter.finish()
         full_reply += rest
+        if reasoning_suppress:
+            # 整条清洗后单条发出; 自查内容不能进 TTS
+            from mohobot.utils.reply_filter import strip_unwrapped_reasoning
+            cleaned = strip_unwrapped_reasoning(full_reply).strip()
+            if cleaned:
+                segments_sent += 1
+                first_sent = await self._send_segment(bot_id, event, cleaned, first_sent)
+            self._submit_tts(bot_id, event, tts_text)
+            logger.debug(
+                f"Streamed reply (reasoning-suppressed) done: "
+                f"{len(full_reply)} -> {len(cleaned)} chars"
+            )
+            if diagnostic is not None:
+                await self._send_segment(bot_id, event, diagnostic, first_sent)
+                return diagnostic
+            return cleaned
         if rest.strip():
             segments_sent += 1
             first_sent = await self._send_segment(bot_id, event, rest, first_sent)
