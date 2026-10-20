@@ -224,25 +224,11 @@ class MemeStealToolWorkflow:
         """
         explicit_ref = str(image_ref or "").strip()
 
-        # 1. URL 形式（http/https/file 协议）直接信任 LLM 传入
-        if explicit_ref and (
-            explicit_ref.startswith("http://")
-            or explicit_ref.startswith("https://")
-            or explicit_ref.startswith("file:")
-        ):
-            return explicit_ref, "llm_tool"
-
-        # 2. 尝试把显式 ref 解析为消息内某张图片的真实位置
-        resolved_explicit = ""
-        if explicit_ref:
-            resolved_explicit = await self._resolve_image_ref_against_event(
-                event, explicit_ref
-            )
-            if resolved_explicit:
-                return resolved_explicit, "llm_tool"
-
-        # 3. 未提供 ref 或 ref 解析失败：取当前消息中第一张可用图片，
-        #    没有时再看用户引用的那条消息（“引用图片 + 偷一下”）
+        # 先收集"本事件内合法图片来源"(当前消息 + 引用消息 + QQ商城表情)。
+        # issue #6 第 2 点: 旧实现在显式 ref 是 http/https/file 时直接信任,
+        # 模型可以传任意网络 URL 或本机绝对路径把无关文件送进 VLM/图库;
+        # 修复后显式 ref 必须能在这些合法来源里命中, 否则拒绝。
+        candidates: list[tuple[str, str]] = []  # (ref, source)
         try:
             images = [comp for comp in event.get_messages() if isinstance(comp, MessageImage)]
         except Exception:
@@ -260,18 +246,67 @@ class MemeStealToolWorkflow:
             except Exception:
                 ref = ""
             if ref:
-                return ref, "llm_tool"
+                candidates.append((str(ref).strip(), "llm_tool"))
 
-        # 4. 兜底：QQ 商城表情 URL
+        # QQ 商城表情 URL 也是合法来源
         try:
             store_urls = event_handler._extract_store_emoji_urls(event)
         except Exception:
             store_urls = []
-        if store_urls:
-            return str(store_urls[0] or "").strip(), "qq_store"
+        for url in store_urls:
+            url = str(url or "").strip()
+            if url:
+                candidates.append((url, "qq_store"))
 
-        # 5. 都没有的话才把显式 ref 原样回传（让下游报错时提示更准确）
-        return explicit_ref, "llm_tool"
+        if explicit_ref:
+            matched = self._match_candidate_ref(explicit_ref, candidates)
+            if matched is not None:
+                ref, source = matched
+                return ref, source
+            # 显式 ref 不来自当前上下文: 退回「消息解析」再试一次(相对路径/
+            # 仅文件名等), 仍不命中则拒绝, 不再原样放行。
+            resolved_explicit = await self._resolve_image_ref_against_event(
+                event, explicit_ref
+            )
+            if resolved_explicit:
+                return resolved_explicit, "llm_tool"
+            logger.warning(
+                f"[Tool] 拒绝越界 image_ref(只能是当前/引用消息里的图片): {explicit_ref[:120]}"
+            )
+            return "", "rejected"
+
+        # 未提供 ref: 取本事件第一张合法图片(含引用消息/商城表情)
+        if candidates:
+            return candidates[0]
+
+        return "", "llm_tool"
+
+    @staticmethod
+    def _match_candidate_ref(
+        explicit_ref: str, candidates: list[tuple[str, str]],
+    ) -> tuple[str, str] | None:
+        """显式 ref 必须命中本事件的合法图片候选(按完整 ref / basename)。
+
+        返回 ``(ref, source)`` 或 None。basename 匹配用于模型把 URL 简写成
+        文件名、或传了消息图片的本地临时路径的场景。
+        """
+        ref = str(explicit_ref or "").strip()
+        if not ref or not candidates:
+            return None
+        ref_norm = ref.replace("\\", "/")
+        ref_clean = ref_norm.split("?", 1)[0].split("#", 1)[0]
+        ref_base = ref_clean.rsplit("/", 1)[-1]
+        for cand_ref, source in candidates:
+            cand = str(cand_ref or "").strip()
+            if not cand:
+                continue
+            cand_norm = cand.replace("\\", "/")
+            cand_clean = cand_norm.split("?", 1)[0].split("#", 1)[0]
+            if ref_clean == cand_clean or ref_norm == cand_norm:
+                return cand, source
+            if ref_base and ref_base == cand_clean.rsplit("/", 1)[-1]:
+                return cand, source
+        return None
 
     async def _resolve_image_ref_against_event(
         self,

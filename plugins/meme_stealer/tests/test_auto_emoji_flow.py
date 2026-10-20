@@ -302,18 +302,26 @@ class StealToolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             Path(local_path).unlink(missing_ok=True)
 
-    async def test_steal_tool_keeps_relative_path_when_no_image_in_message(self):
+    async def test_steal_tool_rejects_relative_path_when_no_image_in_message(self):
+        """issue #6: 消息里没有图片时, 任意相对路径不再原样放行(安全拒绝)。"""
         main = _build_main(1.0)
         resolved, source = await main._resolve_steal_image_ref(
             DummyEvent(), "./orphan.png", FakeStealEventHandler()
         )
-        self.assertEqual(resolved, "./orphan.png")
-        self.assertEqual(source, "llm_tool")
+        self.assertEqual(resolved, "")
+        self.assertEqual(source, "rejected")
 
     async def test_steal_tool_passes_origin_metadata_and_context_to_processor(self):
         main = _build_main(1.0)
         main.is_steal_enabled_for_event = lambda event: True
         main.get_event_target = lambda event: ("group", "123")
+        # 本用例验证元数据/上下文透传, 与图片来源边界无关 → 直接桩掉解析
+        # (issue #6 后任意 URL 需命中当前消息图片, 解析逻辑由
+        #  tests/test_meme_scope_and_source_bounds.py 覆盖)
+        async def _fake_resolve(event, ref, handler):
+            return "https://example.test/a.png", "llm_tool"
+
+        main._resolve_steal_image_ref = _fake_resolve
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fp:
             temp_path = fp.name
