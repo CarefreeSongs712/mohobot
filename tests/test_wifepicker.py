@@ -17,6 +17,10 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 插件目录在模块导入时就加入 sys.path: 否则 `pytest -n auto` 把同文件的用例
+# 分发到不同 worker 时, 依赖前面用例插入路径的用例会 ModuleNotFoundError
+# (原本靠同文件用例执行顺序, 并行下顺序不保证)。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "wifepicker"))
 
 from mohobot.models.onebot import GroupMessageEvent, PrivateMessageEvent, Sender
 

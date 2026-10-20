@@ -100,6 +100,8 @@ python main.py
 
 ```bash
 python -m pytest -q tests --ignore=tests/test_concurrency.py  # 逐用例；pytest.ini 自动 await async 测试
+python -m pytest -q -n auto --dist loadfile tests --ignore=tests/test_concurrency.py  # 并行(~4-5x 快)；loadfile 让同文件用例同 worker，规避顺序/模块状态依赖
+python -m pytest -q -n auto tests/test_<你的模块>.py  # 改一个模块时只跑相关用例(秒级)
 python tests/_run_all.py          # 全量，从仓库根执行
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
