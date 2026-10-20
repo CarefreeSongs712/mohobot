@@ -25,12 +25,15 @@ class ExternalSourceRoutes:
         return dict(payload)
 
     def _validate_source_pack_path(self, payload: dict[str, Any]) -> None:
+        # issue #6 第 3 点: 旧实现只 .lower() 未 .strip(), 而底层
+        # _infer_source_type 是 .strip().lower(); 传 " meme_pack " 时 API 层
+        # 白名单检查被绕过(不等于集合中的值 → 直接 return)。统一先 strip。
         source_type = str(
             payload.get("source_type")
             or payload.get("type")
             or payload.get("kind")
             or ""
-        ).lower()
+        ).strip().lower()
         if not source_type and payload.get("path"):
             source_type = "meme_pack"
         if source_type not in {"pack", "meme_pack", "meme-manager", "meme_manager"}:
