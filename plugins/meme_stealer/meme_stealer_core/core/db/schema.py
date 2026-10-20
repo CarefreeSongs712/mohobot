@@ -92,7 +92,8 @@ class DatabaseSchema:
                 overlay_text TEXT,
                 emotions_json TEXT,
                 character TEXT,
-                retention_class TEXT DEFAULT 'native'
+                retention_class TEXT DEFAULT 'native',
+                allowed_bots TEXT DEFAULT ''
             )
         """)
 
@@ -150,7 +151,8 @@ class DatabaseSchema:
                 overlay_text TEXT,
                 emotions_json TEXT,
                 character TEXT,
-                retention_class TEXT DEFAULT 'native'
+                retention_class TEXT DEFAULT 'native',
+                allowed_bots TEXT DEFAULT ''
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_created ON emoji_pending(created_at)")
@@ -235,6 +237,7 @@ class DatabaseSchema:
             *(col for col, _ in _META_COLUMNS),
             *(col for col, _ in _SEMANTIC_COLUMNS),
             "retention_class",
+            "allowed_bots",
         }
     )
     # INSERT 语句用列清单（顺序与 _INSERT_EMOJI_SQL 的 VALUES 占位对应）
@@ -280,6 +283,7 @@ class DatabaseSchema:
         *(col for col, _ in _META_COLUMNS),
         *(col for col, _ in _SEMANTIC_COLUMNS),
         "retention_class",
+        "allowed_bots",
     )
 
     def _migrate_v5(self, conn: sqlite3.Connection) -> None:
@@ -351,6 +355,14 @@ class DatabaseSchema:
             try:
                 conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN retention_class TEXT DEFAULT 'native'"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+            # allowed_bots: 逗号分隔的 bot_id 白名单; 空串 = 全部 bot 可用
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN allowed_bots TEXT DEFAULT ''"
                 )
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
