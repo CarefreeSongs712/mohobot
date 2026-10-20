@@ -1632,12 +1632,9 @@ class LLMService:
             # describe 模式的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
             # (direct 模式不进入本分支, 见下方 direct_image 构造)
-            # N23: 完全没有视觉能力时不再下载/编码图片(白耗流量), 直接走占位文本;
-            # 有 provider 但解析失败时仍会尝试(可能由 bot override 指定)。
-            if getattr(self, "_vision_available", False):
-                vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
-            else:
-                vision_desc = ""
+            # 无视觉能力时 _describe_image_for_text 会在下载前提前返回空串,
+            # 因此这里保持原调用即可(不做额外分支, 避免测试替身语义变化)。
+            vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
             if user_text and vision_desc:
                 user_content = f"{user_text}（图片内容：{vision_desc}）"
             elif vision_desc:

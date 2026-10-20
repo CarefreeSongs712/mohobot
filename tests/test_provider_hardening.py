@@ -563,38 +563,20 @@ async def test_prepare_messages_passes_bot_config_to_vision():
     assert seen.get("bot_config") is bot, "N17: _prepare_messages 未把 bot_config 传给视觉路径"
 
 
-async def test_vision_unavailable_skips_image_download():
-    """N23: 无视觉能力时不应再下载/编码图片。"""
+async def test_vision_unavailable_does_not_touch_image_cache():
+    """N23: 无视觉能力时, 描述路径必须在下载/编码图片之前提前返回。"""
     from mohobot.llm_service import LLMService
-    from mohobot.models.onebot import GroupMessageEvent, Sender
 
-    called = {"describe": 0}
+    class ExplodingCache:
+        async def get_or_describe(self, *a, **k):
+            raise AssertionError("无视觉能力时不应访问 ImageCache(会触发下载/编码)")
 
     svc = object.__new__(LLMService)
     svc._cfg = SimpleNamespace(llm=LLMConfig(vision_mode="describe"))
     svc._vision_available = False
-
-    async def fake_describe(url, bot_config=None):
-        called["describe"] += 1
-        return "不应被调用"
-
-    svc._describe_image_for_text = fake_describe
-    event = GroupMessageEvent(
-        time=0, self_id=1000, post_type="message", message_type="group",
-        message_id=1, user_id=2000, group_id=3000,
-        message=[{"type": "image", "data": {"url": "http://img/x.png"}}],
-        sender=Sender(user_id=2000, nickname="u"),
-    )
-    svc._build_self_reference = lambda *a, **k: ""
-    svc._build_time_context = lambda *a, **k: ""
-    svc._build_memory_context = lambda *a, **k: ""
-    try:
-        await LLMService._prepare_messages(
-            svc, "b", event, [], BotConfig(bot_id="b"), force_describe=True,
-        )
-    except Exception:
-        pass
-    assert called["describe"] == 0, "N23: 无视觉能力仍在调用识图(会下载图片)"
+    svc._image_cache = ExplodingCache()
+    out = await LLMService._describe_image_for_text(svc, "http://img/x.png", None)
+    assert out == ""
 
 
 async def test_vision_unavailable_warning_is_interpolated():
