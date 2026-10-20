@@ -177,6 +177,10 @@ class BotManager:
             self._unbind_qq_from_others(qq_int, exclude_bot_id=bot_id)
         self._bots_dir.mkdir(parents=True, exist_ok=True)
         cfg.save(self._bot_config_path(bot_id))
+        # 若创建时就填了 QQ, 必须把"已在线但未绑定"的连接晋升为本 bot,
+        # 否则该 QQ 要断开重连后才生效(消息在此期间被忽略)。
+        if qq_int:
+            self.bind_qq(bot_id, qq_int)
         logger.info(f"Bot created: {bot_id} (nickname={cfg.nickname}, qq={qq_int or '未绑定'})")
         return cfg
 
