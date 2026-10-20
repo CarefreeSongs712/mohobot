@@ -3,7 +3,7 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `9bfc27b`。CI 四项通过。
+> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `12c4ec9`。CI 四项通过。
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
 
 ---
@@ -106,6 +106,19 @@
 PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provider_hardening.py` 10 条，7/7 变异杀死；全量 798 passed、runner 89/0、ban/reload/concurrency 单独 OK、smoke OK。
 
 **教训（已写入流程）**：PR 审查改为**独立子代理先审**再合并；自身测试容易漏"同一改动在其它出口的影响面"（本例是 `/api/config` 这个既有出口）。
+
+### 2.5 多提供商跟进修复（PR #75 + 收尾）
+
+独立复审 #74 后跟进（PR #75，已合并）：
+- **N14（P2 安全，已修）**：`chat_base_url` 为空时空 key provider 会把主 Key 发往第三方端点 → 仅"未写 base_url"或"同端点"才继承；
+- **N13（P2，已修）**：仅 per-bot `vision_provider_override` 时识图静默失效 → 可用性改为"任一 provider client 即可用"，不可用时打 warning；
+- **N15（P3，已修）**：provider client 不再每次保存都重建（identity 缓存复用）；顺带修掉 `_provider_identities` 命名冲突导致的 `'dict' object is not callable`；
+- **N16/N17（P3，已修）**：补 `close()` 关闭当前 provider client、`_vision_callback`/`MessageHandler` 传 bot 配置的承重测试；
+- **N18~N28（P3，已修）**：loguru `%s/%r` 不插值、示例注释、前端 provider 删除/缓存为空时的选项、测试替身签名等。
+
+遗留（P3，接受现状）：N21 `_provider_specs` 对缺字段 SimpleNamespace 的容错；N22 ImageCache 按图片共享描述，per-bot vision 只在首次识别生效（缓存层设计，需单独排期）。
+
+当前 `dev` = `12c4ec9`，全量 **808 passed**、runner **89/0**、smoke/ruff 通过。
 
 
 ## 3. 分支模型与规范
