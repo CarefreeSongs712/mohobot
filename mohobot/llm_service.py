@@ -315,8 +315,10 @@ class LLMService:
         # per-bot 可在运行时用 vision_provider_override 指定提供商, 因此
         # "有没有 provider client" 本身就可能让识图可用, 不能只看全局
         # llm.vision_provider(否则多 bot 各自指定、全局留空时识图静默失效)。
+        # 视觉模型来源: 全局 vision_model, 或提供商自己的 default_model
+        # (N25: 全局留空 + 仅提供商配置时也应视为可能可用)
         self._vision_available = bool(
-            llm.vision_model
+            (llm.vision_model or bool(self._provider_clients))
             and (self._vision_client is not None or bool(self._provider_clients))
         )
 
@@ -1630,7 +1632,12 @@ class LLMService:
             # describe 模式的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
             # (direct 模式不进入本分支, 见下方 direct_image 构造)
-            vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
+            # N23: 完全没有视觉能力时不再下载/编码图片(白耗流量), 直接走占位文本;
+            # 有 provider 但解析失败时仍会尝试(可能由 bot override 指定)。
+            if getattr(self, "_vision_available", False):
+                vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
+            else:
+                vision_desc = ""
             if user_text and vision_desc:
                 user_content = f"{user_text}（图片内容：{vision_desc}）"
             elif vision_desc:
@@ -1731,11 +1738,13 @@ class LLMService:
         """
         vision_client, vision_model, vision_provider_id = self._resolve_vision_target(bot_config)
         if not self._vision_available or vision_client is None:
+            # loguru 用 {} 插值, 不支持 logging 的 %s/%r(会原样输出并丢字段)
+            _llm_cfg = getattr(getattr(self, "_cfg", None), "llm", None)
             logger.warning(
-                "识图不可用: 未配置可用的视觉提供商(clients=%s, vision_provider=%r, bot_override=%r)",
-                bool(getattr(self, "_provider_clients", None)),
-                getattr(getattr(getattr(self, "_cfg", None), "llm", None), "vision_provider", ""),
-                getattr(bot_config, "vision_provider_override", "") if bot_config else "",
+                "识图不可用: 未配置可用的视觉提供商"
+                f"(clients={bool(getattr(self, '_provider_clients', None))}, "
+                f"vision_provider={getattr(_llm_cfg, 'vision_provider', '')!r}, "
+                f"bot_override={getattr(bot_config, 'vision_provider_override', '') if bot_config else ''!r})"
             )
             return ""
         # 参数可在 WebUI 配置(llm.vision_max_tokens / vision_temperature);

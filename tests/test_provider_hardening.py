@@ -520,3 +520,144 @@ async def test_sync_config_reuses_unchanged_provider_clients():
 
     assert created_after == [], f"N15: 配置未变仍重建了 client: {created_after}"
     assert svc._provider_clients == first
+
+
+# ── PR #75 复审遗留 P3（N23 / N24 / N25 承重） ─────────────
+
+async def test_prepare_messages_passes_bot_config_to_vision():
+    """N17 残留: _prepare_messages 必须把 bot_config 传给视觉描述路径。"""
+    from mohobot.llm_service import LLMService
+    from mohobot.models.onebot import GroupMessageEvent, Sender
+
+    seen = {}
+
+    svc = object.__new__(LLMService)
+    svc._cfg = SimpleNamespace(llm=LLMConfig(vision_mode="describe"))
+    svc._vision_available = True
+    svc._image_cache = None
+    svc._song_annotator = None
+    svc._news_annotator = None
+
+    async def fake_describe(url, bot_config=None):
+        seen["bot_config"] = bot_config
+        return "一只猫"
+
+    svc._describe_image_for_text = fake_describe
+    bot = BotConfig(bot_id="b", vision_provider_override="p-vision")
+
+    event = GroupMessageEvent(
+        time=0, self_id=1000, post_type="message", message_type="group",
+        message_id=1, user_id=2000, group_id=3000,
+        message=[{"type": "image", "data": {"url": "http://img/x.png"}}],
+        sender=Sender(user_id=2000, nickname="u"),
+    )
+    svc._build_self_reference = lambda *a, **k: ""
+    svc._build_time_context = lambda *a, **k: ""
+    svc._build_memory_context = lambda *a, **k: ""
+    try:
+        await LLMService._prepare_messages(
+            svc, "b", event, [], bot, force_describe=True,
+        )
+    except Exception:
+        pass
+    assert seen.get("bot_config") is bot, "N17: _prepare_messages 未把 bot_config 传给视觉路径"
+
+
+async def test_vision_unavailable_skips_image_download():
+    """N23: 无视觉能力时不应再下载/编码图片。"""
+    from mohobot.llm_service import LLMService
+    from mohobot.models.onebot import GroupMessageEvent, Sender
+
+    called = {"describe": 0}
+
+    svc = object.__new__(LLMService)
+    svc._cfg = SimpleNamespace(llm=LLMConfig(vision_mode="describe"))
+    svc._vision_available = False
+
+    async def fake_describe(url, bot_config=None):
+        called["describe"] += 1
+        return "不应被调用"
+
+    svc._describe_image_for_text = fake_describe
+    event = GroupMessageEvent(
+        time=0, self_id=1000, post_type="message", message_type="group",
+        message_id=1, user_id=2000, group_id=3000,
+        message=[{"type": "image", "data": {"url": "http://img/x.png"}}],
+        sender=Sender(user_id=2000, nickname="u"),
+    )
+    svc._build_self_reference = lambda *a, **k: ""
+    svc._build_time_context = lambda *a, **k: ""
+    svc._build_memory_context = lambda *a, **k: ""
+    try:
+        await LLMService._prepare_messages(
+            svc, "b", event, [], BotConfig(bot_id="b"), force_describe=True,
+        )
+    except Exception:
+        pass
+    assert called["describe"] == 0, "N23: 无视觉能力仍在调用识图(会下载图片)"
+
+
+async def test_vision_unavailable_warning_is_interpolated():
+    """N24: 不可用 warning 必须真正插值(loguru 不用 %s), 且可被断言。"""
+    from loguru import logger as _logger
+
+    from mohobot.llm_service import LLMService
+
+    messages: list[str] = []
+    handler_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        svc = object.__new__(LLMService)
+        svc._cfg = SimpleNamespace(llm=LLMConfig(vision_provider=""))
+        svc._provider_clients = {}
+        svc._chat_client = svc._vision_client = svc._emotion_client = None
+        svc._vision_available = False
+        await LLMService.describe_image(svc, "http://img/x.png")
+    finally:
+        _logger.remove(handler_id)
+    joined = "\n".join(messages)
+    assert "识图不可用" in joined, joined
+    assert "%s" not in joined and "%r" not in joined, f"loguru 未插值: {joined}"
+    assert "clients=False" in joined, joined
+
+
+async def test_vision_provider_default_model_works_when_global_model_empty():
+    """N25: 全局 vision_model 为空时, 提供商 default_model 仍可作为视觉模型。"""
+    from mohobot.llm_service import LLMService
+
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="描述"))],
+                usage=None,
+            )
+
+    class ProvClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    llm = LLMConfig(chat_model="m", vision_model="")   # 全局视觉模型留空
+    llm.providers = _normalize_providers([
+        {"id": "p", "base_url": "https://v", "api_key": "sk-v", "default_model": "v-model"},
+    ])
+    svc = object.__new__(LLMService)
+    svc._cfg = SimpleNamespace(llm=llm)
+    svc._provider_clients = {"p": ProvClient()}
+    svc._chat_client = svc._vision_client = svc._emotion_client = None
+    LLMService._install_clients(
+        svc, llm,
+        {"chat": None, "vision": None, "emotion": None},
+        {"chat": None, "vision": None, "emotion": None},
+        {"p": svc._provider_clients["p"]},
+    )
+
+    async def _noop(*a, **k):
+        return None
+
+    svc._record_usage = _noop
+    bot = BotConfig(bot_id="b", vision_provider_override="p")
+    out = await LLMService.describe_image(svc, "http://img/x.png", bot_config=bot)
+    assert out == "描述", out
+    assert captured["model"] == "v-model"

@@ -1510,7 +1510,8 @@ function _botProviderOptions(selected) {
   // 已保存的 override 对应的 provider 被删除时, 仍把它显示为一项,
   // 避免保存 Bot 配置时静默把 override 清空(用户可显式改回跟随全局)。
   const sel = String(selected || '');
-  if (sel && !list.some(p => String(p.id) === sel)) {
+  // 缓存为空说明"还没加载/加载失败", 此时不能断言 provider 不存在(否则误报)
+  if (sel && list.length && !list.some(p => String(p.id) === sel)) {
     html += `<option value="${esc(sel)}" selected>${esc(sel)}（提供商不存在）</option>`;
   }
   return html;

@@ -77,8 +77,8 @@ llm:
   #     models: ["deepseek-chat", "deepseek-reasoner"]
   chat_provider: ""        # 默认 chat 提供商 id(空=用下面 chat_base_url/api_key)
   # 注意: 同一 provider 的 default_model 同时用于 chat 与 vision,
-  # 若该家 chat 模型不支持视觉, 请把它配成视觉模型, 或保持本字段为空、
-  # 单独用下面 vision_base_url/vision_model/vision_api_key 指定视觉模型。
+  # 若该家 chat 模型不支持视觉, 请把该 provider 的 default_model 配成视觉模型,
+  # 或保持 vision_provider 为空、用下方 vision_base_url/vision_model/vision_api_key 单独指定。
   vision_provider: ""      # 默认 vision 提供商 id(空=用 vision_base_url/api_key)
   emotion_provider: ""     # 默认 emotion 提供商 id(空=用 emotion_base_url/api_key)
 
