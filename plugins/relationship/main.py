@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from typing import Any
@@ -269,6 +270,26 @@ class Plugin:
             return "用法: /批量加好友 <QQ1,QQ2,...>(逗号分隔)"
         return self._start_batch(bot_id, event, "friend", ids)
 
+    async def on_shutdown(self) -> None:
+        """插件重载/关闭: 取消未完成的批量任务(issue #7)。
+
+        PluginSystem.shutdown_plugins() 会在 reload 与进程关闭时调用本钩子。
+        裸 asyncio.create_task 的任务不会被 supervisor 管理, 必须自己取消,
+        否则重载后旧任务仍会继续向 NapCat 发批量申请。
+        """
+        task = getattr(self, "_batch_task", None)
+        self._batch_task = None
+        if task is None or task.done():
+            self._batch_running = False
+            return
+        logger.info("关系插件: 关闭时取消进行中的批量任务")
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+            logger.debug(f"批量任务取消完成: {exc}")
+        self._batch_running = False
+
     @staticmethod
     def _parse_batch_ids(rest: str) -> list[str]:
         parts = [p.strip() for p in (rest or "").replace("，", ",").split(",")]
@@ -282,7 +303,10 @@ class Plugin:
             return "⚠️ 已有批量任务在进行中, 请等待完成后再试。"
         self._batch_running = True
         import asyncio as _aio
-        _aio.create_task(self._run_batch(bot_id, event, kind, ids))
+        # 记录任务引用: 插件重载/关闭时由 on_shutdown 取消, 避免后台继续发申请
+        self._batch_task = _aio.create_task(
+            self._run_batch(bot_id, event, kind, ids), name="relationship-batch",
+        )
         total_sec = len(ids) * 20  # 按默认延迟区间估算
         return (
             f"🚀 开始批量{'加群' if kind == 'group' else '加好友'} {len(ids)} 个目标,"
@@ -345,3 +369,4 @@ class Plugin:
                 pass
         finally:
             self._batch_running = False
+            self._batch_task = None

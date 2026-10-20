@@ -19,10 +19,25 @@ class BaseRequest(ABC):
     _HEADER: ClassVar[str]
     _FIELD_MAP: ClassVar[dict[str, str]]
 
+    @staticmethod
+    def _sanitize_value(value: Any) -> str:
+        """把字段值压成单行, 防止通过换行伪造后续字段(审批文本注入)。
+
+        申请人的验证信息(comment)完全可控: 若原样拼进多行卡片, 攻击者可以
+        在评论里插入 ``\nQQ号：2002`` 伪造字段, 使管理员按行解析时把无辜用户
+        当成申请人(issue #7)。这里把所有换行折成空格, 并去掉行内冒号,
+        让注入内容无法构造出新的 "键：值" 行。
+        """
+        text = str(value if value is not None else "")
+        for ch in ("\r\n", "\r", "\n", "\u2028", "\u2029"):
+            text = text.replace(ch, " ")
+        text = text.replace("：", ":").replace(":", "\uff1a").replace("\uff1a", "、")
+        return " ".join(text.split())
+
     def to_display_text(self) -> str:
         lines = [self._HEADER]
         for cn, fld in self._FIELD_MAP.items():
-            lines.append(f"{cn}：{getattr(self, fld)}")
+            lines.append(f"{cn}：{self._sanitize_value(getattr(self, fld))}")
         return "\n".join(lines)
 
     @classmethod
@@ -43,7 +58,9 @@ class BaseRequest(ABC):
                 continue
             key, _, val = line.partition("：")
             fld = cls._FIELD_MAP.get(key.strip())
-            if fld:
+            # 首次出现优先: 真实字段由服务端先写入, 申请人的验证信息排在最后;
+            # 这样评论里伪造的同名字段无法覆盖已解析出的元数据(issue #7)。
+            if fld and fld not in kwargs:
                 kwargs[fld] = val.strip()
         required = set(cls._FIELD_MAP.values()) - {"comment"}
         if not required <= kwargs.keys():
