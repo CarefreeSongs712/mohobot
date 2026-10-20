@@ -282,6 +282,12 @@ class ProactiveEngine:
     # ── 单会话主动消息流程 ────────────────────────────────
 
     async def _run_session(self, key: str, cfg: dict, now: float) -> None:
+        # 封禁检查(issue #9 第 2 点): 用户可能在排队/冷却期间被封禁,
+        # 到期后不得再生成或发送主动消息(否则绕过封禁策略)。
+        if await self._is_banned_key(key):
+            await self._mutate_state(lambda st: st.get("sessions", {}).pop(key, None))
+            logger.debug(f"[主动消息] 跳过已封禁会话: {key}")
+            return
         bot_id, _, user_id = key.partition(":")
         if user_id in self._exclude_set():
             return
@@ -495,6 +501,28 @@ class ProactiveEngine:
         if remaining:
             return kind, remaining  # 标记附带正文: 按正文发送
         return kind, ""
+
+    async def _is_banned_key(self, key: str) -> bool:
+        """该会话键是否对应已被全局封禁的用户/群(未注入 BanStore 时返回 False)。"""
+        store = self._ref("ban_store")
+        if store is None:
+            return False
+        parts = str(key).split(":")
+        if len(parts) < 2:
+            return False
+        if len(parts) >= 3 and parts[-2] in ("private", "group"):
+            # bot:private:123 / bot:group:456
+            chat_type, target = parts[-2], parts[-1]
+            scope = "private" if chat_type == "private" else "group"
+        else:
+            # 主动聊天会话键为 ``bot_id:user_id``(session_key), 属私聊
+            scope, target = "private", parts[-1]
+        try:
+            banned, _reason = await store.is_banned(f"{scope}:{target}", str(target))
+        except Exception as exc:  # noqa: BLE001 - 查询失败不阻断发送
+            logger.debug(f"[主动消息] 封禁检查失败({key}): {exc}")
+            return False
+        return bool(banned)
 
     async def _send(self, bot_id: str, user_id: str, event: PrivateMessageEvent,
                     reply: str) -> str:

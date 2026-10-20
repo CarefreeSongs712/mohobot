@@ -117,6 +117,12 @@ class _MohobotBridge:
         if ws is None or not chat_id:
             logger.warning("[Stealer] WSServer 未就绪，消息未发送")
             return False
+        # bot 离线(无在线实例)时宿主只会静默丢弃, 必须回报失败, 否则插件会
+        # 误计发送成功、进入冷却并累加使用次数(issue #9 第 5 点)。
+        manager = getattr(ws, "_bot_manager", None)
+        if manager is not None and manager.get(bot_id) is None:
+            logger.warning(f"[Stealer] bot {bot_id} 不在线，消息未发送")
+            return False
         try:
             if chat_type == "group":
                 await ws.send_group_msg(bot_id, chat_id, segments)
