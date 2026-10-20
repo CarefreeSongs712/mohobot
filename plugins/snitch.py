@@ -54,6 +54,10 @@ async def snitch(content: str, context: dict) -> str:
 
 
 def _register() -> None:
+    # llm_tools.py 会先把本文件作为内置工具导入(告状工具需要会话上下文注入),
+    # 之后插件系统再加载同一文件时不能重复注册, 否则整个插件加载失败。
+    if registry.contains("snitch"):
+        return
     registry.register(LLMTool(
         tool_schema(
             "snitch",
