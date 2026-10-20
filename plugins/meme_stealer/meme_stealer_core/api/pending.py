@@ -151,6 +151,8 @@ class PendingRoutes:
                 "bytes": row.get("bytes"),
                 "add_method": row.get("add_method"),
                 "retention_class": str(row.get("retention_class", "native") or "native"),
+                # REQ-3: 适用 bot 白名单(空串 = 全部 bot 可用)
+                "allowed_bots": str(row.get("allowed_bots", "") or ""),
             }
             inserted = await db.insert_batch([emoji_entry])
             if not inserted:

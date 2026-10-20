@@ -19,6 +19,7 @@ class MemeStealToolWorkflow:
         self,
         event: StealerEvent,
         image_ref: str,
+        bots: str = "",
     ):
         """偷取图片入库。VLM 视觉模型会自动分析图片，打上分类、标签、描述和场景。
 
@@ -34,6 +35,7 @@ class MemeStealToolWorkflow:
 
         Args:
             image_ref(string): 图片 URL 或文件路径，从当前消息已有的 Image URL 中选择。
+            bots(string): 可选。适用 bot 白名单(逗号分隔); 留空 = 全部 bot 通用。
         """
         event = unwrap_event(event)
         try:
@@ -120,6 +122,12 @@ class MemeStealToolWorkflow:
             extra_meta = self._build_steal_tool_extra_meta(
                 event, image_ref, source=source
             )
+            # REQ-3: 标注适用 bot(缺省空 = 全部 bot 可用)
+            from ..util.bot_scope import format_allowed_bots
+
+            allowed_bots = format_allowed_bots(bots)
+            if allowed_bots:
+                extra_meta["allowed_bots"] = allowed_bots
             success, merged_idx = await self._process_image(
                 event,
                 temp_path,

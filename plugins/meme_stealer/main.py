@@ -77,7 +77,14 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "image_ref": {
                 "type": "string",
                 "description": "可选。当前消息中某张图片的 URL 或文件路径；留空则取第一张图片。",
-            }
+            },
+            "bots": {
+                "type": "string",
+                "description": (
+                    "可选。这张表情包适合哪些 bot 使用：填 bot_id，多个用逗号分隔；"
+                    "留空表示全部 bot 通用。仅在该表情明显只符合某些角色人设时才填。"
+                ),
+            },
         },
         "required": [],
     },
@@ -382,11 +389,11 @@ class Plugin:
             self._dispatch_after_reply(app, event)
         return result
 
-    async def _tool_steal_meme(self, image_ref: str = "", **_: Any) -> str:
+    async def _tool_steal_meme(self, image_ref: str = "", bots: str = "", **_: Any) -> str:
         app, event = self._tool_context()
         if app is None or event is None:
             return "表情包工具当前不可用。"
-        return await app.steal_meme(event, str(image_ref or ""))
+        return await app.steal_meme(event, str(image_ref or ""), bots=str(bots or ""))
 
     @staticmethod
     def _dispatch_after_reply(app: StealerApp, event: StealerEvent) -> None:

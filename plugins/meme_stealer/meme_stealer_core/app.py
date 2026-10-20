@@ -698,8 +698,10 @@ class StealerApp(MemeSearchToolWorkflow, MemeStealToolWorkflow):
     async def send_meme(self, event: StealerEvent, emoji_id: Any) -> str:
         return await self._collect_text(self._send_meme_impl(event, emoji_id))
 
-    async def steal_meme(self, event: StealerEvent, image_ref: str = "") -> str:
-        return await self._collect_text(self._steal_sticker_impl(event, image_ref))
+    async def steal_meme(
+        self, event: StealerEvent, image_ref: str = "", bots: str = "",
+    ) -> str:
+        return await self._collect_text(self._steal_sticker_impl(event, image_ref, bots))
 
     def has_queued_meme(self, event: StealerEvent) -> bool:
         state = self._emoji_sender_engine.emoji_turn_state(event)
