@@ -911,6 +911,57 @@ class WebPanel:
                 raise
             return {"status": "ok"}
 
+        # ── 2.9 多提供商(providers) ──────────────────────────
+
+        @app.get("/api/providers")
+        async def get_providers(request: Request):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig
+            cfg = GlobalConfig.load(self._config_path)
+            items = []
+            for prov in (cfg.llm.providers or []):
+                item = dict(prov)
+                item["api_key"] = self._mask_secret(str(prov.get("api_key") or ""))
+                items.append(item)
+            return {
+                "providers": items,
+                "chat_provider": cfg.llm.chat_provider,
+                "vision_provider": cfg.llm.vision_provider,
+                "emotion_provider": cfg.llm.emotion_provider,
+            }
+
+        @app.put("/api/providers")
+        async def update_providers(request: Request, body: ConfigUpdateRequest):
+            await _require_auth(request)
+            from mohobot.models.config import GlobalConfig, _normalize_providers
+            cfg = GlobalConfig.load(self._config_path)
+            data = body.data or {}
+            if "providers" in data:
+                incoming = data.get("providers")
+                if not isinstance(incoming, list):
+                    raise HTTPException(status_code=400, detail="providers 必须是数组")
+                # 掩码值表示"未修改", 用磁盘上的原 key 回填
+                current = {str(p.get("id") or ""): p for p in (cfg.llm.providers or [])}
+                merged = []
+                for item in incoming:
+                    if not isinstance(item, dict):
+                        continue
+                    item = dict(item)
+                    key = str(item.get("api_key") or "")
+                    if key in ("", self._MASK):
+                        old = current.get(str(item.get("id") or "")) or {}
+                        item["api_key"] = str(old.get("api_key") or "")
+                    merged.append(item)
+                cfg.llm.providers = _normalize_providers(merged)
+            for role in ("chat", "vision", "emotion"):
+                field = f"{role}_provider"
+                if field in data:
+                    setattr(cfg.llm, field, str(data.get(field) or "").strip())
+            cfg.save(self._config_path)
+            await self._sync_runtime_config(cfg)
+            await _audit(request, "providers_update", "", {"count": len(cfg.llm.providers)})
+            return {"status": "ok", "count": len(cfg.llm.providers)}
+
         # ── 3. Models (模型配置) ─────────────────────────────
 
         @app.get("/api/models")
