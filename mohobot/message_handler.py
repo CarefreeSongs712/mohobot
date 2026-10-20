@@ -127,6 +127,9 @@ class MessageHandler:
     def _sync_reply_config(self, reply_config) -> None:
         """更新构造时复制的回复参数(不能只更新 GlobalConfig.reply)。"""
         self._segment_reply = reply_config.segment_reply
+        self._strip_english_fillers = bool(
+            getattr(reply_config, "strip_english_fillers", True)
+        )
         self._seg_min_len = reply_config.segment_min_len
         self._seg_max_len = reply_config.segment_max_len
         self._seg_delay_min = reply_config.segment_delay_min
@@ -1601,6 +1604,15 @@ class MessageHandler:
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
         Returns the updated first_sent flag.
         """
+        # OOC 治理: 清理中文回复里突兀的英文话语标记(Well,/Okay so,/As an AI…)。
+        # 放在发送口统一处理, 流式与非流式都覆盖; 开关见 reply.strip_english_fillers。
+        if getattr(self, "_strip_english_fillers", True) and isinstance(seg, str) and seg:
+            from mohobot.utils.reply_filter import strip_english_fillers
+            cleaned = strip_english_fillers(seg)
+            if cleaned != seg:
+                seg = cleaned
+                if not seg.strip():
+                    return first_sent
         seg = seg.strip()
         if not seg:
             return first_sent  # Empty after strip — skip

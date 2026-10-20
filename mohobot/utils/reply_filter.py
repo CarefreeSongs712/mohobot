@@ -517,6 +517,64 @@ def strip_unwrapped_reasoning(text: str) -> str:
     return rest if _has_substance(rest) else ""
 
 
+# ── 中英混杂清理 (REQ-7) ─────────────────────────────────────
+#
+# 现象: 中文对话里突兀出现英文话语标记与 AI 套话, 如
+#   "Well, 我觉得…" / "Okay so 那个…" / "As an AI language model, …"
+# 这些是底座模型的英文偏置与"AI 自我认知"残留, 属 OOC。
+#
+# 策略: **只清理白名单内的英文话语标记与 AI 套话**, 不动正常英文内容
+# (歌名/人名/术语如 "Vocaloid"、"BPM" 一律保留)。清理范围:
+#   1. 句首的英文填充词 + 逗号(Well/Okay/So/Actually/Anyway/Alright/Hmm/Oh);
+#   2. 句首的 "As an AI ..." / "I'm sorry, but ..." 类 AI 套话前缀;
+#   3. 中英之间的多余空格(如 "我觉得 well 这个" 不动, 只处理删除后的残留空格)。
+# 判定保守: 只匹配**句首**(行首或中文标点后), 且要求后接中文或直接接正文。
+
+_ENGLISH_FILLERS = (
+    "Well", "Okay", "OK", "So", "Actually", "Anyway", "Alright", "Hmm", "Oh",
+    "Umm", "Uh", "Right", "Sure", "Indeed", "Basically", "Honestly", "Look",
+)
+_FILLER_RE = re.compile(
+    r"(?:^|(?<=[。！？!?…\n，,；;：:]))\s*(?:"
+    + "|".join(_ENGLISH_FILLERS)
+    # 允许 "Okay so," / "Well then," 这类连接链; 逗号可选(中文回复里常直接接正文)
+    + r")(?:\s+(?:so|then|well))?\s*[,，]?\s+",
+    re.IGNORECASE,
+)
+# AI 自我认知套话: 整句前缀
+_AI_BOILERPLATE_RE = re.compile(
+    r"^(?:As an AI(?: language model)?|I'?m (?:just )?an AI|"
+    r"I am (?:just )?an AI)[^。！？!?\n]{0,80}[。！？!?.,，]\s*",
+    re.IGNORECASE,
+)
+# 英文道歉式套话前缀("I'm sorry, but ...")在中文回复里属 OOC
+_APOLOGY_BOILERPLATE_RE = re.compile(
+    r"^(?:I'?m sorry|Sorry)\s*[,，]\s*(?:but\s*)?", re.IGNORECASE,
+)
+
+
+def strip_english_fillers(text: str) -> str:
+    """清理中文回复里突兀的英文话语标记与 AI 套话（保守白名单）。
+
+    只处理句首的少量英文填充词与 AI 自我认知前缀；正常英文单词、歌名、
+    专有名词一律保留。返回清理后的文本。
+    """
+    if not text:
+        return ""
+    out = text
+    # 1) AI 套话(整句前缀) —— 仅在回复开头
+    out = _AI_BOILERPLATE_RE.sub("", out.lstrip())
+    # 2) 英文道歉套话
+    out = _APOLOGY_BOILERPLATE_RE.sub("", out.lstrip())
+    # 3) 句首英文填充词(可多次命中, 如 "Well, okay, 那…")
+    for _ in range(4):
+        new = _FILLER_RE.sub("", out)
+        if new == out:
+            break
+        out = new
+    return out.lstrip()
+
+
 def strip_reply_artifacts(text: str) -> tuple[str, str]:
     """非流式全文处理: 剥除所有可识别产物。
 
