@@ -236,6 +236,7 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
     <div class="nav-item" data-page="knowledge"><span class="icon">📚</span> 知识库</div>
+    <div class="nav-item" data-page="news"><span class="icon">📰</span> 新闻动态</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
     <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
@@ -270,6 +271,49 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   </div>
 
   <!-- 2. Usage -->
+  <div class="page" id="page-news">
+    <h2>📰 新闻动态</h2>
+    <div class="subtitle">REQ-6 · 采集/提取的条目先进入待审池，管理员审核通过后才参与提示词注入与 <code>news_recent</code> / <code>news_search</code> 工具检索</div>
+
+    <div class="card">
+      <div class="card-title">📊 库状态</div>
+      <div id="news-stats" class="stat-label">⏳ 加载中…</div>
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="loadNewsPage()">🔄 刷新</button>
+      </div>
+      <div class="small" style="color:var(--text-dim);margin-top:8px">
+        开关与采集器参数在本地 config 文件（<code>news.enabled</code> / <code>news.collector_enabled</code> / <code>news.collector_uids</code>）配置，重启后生效。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">✏️ 手动新增（进入待审）</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <input type="text" id="news-add-title" placeholder="标题（必填）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-content" placeholder="正文/补充说明（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-url" placeholder="来源链接（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-author" placeholder="来源/发布者（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <div class="form-row" style="justify-content:flex-end">
+          <button class="btn" id="news-add-btn" onclick="newsSubmitManual()">➕ 提交待审</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🕓 待审核</div>
+      <div id="news-pending-list" class="stat-label">⏳ 加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">✅ 已生效（会注入上下文）</div>
+      <div id="news-approved-list" class="stat-label">⏳ 加载中…</div>
+    </div>
+  </div>
+
   <div class="page" id="page-usage">
     <h2>📈 用量统计</h2>
     <div class="subtitle">LLM Token 消耗 — 按会话 / 按发起用户 / 按用途三种视角（点击表头切换排序，点击行展开明细）</div>
@@ -769,6 +813,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
       case 'models': loadModels(); break;
       case 'tts': loadTtsPage(); break;
       case 'knowledge': loadKnowledgePage(); break;
+      case 'news': loadNewsPage(); break;
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
       case 'ban': loadBanPage(); break;
@@ -782,6 +827,118 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function init() {
   loadDashboard();
   startLogStream();
+}
+
+// ═══════════════ 3.7 新闻动态 (REQ-6) ═══════════════
+function _newsEscape(text) {
+  const div = document.createElement('div');
+  div.textContent = text == null ? '' : String(text);
+  return div.innerHTML;
+}
+
+function _newsRow(item, opts = {}) {
+  const tags = Array.isArray(item.tags) ? item.tags.join(' / ') : '';
+  const day = item.published_at
+    ? new Date(item.published_at * 1000).toLocaleString('zh-CN', { hour12: false })
+    : '';
+  const meta = [item.source, item.author_name, day, tags].filter(Boolean).join(' · ');
+  const link = item.url
+    ? `<a href="${_newsEscape(item.url)}" target="_blank" rel="noopener" style="color:var(--accent)">原文</a>`
+    : '';
+  const actions = opts.pending
+    ? `<button class="btn btn-sm" onclick="newsReview('${_newsEscape(item.id)}', true)">✅ 通过</button>
+       <button class="btn btn-sm" onclick="newsReview('${_newsEscape(item.id)}', false)">❌ 拒绝</button>`
+    : `<button class="btn btn-sm" onclick="newsDelete('${_newsEscape(item.id)}')">🗑 删除</button>`;
+  return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+    <div style="font-weight:600">${_newsEscape(item.title)}</div>
+    ${item.content ? `<div style="color:var(--text-dim);margin-top:4px">${_newsEscape(item.content).slice(0, 200)}</div>` : ''}
+    <div class="small" style="color:var(--text-dim);margin-top:4px">${_newsEscape(meta)} ${link}</div>
+    <div style="margin-top:6px;display:flex;gap:6px">${actions}</div>
+  </div>`;
+}
+
+async function loadNewsPage() {
+  const statsEl = document.getElementById('news-stats');
+  const pendingEl = document.getElementById('news-pending-list');
+  const approvedEl = document.getElementById('news-approved-list');
+  try {
+    const stats = await apiJSON('/api/news/stats');
+    if (!stats.enabled) {
+      statsEl.textContent = '新闻库未启用（config: news.enabled=false）';
+      pendingEl.textContent = '—';
+      approvedEl.textContent = '—';
+      return;
+    }
+    const counts = stats.counts || {};
+    statsEl.textContent = `待审 ${counts.pending || 0} · 生效 ${counts.approved || 0} · 拒绝 ${counts.rejected || 0}`;
+  } catch (e) {
+    statsEl.textContent = '状态读取失败: ' + e.message;
+  }
+  try {
+    const data = await apiJSON('/api/news/pending');
+    pendingEl.innerHTML = (data.items || []).length
+      ? data.items.map(i => _newsRow(i, { pending: true })).join('')
+      : '暂无待审条目';
+  } catch (e) {
+    pendingEl.textContent = '待审列表读取失败: ' + e.message;
+  }
+  try {
+    const data = await apiJSON('/api/news/approved');
+    approvedEl.innerHTML = (data.items || []).length
+      ? data.items.map(i => _newsRow(i)).join('')
+      : '暂无已生效条目';
+  } catch (e) {
+    approvedEl.textContent = '已生效列表读取失败: ' + e.message;
+  }
+}
+
+async function newsReview(id, approve) {
+  try {
+    const r = await apiJSON('/api/news/review', {
+      method: 'POST', body: { ids: [id], approve: approve },
+    });
+    showToast(r.changed > 0 ? (approve ? '已通过' : '已拒绝') : '操作失败/状态已变更', r.changed > 0);
+    loadNewsPage();
+  } catch (e) {
+    showToast('审核失败: ' + e.message, false);
+  }
+}
+
+async function newsDelete(id) {
+  if (!confirm('确认删除该条目？')) return;
+  try {
+    await apiJSON('/api/news/' + encodeURIComponent(id), { method: 'DELETE' });
+    showToast('已删除');
+    loadNewsPage();
+  } catch (e) {
+    showToast('删除失败: ' + e.message, false);
+  }
+}
+
+async function newsSubmitManual() {
+  const title = (document.getElementById('news-add-title').value || '').trim();
+  if (!title) { showToast('标题不能为空', false); return; }
+  const btn = document.getElementById('news-add-btn');
+  btn.disabled = true;
+  try {
+    await apiJSON('/api/news/submit', {
+      method: 'POST',
+      body: {
+        title: title,
+        content: (document.getElementById('news-add-content').value || '').trim(),
+        url: (document.getElementById('news-add-url').value || '').trim(),
+        author_name: (document.getElementById('news-add-author').value || '').trim(),
+      },
+    });
+    showToast('已提交待审');
+    ['news-add-title', 'news-add-content', 'news-add-url', 'news-add-author']
+      .forEach(id => { document.getElementById(id).value = ''; });
+    loadNewsPage();
+  } catch (e) {
+    showToast('提交失败: ' + e.message, false);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ═══════════════ 3.6 知识库 ═══════════════

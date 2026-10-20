@@ -163,8 +163,10 @@ class WebPanel:
         config_update_callback=None,
         persona_service=None,
         persona_ab_service=None,
+        news_service=None,
     ):
         self._persona_ab = persona_ab_service
+        self._news_service = news_service
         self._host = host
         self._port = port
         self._username = username
@@ -716,6 +718,102 @@ class WebPanel:
             from fastapi.responses import JSONResponse
             return JSONResponse(await self._persona_ab.report(bot_id=bot_id, version_hash=version_hash, export=True),
                 headers={"Content-Disposition": 'attachment; filename="persona-ab.json"'})
+
+        # ── News (REQ-6) ──────────────────────────────────────
+
+        def _news():
+            if self._news_service is None:
+                raise HTTPException(status_code=503, detail="新闻库未启用或未装配")
+            return self._news_service
+
+        def _news_or_none():
+            """读接口用: 未装配/未启用时返回 None, 由调用方给出 enabled=false。"""
+            return self._news_service
+
+        @app.get("/api/news/pending")
+        async def news_pending(request: Request, limit: int = 50):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "items": []}
+            return {"enabled": True, "items": await svc.list_pending(limit=max(1, min(limit, 200)))}
+
+        @app.get("/api/news/approved")
+        async def news_approved(request: Request, limit: int = 20):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "items": []}
+            items = await svc.recent_news(limit=max(1, min(limit, 200)))
+            return {"enabled": True, "items": [i.to_dict() for i in items]}
+
+        @app.get("/api/news/stats")
+        async def news_stats(request: Request):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "counts": {}}
+            return {"enabled": True, "counts": await svc.stats()}
+
+        @app.post("/api/news/submit")
+        async def news_submit(request: Request):
+            """手动新增一条待审新闻(管理员补录)。"""
+            await _require_auth(request)
+            body = await request.json()
+            title = str(body.get("title") or "").strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="标题不能为空")
+            svc = _news()
+            try:
+                item = await svc.submit(
+                    title,
+                    content=str(body.get("content") or ""),
+                    source=str(body.get("source") or "manual"),
+                    url=str(body.get("url") or ""),
+                    author_name=str(body.get("author_name") or ""),
+                    tags=[str(t) for t in (body.get("tags") or []) if str(t).strip()],
+                    published_at=float(body.get("published_at") or 0.0),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            await _audit(request, "news_submit", title, {"id": item.id})
+            return {"status": "ok", "id": item.id, "review": "pending"}
+
+        @app.post("/api/news/review")
+        async def news_review(request: Request):
+            """批量审核: {"ids": [...], "approve": true|false}。"""
+            await _require_auth(request)
+            body = await request.json()
+            raw_ids = body.get("ids")
+            if not isinstance(raw_ids, list) or not raw_ids:
+                raise HTTPException(status_code=400, detail="缺少 ids")
+            approve = bool(body.get("approve", True))
+            svc = _news()
+            changed = 0
+            failed: list[str] = []
+            for item_id in raw_ids:
+                item_id = str(item_id or "").strip()
+                if not item_id:
+                    continue
+                ok = await (svc.approve(item_id, reviewer=self._username) if approve
+                            else svc.reject(item_id, reviewer=self._username))
+                if ok:
+                    changed += 1
+                else:
+                    failed.append(item_id)
+            await _audit(request, "news_approve" if approve else "news_reject",
+                         ",".join(str(i) for i in raw_ids), {"changed": changed})
+            return {"status": "ok", "changed": changed, "failed": failed}
+
+        @app.delete("/api/news/{item_id}")
+        async def news_delete(item_id: str, request: Request):
+            await _require_auth(request)
+            svc = _news()
+            ok = await svc.delete(item_id)
+            if not ok:
+                raise HTTPException(status_code=404, detail="条目不存在")
+            await _audit(request, "news_delete", item_id)
+            return {"status": "ok"}
 
         # ── Shared persona presets ──────────────────────────
 

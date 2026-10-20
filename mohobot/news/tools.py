@@ -79,6 +79,40 @@ async def news_search(keywords: str, limit: int = 3) -> str:
     })
 
 
+async def news_submit(
+    title: str,
+    content: str = "",
+    source_url: str = "",
+    author: str = "",
+) -> str:
+    """把聊天中出现的、值得记录的动态/新闻提交为**待审**条目。
+
+    仅供"用户在聊天里提到了一条近期动态/资讯"时记录线索; 提交后仍需管理员
+    在 WebUI 审核通过才会被注入上下文或工具检索到。
+    """
+    if _service is None:
+        return _json({"error": "新闻库未启用"})
+    title = str(title or "").strip()
+    if not title:
+        return _json({"error": "title 不能为空"})
+    try:
+        item = await _service.submit(
+            title,
+            content=str(content or "").strip(),
+            source="chat_extracted",
+            url=str(source_url or "").strip(),
+            author_name=str(author or "").strip(),
+            tags=["聊天提取"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _json({"error": f"提交失败: {exc}"})
+    return _json({
+        "status": "pending_review",
+        "id": item.id,
+        "note": "已提交管理员审核；审核通过前不会出现在上下文或检索结果中",
+    })
+
+
 _TOOLS = [
     LLMTool(
         tool_schema(
@@ -89,6 +123,21 @@ _TOOLS = [
             [],
         ),
         news_recent,
+    ),
+    LLMTool(
+        tool_schema(
+            "news_submit",
+            "把聊天中提到的近期动态/新闻记录为待审条目（不会立即生效，需管理员审核）。"
+            "仅当用户明确提到值得记录的真实资讯时使用；不要凭猜测编造新闻。",
+            {
+                "title": {"type": "string", "description": "一句话标题/核心事实"},
+                "content": {"type": "string", "description": "可选。补充细节或原文摘录"},
+                "source_url": {"type": "string", "description": "可选。来源链接"},
+                "author": {"type": "string", "description": "可选。发布者名称"},
+            },
+            ["title"],
+        ),
+        news_submit,
     ),
     LLMTool(
         tool_schema(
