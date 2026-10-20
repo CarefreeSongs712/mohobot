@@ -174,6 +174,24 @@ class WSServer:
             await self._bot_manager.handle_api_response(bot_id, data)
             return
 
+        # 群成员减少通知(被踢/主动退群): 立即从群在线集合剔除该 bot, 否则
+        # 全局指令抽签仍可能选中它导致命令无响应(issue #9 第 4 点)。
+        # 通知本身不依赖 enabled 开关, 先于开关判断处理。
+        if data.get("post_type") == "notice" and data.get("notice_type") == "group_decrease":
+            group_id = data.get("group_id")
+            if group_id is not None:
+                try:
+                    self._bot_manager.note_group_left(bot_id, group_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"note_group_left failed: {exc}")
+
+        # Bot 禁用开关: Web 面板把 bot_config.enabled 置 false 时应停止一切响应
+        # (issue #9 第 3 点)。连接保持, 只是不处理事件。
+        bot_config = getattr(instance, "config", None)
+        if bot_config is not None and not getattr(bot_config, "enabled", True):
+            logger.debug(f"Ignoring event for disabled bot {bot_id}")
+            return
+
         # It's an event (has 'post_type') — 异步派发, 不阻塞连接
         if "post_type" in data:
             event = Event.from_dict(data)

@@ -309,6 +309,23 @@ class BotManager:
         """记录 bot 在群内的存在(消息驱动: 收到群消息即在该群)。"""
         self._group_bots.setdefault(str(group_id), set()).add(bot_id)
 
+    def note_group_left(self, bot_id: str, group_id: int | str) -> None:
+        """bot 已离开该群(被踢/主动退群): 从群集合剔除并失效抽签缓存。
+
+        issue #9 第 4 点: 原实现只在群消息里累加, 被踢但连接仍在的 bot
+        仍会被全局指令抽签选中, 导致命令无响应。
+        """
+        gid = str(group_id)
+        bots = self._group_bots.get(gid)
+        if bots is not None:
+            bots.discard(bot_id)
+            if not bots:
+                self._group_bots.pop(gid, None)
+        # 失效该群的 (群号, message_id) 抽签缓存, 避免继续返回已离群 bot
+        for key in [k for k in self._group_pick_cache if str(k[0]) == gid]:
+            self._group_pick_cache.pop(key, None)
+        logger.info(f"Bot {bot_id} 已从群 {gid} 的在线集合移除")
+
     def pick_bot_for_group(
         self, group_id: int | str, message_id: int | str | None = None,
     ) -> str | None:
