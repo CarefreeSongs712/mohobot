@@ -129,7 +129,7 @@ class FakeImageCache:
 
 
 class FakeLLM:
-    async def describe_image_file(self, local_path, max_tokens=512):
+    async def describe_image_file(self, local_path, max_tokens=512, bot_config=None):
         return "一只猫在窗边"
 
 

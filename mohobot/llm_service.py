@@ -201,11 +201,16 @@ class LLMService:
             base_url = raw_base or chat_base
             api_key = str(item.get("api_key") or "").strip()
             if not api_key:
-                # 只有"同一端点"才允许继承 chat key; 否则等于把主 Key 发给
-                # 未显式声明的第三方地址(配置失误即泄漏), 直接跳过并提示。
-                if not raw_base or not chat_base or (
-                    raw_base.rstrip("/") == chat_base.rstrip("/")
-                ):
+                # 只有"同一端点"才允许继承 chat key:
+                #   - provider 没写 base_url(跟随 chat 端点) → 允许;
+                #   - 写了 base_url 且与 chat_base_url 同端点 → 允许;
+                #   - 其余(含 chat_base_url 为空却指定了新地址) → 拒绝。
+                # 否则等于把主 Key 发给未显式声明的第三方地址。
+                same_endpoint = bool(
+                    chat_base and raw_base
+                    and raw_base.rstrip("/") == chat_base.rstrip("/")
+                )
+                if not raw_base or same_endpoint:
                     api_key = chat_key
                 else:
                     logger.warning(
@@ -273,7 +278,15 @@ class LLMService:
                 created.append(client)
                 reusable[identity] = client
             clients[role] = reusable[identity]
-        # 多提供商: 每个 provider 一套独立 client(按 api_key+base_url 复用)
+        # 多提供商: 每个 provider 一套独立 client(按 api_key+base_url 复用)。
+        # 旧 provider 的 identity→client 也进入复用池, 否则每次 sync_config
+        # 都会重建全部 provider client 并堆积到退休列表(N15)。
+        old_provider_identities = getattr(self, "_provider_identity_cache", {}) or {}
+        old_provider_clients = getattr(self, "_provider_clients", {}) or {}
+        for pid, ident in old_provider_identities.items():
+            old_client = old_provider_clients.get(pid)
+            if old_client is not None and ident is not None:
+                reusable.setdefault(ident, old_client)
         provider_clients: dict[str, AsyncOpenAI] = {}
         for pid, spec in self._provider_specs(llm).items():
             identity = (spec["api_key"], spec["base_url"])
@@ -293,13 +306,18 @@ class LLMService:
         self._vision_client = clients["vision"]
         self._emotion_client = clients["emotion"]
         self._provider_clients = provider_clients or {}
+        specs = self._provider_specs(llm)
+        self._provider_identity_cache = {
+            pid: (spec["api_key"], spec["base_url"])
+            for pid, spec in specs.items()
+        }
         self._available = self._chat_client is not None or bool(self._provider_clients)
-        has_vision_provider = bool(
-            (llm.vision_provider or "").strip()
-            and (llm.vision_provider or "").strip() in self._provider_clients
-        )
+        # per-bot 可在运行时用 vision_provider_override 指定提供商, 因此
+        # "有没有 provider client" 本身就可能让识图可用, 不能只看全局
+        # llm.vision_provider(否则多 bot 各自指定、全局留空时识图静默失效)。
         self._vision_available = bool(
-            llm.vision_model and (self._vision_client is not None or has_vision_provider)
+            llm.vision_model
+            and (self._vision_client is not None or bool(self._provider_clients))
         )
 
     async def sync_config(self, config: GlobalConfig) -> None:
@@ -1713,6 +1731,12 @@ class LLMService:
         """
         vision_client, vision_model, vision_provider_id = self._resolve_vision_target(bot_config)
         if not self._vision_available or vision_client is None:
+            logger.warning(
+                "识图不可用: 未配置可用的视觉提供商(clients=%s, vision_provider=%r, bot_override=%r)",
+                bool(getattr(self, "_provider_clients", None)),
+                getattr(getattr(getattr(self, "_cfg", None), "llm", None), "vision_provider", ""),
+                getattr(bot_config, "vision_provider_override", "") if bot_config else "",
+            )
             return ""
         # 参数可在 WebUI 配置(llm.vision_max_tokens / vision_temperature);
         # 推理型视觉模型思考会烧 token, 预算太小会导致正文为空。
@@ -1882,6 +1906,7 @@ class LLMService:
         for provider_client in (getattr(self, "_provider_clients", {}) or {}).values():
             clients.append(provider_client)
         self._provider_clients = {}
+        self._provider_identity_cache = {}
         self._available = False
         self._vision_available = False
         self._client_identities = {}
