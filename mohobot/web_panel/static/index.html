@@ -448,6 +448,30 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
         <div id="model-list-form"></div>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-title">🏢 多提供商（每套 base_url + api_key 独立）</div>
+      <div class="small" style="color:var(--text-dim);margin-bottom:8px">
+        多套 Key（如 SnowLuma + DeepSeek）可同时配置：每行一个提供商；
+        下面选择默认用哪套，单个 Bot 还可在「Bot 配置」里单独指定。
+        Key 已保存的显示为掩码，不修改就留空。
+      </div>
+      <div id="provider-list"></div>
+      <div class="form-row" style="margin-top:8px">
+        <button class="btn btn-sm" onclick="addProviderRow()">➕ 新增提供商</button>
+      </div>
+      <div class="grid cols-3" style="margin-top:12px">
+        <div><label class="field-label">默认 Chat 提供商</label>
+          <select id="cfg-chat_provider" class="field-input"></select></div>
+        <div><label class="field-label">默认 Vision 提供商</label>
+          <select id="cfg-vision_provider" class="field-input"></select></div>
+        <div><label class="field-label">默认 Emotion 提供商</label>
+          <select id="cfg-emotion_provider" class="field-input"></select></div>
+      </div>
+      <div class="form-row" style="justify-content:flex-end;margin-top:10px">
+        <button class="btn" onclick="saveProviders()">保存提供商配置</button>
+      </div>
+    </div>
     <button class="btn" onclick="saveModels()">保存模型配置</button>
   </div>
 
@@ -827,6 +851,10 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function init() {
   loadDashboard();
   startLogStream();
+  // 预取多提供商列表, 供 Bot 配置页下拉使用(失败不影响主流程)
+  apiJSON('/api/providers')
+    .then(r => { _botProviderCache = (r && r.providers) || []; })
+    .catch(() => { _botProviderCache = []; });
 }
 
 // ═══════════════ 3.7 新闻动态 (REQ-6) ═══════════════
@@ -1473,6 +1501,14 @@ async function unbindBotPrompt() {
 }
 
 let botConfigGeneration = 0;
+let _botProviderCache = [];
+function _botProviderOptions(selected) {
+  const list = _botProviderCache || [];
+  const isSel = (v) => (String(v || '') === String(selected || '') ? ' selected' : '');
+  return '<option value=""' + isSel('') + '>(跟随全局)</option>' +
+    list.map(p => `<option value="${esc(p.id)}"${isSel(p.id)}>${esc(p.name || p.id)}</option>`).join('');
+}
+
 async function loadBotConfig() {
   const botId = document.getElementById('config-bot-select').value;
   const generation = ++botConfigGeneration;
@@ -1500,6 +1536,11 @@ async function loadBotConfig() {
       textareaField('touch_replies', '戳一戳回复(每行一条,留空用全局)', (b.touch_replies || []).join('\n'), '本 bot 的戳一戳固定回复; 留空则使用全局配置(touch_replies)') +
       formField('chat_model_override', 'Chat 模型覆盖（留空用全局）', b.chat_model_override) +
       formField('vision_model_override', 'Vision 模型覆盖（留空用全局）', b.vision_model_override) +
+      `<div class="form-row"><label for="cfg-chat_provider_override">Chat 提供商</label>
+        <select id="cfg-chat_provider_override">${_botProviderOptions(b.chat_provider_override)}</select></div>` +
+      `<div class="form-row"><label for="cfg-vision_provider_override">Vision 提供商</label>
+        <select id="cfg-vision_provider_override">${_botProviderOptions(b.vision_provider_override)}</select></div>` +
+      '<div class="hint">多提供商（SnowLuma / DeepSeek 等）在「模型配置」页维护；这里选该 bot 用哪一套，留空跟随全局。</div>' +
       formField('command_prefix', '指令前缀', b.command_prefix) +
       `<div class="form-row"><label>启用</label>
         <label class="switch"><input type="checkbox" id="cfg-enabled" ${b.enabled ? 'checked' : ''}><span class="slider"></span></label></div>` +
@@ -1592,6 +1633,8 @@ async function saveBotConfig() {
       .split('\n').map(s => s.trim()).filter(Boolean),
     chat_model_override: document.getElementById('cfg-chat_model_override').value,
     vision_model_override: document.getElementById('cfg-vision_model_override').value,
+    chat_provider_override: document.getElementById('cfg-chat_provider_override')?.value || '',
+    vision_provider_override: document.getElementById('cfg-vision_provider_override')?.value || '',
     command_prefix: document.getElementById('cfg-command_prefix').value,
     enabled: document.getElementById('cfg-enabled').checked,
     tts_enabled: document.getElementById('cfg-tts_enabled')?.checked ?? false,
@@ -1958,7 +2001,72 @@ async function loadModels() {
     document.getElementById('model-list-form').innerHTML =
       textareaField('models', '可用模型列表(每行一个)', (modelCache.models || []).join('\n'),
         '可用模型统一列表; 增删后保存') ;
+    await loadProviders();
   } catch (e) { showToast('加载模型配置失败: ' + e.message, false); }
+}
+
+// ── 多提供商编辑(SnowLuma / DeepSeek 等多套 Key 并存) ──
+let providerCache = { providers: [], chat_provider: '', vision_provider: '', emotion_provider: '' };
+
+function _providerRow(p = {}) {
+  const div = document.createElement('div');
+  div.className = 'provider-row';
+  div.style.cssText = 'display:grid;grid-template-columns:120px 140px 1fr 1fr 130px 32px;gap:6px;margin-bottom:6px;align-items:center';
+  div.innerHTML = `
+    <input class="p-id field-input" placeholder="id(唯一)" value="${esc(p.id || '')}">
+    <input class="p-name field-input" placeholder="显示名" value="${esc(p.name || '')}">
+    <input class="p-base field-input" placeholder="base_url" value="${esc(p.base_url || '')}">
+    <input class="p-key field-input" type="password" placeholder="api_key(留空=不改)" value="">
+    <input class="p-model field-input" placeholder="默认模型" value="${esc(p.default_model || '')}">
+    <button class="btn btn-sm" title="删除" onclick="this.parentElement.remove()">✕</button>`;
+  return div;
+}
+
+function addProviderRow(p) {
+  document.getElementById('provider-list').appendChild(_providerRow(p || {}));
+}
+
+function _fillProviderSelect(id, value, allowEmptyLabel) {
+  const sel = document.getElementById(id);
+  const opts = ['<option value="">' + (allowEmptyLabel || '(使用下方旧字段)') + '</option>']
+    .concat(providerCache.providers.map(p =>
+      `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = value || '';
+}
+
+async function loadProviders() {
+  try {
+    providerCache = await apiJSON('/api/providers');
+    const box = document.getElementById('provider-list');
+    box.innerHTML = '';
+    (providerCache.providers || []).forEach(p => addProviderRow(p));
+    _fillProviderSelect('cfg-chat_provider', providerCache.chat_provider);
+    _fillProviderSelect('cfg-vision_provider', providerCache.vision_provider);
+    _fillProviderSelect('cfg-emotion_provider', providerCache.emotion_provider);
+  } catch (e) { showToast('加载提供商失败: ' + e.message, false); }
+}
+
+async function saveProviders() {
+  const rows = Array.from(document.querySelectorAll('#provider-list .provider-row'));
+  const providers = rows.map(r => ({
+    id: r.querySelector('.p-id').value.trim(),
+    name: r.querySelector('.p-name').value.trim(),
+    base_url: r.querySelector('.p-base').value.trim(),
+    api_key: r.querySelector('.p-key').value,
+    default_model: r.querySelector('.p-model').value.trim(),
+  })).filter(p => p.id);
+  const data = {
+    providers,
+    chat_provider: document.getElementById('cfg-chat_provider').value,
+    vision_provider: document.getElementById('cfg-vision_provider').value,
+    emotion_provider: document.getElementById('cfg-emotion_provider').value,
+  };
+  try {
+    await apiJSON('/api/providers', { method: 'PUT', body: { data } });
+    showToast('提供商配置已保存');
+    loadProviders();   // 重新拉取(Key 变掩码)
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
 }
 
 async function saveModels() {

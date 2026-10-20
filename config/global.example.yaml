@@ -55,6 +55,30 @@ server:
   outbound_enqueue_timeout: 2.0  # 已废弃, 不再生效: 队列满时立即失败(保留字段兼容旧配置)
 
 llm:
+  # ── 多提供商(可选) ─────────────────────────────────────────
+  # 每套 base_url + api_key 可独立配置, 支持多家并存(如 snowluma + deepseek)。
+  # 配好后用 chat_provider / vision_provider / emotion_provider 指定默认;
+  # 单个 bot 还可在 bot 配置里用 chat_provider_override 单独指定。
+  # 未配置 providers 时, 回退下面的 chat_base_url / chat_api_key 等旧字段。
+  providers: []
+  # 示例:
+  # providers:
+  #   - id: snowluma
+  #     name: SnowLuma
+  #     base_url: "https://api.snowluma.example/v1"
+  #     api_key: "sk-xxx"
+  #     default_model: "gpt-4o"
+  #     models: ["gpt-4o", "claude-sonnet-4"]
+  #   - id: deepseek
+  #     name: DeepSeek
+  #     base_url: "https://api.deepseek.com"
+  #     api_key: "sk-yyy"
+  #     default_model: "deepseek-chat"
+  #     models: ["deepseek-chat", "deepseek-reasoner"]
+  chat_provider: ""        # 默认 chat 提供商 id(空=用下面 chat_base_url/api_key)
+  vision_provider: ""      # 默认 vision 提供商 id(空=用 vision_base_url/api_key)
+  emotion_provider: ""     # 默认 emotion 提供商 id(空=用 emotion_base_url/api_key)
+
   # Chat model
   chat_model: "DeepSeek-V4-Flash"
   chat_base_url: "https://api.openai.com/v1"
