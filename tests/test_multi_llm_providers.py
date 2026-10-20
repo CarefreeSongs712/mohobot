@@ -120,6 +120,30 @@ def test_specs_normalized_with_fallbacks():
     assert LLMService._provider_specs(llm2) == {}
 
 
+def test_provider_without_base_url_inherits_global():
+    """只填 api_key 的 provider 复用 chat_base_url(同端点换 key 的常见用法)。
+
+    对抗验证时发现文档写成"两者都必须有", 与实现(回退)不符; 这里用测试锁住
+    真实语义, 避免后续被误改。
+    """
+    llm = LLMConfig(chat_base_url="https://global.example/v1", chat_api_key="sk-global")
+    llm.providers = _normalize_providers([
+        {"id": "keyonly", "api_key": "sk-alt", "default_model": "m-alt"},
+    ])
+    specs = None
+    from mohobot.llm_service import LLMService
+
+    specs = LLMService._provider_specs(llm)
+    assert "keyonly" in specs, specs
+    assert specs["keyonly"]["base_url"] == "https://global.example/v1"
+    assert specs["keyonly"]["api_key"] == "sk-alt"
+
+    # 既没有 key 也没有地址 → 排除
+    llm2 = LLMConfig(chat_api_key="")
+    llm2.providers = _normalize_providers([{"id": "empty"}])
+    assert LLMService._provider_specs(llm2) == {}
+
+
 def test_chat_target_uses_global_provider():
     svc = _service(_llm_with_providers())
     client, model, pid = svc._resolve_chat_target(None)

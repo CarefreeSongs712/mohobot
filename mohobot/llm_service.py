@@ -183,8 +183,10 @@ class LLMService:
     def _provider_specs(llm: LLMConfig) -> dict[str, dict[str, str]]:
         """归一化 providers 列表 → {id: {base_url, api_key, default_model}}。
 
-        只保留 base_url 与 api_key 都非空的项(否则无法建 client)。
-        base_url 未填时回退该角色旧字段; api_key 未填时回退 chat key。
+        规则(与 WebUI 行为一致):
+        - api_key 未填时回退 chat key;
+        - base_url 未填时回退 **chat_base_url**(因此可以只换 key/模型, 复用同一端点);
+        - 两者回退后仍为空(没有任何可用 key 或地址)的项会被排除。
         """
         chat_key = llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
         specs: dict[str, dict[str, str]] = {}
