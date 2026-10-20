@@ -3,7 +3,7 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `c88bc20`。CI 四项通过。
+> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `9bfc27b`。CI 四项通过。
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
 
 ---
@@ -98,6 +98,14 @@
 | 测试耗时调查 | ✅ 建档 | `.venv/prep/report-test-speed.md`：模式对比、慢用例归因、runner 覆盖缺口（707 vs 774 顶层函数，`test_ban_pipeline`/`test_plugin_reload` 记 PASS 但 0 用例）、后续建议 | 本地文件 |
 
 **待维护者决策**：CI 的 legacy runner 是否改为只在 push main 时跑（PR 用 pytest 为准，预计 PR CI 再省 ~90s）。
+
+### 2.4 多提供商安全热修（PR #74）
+
+独立审查（`.venv/prep/reviews/pr73/INDEPENDENT.md`）在 #73 合并后发现 **P1**：`GET /api/config` 明文返回 provider `api_key`；另有 4 个 P2（无效 provider 跳过全局回退、provider client 不退休、bot `vision_provider_override` 未接线、`emotion_provider` 未接线）与 P3（空 key 跨端点继承、`models` 被清空、前端缓存）。
+
+PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provider_hardening.py` 10 条，7/7 变异杀死；全量 798 passed、runner 89/0、ban/reload/concurrency 单独 OK、smoke OK。
+
+**教训（已写入流程）**：PR 审查改为**独立子代理先审**再合并；自身测试容易漏"同一改动在其它出口的影响面"（本例是 `/api/config` 这个既有出口）。
 
 
 ## 3. 分支模型与规范
