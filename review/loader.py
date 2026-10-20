@@ -496,10 +496,12 @@ class MohobotData:
         if kind == "assistant":
             # 来源过滤: "auto"=命令/插件等机械内容(欢迎/禁言通知/点赞结果等),
             # 不参与审核; "llm"=LLM 生成; 旧数据无标记 → 保留待审(历史兼容)。
-            if str(d.get("source") or "") == "auto":
-                return None
+            # ID 登记必须先于 source 过滤(issue #8 第 3 点): 用户引用一条 auto
+            # 消息提问时, 该 ID 需被识别为 bot 发言, 否则引用消息被丢弃漏审。
             if mid:
                 bot_mids.add(mid)
+            if str(d.get("source") or "") == "auto":
+                return None
             sender = d.get("sender") or {}
             nick = str(sender.get("nickname") or "").strip()
             return {
@@ -575,11 +577,12 @@ class MohobotData:
             # 来源过滤: "auto"=命令/插件等机械内容, 不参与审核;
             # "llm"=LLM 生成; 旧数据无标记 → 保留待审(历史兼容)。
             source = str(d.get("source") or "")
-            if source == "auto":
-                return None
             bot = str(d.get("bot_id") or "").strip()
             if not bot:
                 bot = self._bot_by_self_id(str(d.get("self_id") or "")) or "bot"
+            # Bot 消息 ID 登记与"是否入审正文"解耦(issue #8 第 3 点):
+            # 用户【引用】一条 auto 消息提问时, 该消息需要被识别为 bot 发言,
+            # 否则会被当成用户消息丢弃。因此先登记 ID, 再按 source 决定是否入审。
             if mid:
                 idx.bot_mids.add(mid)
                 idx.bot_mids_by_bot.setdefault(bot, set()).add(mid)
@@ -589,6 +592,9 @@ class MohobotData:
                 idx.bot_self_ids[bot] = self_id if not prev else prev
             if bot not in idx.bots:
                 idx.bots.append(bot)
+            if source == "auto":
+                # 机械内容不入审, 但 ID 已登记(见上)
+                return None
             sender = d.get("sender") or {}
             nick = str(sender.get("nickname") or "").strip()
             return {

@@ -164,9 +164,11 @@ class WebPanel:
         persona_service=None,
         persona_ab_service=None,
         news_service=None,
+        history_barrier=None,
     ):
         self._persona_ab = persona_ab_service
         self._news_service = news_service
+        self._history_barrier = history_barrier
         self._host = host
         self._port = port
         self._username = username
@@ -1510,7 +1512,16 @@ class WebPanel:
                             raise HTTPException(status_code=400, detail="备份文件包含非法路径")
                     zf.extractall(tmp_dir)
 
-                restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
+                # history 被替换时: 冻结写入并关闭活跃 writer, 恢复后重新打开
+                # 新文件, 避免继续写已被删除/替换的旧 inode(issue #8)。
+                barrier = self._history_barrier if "history" in dir_set else None
+                if barrier is not None:
+                    await barrier.freeze()
+                try:
+                    restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
+                finally:
+                    if barrier is not None:
+                        await barrier.thaw()
                 if "contexts" in dir_set and self._persona_service is not None:
                     self._persona_service.invalidate_references()
             except HTTPException:
@@ -1541,11 +1552,20 @@ class WebPanel:
             if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
-            if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
-                async with self._persona_service.lock, self._context_manager.maintenance_lock:
+            # history 被清理时: 先冻结写入并关闭活跃 writer, 避免它们继续写已被
+            # unlink 的旧 inode(issue #8 第 1 点)。
+            barrier = self._history_barrier if "history" in dir_set else None
+            if barrier is not None:
+                await barrier.freeze()
+            try:
+                if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
+                    async with self._persona_service.lock, self._context_manager.maintenance_lock:
+                        removed = self._cleanup_data(bot_list, dir_set)
+                else:
                     removed = self._cleanup_data(bot_list, dir_set)
-            else:
-                removed = self._cleanup_data(bot_list, dir_set)
+            finally:
+                if barrier is not None:
+                    await barrier.thaw()
             if "contexts" in dir_set and self._persona_service is not None:
                 self._persona_service.invalidate_references()
             # 清理封禁数据后同步刷新拦截器缓存

@@ -58,6 +58,9 @@ class MohobotApplication:
         self._knowledge_service: Any | None = None
         self._news_service: Any | None = None
         self._news_collector: Any | None = None
+        # 历史归档维护屏障(issue #8): Web 面板热清理/恢复 history 时冻结写入
+        from mohobot.services.history_barrier import HistoryBarrier
+        self._history_barrier = HistoryBarrier()
         self._task_supervisor = TaskSupervisor()
         self._running = False
         self._shutting_down = False
@@ -333,6 +336,7 @@ class MohobotApplication:
             persona_service=self._persona_service,
             persona_ab_service=self._persona_ab_service,
         )
+        self._message_handler.set_history_barrier(self._history_barrier)
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
         from mohobot.ban import BanInterceptor, BanStore
@@ -374,6 +378,7 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
             global_config=self._config,
         )
+        self._ws_server.set_history_barrier(self._history_barrier)
 
         # Wire up circular references
         self._message_handler._ws = self._ws_server
@@ -425,6 +430,7 @@ class MohobotApplication:
                 tts_service=self._tts_service,
                 knowledge_service=self._knowledge_service,
                 news_service=self._news_service,
+                history_barrier=self._history_barrier,
                 persona_service=self._persona_service,
                 persona_ab_service=self._persona_ab_service,
                 config_update_callback=self.sync_config,

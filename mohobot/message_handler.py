@@ -249,6 +249,11 @@ class MessageHandler:
         history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
         一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
         """
+        # 维护窗口内跳过归档: 宁可这段消息不归档, 也不写进即将被删除/替换的
+        # 旧 inode(否则静默丢失, 见 issue #8)。
+        if self._history_frozen():
+            logger.debug("history 维护中, 跳过归档")
+            return
         dual_write = bool(getattr(self._global_config, "history_dual_write", True))
         if isinstance(event, PrivateMessageEvent):
             file_path = f"{self._data_dir}/history/{bot_id}/private/{event.user_id}.jsonl"
@@ -352,6 +357,34 @@ class MessageHandler:
         if len(window) > self._GROUP_MID_WINDOW:
             window.popitem(last=False)
         return True
+
+    # ── 历史维护屏障 (issue #8) ──────────────────────────────
+
+    def set_history_barrier(self, barrier) -> None:
+        """注入历史维护屏障: 冻结期间跳过归档写入, 并注册 writer 关闭回调。
+
+        热清理/恢复 history 目录时, 旧的 JSONLWriter 仍持有已 unlink 的 inode,
+        继续写入会让消息静默丢失(issue #8 第 1 点)。屏障由 Web 面板在维护
+        前后成对调用, 负责关句柄 + 冻结写入。
+        """
+        self._history_barrier = barrier
+        if barrier is not None:
+            barrier.register_closer(self.close_history_writers)
+
+    async def close_history_writers(self) -> None:
+        """关闭并清空全部 history writer(不删文件), 使下次写入重开新 inode。"""
+        writers = list(self._writer_registry.items())
+        self._writer_registry.clear()
+        for path, writer in writers:
+            try:
+                await writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"关闭 history writer 失败({path}): {exc}")
+        logger.info(f"[History] 已关闭 {len(writers)} 个 history writer")
+
+    def _history_frozen(self) -> bool:
+        barrier = getattr(self, "_history_barrier", None)
+        return bool(barrier is not None and barrier.frozen)
 
     def _get_or_create_writer(self, file_path: str) -> JSONLWriter:
         """Get or create a JSONLWriter for the given path."""
