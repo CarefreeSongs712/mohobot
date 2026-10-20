@@ -3,7 +3,7 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `b0f1eab`。CI 四项通过。
+> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `c88bc20`。CI 四项通过。
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
 
 ---
@@ -88,6 +88,17 @@
 | `#2` SQLite 旧库 WAL 迁移 | wontfix | 维护者此前表示暂缓，保持 wontfix | — |
 
 > 截至 2026-10-20，开放 issue 仅剩 `#2`（wontfix）。
+
+### 2.3 本轮新增能力与基础设施
+
+| 项 | 状态 | 说明 | PR/提交 |
+|---|---|---|---|
+| LLM 多提供商 | ✅ 已合并 | 每套 `base_url+api_key+default_model` 可并存(snowluma/deepseek)；全局 `chat_provider/vision_provider/emotion_provider`，每 bot 可用 `*_provider_override`；不配 providers 时行为与旧版完全一致；WebUI「模型配置 → 多提供商」可增删改，Key 掩码且留空保留原值 | `#73`（`c88bc20`） |
+| 测试提速 | ✅ 已合并 | `pytest-xdist` + CI `-n auto --dist loadfile`；本地全量 80s → 17s（`-n 8`）；修 `test_wifepicker` 顺序依赖；串行慢的根因是真实 sleep（qzone 防刷 5.07/4.21/2.96/2.70s、plugin tick 3.5s、login 0.5s 硬延迟等，前 30 项占 72%） | `ba0ec66` |
+| 测试耗时调查 | ✅ 建档 | `.venv/prep/report-test-speed.md`：模式对比、慢用例归因、runner 覆盖缺口（707 vs 774 顶层函数，`test_ban_pipeline`/`test_plugin_reload` 记 PASS 但 0 用例）、后续建议 | 本地文件 |
+
+**待维护者决策**：CI 的 legacy runner 是否改为只在 push main 时跑（PR 用 pytest 为准，预计 PR CI 再省 ~90s）。
+
 
 ## 3. 分支模型与规范
 
