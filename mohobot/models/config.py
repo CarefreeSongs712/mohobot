@@ -159,6 +159,12 @@ class NewsConfig:
     inject_header: str = ""              # 留空用内置表头
     default_ttl_days: float = 14.0       # 条目默认有效期(天), <=0 表示不自动过期
     tool_enabled: bool = True            # 是否注册 news_recent/news_search 工具
+    # ── B站采集器(默认关闭, 关闭时不发任何网络请求) ──
+    collector_enabled: bool = False
+    collector_uids: list[str] = field(default_factory=list)   # 关注的 B站 UID
+    collector_interval_seconds: float = 1800.0                # 轮询间隔(秒), 最小 300
+    collector_max_items_per_uid: int = 5                      # 单 UID 每轮最多提交条数
+    collector_ttl_days: float = 14.0                          # 采集条目有效期(天)
 
 
 @dataclass
@@ -534,6 +540,19 @@ class GlobalConfig:
                 inject_header=str(news_raw.get("inject_header", "") or ""),
                 default_ttl_days=float(news_raw.get("default_ttl_days", 14.0)),
                 tool_enabled=bool(news_raw.get("tool_enabled", True)),
+                collector_enabled=bool(news_raw.get("collector_enabled", False)),
+                collector_uids=[
+                    str(u).strip()
+                    for u in (news_raw.get("collector_uids") or [])
+                    if str(u).strip()
+                ],
+                collector_interval_seconds=float(
+                    news_raw.get("collector_interval_seconds", 1800) or 1800
+                ),
+                collector_max_items_per_uid=int(
+                    news_raw.get("collector_max_items_per_uid", 5) or 5
+                ),
+                collector_ttl_days=float(news_raw.get("collector_ttl_days", 14) or 14),
             ),
             anysearch=AnySearchConfig(
                 enabled=anysearch_raw.get("enabled", True),
@@ -698,6 +717,11 @@ class GlobalConfig:
                 "inject_header": self.news.inject_header,
                 "default_ttl_days": self.news.default_ttl_days,
                 "tool_enabled": self.news.tool_enabled,
+                "collector_enabled": self.news.collector_enabled,
+                "collector_uids": list(self.news.collector_uids),
+                "collector_interval_seconds": self.news.collector_interval_seconds,
+                "collector_max_items_per_uid": self.news.collector_max_items_per_uid,
+                "collector_ttl_days": self.news.collector_ttl_days,
             },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
@@ -854,6 +878,11 @@ class GlobalConfig:
                 "inject_header": self.news.inject_header,
                 "default_ttl_days": self.news.default_ttl_days,
                 "tool_enabled": self.news.tool_enabled,
+                "collector_enabled": self.news.collector_enabled,
+                "collector_uids": list(self.news.collector_uids),
+                "collector_interval_seconds": self.news.collector_interval_seconds,
+                "collector_max_items_per_uid": self.news.collector_max_items_per_uid,
+                "collector_ttl_days": self.news.collector_ttl_days,
             },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
