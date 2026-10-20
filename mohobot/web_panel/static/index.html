@@ -854,7 +854,7 @@ function init() {
   // 预取多提供商列表, 供 Bot 配置页下拉使用(失败不影响主流程)
   apiJSON('/api/providers')
     .then(r => { _botProviderCache = (r && r.providers) || []; })
-    .catch(() => { _botProviderCache = []; });
+    .catch(() => { /* 保留旧缓存, 失败不能清空已保存的 override 选项 */ });
 }
 
 // ═══════════════ 3.7 新闻动态 (REQ-6) ═══════════════
@@ -1505,8 +1505,15 @@ let _botProviderCache = [];
 function _botProviderOptions(selected) {
   const list = _botProviderCache || [];
   const isSel = (v) => (String(v || '') === String(selected || '') ? ' selected' : '');
-  return '<option value=""' + isSel('') + '>(跟随全局)</option>' +
+  let html = '<option value=""' + isSel('') + '>(跟随全局)</option>' +
     list.map(p => `<option value="${esc(p.id)}"${isSel(p.id)}>${esc(p.name || p.id)}</option>`).join('');
+  // 已保存的 override 对应的 provider 被删除时, 仍把它显示为一项,
+  // 避免保存 Bot 配置时静默把 override 清空(用户可显式改回跟随全局)。
+  const sel = String(selected || '');
+  if (sel && !list.some(p => String(p.id) === sel)) {
+    html += `<option value="${esc(sel)}" selected>${esc(sel)}（提供商不存在）</option>`;
+  }
+  return html;
 }
 
 async function loadBotConfig() {

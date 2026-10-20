@@ -319,3 +319,204 @@ def test_frontend_refreshes_provider_cache_safely():
     assert "_botProviderCache = providerCache.providers" in html
     # 加载失败时不把缓存清空
     assert "失败时保留旧缓存" in html or "保留旧缓存" in html
+
+
+# ── PR #74 复审跟进：N13 / N14 / N15 / N16 / N17 ─────────────
+
+def test_empty_chat_base_url_does_not_leak_key_to_other_endpoint():
+    """N14: chat_base_url 为空时, 空 key provider 也不得继承主 key 到别的端点。"""
+    from mohobot.llm_service import LLMService
+
+    llm = LLMConfig(chat_api_key="sk-MAIN-OPENAI", chat_base_url="")
+    llm.providers = _normalize_providers([
+        {"id": "third", "base_url": "https://evil.example/v1", "api_key": ""},
+        {"id": "inherit", "api_key": ""},   # 无 base_url → 跟随(空)chat 端点
+    ])
+    specs = LLMService._provider_specs(llm)
+    assert "third" not in specs, "N14: 主 key 被继承到不同端点"
+    # 没有可用端点时 inherit 也不该带出 key
+    assert "inherit" not in specs
+
+
+async def test_vision_available_with_per_bot_provider_only():
+    """N13: 全局 vision_provider 留空、仅 per-bot override 时识图也应可用。"""
+    from mohobot.llm_service import LLMService
+
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="一只狗"))],
+                usage=None,
+            )
+
+    class ProvClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    llm = LLMConfig(chat_model="m", vision_model="global-vision", vision_provider="")
+    llm.providers = _normalize_providers([
+        {"id": "visionprov", "base_url": "https://v", "api_key": "sk-v",
+         "default_model": "v-model"},
+    ])
+    svc = object.__new__(LLMService)
+    svc._cfg = SimpleNamespace(llm=llm)
+    svc._provider_clients = {"visionprov": ProvClient()}
+    svc._chat_client = None
+    svc._vision_client = None
+    svc._emotion_client = None
+    svc._provider_identity_cache = {}
+
+    # 用真实 _install_clients 计算可用性(全局 vision_provider 为空)
+    LLMService._install_clients(
+        svc, llm,
+        {"chat": None, "vision": None, "emotion": None},
+        {"chat": None, "vision": None, "emotion": None},
+        {"visionprov": svc._provider_clients["visionprov"]},
+    )
+
+    async def _noop(*a, **k):
+        return None
+
+    svc._record_usage = _noop
+    bot = BotConfig(bot_id="b", vision_provider_override="visionprov")
+    out = await LLMService.describe_image(svc, "http://img/x.png", bot_config=bot)
+    assert out == "一只狗", out
+    assert captured["model"] == "v-model"
+
+
+async def test_close_closes_current_provider_clients():
+    """N16: close() 必须关闭**当前**(未退休)的 provider client(变异承重)。"""
+    from mohobot.llm_service import LLMService
+
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    current = FakeClient()
+    svc = object.__new__(LLMService)
+    svc._cfg = SimpleNamespace(llm=LLMConfig())
+    svc._provider_clients = {"p": current}
+    svc._provider_identities = {"p": ("sk", "https://x")}
+    svc._chat_client = svc._vision_client = svc._emotion_client = None
+    svc._retired_clients = []       # 没有退休 client → 只能靠 close 的 provider 循环
+    svc._available = True
+    svc._vision_available = True
+    svc._owns_usage_recorder = False
+    await svc.close()
+    assert current.closed, "close() 未关闭当前 provider client"
+    assert svc._provider_clients == {}
+    assert svc._provider_identity_cache == {}
+
+
+async def test_vision_callback_passes_bot_config():
+    """N17: LLMService._vision_callback(bot) 必须把 bot 配置传进 describe_image_file。"""
+    from mohobot.llm_service import LLMService
+
+    seen = {}
+
+    svc = object.__new__(LLMService)
+
+    async def fake_describe_file(local_path, max_tokens=None, bot_config=None):
+        seen["bot_config"] = bot_config
+        return "描述"
+
+    svc.describe_image_file = fake_describe_file
+    bot = BotConfig(bot_id="b", vision_provider_override="p2")
+    cb = LLMService._vision_callback(svc, bot)
+    out = await cb("http://img/x.png", "/tmp/x.png")
+    assert out == "描述"
+    assert seen["bot_config"] is bot, "N17: _vision_callback 未传 bot_config"
+
+
+async def test_message_handler_vision_callback_passes_bot_config():
+    """N17: MessageHandler._vision_callback(bot_id) 应取该 bot 配置并传下去。"""
+    import mohobot.message_handler as mh
+
+    seen = {}
+
+    class FakeLLM:
+        async def describe_image_file(self, local_path, max_tokens=None, bot_config=None):
+            seen["bot_config"] = bot_config
+            return "描述"
+
+    handler = object.__new__(mh.MessageHandler)
+    handler._llm = FakeLLM()
+    handler._bot_config = lambda bot_id: BotConfig(
+        bot_id=bot_id, vision_provider_override="p3",
+    )
+    cb = mh.MessageHandler._vision_callback(handler, "bot_001")
+    out = await cb("http://img/x.png", "/tmp/x.png")
+    assert out == "描述"
+    assert seen["bot_config"] is not None
+    assert seen["bot_config"].vision_provider_override == "p3"
+
+
+async def test_sync_config_reuses_unchanged_provider_clients():
+    """N15: provider 配置未变时, sync_config 不应重建 client。"""
+    from mohobot.llm_service import LLMService
+
+    cfg = GlobalConfig()
+    cfg.llm = _llm()
+    svc = object.__new__(LLMService)
+    svc._cfg = cfg
+    svc._provider_clients = {}
+    svc._provider_identity_cache = {}
+    svc._chat_client = svc._vision_client = svc._emotion_client = None
+    svc._retired_clients = []
+    svc._client_identities = {}
+    svc._install_clients = LLMService._install_clients.__get__(svc, LLMService)
+
+    # 第一次: prepare 造出两个 provider client
+    class FakeClient:
+        def __init__(self, name):
+            self.name = name
+
+        async def close(self):
+            pass
+
+    created: list[FakeClient] = []
+
+    def prepare(llm, created_holder):
+        provider_clients = {}
+        for pid in ("snowluma", "deepseek"):
+            c = FakeClient(pid)
+            created.append(c)
+            provider_clients[pid] = c
+        return (
+            {"chat": None, "vision": None, "emotion": None},
+            {"chat": None, "vision": None, "emotion": None},
+            provider_clients,
+        )
+
+    svc._prepare_clients = prepare
+    await svc.sync_config(cfg)
+    first = dict(svc._provider_clients)
+    assert len(created) == 2
+
+    # 第二次: 用真实 _prepare_clients 的复用池行为 → 不应新建
+    svc._prepare_clients = LLMService._prepare_clients.__get__(svc, LLMService)
+    # 真实 _prepare_clients 会构造 AsyncOpenAI; 用桩替换构造, 只验证复用逻辑
+    import mohobot.llm_service as lsvc
+
+    orig = lsvc.AsyncOpenAI
+    try:
+        created_after: list = []
+
+        def fake_openai(api_key=None, base_url=None):
+            c = FakeClient(f"{api_key}@{base_url}")
+            created_after.append(c)
+            return c
+
+        lsvc.AsyncOpenAI = fake_openai
+        await svc.sync_config(cfg)
+    finally:
+        lsvc.AsyncOpenAI = orig
+
+    assert created_after == [], f"N15: 配置未变仍重建了 client: {created_after}"
+    assert svc._provider_clients == first
