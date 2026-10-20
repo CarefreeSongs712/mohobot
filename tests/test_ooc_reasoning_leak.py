@@ -305,6 +305,95 @@ async def main() -> None:
     print("\nALL OOC REASONING LEAK TESTS PASSED")
 
 
+
+
+# ── 5. 中英混杂清理 (REQ-7) ──────────────────────────────────
+
+def test_strip_english_fillers_basic():
+    from mohobot.utils.reply_filter import strip_english_fillers
+
+    cases = [
+        ("Well, 我觉得今天天气不错", "我觉得今天天气不错"),
+        ("Okay so 那个，明天见吧", "那个，明天见吧"),
+        ("So, actually, 这个我也不太清楚", "这个我也不太清楚"),
+        ("Well then, 我们走吧", "我们走吧"),
+        ("As an AI language model, 我不能这样做", "我不能这样做"),
+        ("I'm sorry, but 我不能帮你这个", "我不能帮你这个"),
+    ]
+    for raw, expected in cases:
+        got = strip_english_fillers(raw)
+        assert got == expected, f"{raw!r} -> {got!r} (want {expected!r})"
+
+
+def test_strip_english_fillers_preserves_legit_english():
+    """不误伤: 句中英文、专有名词、英文歌名/Vocaloid 术语都保留。"""
+    from mohobot.utils.reply_filter import strip_english_fillers
+
+    keep = [
+        "我觉得 Well 这个词没问题",
+        "Vocaloid 的新歌很好听",
+        "这首歌 BPM 好高",
+        "明天见",
+        "OK，那就这样吧",          # 中文里正当使用的 OK, 不动
+        "天依的英文名是 Luo Tianyi",
+        "",
+    ]
+    for text in keep:
+        assert strip_english_fillers(text) == text, text
+
+
+def test_reply_config_exposes_filler_switch():
+    from mohobot.models.config import GlobalConfig
+
+    cfg = GlobalConfig()
+    assert cfg.reply.strip_english_fillers is True, "默认开启(保守白名单)"
+    cfg.reply.strip_english_fillers = False
+    assert cfg.to_dict()["reply"]["strip_english_fillers"] is False
+
+
+def _real_send_handler(sent: list[str]):
+    """构造使用**真实 _send_segment** 的 handler(只替换最终发送边界)。"""
+    from mohobot.message_handler import MessageHandler
+
+    handler = object.__new__(MessageHandler)
+    handler._seg_delay_min = 0
+    handler._seg_delay_max = 0
+    handler._reply_quote = False
+    handler._strip_english_fillers = True
+
+    async def _send_message(bot_id, event, message, source="llm"):
+        sent.append(message if isinstance(message, str) else str(message))
+        return None
+
+    handler._send_message = _send_message
+    return handler
+
+
+async def test_send_segment_strips_fillers():
+    """发送口统一清理: 分段文本里的 "Well," 不得发给用户。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    await handler._send_segment("bot", None, "Well, 我觉得今天天气不错", False)
+    assert sent == ["我觉得今天天气不错"], sent
+
+
+async def test_filler_cleanup_can_be_disabled():
+    """开关关闭时不清理(保持原样)。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._strip_english_fillers = False
+    await handler._send_segment("bot", None, "Well, 我觉得不错", False)
+    assert sent == ["Well, 我觉得不错"], sent
+
+
+async def test_send_segment_skips_when_only_filler():
+    """整段都是英文填充词时, 清理后为空 → 不发送该段。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    await handler._send_segment("bot", None, "Well, ", False)
+    assert sent == [], sent
+
+
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())

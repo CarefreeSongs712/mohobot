@@ -112,6 +112,9 @@ reply:
   segment_delay_min: 0.2    # 分段发送随机延迟下限（秒）
   segment_delay_max: 0.5    # 分段发送随机延迟上限（秒）
   reply_quote: true         # 是否引用触发回复的那条消息
+  # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话(Well,/Okay so,/As an AI…)
+  # 只清理白名单句首词, 不影响正常英文内容(Vocaloid/BPM 等保留)
+  strip_english_fillers: true
 
 web_panel:
   enabled: true

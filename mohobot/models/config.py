@@ -131,6 +131,9 @@ class ReplyConfig:
     segment_delay_min: float = 0.2  # 分段发送随机延迟下限(秒)
     segment_delay_max: float = 0.5  # 分段发送随机延迟上限(秒)
     reply_quote: bool = True       # 是否引用触发回复的那条消息
+    # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话
+    # (Well,/Okay so,/As an AI…)。只清理白名单句首词, 不影响正常英文内容。
+    strip_english_fillers: bool = True
 
 
 @dataclass
@@ -525,6 +528,7 @@ class GlobalConfig:
                 segment_delay_min=reply_raw.get("segment_delay_min", 0.2),
                 segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
                 reply_quote=reply_raw.get("reply_quote", True),
+                strip_english_fillers=bool(reply_raw.get("strip_english_fillers", True)),
             ),
             database=DatabaseConfig(
                 enabled=db_raw.get("enabled", True),
@@ -702,6 +706,7 @@ class GlobalConfig:
                 "segment_delay_min": self.reply.segment_delay_min,
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
+                "strip_english_fillers": self.reply.strip_english_fillers,
             },
             "database": {
                 "enabled": self.database.enabled,
@@ -863,6 +868,7 @@ class GlobalConfig:
                 "segment_delay_min": self.reply.segment_delay_min,
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
+                "strip_english_fillers": self.reply.strip_english_fillers,
             },
             "database": {
                 "enabled": self.database.enabled,
