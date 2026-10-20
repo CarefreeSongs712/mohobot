@@ -2044,7 +2044,10 @@ async function loadProviders() {
     _fillProviderSelect('cfg-chat_provider', providerCache.chat_provider);
     _fillProviderSelect('cfg-vision_provider', providerCache.vision_provider);
     _fillProviderSelect('cfg-emotion_provider', providerCache.emotion_provider);
-  } catch (e) { showToast('加载提供商失败: ' + e.message, false); }
+  } catch (e) {
+    // 失败时保留旧缓存, 避免 Bot 配置页下拉与已保存的 override 被静默清空
+    showToast('加载提供商失败: ' + e.message, false);
+  }
 }
 
 async function saveProviders() {
@@ -2065,7 +2068,8 @@ async function saveProviders() {
   try {
     await apiJSON('/api/providers', { method: 'PUT', body: { data } });
     showToast('提供商配置已保存');
-    loadProviders();   // 重新拉取(Key 变掩码)
+    await loadProviders();                       // 重新拉取(Key 变掩码, 保留 models)
+    _botProviderCache = providerCache.providers || [];  // Bot 配置页下拉同步刷新
   } catch (e) { showToast('保存失败: ' + e.message, false); }
 }
 

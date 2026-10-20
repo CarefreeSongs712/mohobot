@@ -451,6 +451,14 @@ class WebPanel:
                 for key, value in list(result.get(section, {}).items()):
                     if any(marker in key.lower() for marker in ("key", "token", "secret", "password")):
                         result[section][key] = self._mask_secret(value)
+            # providers 是列表, 上面的顶层 key 名匹配扫不到列表内部 →
+            # 必须单独递归掩码, 否则 GET /api/config 会把每套提供商的 api_key
+            # 明文下发给前端(独立审查发现的 P1)。
+            llm_result = result.get("llm")
+            if isinstance(llm_result, dict):
+                for prov in (llm_result.get("providers") or []):
+                    if isinstance(prov, dict) and prov.get("api_key"):
+                        prov["api_key"] = self._mask_secret(prov["api_key"])
             return result
 
         @app.put("/api/config")
@@ -948,9 +956,13 @@ class WebPanel:
                         continue
                     item = dict(item)
                     key = str(item.get("api_key") or "")
+                    old = current.get(str(item.get("id") or "")) or {}
                     if key in ("", self._MASK):
-                        old = current.get(str(item.get("id") or "")) or {}
                         item["api_key"] = str(old.get("api_key") or "")
+                    # 前端行编辑器不维护 models; 未提交时保留原值,
+                    # 否则每次保存都会把 models 清空。
+                    if not item.get("models") and old.get("models"):
+                        item["models"] = list(old.get("models") or [])
                     merged.append(item)
                 cfg.llm.providers = _normalize_providers(merged)
             for role in ("chat", "vision", "emotion"):

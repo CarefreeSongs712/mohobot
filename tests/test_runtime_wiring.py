@@ -153,7 +153,7 @@ async def test_main_image_cache_shared_with_llm_and_context():
             uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
             calls = []
 
-            async def describe(path, max_tokens=None):
+            async def describe(path, max_tokens=None, bot_config=None):
                 calls.append(path)
                 await asyncio.sleep(0.01)
                 return "一张红色图片"
