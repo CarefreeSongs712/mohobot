@@ -805,6 +805,7 @@ registry.register(LLMTool(
 - 首次调用 `stream=True, stream_options={"include_usage": True}`，`tool_choice="auto"`。
 - 无重试：初始调用异常直接 `[LLM 调用失败: ...]`（`chat()` 同样，返回错误串作为回复内容）。
 - 工具后续流没产出内容 → 非流式重试一次；仍空 → `[工具调用完成，但模型未返回文本]`。
+- 识图两种模式（`llm.vision_mode`）：`describe`（默认）先调视觉模型转述成文本再交主模型；`direct` 把 `image_url` 多模态直发主模型，省一次调用，失败（如主模型不支持图片）自动回退 `describe` 重试一次。两种模式都只处理消息里的首张图片，且 `direct` 只影响本次请求、不写入上下文。
 - 视觉 `describe_image*` 失败降级为空串。
 - `analyze_emotion` 失败返回 `None`；`EmotionExpert` 外面有超时 + 重试 + **连续 3 次失败熔断**。
 

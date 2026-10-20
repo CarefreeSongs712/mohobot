@@ -297,8 +297,9 @@ class LLMService:
         max_tokens = self._cfg.llm.chat_max_tokens
         client = self._chat_client
 
-        # 图片不再切视觉模型: 描述已由 _build_messages 内预调用视觉模型转成文本,
-        # 主模型(纯文本 chat_model)统一处理、不接收图片原始信息。
+        # 识图有两种模式(见 _prepare_messages):
+        #   describe(默认) → 图片已由视觉模型转述成文本, 主模型只收文本;
+        #   direct        → 图片以 image_url 多模态直发主模型(要求 chat 模型支持视觉)。
         if bot_config and bot_config.chat_model_override:
             model = bot_config.chat_model_override
 
@@ -460,8 +461,9 @@ class LLMService:
         max_tokens = self._cfg.llm.chat_max_tokens
         client = self._chat_client
 
-        # 图片不再切视觉模型: 描述已由 _build_messages 内预调用视觉模型转成文本,
-        # 主模型(纯文本 chat_model)统一处理、不接收图片原始信息。
+        # 识图有两种模式(见 _prepare_messages):
+        #   describe(默认) → 图片已由视觉模型转述成文本, 主模型只收文本;
+        #   direct        → 图片以 image_url 多模态直发主模型(要求 chat 模型支持视觉)。
 
         if bot_config and bot_config.chat_model_override:
             model = bot_config.chat_model_override
@@ -1448,8 +1450,9 @@ class LLMService:
             ]
 
         if image_urls and direct_image is None:
-            # 与 beta(Agent)路径一致的图片语义: 先预调用视觉模型取描述,
+            # describe 模式的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
+            # (direct 模式不进入本分支, 见下方 direct_image 构造)
             vision_desc = await self._describe_image_for_text(image_urls[0])
             if user_text and vision_desc:
                 user_content = f"{user_text}（图片内容：{vision_desc}）"
