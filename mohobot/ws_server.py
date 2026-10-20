@@ -519,6 +519,11 @@ class WSServer:
         {bot_id}/group/ 归档一份(回滚保险)。source 标注来源:
         "llm"=LLM 生成回复, "auto"=命令/插件等机械内容(审核面板据此过滤)。
         """
+        # 维护窗口内跳过归档(不写旧 inode), 见 issue #8
+        barrier = getattr(self, "_history_barrier", None)
+        if barrier is not None and barrier.frozen:
+            logger.debug("history 维护中, 跳过 bot 发言归档")
+            return
         instance = self._bot_manager.get(bot_id)
         bot_qq = instance.qq if instance else 0
         bot_nick = instance.nickname if instance else bot_id
@@ -553,6 +558,25 @@ class WSServer:
                 paths.append(f"{self._data_dir}/history/{bot_id}/group/{chat_id}.jsonl")
             return paths
         return [f"{self._data_dir}/history/{bot_id}/private/{chat_id}.jsonl"]
+
+    # ── 历史维护屏障 (issue #8) ──────────────────────────────
+
+    def set_history_barrier(self, barrier) -> None:
+        """注入历史维护屏障: 冻结期间跳过 message_sent 归档并注册关闭回调。"""
+        self._history_barrier = barrier
+        if barrier is not None:
+            barrier.register_closer(self.close_archive_writers)
+
+    async def close_archive_writers(self) -> None:
+        """关闭并清空 bot 发言归档 writer(不删文件)。"""
+        writers = list(self._archive_writers.items())
+        self._archive_writers.clear()
+        for path, writer in writers:
+            try:
+                await writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"关闭 archive writer 失败({path}): {exc}")
+        logger.info(f"[History] 已关闭 {len(writers)} 个 bot 发言归档 writer")
 
     def _get_archive_writer(self, path: str) -> JSONLWriter:
         writer = self._archive_writers.get(path)
