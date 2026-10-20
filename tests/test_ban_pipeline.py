@@ -151,7 +151,7 @@ class _LLM:
         self.calls.append(kwargs)
         yield ("fake LLM reply", True)
 
-    async def describe_image_file(self, local_path):
+    async def describe_image_file(self, local_path, max_tokens=None, bot_config=None):
         self.vision_calls.append(local_path)
         return "fake image description"
 

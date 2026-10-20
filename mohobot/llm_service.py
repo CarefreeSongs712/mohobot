@@ -189,6 +189,7 @@ class LLMService:
         - 两者回退后仍为空(没有任何可用 key 或地址)的项会被排除。
         """
         chat_key = llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
+        chat_base = str(getattr(llm, "chat_base_url", "") or "").strip()
         specs: dict[str, dict[str, str]] = {}
         for item in (getattr(llm, "providers", None) or []):
             if not isinstance(item, dict):
@@ -196,8 +197,22 @@ class LLMService:
             pid = str(item.get("id") or "").strip()
             if not pid or pid in specs:
                 continue
-            base_url = str(item.get("base_url") or "").strip() or llm.chat_base_url
-            api_key = str(item.get("api_key") or "").strip() or chat_key
+            raw_base = str(item.get("base_url") or "").strip()
+            base_url = raw_base or chat_base
+            api_key = str(item.get("api_key") or "").strip()
+            if not api_key:
+                # 只有"同一端点"才允许继承 chat key; 否则等于把主 Key 发给
+                # 未显式声明的第三方地址(配置失误即泄漏), 直接跳过并提示。
+                if not raw_base or not chat_base or (
+                    raw_base.rstrip("/") == chat_base.rstrip("/")
+                ):
+                    api_key = chat_key
+                else:
+                    logger.warning(
+                        f"provider {pid!r} 未配置 api_key 且 base_url 与 chat_base_url 不同, "
+                        "已跳过(避免把 chat Key 发往未声明的端点)"
+                    )
+                    continue
             if not base_url or not api_key:
                 continue
             specs[pid] = {
@@ -311,6 +326,12 @@ class LLMService:
             if old is not None and id(old) not in retained_ids and id(old) not in retired_ids:
                 retired.append(old)
                 retired_ids.add(id(old))
+        # provider client 同样要退休: 旧配置里的 key/base_url 不应继续驻留内存,
+        # 也不能在配置热更后仍被复用(此前只退休了三个 role client)。
+        for old in (getattr(self, "_provider_clients", {}) or {}).values():
+            if old is not None and id(old) not in retained_ids and id(old) not in retired_ids:
+                retired.append(old)
+                retired_ids.add(id(old))
         self._cfg.llm = llm
         self._retired_clients = retired
         self._install_clients(llm, identities, clients, provider_clients)
@@ -334,12 +355,19 @@ class LLMService:
         override = str(
             getattr(bot_config, f"{role}_provider_override", "") or ""
         ).strip() if bot_config is not None else ""
-        provider_id = override or str(getattr(llm, f"{role}_provider", "") or "").strip()
-        if provider_id and provider_id in providers:
-            return providers[provider_id], provider_id
-        if provider_id:
+        global_id = str(getattr(llm, f"{role}_provider", "") or "").strip()
+        # 回退顺序: bot override → 全局 <role>_provider → 旧字段。
+        # 之前 override 无效时直接跳到旧字段, 会跳过本可用的全局 provider,
+        # 导致"只配 providers"的部署 bot 聊天直接报未配置。
+        candidates = [override] if override else []
+        if global_id and global_id != override:
+            candidates.append(global_id)
+        for candidate in candidates:
+            if candidate in providers:
+                return providers[candidate], candidate
+        if candidates:
             logger.warning(
-                f"bot 指定的 {role} 提供商 {provider_id!r} 不存在, 回退默认配置"
+                f"{role} 提供商 {candidates} 均不存在, 回退默认配置"
             )
         return getattr(self, f"_{role}_client", None), ""
 
@@ -1211,11 +1239,17 @@ class LLMService:
         model: 按次指定模型(队列积压时的快速模型 burst); 留空用配置的 emotion_model。
         失败/未配置返回 None, 调用方(EmotionExpert)自行降级。
         """
-        if self._emotion_client is None:
+        emotion_client, emotion_provider_id = self._resolve_role("emotion", None)
+        if emotion_client is None:
             return None
-        model = model or self._cfg.llm.emotion_model or self._cfg.llm.chat_model
+        # 模型优先级: 调用方指定 > emotion_model > 提供商默认模型 > chat 模型
+        model = model or self._cfg.llm.emotion_model
+        if not model and emotion_provider_id:
+            spec = self._provider_specs(self._cfg.llm).get(emotion_provider_id) or {}
+            model = spec.get("default_model") or ""
+        model = model or self._cfg.llm.chat_model
         try:
-            resp = await self._emotion_client.chat.completions.create(
+            resp = await emotion_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=float(getattr(self._cfg.llm, "emotion_temperature", 0.3)),
@@ -1578,7 +1612,7 @@ class LLMService:
             # describe 模式的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
             # (direct 模式不进入本分支, 见下方 direct_image 构造)
-            vision_desc = await self._describe_image_for_text(image_urls[0])
+            vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
             if user_text and vision_desc:
                 user_content = f"{user_text}（图片内容：{vision_desc}）"
             elif vision_desc:
@@ -1634,7 +1668,7 @@ class LLMService:
 
         return messages
 
-    async def _describe_image_for_text(self, url: str) -> str:
+    async def _describe_image_for_text(self, url: str, bot_config=None) -> str:
         """Legacy 路径用: 预调用视觉模型把图片转述为文本描述。
 
         优先走 ImageCache(下载 → phash 去重 → 描述缓存, 命中缓存不再调 vision);
@@ -1646,21 +1680,21 @@ class LLMService:
         if self._image_cache is not None:
             try:
                 _, description = await self._image_cache.get_or_describe(
-                    url, vision_callback=self._vision_callback(),
+                    url, vision_callback=self._vision_callback(bot_config),
                 )
                 return description or ""
             except Exception as e:
                 logger.warning(f"ImageCache failed in _build_messages: {e}")
                 return ""
         # 无缓存注入: 直调 describe_image(不支持下载的 URL 可能返回空)
-        return await self.describe_image(url)
+        return await self.describe_image(url, bot_config=bot_config)
 
-    def _vision_callback(self):
+    def _vision_callback(self, bot_config=None):
         """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。"""
         async def _cb(image_url: str, local_path: str) -> str:
             try:
                 return await asyncio.wait_for(
-                    self.describe_image_file(local_path),
+                    self.describe_image_file(local_path, bot_config=bot_config),
                     timeout=30.0,
                 )
             except asyncio.TimeoutError:
@@ -1671,13 +1705,13 @@ class LLMService:
                 return ""
         return _cb
 
-    async def describe_image(self, url: str, max_tokens: int | None = None) -> str:
+    async def describe_image(self, url: str, max_tokens: int | None = None, bot_config=None) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
 
         提示词取全局配置 llm.vision_prompt(默认含中V人物特征参照);
         视觉不可用或调用失败时返回空串(调用方降级为占位符)。
         """
-        vision_client, vision_model, vision_provider_id = self._resolve_vision_target(None)
+        vision_client, vision_model, vision_provider_id = self._resolve_vision_target(bot_config)
         if not self._vision_available or vision_client is None:
             return ""
         # 参数可在 WebUI 配置(llm.vision_max_tokens / vision_temperature);
@@ -1711,7 +1745,7 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
-    async def describe_image_file(self, local_path: str, max_tokens: int | None = None) -> str:
+    async def describe_image_file(self, local_path: str, max_tokens: int | None = None, bot_config=None) -> str:
         """用视觉模型描述本地图片文件。
 
         图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网
@@ -1728,7 +1762,9 @@ class LLMService:
             }.get(ext, "image/jpeg")
             with open(local_path, "rb") as f:
                 data = _b64.b64encode(f.read()).decode()
-            return await self.describe_image(f"data:{mime};base64,{data}", max_tokens)
+            return await self.describe_image(
+                f"data:{mime};base64,{data}", max_tokens, bot_config=bot_config,
+            )
         except Exception as e:
             logger.warning(f"Vision describe file failed: {e}")
             return ""
@@ -1843,6 +1879,9 @@ class LLMService:
         for role in ("chat", "vision", "emotion"):
             clients.append(getattr(self, f"_{role}_client", None))
             setattr(self, f"_{role}_client", None)
+        for provider_client in (getattr(self, "_provider_clients", {}) or {}).values():
+            clients.append(provider_client)
+        self._provider_clients = {}
         self._available = False
         self._vision_available = False
         self._client_identities = {}

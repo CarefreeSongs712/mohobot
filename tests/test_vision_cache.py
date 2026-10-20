@@ -104,7 +104,7 @@ async def test_describe_image_file_uri() -> None:
         _vision_available = True
         _vision_client = object()
 
-        async def describe_image(self, url, max_tokens=256):
+        async def describe_image(self, url, max_tokens=256, bot_config=None):
             captured["url"] = url
             return "一只猫"
 

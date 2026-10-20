@@ -56,7 +56,7 @@ def _stub_service(mode: str, captured: list, fail_first: bool = False):
     svc._available = True
     svc._retired_clients = []
 
-    async def _describe(url):
+    async def _describe(url, bot_config=None):
         captured.append(("describe", url))
         return "一张风景照"
     svc._describe_image_for_text = _describe

@@ -1141,11 +1141,20 @@ class MessageHandler:
                 logger.debug(f"图片 get_image 成功: {file_ref[:40]} → data URI")
 
     def _vision_callback(self, bot_id: str):
-        """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。"""
+        """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。
+
+        传 bot 配置, 使 bot 级 `vision_provider_override` 生效(多提供商)。
+        """
+        bot_config = None
+        try:
+            bot_config = self._bot_config(bot_id)
+        except Exception:  # noqa: BLE001
+            bot_config = None
+
         async def _cb(image_url: str, local_path: str) -> str:
             try:
                 return await asyncio.wait_for(
-                    self._llm.describe_image_file(local_path),
+                    self._llm.describe_image_file(local_path, bot_config=bot_config),
                     timeout=30.0,
                 )
             except asyncio.TimeoutError:
