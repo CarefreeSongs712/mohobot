@@ -149,12 +149,15 @@ def _render_message(message: Any) -> tuple[str, str]:
 class _FileIndex:
     """单个 history JSONL 的增量解析缓存。"""
 
-    __slots__ = ("mtime", "size", "offset", "rows", "bot_mids", "seen_mids",
-                 "bot_mids_by_bot", "bot_self_ids", "bots")
+    __slots__ = ("mtime", "size", "offset", "inode", "rows", "bot_mids",
+                 "seen_mids", "bot_mids_by_bot", "bot_self_ids", "bots")
 
     def __init__(self) -> None:
         self.mtime: float = -1.0
         self.size: int = -1
+        # 文件身份(inode): 等长替换 + 保守 mtime 时仅靠 (mtime,size) 无法发现,
+        # 会继续复用旧解析结果导致漏审(issue #8 第 2 点)。
+        self.inode: int = 0
         self.offset: int = 0
         # 过滤后的行(仅入审内容): {kind, mid, uid, nick, text, image_url, time, bot}
         # 同一 message_id 重复推送(断线重推/好友请求重发)在解析时去重, 只留首条
@@ -178,6 +181,7 @@ class _FileIndex:
         idx.mtime = float(d.get("mtime") or 0)
         idx.size = int(d.get("size") or 0)
         idx.offset = int(d.get("offset") or 0)
+        idx.inode = int(d.get("inode") or 0)
         idx.bot_mids = {str(x) for x in (d.get("bot_mids") or [])}
         idx.bot_mids_by_bot = {
             str(k): {str(x) for x in (v or [])}
@@ -200,7 +204,7 @@ class MohobotData:
     """
 
     # v6: bot 发言增加 source 标记(llm/auto), 机械内容不参与审核; 旧缓存作废
-    _CACHE_VERSION = 6
+    _CACHE_VERSION = 7
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None,
@@ -303,7 +307,7 @@ class MohobotData:
             if not force and now - self._last_save < self._SAVE_MIN_INTERVAL:
                 return
             snapshot = [
-                (path, idx.mtime, idx.size, idx.offset,
+                (path, idx.mtime, idx.size, idx.offset, idx.inode,
                  sorted(idx.bot_mids), list(idx.rows),
                  {k: sorted(v) for k, v in idx.bot_mids_by_bot.items()},
                  dict(idx.bot_self_ids), list(idx.bots))
@@ -313,7 +317,7 @@ class MohobotData:
             self._last_save = now
 
         files: dict[str, Any] = {}
-        for (path, mtime, size, offset, bot_mids, rows,
+        for (path, mtime, size, offset, inode, bot_mids, rows,
              bot_mids_by_bot, bot_self_ids, bots) in snapshot:
             try:
                 if not Path(path).exists():
@@ -325,6 +329,7 @@ class MohobotData:
                 "mtime": mtime,
                 "size": size,
                 "offset": offset,
+                "inode": inode,
                 "bot_mids": bot_mids,
                 "bot_mids_by_bot": bot_mids_by_bot,
                 "bot_self_ids": bot_self_ids,
@@ -412,11 +417,15 @@ class MohobotData:
             if idx is None:
                 idx = _FileIndex()
                 self._file_cache[key] = idx
-            mtime, size = st.st_mtime, st.st_size
-            if idx.mtime == mtime and idx.size == size:
+            mtime, size, inode = st.st_mtime, st.st_size, int(st.st_ino)
+            if idx.mtime == mtime and idx.size == size and idx.inode == inode:
                 return idx
 
-            if size < idx.offset or idx.mtime < 0:
+            if (
+                size < idx.offset
+                or idx.mtime < 0
+                or (idx.inode and idx.inode != inode)  # 等长替换 → 旧解析结果作废
+            ):
                 # 文件被截断/替换 → 全量重读
                 idx.rows = []
                 idx.bot_mids = set()
@@ -428,11 +437,21 @@ class MohobotData:
             new_rows: list[dict[str, Any]] = []
             try:
                 with open(path, "r", encoding="utf-8") as fh:
-                    if idx.offset:
-                        fh.seek(idx.offset)
+                    start_offset = idx.offset
+                    if start_offset:
+                        fh.seek(start_offset)
                     new_text = fh.read()
-                    idx.offset = fh.tell()
-                idx.mtime, idx.size = mtime, size
+                # 只消费到最后一个换行: 跨分块写入的半行留到下次(文件增长后)
+                # 再解析, 避免"丢弃半行 + 已推进 offset"导致该行永久漏审
+                # (issue #8 第 5 点/半行问题)。
+                cut = new_text.rfind("\n")
+                if cut >= 0:
+                    new_text = new_text[: cut + 1]
+                    idx.offset = start_offset + cut + 1
+                else:
+                    new_text = ""
+                    idx.offset = start_offset
+                idx.mtime, idx.size, idx.inode = mtime, size, inode
             except OSError:
                 return None
             # 布局判定: history/group/{群号}.jsonl 为群合并文件(倒数第三段是
@@ -788,6 +807,47 @@ class MohobotData:
             return []
         with self._lock:
             return list(idx.rows)
+
+    def unreviewed_counts(self, statuses: dict[str, dict[str, Any]]) -> dict[str, int]:
+        """{session_key: 待审条数} —— 对**当前文件里的有效消息集合**求交。
+
+        旧实现用 ``total - 已判定数``, 恢复较短备份后 total 变小而 DB 里仍有
+        旧判定记录, 相减会得到负数/0, 与明细里的待审条目矛盾(issue #8 第 4 点)。
+        这里改为逐条枚举当前索引里的消息, 只要其 fingerprint 不在已判定集合中
+        就计为待审, 因此与明细口径一致。
+        """
+        self.list_sessions()  # 确保文件索引已加载(幂等)
+        out: dict[str, int] = {}
+        with self._lock:
+            files = list(self._file_cache.items())
+        for path_str, idx in files:
+            path = Path(path_str)
+            merged_group = (
+                len(path.parts) >= 3
+                and path.parts[-3] == "history" and path.parts[-2] == "group"
+            )
+            if merged_group:
+                sk = session_key(MERGED_BOT_ID, "group", path.stem)
+                rows = self._merged_rows(path.stem)
+            else:
+                if len(path.parts) < 3:
+                    continue
+                sk = session_key(path.parts[-3], path.parts[-2], path.stem)
+                rows = list(idx.rows)
+            st = statuses.get(sk, {})
+            n = 0
+            for row in rows:
+                if row["kind"] == "user" and row["uid"] in self._exempt_uids:
+                    continue  # 管理员免检消息不计入待审
+                ident = entry_identity(
+                    row["mid"],
+                    content_fingerprint(sk, row["kind"], row["time"], row["text"]),
+                )
+                if ident not in st:
+                    n += 1
+            if n:
+                out[sk] = n
+        return out
 
     def exempt_pending_counts(self, statuses: dict[str, dict[str, Any]]) -> dict[str, int]:
         """{session_key: 管理员免检且未判定的条数} — 供待审计数扣除。

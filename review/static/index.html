@@ -437,11 +437,21 @@ $('sortBtn').onclick=()=>{ sortMode = sortMode==='oldest'?'recent':'oldest';
 
 /* ================= 会话明细 ================= */
 let focusFp = null;   // 打开会话后需要定位高亮的条目(内容搜索跳转用)
+// 会话加载代际: 快速切换会话时, 先发出的请求可能后返回。若直接用回包覆盖
+// curSession, 会把当前会话替换成旧会话(待审数清零/渲染错乱, issue #8 第 4 点)。
+let sessionLoadGen = 0;
 async function openSession(sk, page, fp){
+  const gen = ++sessionLoadGen;
   focusFp = fp || null;
+  let data;
   try{
-    curSession = await api('/api/session/'+sk+(page?`?page=${page}`:''));
-  }catch(e){ focusFp = null; toast(e.message); return }
+    data = await api('/api/session/'+sk+(page?`?page=${page}`:''));
+  }catch(e){
+    if(gen === sessionLoadGen){ focusFp = null; toast(e.message); }
+    return;
+  }
+  if(gen !== sessionLoadGen) return;   // 过期回包: 已有更新的会话请求, 丢弃
+  curSession = data;
   document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.sk===sk));
   renderSession();
 }

@@ -69,13 +69,23 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         """
         all_statuses = await asyncio.to_thread(store.statuses_by_session)
         counts = await asyncio.to_thread(store.counts_by_session)
-        exempt = await asyncio.to_thread(data.exempt_pending_counts, all_statuses)
+        # 待审计数必须对"当前文件里的有效消息"求交, 不能拿 total 相减:
+        # 恢复较短备份后 total 变小而 DB 仍有旧判定记录, 相减会得到负数/0
+        # 与明细矛盾(issue #8 第 4 点)。
+        # 注意顺序: 先 force 重扫刷新文件索引, 再基于最新索引求交 —— 否则
+        # 新追加的消息还没进索引, 会算成 0 待审。
+        sessions = await asyncio.to_thread(data.list_sessions, True)
+        pending = await asyncio.to_thread(data.unreviewed_counts, all_statuses)
         items = []
-        for s in await asyncio.to_thread(data.list_sessions, True):
+        for s in sessions:
             sk = s["session_key"]
             normal, abnormal = counts.get(sk, (0, 0))
-            unreviewed = max(0, s["total"] - normal - abnormal - exempt.get(sk, 0))
-            items.append({**s, "normal": normal, "abnormal": abnormal, "unreviewed": unreviewed})
+            items.append({
+                **s,
+                "normal": normal,
+                "abnormal": abnormal,
+                "unreviewed": int(pending.get(sk, 0)),
+            })
         return items
 
     def _sort_sessions(items: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
