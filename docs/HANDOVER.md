@@ -14,10 +14,10 @@
 
 | 项 | 状态 |
 |---|---|
-| 本地 `dev` | `d826da7`（工作区干净，与 `origin/dev` 一致，无未推送提交） |
-| 远端 `origin/dev` | `d826da7`，CI **success**（Python 3.12 全量、语法/控制流、Ruff 报告、表情包插件） |
+| 本地 `dev` | `07040ac`（工作区干净，与 `origin/dev` 一致，无未推送提交） |
+| 远端 `origin/dev` | `07040ac`，CI **success**（Python 3.12 全量、语法/控制流、Ruff 报告、表情包插件） |
 | `origin/main` | `a361736`（**冻结**，仅作发布线；本轮未改动、未发版） |
-| 领先量 | `dev` 比 `main` 多 **74 个提交** |
+| 领先量 | `dev` 比 `main` 多 **75 个提交** |
 | 开放 PR | **0** |
 | 开放 issue | `#2`（wontfix，SQLite 旧库 WAL 迁移，历史遗留） |
 
