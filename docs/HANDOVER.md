@@ -14,10 +14,10 @@
 
 | 项 | 状态 |
 |---|---|
-| 本地 `dev` | `07040ac`（工作区干净，与 `origin/dev` 一致，无未推送提交） |
-| 远端 `origin/dev` | `07040ac`，CI **success**（Python 3.12 全量、语法/控制流、Ruff 报告、表情包插件） |
+| 本地 / 远端 `dev` | 本节定稿时 CI 为 **success**；具体提交请以 `git log -1 origin/dev` 为准（文档难免在本节提交后才定稿，故不硬编码自身 SHA） |
+| 工作区 | 干净，无未推送提交、无未跟踪的受跟踪文件 |
 | `origin/main` | `a361736`（**冻结**，仅作发布线；本轮未改动、未发版） |
-| 领先量 | `dev` 比 `main` 多 **75 个提交** |
+| 领先量 | `dev` 比 `main` 多 **约 75 个提交**（以 `git rev-list --count origin/main..origin/dev` 为准） |
 | 开放 PR | **0** |
 | 开放 issue | `#2`（wontfix，SQLite 旧库 WAL 迁移，历史遗留） |
 

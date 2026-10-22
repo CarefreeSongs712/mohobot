@@ -3,7 +3,7 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-22，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `07040ac`。CI 四项通过。
+> 当前基线：2026-10-22，`main` = `a361736`（**冻结，不接收新改动**），`dev` 以 `git log -1 origin/dev` 为准（本节维护时 CI 四项通过）。
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
 > 交接状态、验收基线、本机环境与待决策项见 [docs/HANDOVER.md 第 0 节](docs/HANDOVER.md)。
 
@@ -119,7 +119,7 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 
 遗留（P3，接受现状）：N21 `_provider_specs` 对缺字段 SimpleNamespace 的容错；N22 ImageCache 按图片共享描述，per-bot vision 只在首次识别生效（缓存层设计，需单独排期）。
 
-当前 `dev` = `07040ac`（含本文档提交），交接前实测：全量 **810 passed**、runner **91/0**、ban-pipeline / plugin-reload / concurrency 单独 OK、smoke OK、compileall 0、Ruff 门禁 0、表情包插件 **503 passed / 2 skipped**、面板内联 JS 语法 OK。
+交接前实测（`dev` 见上）：全量 **810 passed**、runner **91/0**、ban-pipeline / plugin-reload / concurrency 单独 OK、smoke OK、compileall 0、Ruff 门禁 0、表情包插件 **503 passed / 2 skipped**、面板内联 JS 语法 OK。
 
 ### 2.6 移交前收尾（2026-10-22）
 
