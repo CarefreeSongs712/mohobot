@@ -3,8 +3,9 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-20，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `12c4ec9`。CI 四项通过。
+> 当前基线：2026-10-22，`main` = `a361736`（**冻结，不接收新改动**），`dev` = `d826da7`。CI 四项通过。
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
+> 交接状态、验收基线、本机环境与待决策项见 [docs/HANDOVER.md 第 0 节](docs/HANDOVER.md)。
 
 ---
 
@@ -16,7 +17,7 @@
 | **REQ-2** | **审查并推进知识库代码 (`feat/knowledge-base`)** | 审查位于分支 `feat/knowledge-base`（head `0d1eaa0`）的 RAG 虚拟歌手知识库实现（语义检索 + 可选 rerank），做完整代码审查与回归验证，确认无误后通过 PR 流程合并。 | 隔离环境测试、内存及依赖核验 | **✅ 已完成** —— `#52` 合并（含合并态验证与 3 条 Ruff 债务清理）；模块 `mohobot/knowledge/`，专项测试 20 passed；开关 `knowledge.enabled` 默认关 |
 | **REQ-3** | **重构表情包管理插件 (`meme_stealer`)** | 1. 移除入站聊天全量概览式抓取，仅保留 LLM tool call 抓取与 WebUI 手动上传；<br>2. 引入管理员审核机制，LLM 抓取标注后须经 WebUI 审核批准方可入库；<br>3. 表情包元数据增加适用 `bot_id` 标签，支持按 bot 分流与展示。 | 需明确 WebUI 审核数据流及前端修改范围 | **✅ 三点全部完成** —— `#61`（去概览抓图 + 工具抓取默认待审）、`#64`（`allowed_bots` 白名单 + 检索过滤 + 工具 `bots` 参数）；WebUI 可视化编辑 `allowed_bots` 属可选后续 |
 | **REQ-4** | **改造中V歌曲知识库** | 1. 改造定时同步机制（解决阻塞与重试问题）；<br>2. 数据来源除 VCPedia 外，增加萌娘百科（`moegirl`）、VocaWiki 等；<br>3. 歌曲上下文注入支持错别字、漏字、括号别名的容错与模糊识别。 | 多源同步需网络与真机验证 | **✅ 已完成（既有实现）** —— `#47` 多来源同步/字段合并/模糊识别，`#49` 修复并发竞态（锁内提交 + 原子 upsert）；三源 `vcpedia/moegirl/vocawiki` 已接线，模糊匹配 Damerau-Levenshtein + 歌词 6-gram；定时同步开关 `music_knowledge.sync.enabled` 默认关 |
-| **REQ-5** | **优化识图逻辑（直传多模态支持）** | 在现有“独立 VLM 描述转述”之外，并列提供配置选项：当主模型具备原生视觉能力时，允许将图片原始数据直接与文本一并发送，减少一次额外模型请求。 | LLM 服务层多模态消息构造适配 | **✅ 已完成** —— `#55` 新增 `llm.vision_mode: describe(默认) / direct`，失败自动回退 describe；`#68` 补文档与注释。真实多模态模型联调仍需测试 Key |
+| **REQ-5** | **优化识图逻辑（直传多模态支持）** | 在现有“独立 VLM 描述转述”之外，并列提供配置选项：当主模型具备原生视觉能力时，允许将图片原始数据直接与文本一并发送，减少一次额外模型请求。 | LLM 服务层多模态消息构造适配 | **✅ 已完成** —— `#55` 新增 `llm.vision_mode: describe(默认) / direct`，失败自动回退 describe；`#68` 补文档与注释。真实多模态已在本机实测（2026-10-22：`deepseek-chat` 读图成功、`deepseek-flash` 返回空正文，见 §2.6） |
 | **REQ-6** | **新闻动态注入与主动话题功能** | 1. 采集并向 LLM 注入近期相关新闻（B站官号动态/视频、知名 UP 主动态，或由 LLM 在聊天中主动提取）；<br>2. 新闻作为主动聊天资料与对话话题；<br>3. 提供 function call / tool 供模型主动调取查询；<br>4. 新增或提取的新闻条目必须经管理员审核后方可生效。 | 引入审核数据表、B站API或采集器 | **✅ 主链完成（默认关闭）** —— `#62`（存储/审核门禁/注入/工具）、`#65`（WebUI 审核页 + B站采集器 + `news_submit` 提取工具）。**剩余**：qzone 说说话题池未接；`inject_window_days` 尚未参与过滤；B站接口风控需真机观察 |
 | **REQ-7** | **Bot OOC 行为分析与缓解方案** | 针对未闭合/缺失 `<think>` 思考过程、中英混杂、复读死循环、长文本失控、过度模板化等问题，通过 Prompt 调优、输出过滤（`reply_filter.py`）、Repetition Penalty 与流式截断系统性治理。 | 需真实 bad case 与模型实测 | **🟡 部分完成** —— `#60`（无标签自查/推理块外泄治理，Closes `#57`；采样惩罚参数已暴露默认 0）、`#66`（中英混杂：保守清理句首英文填充词与 AI 套话）。**剩余**：惩罚参数推荐值需真实模型实测；复读/模板化尚无系统性 bad case 库 |
 | **REQ-8** | **Fake OneBot 契约测试环境** | 搭建本地 Fake OneBot v11 反向 WebSocket 服务端/客户端测试框架，模拟网络延迟、断连、echo 丢包、非法字段、乱序推送等极端边界，脱离真实 QQ 进程依赖。 | 基于 `websockets` 编写 harness | **✅ 已完成** —— `#56`：`tests/fake_onebot.py` + 9 条真实 socket 契约测试（多账号/未绑定/乱序 echo/丢 echo/缺 echo/非法 JSON/强杀断连/双账号同 id）；3 个变异各精准命中 |
@@ -87,7 +88,7 @@
 | `#6` meme 作用域过滤与图片来源边界 | enhancement | **已关闭**：列表按事件作用域过滤（P1 跨群泄漏）、`steal_meme` 仅允许当前/引用消息内图片、`source_type` 统一 `strip().lower()` | `#72` |
 | `#2` SQLite 旧库 WAL 迁移 | wontfix | 维护者此前表示暂缓，保持 wontfix | — |
 
-> 截至 2026-10-20，开放 issue 仅剩 `#2`（wontfix）。
+> 截至 2026-10-22：开放 issue 仅剩 `#2`（wontfix），开放 PR 为 **0**；本轮 `#71`~`#75` 均已合并。
 
 ### 2.3 本轮新增能力与基础设施
 
@@ -118,7 +119,26 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 
 遗留（P3，接受现状）：N21 `_provider_specs` 对缺字段 SimpleNamespace 的容错；N22 ImageCache 按图片共享描述，per-bot vision 只在首次识别生效（缓存层设计，需单独排期）。
 
-当前 `dev` = `12c4ec9`，全量 **808 passed**、runner **89/0**、smoke/ruff 通过。
+当前 `dev` = `d826da7`，交接前实测：全量 **810 passed**、runner **91/0**、ban-pipeline / plugin-reload / concurrency 单独 OK、smoke OK、compileall 0、Ruff 门禁 0、表情包插件 **503 passed / 2 skipped**、面板内联 JS 语法 OK。
+
+### 2.6 移交前收尾（2026-10-22）
+
+| 项 | 内容 | 提交 |
+|---|---|---|
+| snitch 插件加载失败 | `llm_tools.py` 已把 `plugins/snitch.py` 作为内置工具导入注册，插件系统再加载同名文件 → `duplicate LLM tool`；注册改为幂等 | `d826da7` |
+| 面板创建 Bot 不接管在线连接 | `create_bot(qq=...)` 只写配置，已连接的 QQ 仍是「未绑定」→ 消息被忽略；改为创建后立即 `bind_qq` 晋升连接 | `a494a91` |
+| 本地空歌曲库假失败 | `test_real_db_dialogue_cases` 在库存在但为空时执行并失败 → 空库跳过 | `9e26b90` |
+| 多提供商功能 | `#73` 多提供商 + `#74` Key 泄漏热修 + `#75` 跟进修复，均已合入 `dev` | `#73`~`#75` |
+| 审核面板 | 本机已建 `review/config.yaml`（git 忽略，不入库），启动自动拉起 9091 | 本地文件 |
+| 识图 direct | 本机 `vision_mode: direct`，真 Key 实测可用 | 本地配置 |
+
+**本机真机验证（2026-10-22）**：
+- SnowLuma（QQ 2774641554）→ `Bot bot_001 connected`；私聊消息触发 `LLM stream call: model=deepseek-chat` 并正常回复；
+- 群消息未 @ 时正确跳过（`Skipping group message (not mentioned)`）；
+- 真 Key 识图：`deepseek-chat` 读出图片文字 `HELLO 42`；`deepseek-flash` 同请求返回空正文；
+- 启动/停机正常；审核面板配置可被 `verify_password` 校验通过。
+
+**遗留（P3，不阻断移交）**：`_provider_specs` 对缺字段测试替身的容错；ImageCache 按图共享描述导致 per-bot vision 仅首识别生效；`snitch` 内置注册与插件加载共用同一文件（现幂等，行为等价）。
 
 
 ## 3. 分支模型与规范
@@ -141,9 +161,20 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 
 - **CI 门禁规范**：
   - Python 3.12 官方基准：逐用例测试、`tests/_run_all.py` 完整 runner、独立并发测试 `test_concurrency.py`。
+  - 本地快速口径（已装 `pytest-xdist`）：`pytest -q -n auto --dist loadfile tests --ignore=tests/test_concurrency.py`，全量约 **20~27s**；`--dist loadfile` 用于规避同文件顺序/模块状态依赖。
   - 代码质量：Ruff 基础阻断门禁（`E9, F63, F7`），增量债务报告（`E4, E7, E9, F`）。
   - 插件回归：`plugins/meme_stealer/` 专用轻量测试套件。
 - **环境缺陷与待修复项**：
   - ~~`test_qzone.py::test_auto_publish_tick_end_to_end` 时钟硬编码~~ —— **已修（`#58`）**：整段测试冻结在固定时刻，8 个时刻矩阵（含 00:00/00:01/23:59）全部通过；生产代码未改。
-  - **本地代理配置容错（未修）**：系统环境变量注入 `socks://127.0.0.1:7890/` 等 httpx 不支持的 scheme 时，`test_anysearch` / `test_webpanel_stop` 会抛 `Unknown scheme for proxy URL`。已确认在 `origin/dev` **基线同样失败**（非改动引入）。临时绕过：运行时清空 `ALL_PROXY/http_proxy/...`；根治应在测试启动器里净化环境变量。
+  - **代理环境变量容错（未修，本机实测）**：两个独立坑 ——
+    ① `ALL_PROXY=socks://127.0.0.1:7890/`：新版 httpx/httpx2 不支持 socks scheme，启动在初始化 LLM 客户端时直接 `Fatal error: Unknown scheme for proxy URL`；测试里表现为 `test_anysearch` / `test_webpanel_stop` 失败。
+    ② `no_proxy` 含 `[::1]`：httpx2 把它当 `host:port` 解析 → `Invalid port: ':1]'`。
+    绕过（本机已验证）：
+    ```bash
+    env -u ALL_PROXY -u all_proxy \
+        NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" \
+        no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" \
+        .venv/bin/python main.py
+    ```
+    根治方向：启动器/测试引导里净化这两类变量（未实施，属 P3）。
   - **既有 Ruff 债务（未清理）**：`mohobot/message_handler.py` 的 `extract_plain_text` F401、`mohobot/llm_service.py` 的 `MessageSegment` F401 与 `since` F841、`mohobot/bot_manager.py` 的 3 条 `websockets` F821、`plugins/relationship/relationship_core/request/model.py` 的 `field` F401 —— 均为基线既有，按「最小改动面」原则未在本轮清理。

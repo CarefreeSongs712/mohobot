@@ -151,6 +151,47 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 
 私聊机器人发送任意消息即可得到回复（流式回复按标点+长度分段发送、首段引用触发消息）。
 
+## 🧠 LLM 模型与多提供商（可选）
+
+默认是**单提供商**：直接填 `llm.chat_model` / `chat_base_url` / `chat_api_key`（vision、emotion 各自还有一组同名字段）。需要**同时接入多家**（例如主模型走一个中转、识图走另一家，或不同 bot 用不同 Key）时用 `providers`：
+
+```yaml
+llm:
+  providers:
+    - id: deepseek
+      name: DeepSeek
+      base_url: "https://api.deepseek.com"   # 自定义/中转地址也填这里
+      api_key: "sk-..."
+      default_model: "deepseek-chat"         # 该家默认模型
+      models: ["deepseek-chat", "deepseek-reasoner"]
+    - id: relay
+      name: 中转服务
+      base_url: "https://relay.example/v1"
+      api_key: "sk-..."
+      default_model: "gpt-4o"
+  chat_provider: "deepseek"   # 默认 chat 用哪套
+  vision_provider: ""         # 留空 → 用 vision_base_url / vision_model / vision_api_key
+  emotion_provider: ""        # 留空 → 用 emotion_* 旧字段
+```
+
+- 也可在 Web 面板「模型配置 → 🏢 多提供商」维护：Key 只显示掩码，留空表示不修改；写入口是 `PUT /api/providers`，`GET /api/config` 同样会掩码。
+- 单个 bot 可覆盖：`data/bots/{bot_id}/config.json` 里的 `chat_provider_override` / `vision_provider_override`（Bot 配置页有下拉）。
+- 解析顺序：**bot 覆盖 → 全局 `<role>_provider` → 旧字段**；模型优先级：bot `*_model_override` > 提供商 `default_model` > 全局模型。
+- 配了不存在的 provider 会打 warning 并回退，不会让消息处理失败。
+- 安全：提供商 `api_key` 留空时，只有**同一端点**（未写 `base_url`，或与 `chat_base_url` 相同）才允许继承 chat Key，避免把主 Key 发往未声明的第三方地址。
+- 未配置 `providers` 时，行为与旧版完全一致。环境变量 `MOHOBOT_LLM_API_KEY` / `MOHOBOT_VISION_API_KEY` / `MOHOBOT_EMOTION_API_KEY` 仍可作为 Key 来源。
+
+### 识图模式
+
+`llm.vision_mode`：
+
+| 值 | 行为 |
+|---|---|
+| `describe`（默认） | 先用视觉模型把图片转述成文字再交给主模型；主模型不需要视觉能力 |
+| `direct` | 图片直接放进主模型消息（要求 chat 模型多模态），失败自动回退 `describe`；不额外消耗视觉模型调用 |
+
+实测（2026-10-22，DeepSeek 官方接口）：`deepseek-chat` 能正确读出图片文字；`deepseek-flash` 同一请求返回空正文，不建议用于识图。
+
 ## 🚀 生产部署（Ubuntu 服务器）
 
 ### 现有生产环境与发布流程
