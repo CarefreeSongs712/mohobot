@@ -71,9 +71,13 @@
 ### 0.5 待维护者决策（移交接手第一优先级）
 
 1. **REQ-9 history 双写 flush 策略**：A 保持现状 / B 时间窗批量（省 ~57%，引入崩溃丢失窗口）/ C 默认关闭的可配置批量（推荐）。
-2. **`dev → main` 发版**：`dev` 领先 74 提交，按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。
+2. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。
 3. **CI legacy runner**：`tests/_run_all.py` 每次 CI 约 100s，覆盖是 pytest 子集且对 `ban_pipeline`/`plugin_reload` 假绿；建议 PR 阶段移除或仅 push main 时跑。
-4. **可选依赖/实跑项**：`playwright`、`umap`、B站采集器真机风控观察、RAG embedding Key、OOC 惩罚参数实测。
+
+**2026-10-23 维护者已定取舍**（详细见 [TODO §2.8](../TODO.md)）：
+- 发布/部署体验（Docker、Windows 安装器、对外部署文档）：**不做**（个人自用）；
+- 安全基础加固（登录锁 DoS、失败限流、计时枚举、PBKDF2 等）：**可修可不修**，不阻塞发布，按需排期；
+- 运维观测（healthz/readyz、成功率/延迟、告警）与知识库/新闻真实验收：**可做**，列入后续可选优化。
 
 ### 0.6 接手注意事项（易踩）
 
