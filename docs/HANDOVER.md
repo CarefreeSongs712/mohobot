@@ -70,11 +70,10 @@
 
 ### 0.5 待维护者决策（移交接手第一优先级）
 
-1. **REQ-9**：~~history 双写 flush 策略~~ → 已决（2026-10-23）：删除双写、群聊单写；flush 批量暂不启用。
-2. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。
-3. **CI legacy runner**：`tests/_run_all.py` 每次 CI 约 100s，覆盖是 pytest 子集且对 `ban_pipeline`/`plugin_reload` 假绿；建议 PR 阶段移除或仅 push main 时跑。
+1. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。（唯一未决项）
 
-**2026-10-23 维护者已定取舍**（详细见 [TODO §2.8](../TODO.md)）：
+**2026-10-23 维护者已定取舍**（详细见 [TODO §2.9](../TODO.md)）：
+- **REQ-9**：~~history 双写 flush 策略~~ → 已决（2026-10-23）：删除双写、群聊单写；flush 批量暂不启用；
 - **history 双写已删除**（2026-10-23）：群聊只写合并布局，旧 per-bot 布局停止写入（review 读侧兼容存量）；flush 批量仍暂不启用；
 - **CI legacy runner**：PR 阶段不再跑，仅 `push main` 时运行（pytest 为超集）；
 - 发布/部署体验（Docker、Windows 安装器、对外部署文档）：**不做**（个人自用）；

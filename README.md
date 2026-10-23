@@ -612,7 +612,7 @@ mohobot/
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
 | 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 
-- **聊天历史**：**群聊跨 bot 合并存储**在 `data/history/group/{群号}.jsonl`（同一群号一个文件；同一条群消息多只 bot 都会收到，写入时按 `message_id` 近期窗口去重只落一份，行内 `bot_id` 标注接收 bot）；**私聊按 bot 分目录** `data/history/{bot_id}/private/{QQ号}.jsonl`（不同 bot 与同一用户的私聊是不同对话）。**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）。旧布局（`history/{bot_id}/group/`）已停止写入（`history_dual_write` 配置与写入代码已删除，2026-10-23），读取侧仍兼容存量旧文件；存量数据可用 `python scripts/migrate_history_layout.py`（**停机运行**）一次性去重合并，旧文件移入 `data/history_legacy_{时间戳}/` 备份
+- **聊天历史**：**群聊跨 bot 合并存储**在 `data/history/group/{群号}.jsonl`（同一群号一个文件；同一条群消息多只 bot 都会收到，写入时按 `message_id` 近期窗口去重只落一份，行内 `bot_id` 标注接收 bot）；**私聊按 bot 分目录** `data/history/{bot_id}/private/{QQ号}.jsonl`（不同 bot 与同一用户的私聊是不同对话）。**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）。旧布局（`history/{bot_id}/group/`）已停止写入（`history_dual_write` 配置与写入代码已删除，2026-10-23）；存量旧文件仍可按旧 session key 被 review loader 读取（面板会话列表只枚举 `history/group/`，需要时先跑迁移脚本）；存量数据可用 `python scripts/migrate_history_layout.py`（**停机运行**）一次性去重合并，旧文件移入 `data/history_legacy_{时间戳}/` 备份
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
 - **数据隔离**：会话上下文按 bot_id 分目录；群聊历史为所有 bot 共享
 
