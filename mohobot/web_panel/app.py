@@ -541,8 +541,7 @@ class WebPanel:
                         "context_summary_sweep_interval_minutes",
                         "context_summary_min_interval_hours",
                         "group_recent_msgs_count",
-                        "ignore_auto_reply",
-                        "history_dual_write"):
+                        "ignore_auto_reply"):
                 if key in data:
                     setattr(cfg, key, data[key])
             # LLM 排除群(整数列表, 清洗为合法群号)

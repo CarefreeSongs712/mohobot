@@ -102,7 +102,7 @@ python main.py
 python -m pytest -q tests --ignore=tests/test_concurrency.py  # 逐用例；pytest.ini 自动 await async 测试
 python -m pytest -q -n auto --dist loadfile tests --ignore=tests/test_concurrency.py  # 并行(~4-5x 快)；loadfile 让同文件用例同 worker，规避顺序/模块状态依赖
 python -m pytest -q -n auto tests/test_<你的模块>.py  # 改一个模块时只跑相关用例(秒级)
-python tests/_run_all.py          # 全量，从仓库根执行
+python tests/_run_all.py          # 全量，从仓库根执行（CI 仅在 push main 时跑）
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
 python tests/_js_check.py         # WebUI JS 括号平衡检查（改 index.html 后跑）
@@ -427,13 +427,13 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 
 > `data/` 与 `logs/` **完全未纳入版本控制**（`git ls-files data` 为空）。
 
-### 4.6 history 群聊合并布局（双写过渡期）
+### 4.6 history 群聊合并布局（双写已移除）
 
 群聊消息曾经每 bot 单独存一份（`history/{bot_id}/group/{群号}.jsonl`），同一条群消息多只 bot 都会收到 → N 份重复。现改为**合并存储 + 写入去重**：
 
 - **写入**（两处）：`MessageHandler._archive_event`（收到的消息）写 `history/group/{群号}.jsonl`，行内注入 `bot_id`（接收 bot）；`WSServer._write_archive_line`（`message_sent`）写同一文件，行内 `bot_id`（发送 bot）。**私聊仍按 bot 分目录**，路径不变。
 - **去重**：`MessageHandler._claim_group_mid` —— 每群一个 `OrderedDict` 窗口（`_GROUP_MID_WINDOW = 2048`），重复 mid 直接跳过合并写入。检查与登记之间无 await，天然互斥。窗口仅存内存：重启后理论上可能重复写一次，消费方（review loader 的 `seen_mids`）读侧兜底去重。
-- **`history_dual_write`（默认 true）**：开启时群消息/发言**额外**按旧布局 `history/{bot_id}/group/` 归档一份（不去重、内容与旧代码完全一致，回滚保险）。确认新布局稳定后在 WebUI 关闭（热生效），下个版本删旧写入代码。
+- **单写**：群消息/发言只写 `history/group/{群号}.jsonl`。旧的 `history_dual_write` 配置与旧布局写入代码已删除（2026-10-23）。旧布局文件不再产生；review loader 的 `history_path` 仍能按旧 session key 读取（`list_sessions()` 只枚举新布局，存量旧文件需迁移或按 key 直接调用）。
 - **存量迁移**：`python scripts/migrate_history_layout.py`（**停机运行**）把旧 per-bot 群文件（含遗留 QQ 号目录）按 mid 去重合并进新布局、补 `bot_id`、按时间排序，旧文件移入 `data/history_legacy_{时间戳}/` 备份。幂等，可重复执行。
 - **读侧适配**：review loader（群会话单文件 + 按行内 bot_id/@/引用做归属过滤，`_CACHE_VERSION` 已 bump 作废旧 sidecar）、chat_manager `history_path`（群路径不含 bot_id）、web_panel `_count_sync`（group 目录单层遍历）。备份/恢复/清理按 bot 筛选时不含群合并数据（共享，不拆分）。
 

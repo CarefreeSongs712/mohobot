@@ -70,11 +70,11 @@
 
 ### 0.5 待维护者决策（移交接手第一优先级）
 
-1. **REQ-9 history 双写 flush 策略**：A 保持现状 / B 时间窗批量（省 ~57%，引入崩溃丢失窗口）/ C 默认关闭的可配置批量（推荐）。
-2. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。
-3. **CI legacy runner**：`tests/_run_all.py` 每次 CI 约 100s，覆盖是 pytest 子集且对 `ban_pipeline`/`plugin_reload` 假绿；建议 PR 阶段移除或仅 push main 时跑。
+1. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。（唯一未决项）
 
-**2026-10-23 维护者已定取舍**（详细见 [TODO §2.8](../TODO.md)）：
+**2026-10-23 维护者已定取舍**（详细见 [TODO §2.9](../TODO.md)）：
+- **REQ-9 / history 双写**：已决（2026-10-23）——删除旧 per-bot 双写，群聊只写合并布局（review 读侧仅兼容存量旧文件）；flush 批量暂不启用；
+- **CI legacy runner**：PR 阶段不再跑，仅 `push main` 时运行（pytest 为超集）；
 - 发布/部署体验（Docker、Windows 安装器、对外部署文档）：**不做**（个人自用）；
 - 安全基础加固（登录锁 DoS、失败限流、计时枚举、PBKDF2 等）：**可修可不修**，不阻塞发布，按需排期；
 - 运维观测（healthz/readyz、成功率/延迟、告警）与知识库/新闻真实验收：**可做**，列入后续可选优化。
@@ -164,7 +164,7 @@ review：独立进程、配置和数据库，只读 history
 
 - 原始 history 只追加，用于回溯与审核，**不作为 LLM 实时上下文**。
 - contexts 是可变工作记忆；满轮总结失败可裁剪，周期总结失败保留待重试。
-- 群历史全 bot 共享、私聊按 bot 隔离；旧群布局默认双写，不能擅自停用回滚保险。
+- 群历史全 bot 共享、私聊按 bot 隔离；群聊**只写**合并布局（`history/group/`），旧 per-bot 布局已停止写入（review 读侧仅兼容存量）。
 - 人设正文、感知、群最近消息、情感、歌曲注解仅请求级注入。引用内容可以按现有用户文本渲染规则保存，但不能存原始 system 块、消息段 repr 或 base64。
 - 通用文件读改写采用 file_store 的同一把路径锁；不等于跨进程事务或崩溃安全替换。人设/评估已有原子替换实现须保留。
 - 人设库损坏要报错；删除/恢复必须强制检查真实引用，不能依赖显示缓存。锁序为 persona → maintenance → chat → file。
