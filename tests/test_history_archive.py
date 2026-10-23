@@ -50,7 +50,11 @@ async def _next_payload(inst, after: int, tries: int = 80) -> dict:
 
 
 def _history_lines(tmp: Path, chat_type: str, chat_id: str) -> list[dict]:
-    path = tmp / "history" / "bot_001" / chat_type / f"{chat_id}.jsonl"
+    # 群聊已改为合并布局(history/group/{群号}.jsonl); 私聊仍按 bot 分目录
+    if chat_type == "group":
+        path = tmp / "history" / "group" / f"{chat_id}.jsonl"
+    else:
+        path = tmp / "history" / "bot_001" / chat_type / f"{chat_id}.jsonl"
     if not path.exists():
         return []
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]

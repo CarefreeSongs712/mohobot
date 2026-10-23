@@ -246,15 +246,14 @@ class MessageHandler:
         data/history/group/{群号}.jsonl, 写入时去重(同一条群消息会经每个
         bot 的连接各推送一次), 行内 bot_id 标注接收 bot; 私聊仍按 bot 分目录
         (不同 bot 与同一用户的私聊是不同对话)。
-        history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
-        一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
+        群聊只写合并布局; 旧的 per-bot 布局({bot_id}/group/)已停止写入,
+        仅 review 读侧保留对存量文件的兼容。
         """
         # 维护窗口内跳过归档: 宁可这段消息不归档, 也不写进即将被删除/替换的
         # 旧 inode(否则静默丢失, 见 issue #8)。
         if self._history_frozen():
             logger.debug("history 维护中, 跳过归档")
             return
-        dual_write = bool(getattr(self._global_config, "history_dual_write", True))
         if isinstance(event, PrivateMessageEvent):
             file_path = f"{self._data_dir}/history/{bot_id}/private/{event.user_id}.jsonl"
             await self._get_or_create_writer(file_path).append(raw)
@@ -265,9 +264,6 @@ class MessageHandler:
                 payload["bot_id"] = bot_id
                 file_path = f"{self._data_dir}/history/group/{group_id}.jsonl"
                 await self._get_or_create_writer(file_path).append(payload)
-            if dual_write:
-                legacy_path = f"{self._data_dir}/history/{bot_id}/group/{group_id}.jsonl"
-                await self._get_or_create_writer(legacy_path).append(raw)
         else:
             return
 

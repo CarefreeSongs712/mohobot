@@ -240,12 +240,10 @@ class BanPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.handler.handle_event(bot_id, event, raw)
         return event, raw
 
-    def archive(self, *, private=False, bot_id="bot_001", user_id=9999, legacy=False):
+    def archive(self, *, private=False, bot_id="bot_001", user_id=9999):
         root = Path(self.tmp.name) / "history"
         if private:
             path = root / bot_id / "private" / f"{user_id}.jsonl"
-        elif legacy:
-            path = root / bot_id / "group" / "2001.jsonl"
         else:
             path = root / "group" / "2001.jsonl"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -294,7 +292,10 @@ class BanPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(row["message_id"], event.message_id)
                 self.assertEqual(row["message"], raw["message"])
                 if not private:
-                    self.assertEqual(self.archive(legacy=True)[-1], raw)
+                    merged = self.archive()[-1]
+                    self.assertEqual(merged["message_id"], raw["message_id"])
+                    self.assertEqual(merged["message"], raw["message"])
+                    self.assertEqual(merged["bot_id"], "bot_001")
 
     async def test_banned_merged_triggers_never_collect_other_bot_replies(self):
         await self.store.upsert("ban", "9999", session_key="group:2001")
@@ -441,8 +442,6 @@ class BanPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(stages.index("pick_bot"), stages.index("ban_command"))
                 self.assertFalse({"observe", "merged", "perception", "normalize"}.intersection(stages))
                 self.assertEqual(sum(row["message_id"] == mid for row in self.archive()), 1)
-                for bot in ("bot_001", "bot_002", "bot_003"):
-                    self.assertEqual(self.archive(bot_id=bot, legacy=True)[-1]["message_id"], mid)
         self.assertEqual(len(self.store.mutations), 3)
         self.assertEqual(len(self.ws.sent), 3)
         self.assertTrue(all(row[1] == "bot_002" for row in self.ws.sent))
@@ -472,7 +471,7 @@ class BanPipelineTests(unittest.IsolatedAsyncioTestCase):
         buffers.update({"bot_001:2001": long_buffer, "bot_002:2001": [{"content": 9}]})
         updated = GlobalConfig(
             admins=[7777], ban=BanConfig(enabled=False), group_recent_msgs_count=2,
-            ignore_auto_reply=False, llm_excluded_groups=[2001], history_dual_write=False,
+            ignore_auto_reply=False, llm_excluded_groups=[2001],
             reply=ReplyConfig(
                 stream=False, segment_reply=True, segment_min_len=20, segment_max_len=100,
                 segment_delay_min=0.1, segment_delay_max=0.9, reply_quote=True,
@@ -500,7 +499,6 @@ class BanPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.ban._enabled)
         self.assertFalse(self.handler._ignore_auto_reply_enabled())
         self.assertTrue(self.handler._group_llm_excluded(2001))
-        self.assertFalse(shared.history_dual_write)
         # main 已更新共享对象再同步的场景也必须刷新复制字段和缓冲。
         shared.reply.stream = True
         shared.admins = []

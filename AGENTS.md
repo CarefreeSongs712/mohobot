@@ -15,7 +15,7 @@
 
 - **history 是追加式原始归档**，不能改成 LLM 实时记忆；review 对 Mohobot 数据只读。
 - **contexts 是可变工作记忆**，完成的对话轮次另写 SQLite。三者不得相互替代。
-- 群聊 history 跨 bot 合并、按 message_id 去重；私聊 history 与 contexts 按 bot 隔离。双写旧布局是过渡保险，不擅自移除。
+- 群聊 history 跨 bot 合并、按 message_id 去重，**只写合并布局** `history/group/{群号}.jsonl`；旧 per-bot 布局已停止写入（review 读侧仅兼容存量），不得重新引入双写。私聊 history 与 contexts 按 bot 隔离。
 - 群聊最近消息、感知、情感、歌曲注解、人设等请求级输入不能直接写回上下文。引用内容沿现有文本渲染规则保存，不落原始 system 块或消息段 repr/base64。
 - 人设解析顺序：私聊 session 专属 → bot 默认 → 系统默认；群聊用 bot 默认。生成捕获会话 ID、generation、人设与 bot 配置快照。
 - 旧会话已删除或替换导致 `append_context` 返回 False 时，停止后续 DB/情感回写；不能把在途回复写入新活动会话。

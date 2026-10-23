@@ -42,7 +42,10 @@ jobs:
         run: python -m compileall -q main.py mohobot plugins review scripts tests
       - name: Run individual test cases
         run: timeout --kill-after=30s 8m python -m pytest -q -n auto --dist loadfile -o faulthandler_timeout=120 tests --ignore=tests/test_concurrency.py  # loadfile: 同文件用例同 worker, 避免顺序/模块状态依赖
-      - name: Run legacy regression runner
+      # legacy runner 覆盖是 pytest 的子集（且对 unittest 类/协程有假绿），
+      # 仅在发布线 push main 时作为额外保险运行，PR 阶段省 ~100s。
+      - name: Run legacy regression runner (main push only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: timeout --kill-after=30s 8m python tests/_run_all.py
       - name: Run concurrency regression
         run: timeout --kill-after=30s 5m python tests/test_concurrency.py
