@@ -190,7 +190,7 @@ llm:
 | `describe`（默认） | 先用视觉模型把图片转述成文字再交给主模型；主模型不需要视觉能力 |
 | `direct` | 图片直接放进主模型消息（要求 chat 模型多模态），失败自动回退 `describe`；不额外消耗视觉模型调用 |
 
-实测（2026-10-22，DeepSeek 官方接口）：`deepseek-chat` 能正确读出图片文字；`deepseek-flash` 同一请求返回空正文，不建议用于识图。
+实测（2026-10-22，DeepSeek 官方接口）：`deepseek-chat` 能正确读出图片文字，可直接用于 `direct` 模式。
 
 ## 🚀 生产部署（Ubuntu 服务器）
 

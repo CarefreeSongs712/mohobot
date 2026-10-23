@@ -83,8 +83,8 @@ llm:
   emotion_provider: ""     # 默认 emotion 提供商 id(空=用 emotion_base_url/api_key)
 
   # Chat model
-  chat_model: "DeepSeek-V4-Flash"
-  chat_base_url: "https://api.openai.com/v1"
+  chat_model: "deepseek-chat"        # 填你所选提供商实际可用的模型名
+  chat_base_url: "https://api.deepseek.com"
   chat_api_key: ""           # 必填，或设置环境变量 MOHOBOT_LLM_API_KEY
   chat_max_tokens: 131072    # 注意：过大的 max_tokens 会导致部分网关返回空流
   chat_temperature: 0.7
@@ -104,7 +104,19 @@ llm:
   #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
   vision_mode: "describe"
 
-  # 新闻/动态知识库 (REQ-6) — 默认关闭
+# 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
+  emotion_model: ""
+  emotion_base_url: ""
+  emotion_api_key: ""        # 或设置环境变量 MOHOBOT_EMOTION_API_KEY
+  emotion_temperature: 0.3
+  emotion_max_tokens: 512
+
+  # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
+  models:
+    - "deepseek-chat"
+    - "deepseek-reasoner"
+
+# ── 新闻/动态知识库 (REQ-6) — 默认关闭 ────────────────────────
 # 开启后: 新条目一律以 pending 入库, 必须在 WebUI 审核通过后才参与
 # 提示词注入与 news_recent/news_search 工具结果; 过期条目自动不再返回。
 news:
@@ -116,19 +128,6 @@ news:
   inject_header: ""        # 留空用内置表头
   default_ttl_days: 14     # 条目默认有效期(天), <=0 表示不自动过期
   tool_enabled: true       # 是否注册 news_recent / news_search 工具
-
-# 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
-  emotion_model: ""
-  emotion_base_url: ""
-  emotion_api_key: ""        # 或设置环境变量 MOHOBOT_EMOTION_API_KEY
-  emotion_temperature: 0.3
-  emotion_max_tokens: 512
-
-  # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
-  models:
-    - "DeepSeek-V4-Flash"
-    - "Qwen3-8B"
-    - "mimo-v2.5"
 
 # ── 回复行为（系统级） ────────────────────────────────────────
 reply:
@@ -273,7 +272,7 @@ emotion:
   min_interval_sec: 180         # 同一用户两次分析的最小间隔(秒, 0=不限)
   max_concurrent: 4             # 同时执行的情感分析调用上限(1=串行; 变更后重启生效)
   # 队列积压时改用快速模型 burst(消化积压后回到正常模型):
-  burst_model: DeepSeek-V4-Flash   # 快速模型名; 留空=不启用
+  burst_model: ""                  # 快速模型名; 留空=不启用(队列积压时用正常模型)
   queue_burst_threshold: 5         # 排队分析数超过该值触发
   queue_burst_count: 3             # 快速模型连续调用次数
   significance_threshold: 5  # 情感变化总幅度达到该值才写入长期记忆

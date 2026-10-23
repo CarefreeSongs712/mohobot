@@ -17,7 +17,7 @@
 | **REQ-2** | **审查并推进知识库代码 (`feat/knowledge-base`)** | 审查位于分支 `feat/knowledge-base`（head `0d1eaa0`）的 RAG 虚拟歌手知识库实现（语义检索 + 可选 rerank），做完整代码审查与回归验证，确认无误后通过 PR 流程合并。 | 隔离环境测试、内存及依赖核验 | **✅ 已完成** —— `#52` 合并（含合并态验证与 3 条 Ruff 债务清理）；模块 `mohobot/knowledge/`，专项测试 20 passed；开关 `knowledge.enabled` 默认关 |
 | **REQ-3** | **重构表情包管理插件 (`meme_stealer`)** | 1. 移除入站聊天全量概览式抓取，仅保留 LLM tool call 抓取与 WebUI 手动上传；<br>2. 引入管理员审核机制，LLM 抓取标注后须经 WebUI 审核批准方可入库；<br>3. 表情包元数据增加适用 `bot_id` 标签，支持按 bot 分流与展示。 | 需明确 WebUI 审核数据流及前端修改范围 | **✅ 三点全部完成** —— `#61`（去概览抓图 + 工具抓取默认待审）、`#64`（`allowed_bots` 白名单 + 检索过滤 + 工具 `bots` 参数）；WebUI 可视化编辑 `allowed_bots` 属可选后续 |
 | **REQ-4** | **改造中V歌曲知识库** | 1. 改造定时同步机制（解决阻塞与重试问题）；<br>2. 数据来源除 VCPedia 外，增加萌娘百科（`moegirl`）、VocaWiki 等；<br>3. 歌曲上下文注入支持错别字、漏字、括号别名的容错与模糊识别。 | 多源同步需网络与真机验证 | **✅ 已完成（既有实现）** —— `#47` 多来源同步/字段合并/模糊识别，`#49` 修复并发竞态（锁内提交 + 原子 upsert）；三源 `vcpedia/moegirl/vocawiki` 已接线，模糊匹配 Damerau-Levenshtein + 歌词 6-gram；定时同步开关 `music_knowledge.sync.enabled` 默认关 |
-| **REQ-5** | **优化识图逻辑（直传多模态支持）** | 在现有“独立 VLM 描述转述”之外，并列提供配置选项：当主模型具备原生视觉能力时，允许将图片原始数据直接与文本一并发送，减少一次额外模型请求。 | LLM 服务层多模态消息构造适配 | **✅ 已完成** —— `#55` 新增 `llm.vision_mode: describe(默认) / direct`，失败自动回退 describe；`#68` 补文档与注释。真实多模态已在本机实测（2026-10-22：`deepseek-chat` 读图成功、`deepseek-flash` 返回空正文，见 §2.6） |
+| **REQ-5** | **优化识图逻辑（直传多模态支持）** | 在现有“独立 VLM 描述转述”之外，并列提供配置选项：当主模型具备原生视觉能力时，允许将图片原始数据直接与文本一并发送，减少一次额外模型请求。 | LLM 服务层多模态消息构造适配 | **✅ 已完成** —— `#55` 新增 `llm.vision_mode: describe(默认) / direct`，失败自动回退 describe；`#68` 补文档与注释。真实多模态已在本机实测（2026-10-22：`deepseek-chat` 读图成功，见 §2.6） |
 | **REQ-6** | **新闻动态注入与主动话题功能** | 1. 采集并向 LLM 注入近期相关新闻（B站官号动态/视频、知名 UP 主动态，或由 LLM 在聊天中主动提取）；<br>2. 新闻作为主动聊天资料与对话话题；<br>3. 提供 function call / tool 供模型主动调取查询；<br>4. 新增或提取的新闻条目必须经管理员审核后方可生效。 | 引入审核数据表、B站API或采集器 | **✅ 主链完成（默认关闭）** —— `#62`（存储/审核门禁/注入/工具）、`#65`（WebUI 审核页 + B站采集器 + `news_submit` 提取工具）。**剩余**：qzone 说说话题池未接；`inject_window_days` 尚未参与过滤；B站接口风控需真机观察 |
 | **REQ-7** | **Bot OOC 行为分析与缓解方案** | 针对未闭合/缺失 `<think>` 思考过程、中英混杂、复读死循环、长文本失控、过度模板化等问题，通过 Prompt 调优、输出过滤（`reply_filter.py`）、Repetition Penalty 与流式截断系统性治理。 | 需真实 bad case 与模型实测 | **🟡 部分完成** —— `#60`（无标签自查/推理块外泄治理，Closes `#57`；采样惩罚参数已暴露默认 0）、`#66`（中英混杂：保守清理句首英文填充词与 AI 套话）。**剩余**：惩罚参数推荐值需真实模型实测；复读/模板化尚无系统性 bad case 库 |
 | **REQ-8** | **Fake OneBot 契约测试环境** | 搭建本地 Fake OneBot v11 反向 WebSocket 服务端/客户端测试框架，模拟网络延迟、断连、echo 丢包、非法字段、乱序推送等极端边界，脱离真实 QQ 进程依赖。 | 基于 `websockets` 编写 harness | **✅ 已完成** —— `#56`：`tests/fake_onebot.py` + 9 条真实 socket 契约测试（多账号/未绑定/乱序 echo/丢 echo/缺 echo/非法 JSON/强杀断连/双账号同 id）；3 个变异各精准命中 |
@@ -135,8 +135,14 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 **本机真机验证（2026-10-22）**：
 - SnowLuma（QQ 2774641554）→ `Bot bot_001 connected`；私聊消息触发 `LLM stream call: model=deepseek-chat` 并正常回复；
 - 群消息未 @ 时正确跳过（`Skipping group message (not mentioned)`）；
-- 真 Key 识图：`deepseek-chat` 读出图片文字 `HELLO 42`；`deepseek-flash` 同请求返回空正文；
+- 真 Key 识图：`deepseek-chat` 读出图片文字 `HELLO 42`（`direct` 模式）；
 - 启动/停机正常；审核面板配置可被 `verify_password` 校验通过。
+
+### 2.7 文案与配置模板清理（2026-10-23）
+
+- 移除已停用模型 `deepseek-flash` / `DeepSeek-V4-Flash` 在文档与示例配置中的残留（README、TODO、`config/global.example.yaml` 的 `chat_model` / `models` / `emotion.burst_model`）；
+- **修复示例配置既有缩进 bug**：`news:` 顶格插在 `llm:` 块中间，导致其后 `emotion_*` 与 `models` 被 YAML 吸进 `news`（照抄模板会静默失效）。已把 `news:` 移到 `llm:` 之后，`GlobalConfig.load(example)` 验证 `llm.models/emotion_model` 与 `news.*` 均正确。
+- **待决策（未改代码）**：`mohobot/models/config.py` 的默认值仍含 `DeepSeek-V4-Flash`（`chat_model`、`models` 列表、`emotion.burst_model`）。改默认值属行为变更，需维护者确认后单独 PR + 回归。
 
 **遗留（P3，不阻断移交）**：`_provider_specs` 对缺字段测试替身的容错；ImageCache 按图共享描述导致 per-bot vision 仅首识别生效；`snitch` 内置注册与插件加载共用同一文件（现幂等，行为等价）。
 
