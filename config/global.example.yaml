@@ -61,13 +61,36 @@ llm:
   chat_api_key: ""           # 必填，或设置环境变量 MOHOBOT_LLM_API_KEY
   chat_max_tokens: 131072    # 注意：过大的 max_tokens 会导致部分网关返回空流
   chat_temperature: 0.7
+  # 重复惩罚(OOC 治理): 抑制复读死循环与模板化套话; 0 = 关闭(不下发该参数)
+  # 部分网关/模型不支持这两个参数, 保持 0 即完全不改变请求形状
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
 
   # Vision model
   vision_model: "Qwen3.5-122B-A10B"
   vision_base_url: "https://api.openai.com/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 
-  # 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
+  # 识图模式:
+  #   describe(默认) = 先用上面的视觉模型转述成文本, 主模型只收文本(主模型无视觉能力时用这个)
+  #   direct         = 把图片随文本一起直接发给主模型(要求 chat_model 本身支持视觉,
+  #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
+  vision_mode: "describe"
+
+  # 新闻/动态知识库 (REQ-6) — 默认关闭
+# 开启后: 新条目一律以 pending 入库, 必须在 WebUI 审核通过后才参与
+# 提示词注入与 news_recent/news_search 工具结果; 过期条目自动不再返回。
+news:
+  enabled: false
+  db_path: ""              # 留空 = <data_dir>/news/news.db
+  inject_enabled: true     # 是否在 system prompt 注入近期动态
+  inject_limit: 3          # 注入条数
+  inject_window_days: 7    # 只注入最近 N 天发布的
+  inject_header: ""        # 留空用内置表头
+  default_ttl_days: 14     # 条目默认有效期(天), <=0 表示不自动过期
+  tool_enabled: true       # 是否注册 news_recent / news_search 工具
+
+# 情感分析(二次 LLM) — 留空则回退 chat 模型/密钥/地址
   emotion_model: ""
   emotion_base_url: ""
   emotion_api_key: ""        # 或设置环境变量 MOHOBOT_EMOTION_API_KEY
@@ -89,6 +112,9 @@ reply:
   segment_delay_min: 0.2    # 分段发送随机延迟下限（秒）
   segment_delay_max: 0.5    # 分段发送随机延迟上限（秒）
   reply_quote: true         # 是否引用触发回复的那条消息
+  # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话(Well,/Okay so,/As an AI…)
+  # 只清理白名单句首词, 不影响正常英文内容(Vocaloid/BPM 等保留)
+  strip_english_fillers: true
 
 web_panel:
   enabled: true
@@ -106,6 +132,30 @@ database:
   enabled: true
   folder: "./data/database"   # SQLite 文件所在目录
   file: "mohobot.db"          # 独立数据库文件
+
+# ── 虚拟歌手知识库(RAG: embedding 语义检索 + 可选 rerank) ──────
+# LLM 工具接入(knowledge_search 语义检索 / knowledge_lookup 别名查档案),
+# 与歌曲知识库(music_knowledge, 关键词匹配自动注入)互补并存。
+# 知识源放 data/knowledge_db/(markdown 条目 + index.json), 向量索引
+# 落在 data/knowledge_index/(可整目录删除重建); 启动后台增量索引,
+# 管理面板「知识库」页可看状态/强制重建/测试检索。
+# enabled 开关启动时读取; 其余字段 WebUI 保存热同步(embedding 模型
+# 变更会自动重建索引)。密钥回退: embedding_api_key → 环境变量
+# MOHOBOT_EMBEDDING_API_KEY → chat key; rerank_api_key →
+# MOHOBOT_RERANK_API_KEY → embedding key。rerank_model 留空 = 不重排。
+knowledge:
+  enabled: false
+  source_dir: "./data/knowledge_db"
+  index_dir: "./data/knowledge_index"
+  embedding_model: "BAAI/bge-m3"                 # 硅基流动免费 embedding
+  embedding_base_url: "https://api.siliconflow.cn/v1"
+  embedding_api_key: ""                          # 必填(或设 MOHOBOT_EMBEDDING_API_KEY)
+  rerank_model: ""                               # 如 BAAI/bge-reranker-v2-m3, 留空不重排
+  rerank_base_url: "https://api.siliconflow.cn/v1"
+  rerank_api_key: ""
+  search_top_k: 20                               # 余弦召回数(rerank 候选池)
+  search_top_n: 5                                # 最终返回给模型的块数
+  max_chars_per_result: 800                      # 单块注入正文的字符截断
 
 # ── 歌曲知识库（全局歌曲识别 + LLM 前注入）─────────────────────
 # SQLite 事实库(songs 表, 新 schema): 歌名/歌词识别不再依赖关键词 txt,

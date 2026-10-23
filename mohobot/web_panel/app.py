@@ -159,11 +159,16 @@ class WebPanel:
         restart_callback=None,
         emotion_manager=None,
         tts_service=None,
+        knowledge_service=None,
         config_update_callback=None,
         persona_service=None,
         persona_ab_service=None,
+        news_service=None,
+        history_barrier=None,
     ):
         self._persona_ab = persona_ab_service
+        self._news_service = news_service
+        self._history_barrier = history_barrier
         self._host = host
         self._port = port
         self._username = username
@@ -201,6 +206,7 @@ class WebPanel:
         self._restart_callback = restart_callback
         self._emotion_manager = emotion_manager
         self._tts_service = tts_service
+        self._knowledge_service = knowledge_service
         self._config_update_callback = config_update_callback
         self._persona_service = persona_service
 
@@ -441,7 +447,7 @@ class WebPanel:
             # 不下发给 WebUI —— 只在本地 config 文件里读写。
             result.pop("server", None)
             result["web_panel"]["password_hash"] = self._mask_secret(cfg.web_panel.password_hash)
-            for section in ("llm", "anysearch", "tts"):
+            for section in ("llm", "anysearch", "tts", "knowledge"):
                 for key, value in list(result.get(section, {}).items()):
                     if any(marker in key.lower() for marker in ("key", "token", "secret", "password")):
                         result[section][key] = self._mask_secret(value)
@@ -487,6 +493,19 @@ class WebPanel:
                 for k, v in tts_data.items():
                     if hasattr(cfg.tts, k):
                         setattr(cfg.tts, k, v)
+            if "knowledge" in data:
+                knowledge_data = data["knowledge"] or {}
+                # source_dir/index_dir 为服务端运行路径, 仅本地配置文件可改
+                # (与 database/data_dir 同策略); api_key 留空或掩码原样 → 保持原 key
+                for k, v in knowledge_data.items():
+                    if not hasattr(cfg.knowledge, k) or k in ("source_dir", "index_dir"):
+                        continue
+                    if k.endswith("api_key"):
+                        sv = str(v or "")
+                        if sv and sv != self._MASK:
+                            setattr(cfg.knowledge, k, sv)
+                        continue
+                    setattr(cfg.knowledge, k, v)
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]
@@ -701,6 +720,102 @@ class WebPanel:
             from fastapi.responses import JSONResponse
             return JSONResponse(await self._persona_ab.report(bot_id=bot_id, version_hash=version_hash, export=True),
                 headers={"Content-Disposition": 'attachment; filename="persona-ab.json"'})
+
+        # ── News (REQ-6) ──────────────────────────────────────
+
+        def _news():
+            if self._news_service is None:
+                raise HTTPException(status_code=503, detail="新闻库未启用或未装配")
+            return self._news_service
+
+        def _news_or_none():
+            """读接口用: 未装配/未启用时返回 None, 由调用方给出 enabled=false。"""
+            return self._news_service
+
+        @app.get("/api/news/pending")
+        async def news_pending(request: Request, limit: int = 50):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "items": []}
+            return {"enabled": True, "items": await svc.list_pending(limit=max(1, min(limit, 200)))}
+
+        @app.get("/api/news/approved")
+        async def news_approved(request: Request, limit: int = 20):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "items": []}
+            items = await svc.recent_news(limit=max(1, min(limit, 200)))
+            return {"enabled": True, "items": [i.to_dict() for i in items]}
+
+        @app.get("/api/news/stats")
+        async def news_stats(request: Request):
+            await _require_auth(request)
+            svc = _news_or_none()
+            if svc is None or not svc.enabled:
+                return {"enabled": False, "counts": {}}
+            return {"enabled": True, "counts": await svc.stats()}
+
+        @app.post("/api/news/submit")
+        async def news_submit(request: Request):
+            """手动新增一条待审新闻(管理员补录)。"""
+            await _require_auth(request)
+            body = await request.json()
+            title = str(body.get("title") or "").strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="标题不能为空")
+            svc = _news()
+            try:
+                item = await svc.submit(
+                    title,
+                    content=str(body.get("content") or ""),
+                    source=str(body.get("source") or "manual"),
+                    url=str(body.get("url") or ""),
+                    author_name=str(body.get("author_name") or ""),
+                    tags=[str(t) for t in (body.get("tags") or []) if str(t).strip()],
+                    published_at=float(body.get("published_at") or 0.0),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            await _audit(request, "news_submit", title, {"id": item.id})
+            return {"status": "ok", "id": item.id, "review": "pending"}
+
+        @app.post("/api/news/review")
+        async def news_review(request: Request):
+            """批量审核: {"ids": [...], "approve": true|false}。"""
+            await _require_auth(request)
+            body = await request.json()
+            raw_ids = body.get("ids")
+            if not isinstance(raw_ids, list) or not raw_ids:
+                raise HTTPException(status_code=400, detail="缺少 ids")
+            approve = bool(body.get("approve", True))
+            svc = _news()
+            changed = 0
+            failed: list[str] = []
+            for item_id in raw_ids:
+                item_id = str(item_id or "").strip()
+                if not item_id:
+                    continue
+                ok = await (svc.approve(item_id, reviewer=self._username) if approve
+                            else svc.reject(item_id, reviewer=self._username))
+                if ok:
+                    changed += 1
+                else:
+                    failed.append(item_id)
+            await _audit(request, "news_approve" if approve else "news_reject",
+                         ",".join(str(i) for i in raw_ids), {"changed": changed})
+            return {"status": "ok", "changed": changed, "failed": failed}
+
+        @app.delete("/api/news/{item_id}")
+        async def news_delete(item_id: str, request: Request):
+            await _require_auth(request)
+            svc = _news()
+            ok = await svc.delete(item_id)
+            if not ok:
+                raise HTTPException(status_code=404, detail="条目不存在")
+            await _audit(request, "news_delete", item_id)
+            return {"status": "ok"}
 
         # ── Shared persona presets ──────────────────────────
 
@@ -956,6 +1071,52 @@ class WebPanel:
                 f"Web panel: TTS test synth ok={result.get('ok')} "
                 f"({result.get('latency_ms')}ms, {result.get('format')})"
             )
+            return result
+
+        # ── 3.6 知识库(虚拟歌手 RAG: 状态/重建/测试检索) ────
+
+        @app.get("/api/knowledge/status")
+        async def knowledge_status(request: Request):
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                return {
+                    "enabled": False, "configured": False,
+                    "ready": False, "indexing": False, "error": None,
+                    "chunks": 0, "files": 0, "last_indexed_at": None,
+                    "last_stats": None, "embedding_model": "", "rerank_model": "",
+                    "rerank_enabled": False, "source_dir": "",
+                }
+            return await self._knowledge_service.service_status()
+
+        @app.post("/api/knowledge/rebuild")
+        async def knowledge_rebuild(request: Request):
+            """强制全量重建索引(重嵌所有知识块)。"""
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                raise HTTPException(status_code=400, detail="知识库未启用(knowledge.enabled=false)")
+            stats = await self._knowledge_service.reindex(force=True)
+            if stats.get("error"):
+                raise HTTPException(status_code=500, detail=f"重建失败: {stats['error']}")
+            logger.info(f"Web panel: knowledge index rebuilt ({stats.get('chunks')} chunks)")
+            return {"status": "ok", "stats": stats}
+
+        @app.post("/api/knowledge/test_search")
+        async def knowledge_test_search(request: Request, body: ConfigUpdateRequest):
+            """面板「测试检索」: 直接跑一次语义检索, 返回命中块。"""
+            await _require_auth(request)
+            if self._knowledge_service is None:
+                raise HTTPException(status_code=400, detail="知识库未启用(knowledge.enabled=false)")
+            data = body.data or {}
+            query = str(data.get("query", "") or "").strip()
+            if not query:
+                raise HTTPException(status_code=400, detail="查询不能为空")
+            try:
+                top_k = max(1, min(int(data.get("top_k", 5) or 5), 10))
+            except (TypeError, ValueError):
+                top_k = 5
+            result = await self._knowledge_service.search(query, top_n=top_k)
+            if result.get("error"):
+                raise HTTPException(status_code=500, detail=result["error"])
             return result
 
         # ── 4. Plugins (插件管理) ────────────────────────────
@@ -1351,7 +1512,16 @@ class WebPanel:
                             raise HTTPException(status_code=400, detail="备份文件包含非法路径")
                     zf.extractall(tmp_dir)
 
-                restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
+                # history 被替换时: 冻结写入并关闭活跃 writer, 恢复后重新打开
+                # 新文件, 避免继续写已被删除/替换的旧 inode(issue #8)。
+                barrier = self._history_barrier if "history" in dir_set else None
+                if barrier is not None:
+                    await barrier.freeze()
+                try:
+                    restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
+                finally:
+                    if barrier is not None:
+                        await barrier.thaw()
                 if "contexts" in dir_set and self._persona_service is not None:
                     self._persona_service.invalidate_references()
             except HTTPException:
@@ -1382,11 +1552,20 @@ class WebPanel:
             if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
-            if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
-                async with self._persona_service.lock, self._context_manager.maintenance_lock:
+            # history 被清理时: 先冻结写入并关闭活跃 writer, 避免它们继续写已被
+            # unlink 的旧 inode(issue #8 第 1 点)。
+            barrier = self._history_barrier if "history" in dir_set else None
+            if barrier is not None:
+                await barrier.freeze()
+            try:
+                if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
+                    async with self._persona_service.lock, self._context_manager.maintenance_lock:
+                        removed = self._cleanup_data(bot_list, dir_set)
+                else:
                     removed = self._cleanup_data(bot_list, dir_set)
-            else:
-                removed = self._cleanup_data(bot_list, dir_set)
+            finally:
+                if barrier is not None:
+                    await barrier.thaw()
             if "contexts" in dir_set and self._persona_service is not None:
                 self._persona_service.invalidate_references()
             # 清理封禁数据后同步刷新拦截器缓存

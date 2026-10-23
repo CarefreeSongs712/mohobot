@@ -174,6 +174,24 @@ class WSServer:
             await self._bot_manager.handle_api_response(bot_id, data)
             return
 
+        # 群成员减少通知(被踢/主动退群): 立即从群在线集合剔除该 bot, 否则
+        # 全局指令抽签仍可能选中它导致命令无响应(issue #9 第 4 点)。
+        # 通知本身不依赖 enabled 开关, 先于开关判断处理。
+        if data.get("post_type") == "notice" and data.get("notice_type") == "group_decrease":
+            group_id = data.get("group_id")
+            if group_id is not None:
+                try:
+                    self._bot_manager.note_group_left(bot_id, group_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"note_group_left failed: {exc}")
+
+        # Bot 禁用开关: Web 面板把 bot_config.enabled 置 false 时应停止一切响应
+        # (issue #9 第 3 点)。连接保持, 只是不处理事件。
+        bot_config = getattr(instance, "config", None)
+        if bot_config is not None and not getattr(bot_config, "enabled", True):
+            logger.debug(f"Ignoring event for disabled bot {bot_id}")
+            return
+
         # It's an event (has 'post_type') — 异步派发, 不阻塞连接
         if "post_type" in data:
             event = Event.from_dict(data)
@@ -519,6 +537,11 @@ class WSServer:
         {bot_id}/group/ 归档一份(回滚保险)。source 标注来源:
         "llm"=LLM 生成回复, "auto"=命令/插件等机械内容(审核面板据此过滤)。
         """
+        # 维护窗口内跳过归档(不写旧 inode), 见 issue #8
+        barrier = getattr(self, "_history_barrier", None)
+        if barrier is not None and barrier.frozen:
+            logger.debug("history 维护中, 跳过 bot 发言归档")
+            return
         instance = self._bot_manager.get(bot_id)
         bot_qq = instance.qq if instance else 0
         bot_nick = instance.nickname if instance else bot_id
@@ -553,6 +576,25 @@ class WSServer:
                 paths.append(f"{self._data_dir}/history/{bot_id}/group/{chat_id}.jsonl")
             return paths
         return [f"{self._data_dir}/history/{bot_id}/private/{chat_id}.jsonl"]
+
+    # ── 历史维护屏障 (issue #8) ──────────────────────────────
+
+    def set_history_barrier(self, barrier) -> None:
+        """注入历史维护屏障: 冻结期间跳过 message_sent 归档并注册关闭回调。"""
+        self._history_barrier = barrier
+        if barrier is not None:
+            barrier.register_closer(self.close_archive_writers)
+
+    async def close_archive_writers(self) -> None:
+        """关闭并清空 bot 发言归档 writer(不删文件)。"""
+        writers = list(self._archive_writers.items())
+        self._archive_writers.clear()
+        for path, writer in writers:
+            try:
+                await writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"关闭 archive writer 失败({path}): {exc}")
+        logger.info(f"[History] 已关闭 {len(writers)} 个 bot 发言归档 writer")
 
     def _get_archive_writer(self, path: str) -> JSONLWriter:
         writer = self._archive_writers.get(path)

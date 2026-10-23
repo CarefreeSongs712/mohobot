@@ -19,6 +19,7 @@ class MemeStealToolWorkflow:
         self,
         event: StealerEvent,
         image_ref: str,
+        bots: str = "",
     ):
         """偷取图片入库。VLM 视觉模型会自动分析图片，打上分类、标签、描述和场景。
 
@@ -34,6 +35,7 @@ class MemeStealToolWorkflow:
 
         Args:
             image_ref(string): 图片 URL 或文件路径，从当前消息已有的 Image URL 中选择。
+            bots(string): 可选。适用 bot 白名单(逗号分隔); 留空 = 全部 bot 通用。
         """
         event = unwrap_event(event)
         try:
@@ -110,20 +112,44 @@ class MemeStealToolWorkflow:
             before_paths = set(idx_before.keys()) if idx_before else set()
 
             # 统一走 VLM 流水线
-            logger.info(f"[Tool] VLM 分析入库: {temp_path}")
+            # tool_capture_requires_review(默认 True): 模型标注完成后只进待审池,
+            # 由 WebUI 管理员通过后才真正入库(不进索引/不参与检索发送)。
+            cfg = getattr(self, "plugin_config", None)
+            to_pending = bool(getattr(cfg, "tool_capture_requires_review", True))
+            logger.info(
+                f"[Tool] VLM 分析{'入待审池' if to_pending else '入库'}: {temp_path}"
+            )
             extra_meta = self._build_steal_tool_extra_meta(
                 event, image_ref, source=source
             )
+            # REQ-3: 标注适用 bot(缺省空 = 全部 bot 可用)
+            from ..util.bot_scope import format_allowed_bots
+
+            allowed_bots = format_allowed_bots(bots)
+            if allowed_bots:
+                extra_meta["allowed_bots"] = allowed_bots
             success, merged_idx = await self._process_image(
                 event,
                 temp_path,
                 is_temp=is_temp,
                 extra_meta=extra_meta,
+                to_pending=to_pending,
                 chat_context=event_handler.build_chat_context(event),
             )
 
             if not success:
                 yield "偷取失败：VLM 分析未通过（可能已存在、内容不合适或无法识别为表情包）"
+                return
+
+            if to_pending:
+                # 待审路径: 标注结果照常回给模型(便于向用户说明), 但不入库、
+                # 不进索引, 也不能声称"已入库"。
+                detail = self._format_steal_tool_result(merged_idx, before_paths)
+                suffix = "图片已提交管理员审核，通过后会加入表情包库"
+                if detail:
+                    yield "偷取成功！VLM 分析结果：\n" + detail + "\n- 状态：" + suffix
+                else:
+                    yield "偷取成功！" + suffix
                 return
 
             if merged_idx:
@@ -155,6 +181,32 @@ class MemeStealToolWorkflow:
             yield f"偷取出错：{e}"
             return
 
+    @staticmethod
+    def _format_steal_tool_result(
+        merged_idx: dict[str, Any] | None, before_paths: set[str],
+    ) -> str:
+        """把新条目的 VLM 标注格式化为给模型看的多行摘要; 无新条目返回空串。"""
+        if not isinstance(merged_idx, dict):
+            return ""
+        new_paths = set(merged_idx.keys()) - before_paths
+        new_entry = next(
+            (merged_idx[p] for p in new_paths if isinstance(merged_idx.get(p), dict)), None,
+        )
+        if not isinstance(new_entry, dict):
+            return ""
+        overlay = str(new_entry.get("overlay_text", "") or "")
+        tag_list = new_entry.get("tags", [])
+        tags_str = ", ".join(tag_list) if isinstance(tag_list, list) else str(tag_list)
+        desc_text = new_entry.get("desc", "")
+        scene_list = new_entry.get("scenes", [])
+        scenes_str = ", ".join(scene_list) if isinstance(scene_list, list) else str(scene_list)
+        return (
+            f"- 图上文字：{overlay or '无'}\n"
+            f"- 标签：{tags_str or '无'}\n"
+            f"- 描述：{desc_text or '无'}\n"
+            f"- 场景：{scenes_str or '无'}"
+        )
+
     async def _resolve_steal_image_ref(
         self,
         event: StealerEvent,
@@ -172,25 +224,11 @@ class MemeStealToolWorkflow:
         """
         explicit_ref = str(image_ref or "").strip()
 
-        # 1. URL 形式（http/https/file 协议）直接信任 LLM 传入
-        if explicit_ref and (
-            explicit_ref.startswith("http://")
-            or explicit_ref.startswith("https://")
-            or explicit_ref.startswith("file:")
-        ):
-            return explicit_ref, "llm_tool"
-
-        # 2. 尝试把显式 ref 解析为消息内某张图片的真实位置
-        resolved_explicit = ""
-        if explicit_ref:
-            resolved_explicit = await self._resolve_image_ref_against_event(
-                event, explicit_ref
-            )
-            if resolved_explicit:
-                return resolved_explicit, "llm_tool"
-
-        # 3. 未提供 ref 或 ref 解析失败：取当前消息中第一张可用图片，
-        #    没有时再看用户引用的那条消息（“引用图片 + 偷一下”）
+        # 先收集"本事件内合法图片来源"(当前消息 + 引用消息 + QQ商城表情)。
+        # issue #6 第 2 点: 旧实现在显式 ref 是 http/https/file 时直接信任,
+        # 模型可以传任意网络 URL 或本机绝对路径把无关文件送进 VLM/图库;
+        # 修复后显式 ref 必须能在这些合法来源里命中, 否则拒绝。
+        candidates: list[tuple[str, str]] = []  # (ref, source)
         try:
             images = [comp for comp in event.get_messages() if isinstance(comp, MessageImage)]
         except Exception:
@@ -208,18 +246,67 @@ class MemeStealToolWorkflow:
             except Exception:
                 ref = ""
             if ref:
-                return ref, "llm_tool"
+                candidates.append((str(ref).strip(), "llm_tool"))
 
-        # 4. 兜底：QQ 商城表情 URL
+        # QQ 商城表情 URL 也是合法来源
         try:
             store_urls = event_handler._extract_store_emoji_urls(event)
         except Exception:
             store_urls = []
-        if store_urls:
-            return str(store_urls[0] or "").strip(), "qq_store"
+        for url in store_urls:
+            url = str(url or "").strip()
+            if url:
+                candidates.append((url, "qq_store"))
 
-        # 5. 都没有的话才把显式 ref 原样回传（让下游报错时提示更准确）
-        return explicit_ref, "llm_tool"
+        if explicit_ref:
+            matched = self._match_candidate_ref(explicit_ref, candidates)
+            if matched is not None:
+                ref, source = matched
+                return ref, source
+            # 显式 ref 不来自当前上下文: 退回「消息解析」再试一次(相对路径/
+            # 仅文件名等), 仍不命中则拒绝, 不再原样放行。
+            resolved_explicit = await self._resolve_image_ref_against_event(
+                event, explicit_ref
+            )
+            if resolved_explicit:
+                return resolved_explicit, "llm_tool"
+            logger.warning(
+                f"[Tool] 拒绝越界 image_ref(只能是当前/引用消息里的图片): {explicit_ref[:120]}"
+            )
+            return "", "rejected"
+
+        # 未提供 ref: 取本事件第一张合法图片(含引用消息/商城表情)
+        if candidates:
+            return candidates[0]
+
+        return "", "llm_tool"
+
+    @staticmethod
+    def _match_candidate_ref(
+        explicit_ref: str, candidates: list[tuple[str, str]],
+    ) -> tuple[str, str] | None:
+        """显式 ref 必须命中本事件的合法图片候选(按完整 ref / basename)。
+
+        返回 ``(ref, source)`` 或 None。basename 匹配用于模型把 URL 简写成
+        文件名、或传了消息图片的本地临时路径的场景。
+        """
+        ref = str(explicit_ref or "").strip()
+        if not ref or not candidates:
+            return None
+        ref_norm = ref.replace("\\", "/")
+        ref_clean = ref_norm.split("?", 1)[0].split("#", 1)[0]
+        ref_base = ref_clean.rsplit("/", 1)[-1]
+        for cand_ref, source in candidates:
+            cand = str(cand_ref or "").strip()
+            if not cand:
+                continue
+            cand_norm = cand.replace("\\", "/")
+            cand_clean = cand_norm.split("?", 1)[0].split("#", 1)[0]
+            if ref_clean == cand_clean or ref_norm == cand_norm:
+                return cand, source
+            if ref_base and ref_base == cand_clean.rsplit("/", 1)[-1]:
+                return cand, source
+        return None
 
     async def _resolve_image_ref_against_event(
         self,

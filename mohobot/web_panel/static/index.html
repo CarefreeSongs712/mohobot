@@ -235,6 +235,8 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
     <div class="nav-item" data-page="personas"><span class="icon">P</span> 人设管理</div>
     <div class="nav-item" data-page="models"><span class="icon">🧠</span> 模型配置</div>
     <div class="nav-item" data-page="tts"><span class="icon">🔊</span> TTS 语音</div>
+    <div class="nav-item" data-page="knowledge"><span class="icon">📚</span> 知识库</div>
+    <div class="nav-item" data-page="news"><span class="icon">📰</span> 新闻动态</div>
     <div class="nav-item" data-page="plugins"><span class="icon">🧩</span> 插件管理</div>
     <div class="nav-item" data-page="contexts"><span class="icon">💬</span> 对话数据</div>
     <div class="nav-item" data-page="ban"><span class="icon">🚫</span> 封禁管理</div>
@@ -269,6 +271,49 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   </div>
 
   <!-- 2. Usage -->
+  <div class="page" id="page-news">
+    <h2>📰 新闻动态</h2>
+    <div class="subtitle">REQ-6 · 采集/提取的条目先进入待审池，管理员审核通过后才参与提示词注入与 <code>news_recent</code> / <code>news_search</code> 工具检索</div>
+
+    <div class="card">
+      <div class="card-title">📊 库状态</div>
+      <div id="news-stats" class="stat-label">⏳ 加载中…</div>
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="loadNewsPage()">🔄 刷新</button>
+      </div>
+      <div class="small" style="color:var(--text-dim);margin-top:8px">
+        开关与采集器参数在本地 config 文件（<code>news.enabled</code> / <code>news.collector_enabled</code> / <code>news.collector_uids</code>）配置，重启后生效。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">✏️ 手动新增（进入待审）</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <input type="text" id="news-add-title" placeholder="标题（必填）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-content" placeholder="正文/补充说明（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-url" placeholder="来源链接（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <input type="text" id="news-add-author" placeholder="来源/发布者（可选）"
+          style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <div class="form-row" style="justify-content:flex-end">
+          <button class="btn" id="news-add-btn" onclick="newsSubmitManual()">➕ 提交待审</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🕓 待审核</div>
+      <div id="news-pending-list" class="stat-label">⏳ 加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">✅ 已生效（会注入上下文）</div>
+      <div id="news-approved-list" class="stat-label">⏳ 加载中…</div>
+    </div>
+  </div>
+
   <div class="page" id="page-usage">
     <h2>📈 用量统计</h2>
     <div class="subtitle">LLM Token 消耗 — 按会话 / 按发起用户 / 按用途三种视角（点击表头切换排序，点击行展开明细）</div>
@@ -437,6 +482,43 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
       </div>
       <div class="hint" id="tts-test-result" style="margin-top:8px"></div>
       <audio id="tts-test-audio" controls style="display:none;width:100%;margin-top:8px"></audio>
+    </div>
+  </div>
+
+  <!-- 3.6 知识库 -->
+  <div class="page" id="page-knowledge">
+    <h2>📚 知识库</h2>
+    <div class="subtitle">虚拟歌手 RAG · embedding 语义检索 + 可选 rerank · LLM 工具接入（knowledge_search / knowledge_lookup）</div>
+
+    <div class="card">
+      <div class="card-title">📊 索引状态</div>
+      <div id="knowledge-status" class="stat-label">⏳ 加载中…</div>
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm" onclick="loadKnowledgePage()">🔄 刷新状态</button>
+        <button class="btn btn-sm" id="knowledge-rebuild-btn" onclick="knowledgeRebuild()">🏗️ 强制重建索引</button>
+      </div>
+      <div class="small" style="color:var(--text-dim);margin-top:8px">
+        知识源目录与索引路径在本地 config 文件（knowledge.source_dir / knowledge.index_dir）配置，不在 WebUI 修改。启动时自动增量索引；手改知识源文件后重启或点「强制重建索引」。
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🧪 测试检索（语义搜索）</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="knowledge-test-query" placeholder="如：洛天依的代表曲 / 五维介质有哪些歌手"
+          style="flex:1;min-width:240px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+        <button class="btn" id="knowledge-test-btn" onclick="knowledgeTestSearch()">🔍 检索</button>
+      </div>
+      <div id="knowledge-test-result" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⚙️ 检索配置</div>
+      <div id="knowledge-config-form"></div>
+      <button class="btn" onclick="saveKnowledgeConfig()">保存配置</button>
+      <div class="small" style="color:var(--text-dim);margin-top:6px">
+        API Key 留空保持原值；enabled 开关修改后需重启生效，其余保存即热同步；embedding 模型变更会自动重建索引。
+      </div>
     </div>
   </div>
 
@@ -730,6 +812,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
       case 'personas': loadPersonasPage(); break;
       case 'models': loadModels(); break;
       case 'tts': loadTtsPage(); break;
+      case 'knowledge': loadKnowledgePage(); break;
+      case 'news': loadNewsPage(); break;
       case 'plugins': loadPlugins(); break;
       case 'contexts': loadContextsPage(); break;
       case 'ban': loadBanPage(); break;
@@ -743,6 +827,204 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function init() {
   loadDashboard();
   startLogStream();
+}
+
+// ═══════════════ 3.7 新闻动态 (REQ-6) ═══════════════
+function _newsEscape(text) {
+  const div = document.createElement('div');
+  div.textContent = text == null ? '' : String(text);
+  return div.innerHTML;
+}
+
+function _newsRow(item, opts = {}) {
+  const tags = Array.isArray(item.tags) ? item.tags.join(' / ') : '';
+  const day = item.published_at
+    ? new Date(item.published_at * 1000).toLocaleString('zh-CN', { hour12: false })
+    : '';
+  const meta = [item.source, item.author_name, day, tags].filter(Boolean).join(' · ');
+  const link = item.url
+    ? `<a href="${_newsEscape(item.url)}" target="_blank" rel="noopener" style="color:var(--accent)">原文</a>`
+    : '';
+  const actions = opts.pending
+    ? `<button class="btn btn-sm" onclick="newsReview('${_newsEscape(item.id)}', true)">✅ 通过</button>
+       <button class="btn btn-sm" onclick="newsReview('${_newsEscape(item.id)}', false)">❌ 拒绝</button>`
+    : `<button class="btn btn-sm" onclick="newsDelete('${_newsEscape(item.id)}')">🗑 删除</button>`;
+  return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+    <div style="font-weight:600">${_newsEscape(item.title)}</div>
+    ${item.content ? `<div style="color:var(--text-dim);margin-top:4px">${_newsEscape(item.content).slice(0, 200)}</div>` : ''}
+    <div class="small" style="color:var(--text-dim);margin-top:4px">${_newsEscape(meta)} ${link}</div>
+    <div style="margin-top:6px;display:flex;gap:6px">${actions}</div>
+  </div>`;
+}
+
+async function loadNewsPage() {
+  const statsEl = document.getElementById('news-stats');
+  const pendingEl = document.getElementById('news-pending-list');
+  const approvedEl = document.getElementById('news-approved-list');
+  try {
+    const stats = await apiJSON('/api/news/stats');
+    if (!stats.enabled) {
+      statsEl.textContent = '新闻库未启用（config: news.enabled=false）';
+      pendingEl.textContent = '—';
+      approvedEl.textContent = '—';
+      return;
+    }
+    const counts = stats.counts || {};
+    statsEl.textContent = `待审 ${counts.pending || 0} · 生效 ${counts.approved || 0} · 拒绝 ${counts.rejected || 0}`;
+  } catch (e) {
+    statsEl.textContent = '状态读取失败: ' + e.message;
+  }
+  try {
+    const data = await apiJSON('/api/news/pending');
+    pendingEl.innerHTML = (data.items || []).length
+      ? data.items.map(i => _newsRow(i, { pending: true })).join('')
+      : '暂无待审条目';
+  } catch (e) {
+    pendingEl.textContent = '待审列表读取失败: ' + e.message;
+  }
+  try {
+    const data = await apiJSON('/api/news/approved');
+    approvedEl.innerHTML = (data.items || []).length
+      ? data.items.map(i => _newsRow(i)).join('')
+      : '暂无已生效条目';
+  } catch (e) {
+    approvedEl.textContent = '已生效列表读取失败: ' + e.message;
+  }
+}
+
+async function newsReview(id, approve) {
+  try {
+    const r = await apiJSON('/api/news/review', {
+      method: 'POST', body: { ids: [id], approve: approve },
+    });
+    showToast(r.changed > 0 ? (approve ? '已通过' : '已拒绝') : '操作失败/状态已变更', r.changed > 0);
+    loadNewsPage();
+  } catch (e) {
+    showToast('审核失败: ' + e.message, false);
+  }
+}
+
+async function newsDelete(id) {
+  if (!confirm('确认删除该条目？')) return;
+  try {
+    await apiJSON('/api/news/' + encodeURIComponent(id), { method: 'DELETE' });
+    showToast('已删除');
+    loadNewsPage();
+  } catch (e) {
+    showToast('删除失败: ' + e.message, false);
+  }
+}
+
+async function newsSubmitManual() {
+  const title = (document.getElementById('news-add-title').value || '').trim();
+  if (!title) { showToast('标题不能为空', false); return; }
+  const btn = document.getElementById('news-add-btn');
+  btn.disabled = true;
+  try {
+    await apiJSON('/api/news/submit', {
+      method: 'POST',
+      body: {
+        title: title,
+        content: (document.getElementById('news-add-content').value || '').trim(),
+        url: (document.getElementById('news-add-url').value || '').trim(),
+        author_name: (document.getElementById('news-add-author').value || '').trim(),
+      },
+    });
+    showToast('已提交待审');
+    ['news-add-title', 'news-add-content', 'news-add-url', 'news-add-author']
+      .forEach(id => { document.getElementById(id).value = ''; });
+    loadNewsPage();
+  } catch (e) {
+    showToast('提交失败: ' + e.message, false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ═══════════════ 3.6 知识库 ═══════════════
+async function loadKnowledgePage() {
+  try {
+    const s = await apiJSON('/api/knowledge/status');
+    const el = document.getElementById('knowledge-status');
+    if (!s.enabled) {
+      el.innerHTML = '⛔ 知识库未启用（knowledge.enabled=false，重启生效）';
+    } else {
+      const state = s.indexing ? '🔄 索引重建中…'
+        : (s.ready ? '✅ 就绪' : `⚠️ 未就绪${s.error ? '：' + s.error : ''}`);
+      el.innerHTML =
+        `${state} · ${s.files} 个文件 / ${s.chunks} 个知识块` +
+        (s.last_indexed_at ? ` · 上次索引 ${s.last_indexed_at}` : '') +
+        `<br>embedding: ${s.embedding_model || '—'} · rerank: ${s.rerank_enabled ? s.rerank_model : '关闭'}` +
+        (s.source_dir ? ` · 知识源: ${s.source_dir}` : '');
+    }
+    const cfg = await apiJSON('/api/config');
+    document.getElementById('knowledge-config-form').innerHTML =
+      checkField('knowledge.enabled', '启用知识库', cfg.knowledge?.enabled, 'LLM 工具 knowledge_search / knowledge_lookup；开关修改后需重启生效') +
+      formField('knowledge.embedding_model', 'Embedding 模型', cfg.knowledge?.embedding_model) +
+      formField('knowledge.embedding_base_url', 'Embedding Base URL', cfg.knowledge?.embedding_base_url) +
+      formField('knowledge.embedding_api_key', 'Embedding API Key', cfg.knowledge?.embedding_api_key, { type: 'password', hint: '留空保持原值；回退 MOHOBOT_EMBEDDING_API_KEY → chat key' }) +
+      formField('knowledge.rerank_model', 'Rerank 模型', cfg.knowledge?.rerank_model, { hint: '如 BAAI/bge-reranker-v2-m3；留空=不重排' }) +
+      formField('knowledge.rerank_base_url', 'Rerank Base URL', cfg.knowledge?.rerank_base_url) +
+      formField('knowledge.rerank_api_key', 'Rerank API Key', cfg.knowledge?.rerank_api_key, { type: 'password', hint: '留空保持原值；回退 embedding key' }) +
+      formField('knowledge.search_top_k', '召回数 top_k', cfg.knowledge?.search_top_k, { hint: '余弦召回候选池大小' }) +
+      formField('knowledge.search_top_n', '返回块数 top_n', cfg.knowledge?.search_top_n) +
+      formField('knowledge.max_chars_per_result', '单块截断(字符)', cfg.knowledge?.max_chars_per_result);
+  } catch (e) { showToast('加载知识库状态失败: ' + e.message, false); }
+}
+
+async function saveKnowledgeConfig() {
+  const num = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? def : v;
+  };
+  const data = { knowledge: {
+    enabled: document.getElementById('cfg-knowledge.enabled')?.checked ?? false,
+    embedding_model: document.getElementById('cfg-knowledge.embedding_model')?.value ?? '',
+    embedding_base_url: document.getElementById('cfg-knowledge.embedding_base_url')?.value ?? '',
+    embedding_api_key: document.getElementById('cfg-knowledge.embedding_api_key')?.value ?? '',
+    rerank_model: document.getElementById('cfg-knowledge.rerank_model')?.value ?? '',
+    rerank_base_url: document.getElementById('cfg-knowledge.rerank_base_url')?.value ?? '',
+    rerank_api_key: document.getElementById('cfg-knowledge.rerank_api_key')?.value ?? '',
+    search_top_k: num('cfg-knowledge.search_top_k', 20),
+    search_top_n: num('cfg-knowledge.search_top_n', 5),
+    max_chars_per_result: num('cfg-knowledge.max_chars_per_result', 800),
+  } };
+  try {
+    await apiJSON('/api/config', { method: 'PUT', body: { data } });
+    showToast('知识库配置已保存');
+    loadKnowledgePage();
+  } catch (e) { showToast('保存失败: ' + e.message, false); }
+}
+
+async function knowledgeRebuild() {
+  if (!confirm('强制全量重建索引？将重新嵌入全部知识块（调用 embedding API）。')) return;
+  const btn = document.getElementById('knowledge-rebuild-btn');
+  btn.disabled = true;
+  try {
+    const r = await apiJSON('/api/knowledge/rebuild', { method: 'POST' });
+    const s = r.stats || {};
+    showToast(`索引已重建: ${s.chunks} 块 / ${s.files} 文件 (${s.elapsed_sec}s)`);
+  } catch (e) { showToast('重建失败: ' + e.message, false); }
+  btn.disabled = false;
+  loadKnowledgePage();
+}
+
+async function knowledgeTestSearch() {
+  const q = document.getElementById('knowledge-test-query').value.trim();
+  if (!q) return;
+  const el = document.getElementById('knowledge-test-result');
+  el.innerHTML = '<div class="hint">⏳ 检索中…</div>';
+  try {
+    const r = await apiJSON('/api/knowledge/test_search', { method: 'POST', body: { data: { query: q, top_k: 5 } } });
+    const esc = s => String(s == null ? '' : s).replace(/</g, '&lt;');
+    el.innerHTML = (r.results || []).map(x =>
+      `<div class="card" style="margin-bottom:8px;padding:8px 10px">
+        <div class="small" style="color:var(--text-dim)">${esc(x.title)} · ${esc(x.source)} · ${esc(x.score)}${r.reranked ? ' (rerank)' : ''}</div>
+        <div style="white-space:pre-wrap;margin-top:4px">${esc(String(x.text || '').slice(0, 400))}</div>
+      </div>`).join('') || '<div class="hint">无结果</div>';
+  } catch (e) { el.innerHTML = `<div class="hint">检索失败: ${e.message}</div>`; }
 }
 
 // ═══════════════ 1. Dashboard ═══════════════

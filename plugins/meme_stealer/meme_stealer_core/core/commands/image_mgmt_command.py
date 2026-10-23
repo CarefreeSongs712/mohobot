@@ -28,6 +28,23 @@ class ImageManagementCommand:
                 indexes[path] = len(indexes) + 1
         return indexes
 
+    def _event_scope_target(self, event: StealerEvent) -> str:
+        """当前事件的作用域标识(``group:123`` / ``user:456``); 取不到返回空串。
+
+        与 ``MemeScopeService`` 同一套语义, 供列表查询在 SQL 层过滤 local 表情。
+        """
+        cfg = getattr(self.plugin, "plugin_config", None)
+        if cfg is None or event is None:
+            return ""
+        try:
+            scope, target_id = cfg.get_event_target(event)
+        except Exception:  # noqa: BLE001
+            return ""
+        scope, target_id = str(scope or "").strip(), str(target_id or "").strip()
+        if not scope or not target_id:
+            return ""
+        return f"{scope}:{target_id}"
+
     async def _add_blacklist_hash(self, image_hash: str) -> bool:
         return await add_blacklist_hash(self.plugin, image_hash)
 
@@ -86,8 +103,17 @@ class ImageManagementCommand:
         db_service = getattr(self.plugin, "db_service", None)
         if db_service and hasattr(db_service, "get_emojis_paginated"):
             cat_filter = category if category else None
+            # 作用域过滤(issue #6 第 1 点): scope_mode=local 的表情只属于其
+            # origin_target(某个群/某个私聊), 不能在其他群或私聊的列表里出现。
+            # 管理员在群里执行时为「管理员模式」: 仍按当前事件作用域过滤,
+            # 避免把 A 群专属表情泄露到 B 群; 需要看全部走 WebUI 或私聊管理。
+            scope_target = self._event_scope_target(event)
             rows, total_filtered, _category_counts = db_service.get_emojis_paginated(
-                page=page_num, page_size=per_page, category=cat_filter, sort_order="newest"
+                page=page_num,
+                page_size=per_page,
+                category=cat_filter,
+                sort_order="newest",
+                scope_target=scope_target or None,
             )
             total_all = db_service.count_total()
 
@@ -103,6 +129,7 @@ class ImageManagementCommand:
                     page_size=per_page,
                     category=cat_filter,
                     sort_order="newest",
+                    scope_target=scope_target or None,
                 )
             indexes = self._existing_path_indexes(db_service)
 

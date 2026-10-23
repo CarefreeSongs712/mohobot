@@ -73,6 +73,7 @@ class PendingRepository:
                         self._emotions_json_from_meta(meta),
                         str(meta.get("character") or "").strip(),
                         str(meta.get("retention_class") or "native").strip() or "native",
+                        str(meta.get("allowed_bots") or "").strip(),
                     ),
                 )
                 path = str(meta.get("path") or "")

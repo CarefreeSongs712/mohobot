@@ -82,6 +82,25 @@ class Plugin:
         self.plugin_config: dict = {}
         self.engine: ProactiveEngine | None = None
 
+    def _engine_ref(self, name: str):
+        """引擎惰性取引用; ban_store 按需构造(与 qzone 同款模式)。
+
+        issue #9 第 2 点: 被全局封禁的用户若在排队期间被封, 到期后不得再发
+        主动消息。引擎在生成/发送前通过 ``banned_check`` 查询本存储。
+        """
+        if name == "ban_store":
+            store = getattr(type(self), "_ban_store_instance", None)
+            if store is None:
+                try:
+                    from mohobot.ban.store import BanStore
+                    store = BanStore(data_dir=str(self._data_dir))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[主动消息] BanStore 不可用: {exc}")
+                    return None
+                type(self)._ban_store_instance = store
+            return store
+        return getattr(type(self), f"_{name}", None)
+
     def _ensure_engine(self) -> ProactiveEngine:
         """惰性创建引擎(注入按类属性在调用时解析, 与创建时序解耦)。"""
         if self.engine is None:
@@ -89,7 +108,7 @@ class Plugin:
                 state_path=Path(self._data_dir) / "proactive_chat" / "state.json",
                 config=dict(self.plugin_config or {}),
                 # 引擎引用名无下划线前缀, 插件类属性带 _ 前缀, 此处统一映射
-                get_ref=lambda name: getattr(type(self), f"_{name}", None),
+                get_ref=self._engine_ref,
             )
         else:
             self.engine.update_config(dict(self.plugin_config or {}))
@@ -131,7 +150,14 @@ class Plugin:
         except Exception as exc:
             logger.error(f"[主动消息] tick 异常: {exc}")
 
-    def on_config_update(self) -> None:
-        """配置热更新(同步钩子): 刷新引擎配置快照; 关闭时由下一次 tick 清理待发任务。"""
+    def on_config_update(self, config: dict | None = None) -> None:
+        """配置热更新(同步钩子): 刷新引擎配置快照。
+
+        框架以 ``updater(merged)`` 调用(传新配置 dict); 旧签名不带参数会抛
+        TypeError 导致本次热更新失败(issue #9 第 2 点)。这里接受可选参数并在
+        收到时优先使用, 同时仍兼容无参调用。
+        """
+        if config is not None and isinstance(config, dict):
+            self.plugin_config = dict(config)
         if self.engine is not None:
             self.engine.update_config(dict(self.plugin_config or {}))

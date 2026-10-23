@@ -36,6 +36,15 @@ class MemeScopeService:
         if not isinstance(data, dict) or event is None:
             return True
 
+        # REQ-3: 适用 bot 白名单(空串 = 全部 bot 可用)。多 bot 部署下按角色分流,
+        # 避免某个角色用了不属于它的表情包。
+        from ..util.bot_scope import is_allowed_for_bot
+
+        if not is_allowed_for_bot(
+            data.get("allowed_bots"), getattr(event, "bot_id", ""),
+        ):
+            return False
+
         if normalize_scope_mode(data.get("scope_mode")) != "local":
             return True
 

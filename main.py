@@ -55,6 +55,12 @@ class MohobotApplication:
         self._song_matcher: Any | None = None
         self._song_info_service: Any | None = None
         self._tts_service: Any | None = None
+        self._knowledge_service: Any | None = None
+        self._news_service: Any | None = None
+        self._news_collector: Any | None = None
+        # 历史归档维护屏障(issue #8): Web 面板热清理/恢复 history 时冻结写入
+        from mohobot.services.history_barrier import HistoryBarrier
+        self._history_barrier = HistoryBarrier()
         self._task_supervisor = TaskSupervisor()
         self._running = False
         self._shutting_down = False
@@ -180,6 +186,99 @@ class MohobotApplication:
                 self._tts_service = None
                 logger.warning(f"TTS 服务初始化失败, 已降级: {e}")
 
+        # 知识库(虚拟歌手 RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入。
+        # enabled 开关启动时读取; 初始化失败 → 降级并摘除工具(正常聊天不受影响)。
+        # 注意: 依赖缺失(numpy/openai)时 import 也会失败, 必须整体落在降级范围内。
+        self._knowledge_service = None
+        if self._config.knowledge.enabled:
+            try:
+                from mohobot.knowledge import KnowledgeService
+                from mohobot.knowledge.tools import (
+                    register_knowledge_tools, unregister_knowledge_tools,
+                )
+                chat_fallback_key = (
+                    self._config.llm.chat_api_key
+                    or os.environ.get("MOHOBOT_LLM_API_KEY", "")
+                )
+                service = KnowledgeService(
+                    self._config.knowledge,
+                    fallback_api_key=chat_fallback_key,
+                    task_supervisor=self._task_supervisor,
+                )
+                await service.startup()
+                self._knowledge_service = service
+                register_knowledge_tools(service)
+                # 后台增量索引: 就绪前 knowledge_search 返回"索引中", 不阻塞启动
+                self._task_supervisor.create_task(
+                    service.reindex(), name="knowledge-index", owner="knowledge",
+                )
+                logger.info("知识库服务已加载(KnowledgeService), 后台索引中")
+            except Exception as e:
+                self._knowledge_service = None
+                try:
+                    from mohobot.knowledge.tools import unregister_knowledge_tools
+                    unregister_knowledge_tools()
+                except Exception:
+                    pass
+                logger.warning(f"知识库初始化失败, 已降级: {e}")
+        else:
+            # 禁用/重启后禁用: 摘除上一进程周期可能残留的工具注册
+            try:
+                from mohobot.knowledge.tools import unregister_knowledge_tools
+                unregister_knowledge_tools()
+            except Exception:
+                pass
+
+        # 新闻/动态库(REQ-6): 默认关闭; 开启后只注入"已审核且未过期"的条目。
+        # 初始化失败 → 降级并摘除工具(正常聊天不受影响)。
+        self._news_service = None
+        self._news_collector = None
+        if self._config.news.enabled:
+            try:
+                from mohobot.news import NewsService
+                from mohobot.news.tools import register_news_tools, unregister_news_tools
+
+                news_cfg = self._config.news
+                db_path = news_cfg.db_path or str(
+                    Path(self._config.data_dir).resolve() / "news" / "news.db"
+                )
+                service = NewsService(news_cfg, db_path=db_path)
+                service.open()
+                self._news_service = service
+
+                if news_cfg.tool_enabled:
+                    from mohobot.news.tools import set_news_service
+                    set_news_service(service)
+                    register_news_tools()
+
+                # 提示词注入: 只把已审核条目并入本轮 system prompt
+                if news_cfg.inject_enabled:
+                    self._llm_service._news_annotator = service.build_injection
+
+                # B站采集器: 默认关闭, 开启后只提交待审条目
+                if news_cfg.collector_enabled:
+                    from mohobot.news.collector import NewsCollector
+
+                    collector = NewsCollector(service, news_cfg)
+                    await collector.start()
+                    self._news_collector = collector
+                logger.info(f"新闻库已加载(enabled), db={db_path}")
+            except Exception as e:
+                self._news_service = None
+                self._news_collector = None
+                try:
+                    from mohobot.news.tools import unregister_news_tools
+                    unregister_news_tools()
+                except Exception:
+                    pass
+                logger.warning(f"新闻库初始化失败, 已降级: {e}")
+        else:
+            try:
+                from mohobot.news.tools import unregister_news_tools
+                unregister_news_tools()
+            except Exception:
+                pass
+
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
             # 绝对路径: 插件内 data 目录按进程 cwd 解析, 启动 cwd 不对会读错文件
@@ -237,6 +336,7 @@ class MohobotApplication:
             persona_service=self._persona_service,
             persona_ab_service=self._persona_ab_service,
         )
+        self._message_handler.set_history_barrier(self._history_barrier)
 
         # 7. Set up interceptors (封禁过滤放最前 — 被禁用户一切消息静默丢弃)
         from mohobot.ban import BanInterceptor, BanStore
@@ -278,6 +378,7 @@ class MohobotApplication:
             data_dir=self._config.data_dir,
             global_config=self._config,
         )
+        self._ws_server.set_history_barrier(self._history_barrier)
 
         # Wire up circular references
         self._message_handler._ws = self._ws_server
@@ -327,6 +428,9 @@ class MohobotApplication:
                 restart_callback=self.restart,
                 emotion_manager=self._emotion_manager,
                 tts_service=self._tts_service,
+                knowledge_service=self._knowledge_service,
+                news_service=self._news_service,
+                history_barrier=self._history_barrier,
                 persona_service=self._persona_service,
                 persona_ab_service=self._persona_ab_service,
                 config_update_callback=self.sync_config,
@@ -435,6 +539,10 @@ class MohobotApplication:
             self._message_handler.sync_config(self._config)
         if self._tts_service is not None:
             self._tts_service.sync_config(config.tts)
+        if self._knowledge_service is not None:
+            await self._knowledge_service.sync_config(config.knowledge)
+        if getattr(self, "_news_service", None):
+            self._news_service.sync_config(config.news)
         logger.info("Runtime configuration synchronized")
 
     async def restart(self) -> None:
@@ -555,6 +663,31 @@ class MohobotApplication:
         # TTS: 停止合成队列 worker(丢弃排队任务)并关闭 HTTP 客户端
         if getattr(self, "_tts_service", None):
             await self._tts_service.stop()
+
+        # 知识库: 取消后台索引任务并关闭 API 客户端/索引库
+        await self._task_supervisor.cancel_owner("knowledge")
+        if getattr(self, "_knowledge_service", None):
+            await self._knowledge_service.close()
+
+        # 新闻库: 先停采集器(它持有后台任务), 再关 SQLite, 最后摘除工具注册
+        if getattr(self, "_news_collector", None):
+            try:
+                await self._news_collector.stop()
+            except Exception as exc:
+                logger.debug(f"news collector stop failed: {exc}")
+            self._news_collector = None
+        if getattr(self, "_news_service", None):
+            try:
+                self._news_service.close()
+            except Exception as exc:
+                logger.debug(f"news service close failed: {exc}")
+            self._news_service = None
+        try:
+            from mohobot.news.tools import unregister_news_tools, set_news_service
+            unregister_news_tools()
+            set_news_service(None)
+        except Exception:
+            pass
 
         # Stop WS server
         if self._ws_server:

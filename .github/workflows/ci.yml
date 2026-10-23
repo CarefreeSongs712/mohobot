@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # main = 发布分支; dev = 集成分支。
+    # 维护者授权「极简改动可直推 dev」, 因此 dev 也必须跑门禁,
+    # 否则直推会绕过全部测试/语法检查。
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 

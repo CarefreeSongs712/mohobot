@@ -127,6 +127,9 @@ class MessageHandler:
     def _sync_reply_config(self, reply_config) -> None:
         """更新构造时复制的回复参数(不能只更新 GlobalConfig.reply)。"""
         self._segment_reply = reply_config.segment_reply
+        self._strip_english_fillers = bool(
+            getattr(reply_config, "strip_english_fillers", True)
+        )
         self._seg_min_len = reply_config.segment_min_len
         self._seg_max_len = reply_config.segment_max_len
         self._seg_delay_min = reply_config.segment_delay_min
@@ -246,6 +249,11 @@ class MessageHandler:
         history_dual_write 开启时群消息额外按旧布局 {bot_id}/group/ 归档
         一份(回滚保险, 不去重, 保持旧代码读到的内容与原先完全一致)。
         """
+        # 维护窗口内跳过归档: 宁可这段消息不归档, 也不写进即将被删除/替换的
+        # 旧 inode(否则静默丢失, 见 issue #8)。
+        if self._history_frozen():
+            logger.debug("history 维护中, 跳过归档")
+            return
         dual_write = bool(getattr(self._global_config, "history_dual_write", True))
         if isinstance(event, PrivateMessageEvent):
             file_path = f"{self._data_dir}/history/{bot_id}/private/{event.user_id}.jsonl"
@@ -349,6 +357,34 @@ class MessageHandler:
         if len(window) > self._GROUP_MID_WINDOW:
             window.popitem(last=False)
         return True
+
+    # ── 历史维护屏障 (issue #8) ──────────────────────────────
+
+    def set_history_barrier(self, barrier) -> None:
+        """注入历史维护屏障: 冻结期间跳过归档写入, 并注册 writer 关闭回调。
+
+        热清理/恢复 history 目录时, 旧的 JSONLWriter 仍持有已 unlink 的 inode,
+        继续写入会让消息静默丢失(issue #8 第 1 点)。屏障由 Web 面板在维护
+        前后成对调用, 负责关句柄 + 冻结写入。
+        """
+        self._history_barrier = barrier
+        if barrier is not None:
+            barrier.register_closer(self.close_history_writers)
+
+    async def close_history_writers(self) -> None:
+        """关闭并清空全部 history writer(不删文件), 使下次写入重开新 inode。"""
+        writers = list(self._writer_registry.items())
+        self._writer_registry.clear()
+        for path, writer in writers:
+            try:
+                await writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"关闭 history writer 失败({path}): {exc}")
+        logger.info(f"[History] 已关闭 {len(writers)} 个 history writer")
+
+    def _history_frozen(self) -> bool:
+        barrier = getattr(self, "_history_barrier", None)
+        return bool(barrier is not None and barrier.frozen)
 
     def _get_or_create_writer(self, file_path: str) -> JSONLWriter:
         """Get or create a JSONLWriter for the given path."""
@@ -1409,6 +1445,11 @@ class MessageHandler:
         first_sent = False
         segments_sent = 0
         diagnostic: LLMDiagnostic | None = None
+        # Issue #57: 模型可能把"检查约束/编写回复/字数检查"写成无标签正文。
+        # 这类块只出现在回复开头且被分段逻辑拆成多气泡直发用户, 因此在流式阶段
+        # 一旦识别到开头是自查块, 就停止逐段发送、改为整条累积, 结束时清洗后
+        # 单条发出(降级为非流式, 牺牲极少数异常回复的流式体验换取不泄漏)。
+        reasoning_suppress = False
 
         async for chunk, is_final in self._llm.chat_stream(
             bot_id=bot_id,
@@ -1433,6 +1474,19 @@ class MessageHandler:
                     buffer += chunk
                     full_reply += chunk
 
+            if not reasoning_suppress and not first_sent and buffer:
+                from mohobot.utils.reply_filter import looks_like_unwrapped_reasoning
+                if looks_like_unwrapped_reasoning(buffer):
+                    reasoning_suppress = True
+                    logger.warning(
+                        f"检测到无标签自查/推理块(bot={bot_id}), 该轮降级为单条发送并清洗"
+                    )
+
+            if reasoning_suppress:
+                # 自查块内容既不逐段发送也不进入分段缓冲, 全部留到流结束统一清洗
+                buffer = ""
+                continue
+
             # Flush complete segments from the buffer
             flushed = self._flush_ready_segments(buffer)
             buffer = flushed["rest"]
@@ -1449,6 +1503,22 @@ class MessageHandler:
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
         rest, tts_text = artifact_filter.finish()
         full_reply += rest
+        if reasoning_suppress:
+            # 整条清洗后单条发出; 自查内容不能进 TTS
+            from mohobot.utils.reply_filter import strip_unwrapped_reasoning
+            cleaned = strip_unwrapped_reasoning(full_reply).strip()
+            if cleaned:
+                segments_sent += 1
+                first_sent = await self._send_segment(bot_id, event, cleaned, first_sent)
+            self._submit_tts(bot_id, event, tts_text)
+            logger.debug(
+                f"Streamed reply (reasoning-suppressed) done: "
+                f"{len(full_reply)} -> {len(cleaned)} chars"
+            )
+            if diagnostic is not None:
+                await self._send_segment(bot_id, event, diagnostic, first_sent)
+                return diagnostic
+            return cleaned
         if rest.strip():
             segments_sent += 1
             first_sent = await self._send_segment(bot_id, event, rest, first_sent)
@@ -1567,6 +1637,15 @@ class MessageHandler:
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
         Returns the updated first_sent flag.
         """
+        # OOC 治理: 清理中文回复里突兀的英文话语标记(Well,/Okay so,/As an AI…)。
+        # 放在发送口统一处理, 流式与非流式都覆盖; 开关见 reply.strip_english_fillers。
+        if getattr(self, "_strip_english_fillers", True) and isinstance(seg, str) and seg:
+            from mohobot.utils.reply_filter import strip_english_fillers
+            cleaned = strip_english_fillers(seg)
+            if cleaned != seg:
+                seg = cleaned
+                if not seg.strip():
+                    return first_sent
         seg = seg.strip()
         if not seg:
             return first_sent  # Empty after strip — skip

@@ -33,6 +33,10 @@ class LLMConfig:
     chat_api_key: str = ""
     chat_max_tokens: int = 4096
     chat_temperature: float = 0.7
+    # 重复惩罚(OOC 治理): 抑制复读死循环与模板化套话。0 = 关闭, 推荐 0.1~0.4。
+    # 部分网关/模型不支持这两个参数, 留 0 时不传参(保持旧请求形状)。
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
 
     # 上下文 AI 总结(压缩早期对话, 默认复用 chat 模型)
     summarize_temperature: float = 0.3
@@ -89,6 +93,12 @@ class LLMConfig:
     vision_max_tokens: int = 2048
     vision_temperature: float = 0.3
 
+    # 识图模式:
+    #   describe(默认) = 先调独立视觉模型转述成文本, 主模型只收文本(兼容纯文本主模型)
+    #   direct         = 把图片原始内容随文本一起发给主模型(要求 chat 模型本身支持视觉,
+    #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
+    vision_mode: str = "describe"
+
     # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
     models: list[str] = field(default_factory=lambda: [
         "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -121,6 +131,9 @@ class ReplyConfig:
     segment_delay_min: float = 0.2  # 分段发送随机延迟下限(秒)
     segment_delay_max: float = 0.5  # 分段发送随机延迟上限(秒)
     reply_quote: bool = True       # 是否引用触发回复的那条消息
+    # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话
+    # (Well,/Okay so,/As an AI…)。只清理白名单句首词, 不影响正常英文内容。
+    strip_english_fillers: bool = True
 
 
 @dataclass
@@ -129,6 +142,32 @@ class DatabaseConfig:
     enabled: bool = True
     folder: str = "./data/database"
     file: str = "luotianyi.db"
+
+
+@dataclass
+class NewsConfig:
+    """新闻/动态知识库(REQ-6) — 采集入库 → 管理员审核 → 检索与提示词注入。
+
+    默认关闭(enabled=False), 开启后:
+    - 只有**已审核通过**且未过期的条目会进入 LLM 上下文或工具结果;
+    - 新条目(采集/LLM 提取/人工)一律以 pending 入库, 需 WebUI 管理员通过;
+    - inject_* 控制被动注入, 工具 news_recent/news_search 由模型主动调用。
+    db_path 留空 = <data_dir>/news/news.db。
+    """
+    enabled: bool = False
+    db_path: str = ""
+    inject_enabled: bool = True          # 是否在 system prompt 注入近期动态
+    inject_limit: int = 3                # 注入条数
+    inject_window_days: int = 7          # 只注入最近 N 天发布的
+    inject_header: str = ""              # 留空用内置表头
+    default_ttl_days: float = 14.0       # 条目默认有效期(天), <=0 表示不自动过期
+    tool_enabled: bool = True            # 是否注册 news_recent/news_search 工具
+    # ── B站采集器(默认关闭, 关闭时不发任何网络请求) ──
+    collector_enabled: bool = False
+    collector_uids: list[str] = field(default_factory=list)   # 关注的 B站 UID
+    collector_interval_seconds: float = 1800.0                # 轮询间隔(秒), 最小 300
+    collector_max_items_per_uid: int = 5                      # 单 UID 每轮最多提交条数
+    collector_ttl_days: float = 14.0                          # 采集条目有效期(天)
 
 
 @dataclass
@@ -221,7 +260,40 @@ class TTSConfig:
     cmd_cooldown: int = 120          # 非管理员冷却(秒)
 
 
+@dataclass
+class KnowledgeConfig:
+    """虚拟歌手知识库(RAG) — embedding 语义检索 + 可选 rerank。
+
+    LLM 工具接入(knowledge_search/knowledge_lookup), 与歌曲知识
+    (music_knowledge, 关键词/歌词确定性匹配)互补并存。
+    enabled 开关启动时读取(修改后需重启); 其余字段经
+    KnowledgeService.sync_config 热同步, embedding 模型变更自动重建索引。
+
+    密钥回退链: embedding_api_key → MOHOBOT_EMBEDDING_API_KEY → chat key;
+    rerank_api_key → MOHOBOT_RERANK_API_KEY → embedding key。
+    rerank_model 留空 = 跳过重排(纯 embedding 余弦检索)。
+    """
+    enabled: bool = False
+    source_dir: str = "./data/knowledge_db"      # 知识源(md + index.json)
+    index_dir: str = "./data/knowledge_index"    # 向量索引 SQLite(可整目录删除重建)
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_api_key: str = ""
+    rerank_model: str = ""                       # 如 BAAI/bge-reranker-v2-m3
+    rerank_base_url: str = "https://api.siliconflow.cn/v1"
+    rerank_api_key: str = ""
+    search_top_k: int = 20                       # 余弦召回数(rerank 候选池)
+    search_top_n: int = 5                        # 最终返回给模型的块数
+    max_chars_per_result: int = 800              # 单块注入正文的字符截断
+
+
 # ── Global Config (旧 agent.beta 相关配置已在 dev 分支移除) ────
+
+
+def _normalize_vision_mode(value) -> str:
+    """识图模式归一化: 只接受 describe / direct, 其余(含空)回退 describe。"""
+    mode = str(value or "").strip().lower()
+    return mode if mode in ("describe", "direct") else "describe"
 
 
 def _int_list(value) -> list[int]:
@@ -304,11 +376,14 @@ class GlobalConfig:
     persona_ab: PersonaABConfig = field(default_factory=PersonaABConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     anysearch: AnySearchConfig = field(default_factory=AnySearchConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     ban: BanConfig = field(default_factory=BanConfig)
     # 情感系统(好感度/亲密度/关系阶段/长期记忆; emotion.enabled 开关)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
     # TTS 语音合成(MiniMax t2a_v2 云端 API; 每 bot 开关在 BotConfig.tts_enabled)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    # 虚拟歌手知识库(RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     # 歌曲知识库(识别 + LLM 前注入; song_database/crawler/关键词文件)
     music_knowledge: dict = field(default_factory=dict)
     # 戳一戳全局兜底文案(bot 私有 touch_replies 优先, 都为空时用内置默认)
@@ -361,9 +436,11 @@ class GlobalConfig:
         reply_raw = raw.get("reply", {})
         db_raw = raw.get("database", {})
         anysearch_raw = raw.get("anysearch", {})
+        news_raw = raw.get("news", {})
         ban_raw = raw.get("ban", {})
         emotion_raw = raw.get("emotion", {})
         tts_raw = raw.get("tts", {})
+        knowledge_raw = raw.get("knowledge", {})
 
         # 旧配置迁移: agent.music_knowledge / agent.reflex.touch_replies
         # 曾嵌在已删除的 agent: 段下, 读到旧键时搬到顶层并重写配置文件
@@ -411,6 +488,8 @@ class GlobalConfig:
                 chat_api_key=llm_raw.get("chat_api_key", ""),
                 chat_max_tokens=llm_raw.get("chat_max_tokens", 4096),
                 chat_temperature=llm_raw.get("chat_temperature", 0.7),
+                frequency_penalty=float(llm_raw.get("frequency_penalty", 0.0) or 0.0),
+                presence_penalty=float(llm_raw.get("presence_penalty", 0.0) or 0.0),
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
                 vision_base_url=llm_raw.get("vision_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
                 vision_api_key=llm_raw.get("vision_api_key", ""),
@@ -418,6 +497,7 @@ class GlobalConfig:
                 vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
                 vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
                 vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
+                vision_mode=_normalize_vision_mode(llm_raw.get("vision_mode")),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 emotion_model=str(llm_raw.get("emotion_model", "") or ""),
@@ -448,11 +528,35 @@ class GlobalConfig:
                 segment_delay_min=reply_raw.get("segment_delay_min", 0.2),
                 segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
                 reply_quote=reply_raw.get("reply_quote", True),
+                strip_english_fillers=bool(reply_raw.get("strip_english_fillers", True)),
             ),
             database=DatabaseConfig(
                 enabled=db_raw.get("enabled", True),
                 folder=db_raw.get("folder", "./data/database"),
                 file=db_raw.get("file", "luotianyi.db"),
+            ),
+            news=NewsConfig(
+                enabled=bool(news_raw.get("enabled", False)),
+                db_path=str(news_raw.get("db_path", "") or ""),
+                inject_enabled=bool(news_raw.get("inject_enabled", True)),
+                inject_limit=int(news_raw.get("inject_limit", 3)),
+                inject_window_days=int(news_raw.get("inject_window_days", 7)),
+                inject_header=str(news_raw.get("inject_header", "") or ""),
+                default_ttl_days=float(news_raw.get("default_ttl_days", 14.0)),
+                tool_enabled=bool(news_raw.get("tool_enabled", True)),
+                collector_enabled=bool(news_raw.get("collector_enabled", False)),
+                collector_uids=[
+                    str(u).strip()
+                    for u in (news_raw.get("collector_uids") or [])
+                    if str(u).strip()
+                ],
+                collector_interval_seconds=float(
+                    news_raw.get("collector_interval_seconds", 1800) or 1800
+                ),
+                collector_max_items_per_uid=int(
+                    news_raw.get("collector_max_items_per_uid", 5) or 5
+                ),
+                collector_ttl_days=float(news_raw.get("collector_ttl_days", 14) or 14),
             ),
             anysearch=AnySearchConfig(
                 enabled=anysearch_raw.get("enabled", True),
@@ -506,6 +610,20 @@ class GlobalConfig:
                 cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),
                 cmd_cooldown=max(0, int(tts_raw.get("cmd_cooldown", 120))),
             ),
+            knowledge=KnowledgeConfig(
+                enabled=bool(knowledge_raw.get("enabled", False)),
+                source_dir=str(knowledge_raw.get("source_dir", "./data/knowledge_db") or "./data/knowledge_db"),
+                index_dir=str(knowledge_raw.get("index_dir", "./data/knowledge_index") or "./data/knowledge_index"),
+                embedding_model=str(knowledge_raw.get("embedding_model", "BAAI/bge-m3") or "BAAI/bge-m3"),
+                embedding_base_url=str(knowledge_raw.get("embedding_base_url", "https://api.siliconflow.cn/v1") or ""),
+                embedding_api_key=str(knowledge_raw.get("embedding_api_key", "") or ""),
+                rerank_model=str(knowledge_raw.get("rerank_model", "") or ""),
+                rerank_base_url=str(knowledge_raw.get("rerank_base_url", "https://api.siliconflow.cn/v1") or ""),
+                rerank_api_key=str(knowledge_raw.get("rerank_api_key", "") or ""),
+                search_top_k=max(1, int(knowledge_raw.get("search_top_k", 20))),
+                search_top_n=max(1, int(knowledge_raw.get("search_top_n", 5))),
+                max_chars_per_result=max(100, int(knowledge_raw.get("max_chars_per_result", 800))),
+            ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
@@ -551,12 +669,15 @@ class GlobalConfig:
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
                 "chat_temperature": self.llm.chat_temperature,
+                "frequency_penalty": self.llm.frequency_penalty,
+                "presence_penalty": self.llm.presence_penalty,
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
                 "vision_prompt": self.llm.vision_prompt,
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
+                "vision_mode": self.llm.vision_mode,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,
@@ -585,11 +706,27 @@ class GlobalConfig:
                 "segment_delay_min": self.reply.segment_delay_min,
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
+                "strip_english_fillers": self.reply.strip_english_fillers,
             },
             "database": {
                 "enabled": self.database.enabled,
                 "folder": self.database.folder,
                 "file": self.database.file,
+            },
+            "news": {
+                "enabled": self.news.enabled,
+                "db_path": self.news.db_path,
+                "inject_enabled": self.news.inject_enabled,
+                "inject_limit": self.news.inject_limit,
+                "inject_window_days": self.news.inject_window_days,
+                "inject_header": self.news.inject_header,
+                "default_ttl_days": self.news.default_ttl_days,
+                "tool_enabled": self.news.tool_enabled,
+                "collector_enabled": self.news.collector_enabled,
+                "collector_uids": list(self.news.collector_uids),
+                "collector_interval_seconds": self.news.collector_interval_seconds,
+                "collector_max_items_per_uid": self.news.collector_max_items_per_uid,
+                "collector_ttl_days": self.news.collector_ttl_days,
             },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
@@ -641,6 +778,20 @@ class GlobalConfig:
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+            },
+            "knowledge": {
+                "enabled": self.knowledge.enabled,
+                "source_dir": self.knowledge.source_dir,
+                "index_dir": self.knowledge.index_dir,
+                "embedding_model": self.knowledge.embedding_model,
+                "embedding_base_url": self.knowledge.embedding_base_url,
+                "embedding_api_key": self.knowledge.embedding_api_key,
+                "rerank_model": self.knowledge.rerank_model,
+                "rerank_base_url": self.knowledge.rerank_base_url,
+                "rerank_api_key": self.knowledge.rerank_api_key,
+                "search_top_k": self.knowledge.search_top_k,
+                "search_top_n": self.knowledge.search_top_n,
+                "max_chars_per_result": self.knowledge.max_chars_per_result,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
@@ -680,12 +831,15 @@ class GlobalConfig:
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
                 "chat_temperature": self.llm.chat_temperature,
+                "frequency_penalty": self.llm.frequency_penalty,
+                "presence_penalty": self.llm.presence_penalty,
                 "vision_model": self.llm.vision_model,
                 "vision_base_url": self.llm.vision_base_url,
                 "vision_api_key": self.llm.vision_api_key,
                 "vision_prompt": self.llm.vision_prompt,
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
+                "vision_mode": self.llm.vision_mode,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,
@@ -714,11 +868,27 @@ class GlobalConfig:
                 "segment_delay_min": self.reply.segment_delay_min,
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
+                "strip_english_fillers": self.reply.strip_english_fillers,
             },
             "database": {
                 "enabled": self.database.enabled,
                 "folder": self.database.folder,
                 "file": self.database.file,
+            },
+            "news": {
+                "enabled": self.news.enabled,
+                "db_path": self.news.db_path,
+                "inject_enabled": self.news.inject_enabled,
+                "inject_limit": self.news.inject_limit,
+                "inject_window_days": self.news.inject_window_days,
+                "inject_header": self.news.inject_header,
+                "default_ttl_days": self.news.default_ttl_days,
+                "tool_enabled": self.news.tool_enabled,
+                "collector_enabled": self.news.collector_enabled,
+                "collector_uids": list(self.news.collector_uids),
+                "collector_interval_seconds": self.news.collector_interval_seconds,
+                "collector_max_items_per_uid": self.news.collector_max_items_per_uid,
+                "collector_ttl_days": self.news.collector_ttl_days,
             },
             "anysearch": {
                 "enabled": self.anysearch.enabled,
@@ -770,6 +940,20 @@ class GlobalConfig:
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+            },
+            "knowledge": {
+                "enabled": self.knowledge.enabled,
+                "source_dir": self.knowledge.source_dir,
+                "index_dir": self.knowledge.index_dir,
+                "embedding_model": self.knowledge.embedding_model,
+                "embedding_base_url": self.knowledge.embedding_base_url,
+                "embedding_api_key": self.knowledge.embedding_api_key,
+                "rerank_model": self.knowledge.rerank_model,
+                "rerank_base_url": self.knowledge.rerank_base_url,
+                "rerank_api_key": self.knowledge.rerank_api_key,
+                "search_top_k": self.knowledge.search_top_k,
+                "search_top_n": self.knowledge.search_top_n,
+                "max_chars_per_result": self.knowledge.max_chars_per_result,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
