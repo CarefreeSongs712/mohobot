@@ -49,6 +49,23 @@ async def _next_payload(inst, after: int, tries: int = 80) -> dict:
     raise AssertionError("payload 未送达")
 
 
+async def _wait_history_lines(tmp: Path, chat_type: str, chat_id: str,
+                             count: int = 1, timeout: float = 3.0) -> list[dict]:
+    """等后台归档任务落盘(替代固定 sleep)。
+
+    发送归档由 `_spawn_archive_task` 派发: 它需等 echo future resolve 后才写文件。
+    慢机器/高负载下 50ms 不够, 固定 sleep 会造成偶发 [] 断言(CI 上表现为
+    test_archive_on_echo 随机失败)。这里轮询到满足条数为止。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        lines = _history_lines(tmp, chat_type, chat_id)
+        if len(lines) >= count or loop.time() >= deadline:
+            return lines
+        await asyncio.sleep(0.02)
+
+
 def _history_lines(tmp: Path, chat_type: str, chat_id: str) -> list[dict]:
     # 群聊已改为合并布局(history/group/{群号}.jsonl); 私聊仍按 bot 分目录
     if chat_type == "group":
@@ -81,8 +98,7 @@ async def test_archive_on_echo():
             await ws.send_group_msg("bot_001", 20002,
                                     [{"type": "text", "data": {"text": "大家好"}}])
             await task
-            await asyncio.sleep(0.05)
-            lines = _history_lines(tmp, "group", "20002")
+            lines = await _wait_history_lines(tmp, "group", "20002")
             assert len(lines) == 1, lines
             ev = lines[0]
             assert ev["post_type"] == "message_sent" and ev["message_type"] == "group"
@@ -107,8 +123,7 @@ async def test_archive_source_llm():
             task = asyncio.create_task(_deliver(bm, inst, 0, 556))
             await ws.send_group_msg("bot_001", 20002, "这是 LLM 的回复", source="llm")
             await task
-            await asyncio.sleep(0.05)
-            lines = _history_lines(tmp, "group", "20002")
+            lines = await _wait_history_lines(tmp, "group", "20002")
             assert len(lines) == 1 and lines[0]["source"] == "llm"
             print("[1b] source=llm 归档 OK")
         finally:
@@ -129,8 +144,7 @@ async def test_send_to_bot_message_action():
             )
             await task
             assert resp is not None and resp["data"]["message_id"] == 777
-            await asyncio.sleep(0.05)
-            lines = _history_lines(tmp, "private", "10001")
+            lines = await _wait_history_lines(tmp, "private", "10001")
             assert len(lines) == 1 and lines[0]["message_id"] == "777"
             assert lines[0]["message"][0]["data"]["text"] == "私聊回复"
             print("[2] send_to_bot 发送类 action 归档 + 响应语义 OK")
@@ -149,8 +163,7 @@ async def test_sanitize_base64_and_forward():
             await ws.send_private_msg("bot_001", 10001,
                                       [{"type": "image", "data": {"file": f"base64://{b64}"}}])
             await task
-            await asyncio.sleep(0.05)
-            lines = _history_lines(tmp, "private", "10001")
+            lines = await _wait_history_lines(tmp, "private", "10001")
             assert len(lines) == 1
             raw = json.dumps(lines[0], ensure_ascii=False)
             assert b64 not in raw, "base64 大字段不得写入 history"
@@ -166,8 +179,7 @@ async def test_sanitize_base64_and_forward():
                                           "content": [{"type": "text", "data": {"text": "乙的回复"}}]}},
             ])
             await task2
-            await asyncio.sleep(0.05)
-            lines2 = _history_lines(tmp, "group", "20002")
+            lines2 = await _wait_history_lines(tmp, "group", "20002")
             assert len(lines2) == 1 and lines2[0]["message_id"] == "889", lines2
             text = lines2[0]["message"][0]["data"]["text"]
             assert text.startswith("【合并转发】") and "天依: 甲的回复" in text
@@ -186,7 +198,7 @@ async def test_no_archive_on_failure():
             task = asyncio.create_task(_deliver(bm, inst, 0, None, retcode=1200))
             await ws.send_group_msg("bot_001", 20002, "不会发出去")
             await task
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.3)  # 给入库路径充分时间: 若错误归档, 这里能抓到
             assert _history_lines(tmp, "group", "20002") == []
             print("[4] 发送失败不归档 OK")
         finally:
@@ -200,8 +212,7 @@ async def test_local_id_on_echo_lost():
         ws, bm, inst = await _make_ws(tmp, echo_timeout=0.15)
         try:
             await ws.send_group_msg("bot_001", 20002, "echo 丢失的回复")
-            await asyncio.sleep(0.4)  # 等 0.15s 超时 + 归档任务完成
-            lines = _history_lines(tmp, "group", "20002")
+            lines = await _wait_history_lines(tmp, "group", "20002", timeout=5.0)
             assert len(lines) == 1
             assert lines[0]["message_id"].startswith("local:")
             assert lines[0]["message"][0]["data"]["text"] == "echo 丢失的回复"
