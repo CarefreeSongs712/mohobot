@@ -73,8 +73,7 @@
 1. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。（唯一未决项）
 
 **2026-10-23 维护者已定取舍**（详细见 [TODO §2.9](../TODO.md)）：
-- **REQ-9**：~~history 双写 flush 策略~~ → 已决（2026-10-23）：删除双写、群聊单写；flush 批量暂不启用；
-- **history 双写已删除**（2026-10-23）：群聊只写合并布局，旧 per-bot 布局停止写入（review 读侧兼容存量）；flush 批量仍暂不启用；
+- **REQ-9 / history 双写**：已决（2026-10-23）——删除旧 per-bot 双写，群聊只写合并布局（review 读侧仅兼容存量旧文件）；flush 批量暂不启用；
 - **CI legacy runner**：PR 阶段不再跑，仅 `push main` 时运行（pytest 为超集）；
 - 发布/部署体验（Docker、Windows 安装器、对外部署文档）：**不做**（个人自用）；
 - 安全基础加固（登录锁 DoS、失败限流、计时枚举、PBKDF2 等）：**可修可不修**，不阻塞发布，按需排期；
