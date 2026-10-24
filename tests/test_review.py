@@ -595,6 +595,71 @@ def test_store_delete_abnormal_reverts_status():
         store.close()
 
 
+def test_store_delete_abnormal_mark_normal():
+    """删除并标正常: 记录删除, 异常结论改判 normal(不回到待审), 缓存计数同步; 陈旧记录补判 normal。"""
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "review.db")
+        sk = "bot_001/private/10001"
+        store.judge(sk, ["mid:A"], "abnormal", "alice")
+        store.statuses_by_session()  # 先建缓存, 验证增量补丁
+        rid = store.add_abnormal(sk, "mid:A", "10001", "李四", "误判内容", "M-A",
+                                 ["辱骂"], "", "alice")
+
+        rec = store.delete_abnormal(rid, "bob", mark_normal=True)
+        assert rec and rec["fingerprint"] == "mid:A"
+        assert store.get_abnormal(rid) is None
+        # 本地写入必须增量补丁缓存(补丁同时刷新 db 戳记, 读取不会重建 → 漏补丁即读到旧值)
+        assert store._statuses_cache[sk]["mid:A"]["status"] == "normal"
+        assert store._counts_cache[sk] == (1, 0)
+        st = store.statuses_by_session()[sk]["mid:A"]
+        assert st["status"] == "normal" and st["reviewer"] == "bob"
+        assert store.counts_by_session()[sk] == (1, 0)
+        logs = store.recent_log(10)
+        assert any(l["action"] == "rejudge" and l["fingerprint"] == "mid:A" for l in logs)
+        assert any(l["action"] == "abnormal_delete" and "改判正常" in l["detail"] for l in logs)
+
+        # 另一个连接从库里重建, 看到的也是 normal
+        other = ReviewStore(Path(td) / "review.db")
+        assert other.statuses_by_session()[sk]["mid:A"]["status"] == "normal"
+        other.close()
+
+        # 陈旧记录(结论已被撤销 → 未审核): 补判 normal
+        rid2 = store.add_abnormal(sk, "mid:B", "10001", "李四", "旧", "M-B", [], "", "alice")
+        assert store.delete_abnormal(rid2, "bob", mark_normal=True) is not None
+        assert store.statuses_by_session()[sk]["mid:B"]["status"] == "normal"
+        assert store.counts_by_session()[sk] == (2, 0)
+        store.close()
+
+
+def test_store_delete_all_abnormal_mark_normal():
+    """批量删除并标正常: 按过滤删除; 异常改判 normal, 已 normal 不重复写; 同消息多条记录只判一次。"""
+    with tempfile.TemporaryDirectory() as td:
+        store = ReviewStore(Path(td) / "review.db")
+        sk1, sk2 = "bot_001/private/10001", "bot_002/private/20002"
+        store.judge(sk1, ["mid:A"], "abnormal", "alice")
+        store.judge(sk1, ["mid:B"], "normal", "alice")
+        store.judge(sk2, ["mid:C"], "abnormal", "alice")
+        store.statuses_by_session()
+        store.add_abnormal(sk1, "mid:A", "1", "张三", "A", "M-A", ["辱骂"], "", "alice")
+        store.add_abnormal(sk1, "mid:A", "1", "张三", "A", "M-A", ["其他"], "", "alice")
+        store.add_abnormal(sk1, "mid:B", "1", "张三", "B", "M-B", ["其他"], "", "alice")
+        store.add_abnormal(sk2, "mid:C", "1", "李四", "C", "M-C", ["辱骂"], "", "alice")
+
+        assert store.delete_all_abnormal(bot="bot_001", reviewer="admin", mark_normal=True) == 3
+        assert store.list_abnormal(bot="bot_001") == []
+        assert store._statuses_cache[sk1]["mid:A"]["status"] == "normal", "批量也要增量补丁缓存"
+        assert store._counts_cache[sk1] == (2, 0)
+        sts = store.statuses_by_session()
+        assert sts[sk1]["mid:A"]["status"] == "normal"
+        assert sts[sk1]["mid:B"]["reviewer"] == "alice", "已是 normal 的不应被改写"
+        assert store.counts_by_session()[sk1] == (2, 0)
+        assert sts[sk2]["mid:C"]["status"] == "abnormal", "过滤范围外不受影响"
+        assert sum(1 for l in store.recent_log(50)
+                   if l["action"] in ("judge", "rejudge") and l["fingerprint"] == "mid:A"
+                   and l["reviewer"] == "admin") == 1, "同一消息两条记录只改判一次"
+        store.close()
+
+
 def test_store_delete_all_abnormal():
     """批量删除: 按 bot/标签过滤; 异常结论撤销, normal 结论保留; 留痕一条。"""
     with tempfile.TemporaryDirectory() as td:
@@ -759,6 +824,28 @@ def _assert_full_flow(client, store) -> None:
         assert detail3["unreviewed"] == 1, "被撤销结论的消息应回到未审核"
         assert client.delete(f"/api/abnormal/{rid}", headers=_auth(tok)).status_code == 404
         assert client.delete(f"/api/abnormal/{rid}").status_code == 401
+
+        # 删除并标正常(单条): 该消息改判 normal, 不回到待审
+        client.post("/api/review", headers=_auth(tok_bob),
+                    json={"session_key": sk, "action": "abnormal",
+                          "fingerprints": [fp], "tags": ["辱骂"], "note": "误判"})
+        rid_n = client.get("/api/abnormal", headers=_auth(tok)).json()["records"][0]["id"]
+        r = client.delete(f"/api/abnormal/{rid_n}?mark_normal=true", headers=_auth(tok))
+        assert r.status_code == 200 and r.json()["mark_normal"] is True
+        assert client.get("/api/abnormal", headers=_auth(tok)).json()["records"] == []
+        d_n = client.get("/api/session/" + sk, headers=_auth(tok)).json()
+        assert d_n["unreviewed"] == 0 and d_n["abnormal_count"] == 0
+        e_n = next(x for x in d_n["entries"] if x["fingerprint"] == fp)
+        assert e_n["status"] == "normal" and e_n["reviewer"] == "admin"
+        # 删除并标正常(批量, 按标签过滤)
+        client.post("/api/review", headers=_auth(tok_bob),
+                    json={"session_key": sk, "action": "abnormal",
+                          "fingerprints": [fp], "tags": ["其他"], "note": ""})
+        r = client.delete("/api/abnormal?tag=其他&mark_normal=true", headers=_auth(tok)).json()
+        assert r["deleted"] == 1 and r["mark_normal"] is True
+        d_b = client.get("/api/session/" + sk, headers=_auth(tok)).json()
+        assert d_b["unreviewed"] == 0 and d_b["abnormal_count"] == 0
+
         # 重新标记异常(保持后续断言/统计口径不变)
         client.post("/api/review", headers=_auth(tok_bob),
                     json={"session_key": sk, "action": "abnormal",

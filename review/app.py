@@ -399,34 +399,41 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         return {"ok": True}
 
     @app.delete("/api/abnormal/{record_id}")
-    async def abnormal_delete(request: Request, record_id: int):
-        """删除异常记录 —— 该消息的审核结论同时撤销(回到未审核)。"""
+    async def abnormal_delete(request: Request, record_id: int, mark_normal: bool = False):
+        """删除异常记录 —— 该消息的审核结论同时撤销(回到未审核)。
+
+        mark_normal=true: 改为把该消息判为「正常」(误判纠正, 不再回到待审)。
+        """
         user = _auth(request)
-        rec = await asyncio.to_thread(store.delete_abnormal, record_id, user)
+        rec = await asyncio.to_thread(store.delete_abnormal, record_id, user, mark_normal)
         if rec is None:
             raise HTTPException(status_code=404, detail="记录不存在")
         logger.info(
             f"[review] {user}: 删除异常记录 #{record_id} "
-            f"({rec['session_key']}) → 该消息回到未审核"
+            f"({rec['session_key']}) → "
+            + ("该消息改判正常" if mark_normal else "该消息回到未审核")
         )
-        return {"ok": True, "id": record_id}
+        return {"ok": True, "id": record_id, "mark_normal": mark_normal}
 
     @app.delete("/api/abnormal")
-    async def abnormal_delete_all(request: Request, bot: str = "", tag: str = ""):
+    async def abnormal_delete_all(request: Request, bot: str = "", tag: str = "",
+                                  mark_normal: bool = False):
         """批量删除异常记录(可按 bot 前缀/标签过滤)。
 
         对应消息当前结论为「异常」的一并撤销(回到未审核);
         已是 normal 的陈旧记录只删记录、不动结论。
+        mark_normal=true: 对应消息改判为「正常」。
         """
         user = _auth(request)
         deleted = await asyncio.to_thread(
-            store.delete_all_abnormal, bot, tag, user,
+            store.delete_all_abnormal, bot, tag, user, mark_normal,
         )
         logger.info(
             f"[review] {user}: 批量删除异常记录 {deleted} 条 "
             f"(bot={bot or '全部'}, tag={tag or '全部'})"
+            + (" → 改判正常" if mark_normal else "")
         )
-        return {"ok": True, "deleted": deleted}
+        return {"ok": True, "deleted": deleted, "mark_normal": mark_normal}
 
     @app.get("/api/export")
     async def export(request: Request, bot: str = "", tag: str = ""):
