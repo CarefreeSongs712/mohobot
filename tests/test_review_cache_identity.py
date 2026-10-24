@@ -88,6 +88,80 @@ def test_partial_line_not_consumed_until_complete():
         assert texts == ["完整一行", "半行消息"], f"补齐后应解析出半行消息, 实际: {texts}"
 
 
+def test_incremental_read_after_multibyte_append():
+    """含中文的文件追加后增量读取: offset 必须是字节偏移。
+
+    生产事故: 字符下标当 offset 用, 中文文件追加后 seek 到 UTF-8 字符中间,
+    UnicodeDecodeError 让会话列表/bootstrap 全部 500, AI 审核整轮空跑。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        hist = tmp_path / "history" / "bot_001" / "private" / "10001.jsonl"
+        _write_private(hist, [_user_msg(1, "第一条中文消息"), _bot_msg(101, "中文回复")])
+        data = MohobotData(tmp_path)
+        sk = session_key("bot_001", "private", "10001")
+        data.list_sessions(force=True)
+
+        for i, text in enumerate(["追加的第二条", "第三条：表情😀与标点"], start=2):
+            with open(hist, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_user_msg(i, text), ensure_ascii=False) + "\n")
+            data.list_sessions(force=True)
+
+        idx = data._file_cache[str(hist)]
+        assert idx.offset == hist.stat().st_size, (idx.offset, hist.stat().st_size)
+        texts = [r["text"] for r in data.load_entries(sk) if r["kind"] == "user"]
+        assert texts == ["第一条中文消息", "追加的第二条", "第三条：表情😀与标点"], texts
+
+
+def test_partial_line_split_inside_multibyte_char():
+    """半行恰好断在多字节字符中间: 不得报错, 补齐后整行解析。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        hist = tmp_path / "history" / "bot_001" / "private" / "10001.jsonl"
+        hist.parent.mkdir(parents=True, exist_ok=True)
+        full = (json.dumps(_user_msg(1, "完整一行"), ensure_ascii=False) + "\n").encode("utf-8")
+        partial = (json.dumps(_user_msg(2, "断在汉字中间"), ensure_ascii=False) + "\n").encode("utf-8")
+        cut = partial.index("汉".encode("utf-8")) + 1  # 汉字 3 字节中的第 1 个之后
+        hist.write_bytes(full + partial[:cut])
+
+        data = MohobotData(tmp_path)
+        sk = session_key("bot_001", "private", "10001")
+        data.list_sessions(force=True)
+        assert [r["text"] for r in data.load_entries(sk) if r["kind"] == "user"] == ["完整一行"]
+
+        with open(hist, "ab") as fh:
+            fh.write(partial[cut:])
+        texts = [r["text"] for r in data.load_entries(sk) if r["kind"] == "user"]
+        assert texts == ["完整一行", "断在汉字中间"], texts
+
+
+def test_stale_char_offset_cache_is_discarded():
+    """v7 sidecar 里的字符偏移必须作废, 不能拿来 seek。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        hist = tmp_path / "history" / "bot_001" / "private" / "10001.jsonl"
+        _write_private(hist, [_user_msg(1, "缓存里的中文")])
+        cache = tmp_path / "loader_cache.json"
+        st = hist.stat()
+        char_offset = len(hist.read_text(encoding="utf-8"))
+        assert char_offset != st.st_size
+        cache.write_text(json.dumps({"version": 7, "files": {
+            "history/bot_001/private/10001.jsonl": {
+                "mtime": 0, "size": 0, "offset": char_offset, "inode": int(st.st_ino),
+                "rows": [], "bot_mids": [],
+            },
+        }}), encoding="utf-8")
+        with open(hist, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_user_msg(2, "重启后追加"), ensure_ascii=False) + "\n")
+
+        data = MohobotData(tmp_path, cache_path=cache)
+        data.list_sessions(force=True)
+        sk = session_key("bot_001", "private", "10001")
+        texts = [r["text"] for r in data.load_entries(sk) if r["kind"] == "user"]
+        data.flush_cache()  # 等后台 sidecar 保存线程结束, 否则 tempdir 清理时目录非空
+        assert texts == ["缓存里的中文", "重启后追加"], texts
+
+
 def test_unreviewed_counts_uses_current_messages():
     """待审数必须基于当前文件消息, 而不是 total 相减(恢复短备份场景)。"""
     with tempfile.TemporaryDirectory() as td:
