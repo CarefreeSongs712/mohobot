@@ -628,6 +628,8 @@ def test_store_delete_abnormal_mark_normal():
         assert store.delete_abnormal(rid2, "bob", mark_normal=True) is not None
         assert store.statuses_by_session()[sk]["mid:B"]["status"] == "normal"
         assert store.counts_by_session()[sk] == (2, 0)
+        # N4: 无结论的补判记 judge(区别于 abnormal→normal 的 rejudge)
+        assert any(l["action"] == "judge" and l["fingerprint"] == "mid:B" for l in store.recent_log(20))
         store.close()
 
 
