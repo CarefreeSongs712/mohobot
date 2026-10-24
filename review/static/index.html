@@ -230,6 +230,7 @@ table.data th{color:var(--dim); font-weight:600; position:sticky; top:0; backgro
         <select id="abTag" style="width:140px"><option value="">全部标签</option></select>
         <span class="spacer" style="flex:1"></span>
         <button id="abExport">⬇ 导出 CSV</button>
+        <button id="abNormalAll" style="color:var(--ok)">✓ 全部删除并标正常</button>
         <button id="abDeleteAll" style="color:var(--bad)">🗑 删除全部</button>
         <button class="ghost" id="abRefresh">⟳ 刷新</button>
       </div>
@@ -771,9 +772,19 @@ async function loadAbnormal(){
     <td class="content-cell">${esc(r.note)}</td>
     <td>${esc(r.reviewer)}</td>
     <td style="white-space:nowrap"><button class="ghost" data-edit="${r.id}">编辑</button>
+      <button class="ghost" data-norm="${r.id}" style="color:var(--ok)" title="删除记录, 并把该消息改判为正常">删除并标正常</button>
       <button class="ghost" data-del="${r.id}" style="color:var(--bad)">删除</button></td>
   </tr>`).join('')}</tbody></table>`;
   el.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditModal(parseInt(b.dataset.edit)));
+  el.querySelectorAll('[data-norm]').forEach(b=>b.onclick=async()=>{
+    const id=parseInt(b.dataset.norm);
+    if(!confirm(`删除异常记录 #${id}，并把该消息改判为「正常」？`)) return;
+    try{
+      await api('/api/abnormal/'+id+'?mark_normal=true',{method:'DELETE'});
+      toast('已删除, 该消息已标为正常');
+      loadAbnormal();
+    }catch(e){ toast(e.message) }
+  });
   el.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{
     const id=parseInt(b.dataset.del);
     if(!confirm(`删除异常记录 #${id}？\n\n该消息的审核结论会一并撤销(回到未审核)。`)) return;
@@ -795,6 +806,18 @@ $('abDeleteAll').onclick = async ()=>{
     const q = new URLSearchParams({bot:$('abBot').value, tag:$('abTag').value});
     const d = await api('/api/abnormal?'+q, {method:'DELETE'});
     toast(`已删除 ${d.deleted} 条异常记录`);
+    loadAbnormal();
+  }catch(e){ toast(e.message) }
+};
+$('abNormalAll').onclick = async ()=>{
+  const n = abLastRecords.length;
+  if(!n){ toast('当前筛选下没有异常记录'); return }
+  const scope = `${$('abBot').value||'全部 Bot'} / ${$('abTag').value||'全部标签'}`;
+  if(!confirm(`确认删除 ${scope} 下的 ${n} 条异常记录，并把对应消息全部改判为「正常」？`)) return;
+  try{
+    const q = new URLSearchParams({bot:$('abBot').value, tag:$('abTag').value, mark_normal:'true'});
+    const d = await api('/api/abnormal?'+q, {method:'DELETE'});
+    toast(`已删除 ${d.deleted} 条异常记录, 对应消息已标为正常`);
     loadAbnormal();
   }catch(e){ toast(e.message) }
 };

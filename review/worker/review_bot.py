@@ -3,7 +3,10 @@
 - 结论三态: 正常 / 异常 / 存疑, 按「待审#N」逐条判定; 单条存疑只跳过该条, 其余消息照常标掉。
   整页无逐条结论时回退旧格式(整页一个结论)。置信度低于 min_conf、异常缺合法标签、LLM 彻底失败 -> 保持未审。
 - 只审用户消息; bot 回复只作上下文, 采纳时一并标为正常(整页只有 bot 待审时直接标正常)。
+- 超过 force_after_hours(默认 72h)的待审消息不允许存疑: 提示词标「必须判决」, 不受 min_conf 限制;
+  仍回存疑/缺结论/异常无合法标签时单独追问一次(只许正常/异常), 再不行按宽松标准兜底判正常。
 - 常驻模式: 跑完一轮后睡到下一个 run_at 时刻(默认 09:00)再醒; 每轮重新登录; 连续存疑/失败超过 max_attempts 次不再重试。
+- 生产环境用 systemd timer 每天 05:00 / 17:00(北京时间)各跑一次 --once。
 
 用法:
   python review_bot.py                 # 常驻, 按 llm.json 每天 run_at 跑一轮
@@ -15,7 +18,8 @@
 llm.json 示例:
   {"server": "http://103.236.70.18:9091", "user": "lingyu", "password": "...",
    "llm_base": "https://api.openai.com/v1", "llm_key": "sk-...", "llm_model": "gpt-4o-mini",
-   "min_conf": 0.7, "run_at": "09:00", "max_attempts": 3, "log_path": "review_log.jsonl"}
+   "min_conf": 0.7, "run_at": "09:00", "max_attempts": 3, "log_path": "review_log.jsonl",
+   "force_after_hours": 72}
 """
 import argparse, getpass, json, os, re, subprocess, sys, time
 from collections import Counter
@@ -30,6 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PARALLEL, RETRIES = int(CFG.get("parallel", 5)), 3
 MIN_CONF = float(CFG.get("min_conf", 0.7))
 MAX_ATTEMPTS = int(CFG.get("max_attempts", 3))
+FORCE_AFTER = float(CFG.get("force_after_hours", 72)) * 3600
 RUN_AT = CFG.get("run_at") or "09:00"
 LOG_PATH = CFG.get("log_path") or "review_log.jsonl"
 if not os.path.isabs(LOG_PATH): LOG_PATH = os.path.join(HERE, LOG_PATH)
@@ -40,8 +45,11 @@ PROMPT = CFG.get("prompt") or (
     "- 歌词、诗词、影视台词、小说/段子引用等创作或引用类内容, 即使涉及色情、暴力等也忽略, 不算异常。\n"
     "- 日常玩笑、口头禅、轻微粗口、擦边但不露骨的内容都算正常; 只有明确且严重的违规才判异常。\n"
     "- 用户只发了图片却没有描述时, 不要因此判存疑, 忽略图片、只按文字内容判断。\n"
+    "- 广告、推广、引流、拉群、群邀请、二维码、外部链接、卡片/小程序分享等都不需要审核, 一律判正常,\n"
+    "  不要判异常, 也不要判存疑; 卡片或链接看不到具体内容时同样直接判正常。\n"
+    "  只有广告内容本身明确涉及色情、政治等其它违规时, 才按那项违规判断。\n"
     "- 拿不准时必须选「存疑」, 不要硬猜。常见存疑情形: 上下文不足只看得到半句话、内容明显被截断、\n"
-    "  无法确认是引用还是本人言论、广告或引流信息不完整、同一段话反复刷屏但意图不明、需要事实核查的断言。\n"
+    "  无法确认是引用还是本人言论、同一段话反复刷屏但意图不明、需要事实核查的断言。\n"
     "每条「待审#N」消息单独判定, 逐条输出一行结论(行首带同样的序号), 三选一, 字段用竖线分隔:\n"
     "  #3 结论: 正常 | 简述这条内容 | 置信度: 你对判定的把握\n"
     "  #5 结论: 异常 | 标签(只能取自 {tags}, 多个用 / 分隔) | 简述违规理由 | 置信度: 你对判定的把握\n"
@@ -49,7 +57,15 @@ PROMPT = CFG.get("prompt") or (
     "每条待审消息必须恰好有一行结论, 不许合并、不许遗漏; 存疑只针对单条消息, 其余消息照常给出判定。\n"
     "全部结论输出完后, 最后一行写「总结: ...」简要概括这段对话。\n"
     "置信度写 0~1 的小数, 如实反映把握程度, 不要一律给高分; 低于 0.7 的会被自动跳过转人工。\n"
-    "每条结论都要用自己的话具体说明看到了什么, 不许只写「无」「正常」「无异常」这类空话。")
+    "每条结论都要用自己的话具体说明看到了什么, 不许只写「无」「正常」「无异常」这类空话。\n"
+    "标注「必须判决」的待审消息已积压过久, 不允许「存疑」, 只能在正常/异常中二选一;\n"
+    "拿不准时按上面的宽松标准倾向正常, 仅明确违规才判异常。")
+FORCE_PROMPT = (
+    "下面这些待审消息已积压过久, 必须给出最终结论, 不允许「存疑」, 只能在正常/异常中二选一。\n"
+    "拿不准时按宽松标准判正常, 仅明确违规才判异常。格式与之前相同, 逐条一行:\n"
+    "  #N 结论: 正常 | 简述 | 置信度: 0~1\n"
+    "  #N 结论: 异常 | 标签(只能取自 {tags}) | 理由 | 置信度: 0~1\n"
+    "需要重判的序号: {idx}")
 VERDICT_RE = re.compile(r"(?:#\s*(\d+)|(\d+)\s*[.、)])?\s*结论\s*[:：]\s*(正常|异常|存疑)(.*)")
 CONF_RE = re.compile(r"置信度\s*[:：]?\s*(\d+(?:\.\d+)?%?)")
 TOKEN = ""
@@ -91,7 +107,21 @@ def api(method, path, body=None):
 def is_bot(e): return e.get("kind") == "assistant"
 
 
-def build_llm_req(s, tags):
+def forced_indices(s, now=None):
+    """本页待审用户消息中超过 FORCE_AFTER 的序号集合(与「待审#N」编号一致)。"""
+    now = time.time() if now is None else now
+    out, seq = set(), 0
+    for e in s["entries"]:
+        if e.get("kind") == "summary" or is_bot(e) or e.get("status") != "unreviewed":
+            continue
+        seq += 1
+        ts = float(e.get("timestamp") or 0)
+        if FORCE_AFTER > 0 and ts > 0 and now - ts > FORCE_AFTER:
+            out.add(seq)
+    return out
+
+
+def build_llm_req(s, tags, forced=frozenset()):
     lines, seq = [], 0
     for e in s["entries"]:
         if e.get("kind") == "summary":
@@ -102,7 +132,7 @@ def build_llm_req(s, tags):
             who = e.get("speaker") or e.get("role") or ""
             if e.get("status") == "unreviewed":
                 seq += 1
-                mark = f" (待审#{seq})"
+                mark = f" (待审#{seq}, 必须判决)" if seq in forced else f" (待审#{seq})"
             else:
                 mark = " (已判异常)" if e.get("status") == "abnormal" else ""
         vlm = f" [图片描述: {e['vlm']}]" if e.get("vlm") else ""
@@ -158,10 +188,15 @@ def parse_verdicts(text, tags):
     return per, all_v
 
 
-def decide(v):
-    """按规则把 LLM 结论落成最终动作: 异常缺合法标签 / 无置信度 / 置信度不足 -> 跳过保持未审。"""
+def decide(v, forced=False):
+    """按规则把 LLM 结论落成最终动作: 异常缺合法标签 / 无置信度 / 置信度不足 -> 跳过保持未审。
+
+    forced(积压超时)只要求给出正常或带合法标签的异常, 不看置信度。
+    """
     if v["action"] == "abnormal" and not v["tags"]:
         return dict(v, action="skip", note=f"异常但未给出合法标签「{v['label']}」, 待人工复查")
+    if forced:
+        return v
     if v["conf"] is None:
         return dict(v, action="skip", note="未给置信度, 待人工复查")
     if v["action"] != "skip" and v["conf"] < MIN_CONF:
@@ -173,9 +208,9 @@ def conf_str(v):
     return f"conf={v['conf']:.2f}" if v["conf"] is not None else "conf=?"
 
 
-def ask_llm(s, tags):
-    """调 LLM, 失败(网络/429/5xx/没给结论)自动重试 RETRIES 次。返回 (text, verdict, err)。"""
-    req, err = build_llm_req(s, tags), ""
+def _post_llm(req):
+    """单次请求(含 RETRIES 重试)。返回 (text, err)。"""
+    err = ""
     for i in range(RETRIES + 1):
         if i: time.sleep(2 ** (i - 1))
         code, js = curl("POST", llm_url(), req, CFG["llm_key"])
@@ -184,13 +219,63 @@ def ask_llm(s, tags):
             if 400 <= code < 500 and code != 429: break  # 参数/鉴权错误, 重试无意义
             continue
         text = ((js.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        per, all_v = parse_verdicts(text, tags)
-        if per:
-            return text, {"per": {i: decide(v) for i, v in per.items()}, "all": None}, ""
-        if all_v:
-            return text, {"per": None, "all": decide(all_v)}, ""
+        if VERDICT_RE.search(text):
+            return text, ""
         err = "回复里没有「结论:」行"
-    return "", None, f"{err} (已尝试 {i + 1} 次)"
+    return "", f"{err} (已尝试 {i + 1} 次)"
+
+
+def force_verdicts(req, text, per, forced, tags):
+    """积压超时条目: 未给出有效判决的追问一次; 仍不行按宽松标准兜底判正常。
+
+    原地更新 per, 返回追问回复文本(没追问为空)。
+    """
+    pending = sorted(i for i in forced if per.get(i, {}).get("action", "skip") == "skip")
+    follow = ""
+    if pending:
+        req2 = dict(req, messages=req["messages"] + [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": FORCE_PROMPT.replace("{tags}", "/".join(tags))
+                .replace("{idx}", " ".join(f"#{i}" for i in pending))},
+        ])
+        follow, _ = _post_llm(req2)
+        again, _ = parse_verdicts(follow, tags) if follow else ({}, None)
+        for i in pending:
+            v = again.get(i)
+            v = decide(v, forced=True) if v else None
+            if v and v["action"] != "skip":
+                per[i] = dict(v, note="[追问] " + v["note"])
+            else:
+                prev = (per.get(i) or {}).get("note") or "未给结论"
+                per[i] = {"action": "normal", "tags": [], "conf": None, "label": "", "fallback": True,
+                          "note": f"[兜底] 积压超 {FORCE_AFTER / 3600:.0f}h 仍无法判决, 按宽松标准判正常: {prev}"}
+    for i in forced:
+        if i in per:
+            per[i]["forced"] = True
+    return follow
+
+
+def ask_llm(s, tags):
+    """调 LLM, 失败(网络/429/5xx/没给结论)自动重试 RETRIES 次。返回 (text, verdict, err)。"""
+    forced = forced_indices(s)
+    req = build_llm_req(s, tags, forced)
+    text, err = _post_llm(req)
+    if err:
+        return "", None, err
+    per, all_v = parse_verdicts(text, tags)
+    if forced and not per and all_v:
+        # 旧格式整页结论 + 有积压条目: 展开成逐条, 让积压条目可单独追问/兜底
+        n = sum(1 for e in s["entries"] if e.get("status") == "unreviewed"
+                and not is_bot(e) and e.get("kind") != "summary")
+        per, all_v = {i: dict(all_v) for i in range(1, n + 1)}, None
+    if per:
+        per = {i: decide(v, forced=i in forced) for i, v in per.items()}
+        if forced:
+            follow = force_verdicts(req, text, per, forced, tags)
+            if follow:
+                text = text + "\n\n【积压条目追问】\n" + follow
+        return text, {"per": per, "all": None}, ""
+    return text, {"per": None, "all": decide(all_v)}, ""
 
 
 def prepare(sk, tags, start_page=0):
@@ -267,6 +352,15 @@ def handle(r):
             groups[vd["action"]].append((i, fp, vd))
         n_fps = [fp for _, fp, _ in groups["normal"]]
         resolved = False
+        forced_n = sum(1 for g in groups.values() for _, _, vd in g if vd.get("forced"))
+        fallback_n = sum(1 for _, _, vd in groups["normal"] if vd.get("fallback"))
+        if forced_n:
+            STATS["forced"] += forced_n
+            STATS["fallback"] += fallback_n
+            print(f"    ⏱ 积压超 {FORCE_AFTER / 3600:.0f}h 必须判决 {forced_n} 条" + (f" (其中兜底判正常 {fallback_n} 条)" if fallback_n else ""))
+            for i, _, vd in groups["normal"]:
+                if vd.get("fallback"):
+                    print(f"    ⏱ #{i} {vd['note'][:160]}")
         if n_fps:
             okn = submit(sk, "normal", n_fps)
             resolved = resolved or okn
@@ -284,7 +378,8 @@ def handle(r):
             okb = submit(sk, "normal", bot_fps)
             if okb: print(f"    ✓ 另 {len(bot_fps)} 条 bot 回复标正常")
         log_rec(sk, s, {"action": "mixed", "tags": [], "conf": None,
-                        "note": f"逐条判定: 正常 {len(n_fps)} / 异常 {len(groups['abnormal'])} / 存疑 {len(groups['skip'])}"}, text)
+                        "note": f"逐条判定: 正常 {len(n_fps)} / 异常 {len(groups['abnormal'])} / 存疑 {len(groups['skip'])}"
+                                + (f" / 积压必判 {forced_n} (兜底 {fallback_n})" if forced_n else "")}, text)
         if groups["skip"]:
             STATS["skip"] += len(groups["skip"])
             if not resolved:
@@ -338,6 +433,7 @@ def summary():
     c = STATS
     print(f"----- 本轮结束: 正常 {c['normal']} / 异常 {c['abnormal']} / 存疑跳过 {c['skip']} / "
           f"LLM失败 {c['llm_fail']} / 取会话失败 {c['fetch_fail']} / 仅bot {c['bot_only']}"
+          + (f" / 积压必判 {c['forced']} (兜底正常 {c['fallback']})" if c['forced'] else "")
           + ("　(只读试跑, 未提交任何结果)" if DRY else ""))
 
 

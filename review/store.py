@@ -329,13 +329,19 @@ class ReviewStore:
         item["tags"] = json.loads(item.get("tags") or "[]")
         return item
 
-    def delete_abnormal(self, record_id: int, reviewer: str) -> dict[str, Any] | None:
+    def delete_abnormal(
+        self, record_id: int, reviewer: str, mark_normal: bool = False,
+    ) -> dict[str, Any] | None:
         """删除一条异常记录, 并在消息当前结论为「异常」时将其撤销(回到未审核)。
 
         撤销是必要的: 否则会话里会残留一条"没有标签/备注的异常"。
         结论已是 normal/不存在的(陈旧记录)则保留结论不动。
-        返回被删记录(不存在返回 None)。操作留痕 action="abnormal_delete"。
+        mark_normal=True 时不回到未审核, 而是改判为「正常」(误判纠正);
+        消息当前没有结论的陈旧记录同样补判为正常。
+        返回被删记录(不存在返回 None)。操作留痕 action="abnormal_delete"
+        (改判正常时另记 rejudge/judge)。
         """
+        now = time.time()
         with self._lock:
             cur = self._conn.cursor()
             row = cur.execute(
@@ -344,39 +350,64 @@ class ReviewStore:
             if row is None:
                 return None
             rec = dict(row)
+            sk, fp = rec["session_key"], rec["fingerprint"]
             removed: list[str] = []
+            updates: list[tuple[str, str, str, float]] = []
             st = cur.execute(
                 "SELECT status FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
-                (rec["session_key"], rec["fingerprint"]),
+                (sk, fp),
             ).fetchone()
-            if st is not None and st["status"] == "abnormal":
+            if mark_normal:
+                if st is None or st["status"] != "normal":
+                    self._upsert_normal_locked(cur, sk, fp, reviewer, now,
+                                               "rejudge" if st is not None else "judge")
+                    updates.append((fp, "normal", reviewer, now))
+            elif st is not None and st["status"] == "abnormal":
                 cur.execute(
                     "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
-                    (rec["session_key"], rec["fingerprint"]),
+                    (sk, fp),
                 )
-                removed.append(rec["fingerprint"])
+                removed.append(fp)
             cur.execute("DELETE FROM abnormal_records WHERE id=?", (record_id,))
             cur.execute(
                 "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
                 "VALUES (?,?,?,?,?,?)",
-                (time.time(), reviewer, "abnormal_delete", rec["session_key"],
-                 rec["fingerprint"], f"#{record_id}"),
+                (now, reviewer, "abnormal_delete", sk, fp,
+                 f"#{record_id}" + (" → 改判正常" if mark_normal else "")),
             )
             self._conn.commit()
-            self._patch_statuses_locked(
-                rec["session_key"], [], removed=removed,
-            )
+            self._patch_statuses_locked(sk, updates, removed=removed)
         return rec
+
+    def _upsert_normal_locked(
+        self, cur: sqlite3.Cursor, session_key: str, fingerprint: str,
+        reviewer: str, now: float, action: str,
+    ) -> None:
+        cur.execute(
+            "INSERT INTO reviewed_entries (session_key, fingerprint, status, reviewer, reviewed_at) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(session_key, fingerprint) DO UPDATE SET "
+            "status=excluded.status, reviewer=excluded.reviewer, reviewed_at=excluded.reviewed_at",
+            (session_key, fingerprint, "normal", reviewer, now),
+        )
+        cur.execute(
+            "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
+            "VALUES (?,?,?,?,?,?)",
+            (now, reviewer, action, session_key, fingerprint, "normal"),
+        )
 
     def delete_all_abnormal(
         self, bot: str = "", tag: str = "", reviewer: str = "",
+        mark_normal: bool = False,
     ) -> int:
         """批量删除异常记录(可按 bot 前缀/标签过滤), 对应消息结论一并撤销。
 
         撤销规则与单条一致: 仅当消息当前结论为「异常」时撤销(回到未审核);
         已是 normal 的陈旧记录只删记录、不动结论。
-        返回删除条数。批量操作只写一条 review_log 留痕。
+        mark_normal=True 时改为把对应消息判为「正常」(规则同 delete_abnormal)。
+        返回删除条数。批量操作只写一条 review_log 留痕(改判另逐条记 rejudge/judge)。
         """
+        now = time.time()
         with self._lock:
             cur = self._conn.cursor()
             rows = cur.execute(
@@ -397,29 +428,41 @@ class ReviewStore:
                     continue
                 targets.append(item)
             cache_removed: dict[str, list[str]] = {}
+            cache_updates: dict[str, list[tuple[str, str, str, float]]] = {}
             for item in targets:
+                sk, fp = item["session_key"], item["fingerprint"]
                 cur.execute("DELETE FROM abnormal_records WHERE id=?", (item["id"],))
+                # 逐条现查(同一连接可见本事务未提交的写入): 同一消息有多条异常记录时,
+                # 第二条看到的已是 normal, 不会重复改判
                 st = cur.execute(
                     "SELECT status FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
-                    (item["session_key"], item["fingerprint"]),
+                    (sk, fp),
                 ).fetchone()
-                if st is not None and st["status"] == "abnormal":
+                if mark_normal:
+                    if st is not None and st["status"] == "normal":
+                        continue
+                    self._upsert_normal_locked(cur, sk, fp, reviewer, now,
+                                               "rejudge" if st is not None else "judge")
+                    cache_updates.setdefault(sk, []).append((fp, "normal", reviewer, now))
+                elif st is not None and st["status"] == "abnormal":
                     cur.execute(
                         "DELETE FROM reviewed_entries WHERE session_key=? AND fingerprint=?",
-                        (item["session_key"], item["fingerprint"]),
+                        (sk, fp),
                     )
-                    cache_removed.setdefault(item["session_key"], []).append(
-                        item["fingerprint"])
+                    cache_removed.setdefault(sk, []).append(fp)
             if targets:
                 cur.execute(
                     "INSERT INTO review_log (time, reviewer, action, session_key, fingerprint, detail) "
                     "VALUES (?,?,?,?,?,?)",
-                    (time.time(), reviewer, "abnormal_delete", "",
-                     "", f"批量 {len(targets)} 条 (bot={bot or '全部'}, tag={tag or '全部'})"),
+                    (now, reviewer, "abnormal_delete", "",
+                     "", f"批量 {len(targets)} 条 (bot={bot or '全部'}, tag={tag or '全部'})"
+                     + (" → 改判正常" if mark_normal else "")),
                 )
                 self._conn.commit()
-                for sk, fps in cache_removed.items():
-                    self._patch_statuses_locked(sk, [], removed=fps)
+                for sk in set(cache_removed) | set(cache_updates):
+                    self._patch_statuses_locked(
+                        sk, cache_updates.get(sk, []), removed=cache_removed.get(sk, []),
+                    )
             return len(targets)
 
     # ── 统计 ─────────────────────────────────────────────────
