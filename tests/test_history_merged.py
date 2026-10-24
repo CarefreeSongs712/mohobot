@@ -1,9 +1,9 @@
-"""history 群聊合并布局测试 — 合并存储 / 写入去重 / bot_id 标注 / 双写 / 迁移脚本。
+"""history 群聊合并布局测试 — 合并存储 / 写入去重 / bot_id 标注 / 单写 / 迁移脚本。
 
 覆盖:
 1. MessageHandler 群消息 → history/group/{群号}.jsonl(行内 bot_id), 私聊不变
 2. 多 bot 收到同一条群消息(同 mid) → 合并文件只写一份
-3. history_dual_write 开/关 → 旧布局 {bot_id}/group/ 是否仍有归档
+3. 群聊只写合并布局 → 旧布局 {bot_id}/group/ 不再产生新文件
 4. WSServer bot 发言 → 群写合并文件 + bot_id, 私聊按 bot 分目录
 5. 迁移脚本: 旧 per-bot 群文件去重合并 + bot_id 补全 + 时间排序 + 备份移动
 
@@ -50,7 +50,7 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-def _make_handler(tmp: Path, dual_write: bool = True):
+def _make_handler(tmp: Path):
     """最小 MessageHandler: 只绑定 _archive_event 用到的属性。"""
     from mohobot.message_handler import MessageHandler
     from mohobot.models.config import GlobalConfig
@@ -58,7 +58,6 @@ def _make_handler(tmp: Path, dual_write: bool = True):
     mh = MessageHandler.__new__(MessageHandler)
     mh._data_dir = str(tmp)
     cfg = GlobalConfig()
-    cfg.history_dual_write = dual_write
     mh._global_config = cfg
     mh._writer_registry = {}
     mh._group_mid_window = {}
@@ -94,17 +93,16 @@ async def test_group_merged_archive_and_dedup():
         assert len(merged) == 1
         assert merged[0]["bot_id"] == "bot_001"
         assert merged[0]["message"][0]["data"]["text"] == "你好"
-        # 未双写关闭时, 旧布局也有一份
-        legacy = _read_jsonl(tmp / "history" / "bot_001" / "group" / "20002.jsonl")
-        assert len(legacy) == 1 and "bot_id" not in legacy[0]
+        legacy_path = tmp / "history" / "bot_001" / "group" / "20002.jsonl"
+        assert not legacy_path.exists(), "旧 per-bot 布局不应再产生新文件"
 
         # 另一只 bot 收到同一条消息(同 mid, 不同 self_id) → 合并文件不重复
         raw2 = _group_raw(1, self_id=222)
         await mh._archive_event("bot_002", _group_event(raw2), raw2)
         merged = _read_jsonl(tmp / "history" / "group" / "20002.jsonl")
         assert len(merged) == 1, "同 mid 的群消息不得重复归档"
-        # 但旧布局各自归档(回滚保险, 不去重)
-        assert len(_read_jsonl(tmp / "history" / "bot_002" / "group" / "20002.jsonl")) == 1
+        assert not (tmp / "history" / "bot_002" / "group" / "20002.jsonl").exists(), \
+            "第二只 bot 也不应写旧布局"
 
         # 不同 mid → 正常写入
         await mh._archive_event("bot_001", _group_event(_group_raw(2)), _group_raw(2))
@@ -119,23 +117,11 @@ async def test_group_merged_archive_and_dedup():
         print("[1] 群消息合并归档 + 同 mid 去重 + 私聊不变 OK")
 
 
-async def test_dual_write_off():
-    """history_dual_write=false → 只写合并文件, 不写旧布局。"""
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
-        await mh._archive_event("bot_001", _group_event(_group_raw(1)), _group_raw(1))
-        assert len(_read_jsonl(tmp / "history" / "group" / "20002.jsonl")) == 1
-        assert not (tmp / "history" / "bot_001" / "group").exists()
-        await _close_writers(mh)
-        print("[2] dual_write 关闭 → 旧布局不写入 OK")
-
-
 async def test_dedup_window_eviction():
     """去重窗口容量有限: 超出窗口的 mid 再次出现会再写一次(近期窗口语义)。"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         mh._GROUP_MID_WINDOW = 2  # 缩小窗口便于测试
         for mid in (1, 2, 3):
             await mh._archive_event("bot_001", _group_event(_group_raw(mid)), _group_raw(mid))
@@ -154,7 +140,7 @@ async def test_cross_account_mid_dedup():
     """message_id 按账号分配时(NapCat): 同一消息多 bot 推送只写一行。"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         # 同一条用户消息: 同 user/time/内容, 不同 message_id 与 self_id
         for i, (mid, self_id) in enumerate(((101, 111), (202, 222), (303, 333))):
             raw = _group_raw(mid, user_id=10001, text="大家好", self_id=self_id)
@@ -171,7 +157,7 @@ async def test_same_second_distinct_content_kept():
     """同一秒内同人不同内容/不同图片必须各自保留(指纹不能过度合并)。"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         base = _group_raw(1, user_id=10001, text="第一条")
         base["time"] = 1700000600
         second = _group_raw(2, user_id=10001, text="第二条")
@@ -199,7 +185,7 @@ async def test_bot_sent_inbound_copy_skipped():
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         claims = SentMessageClaims()
         mh._sent_claims = claims
         text = "今天也要开心呀"
@@ -228,7 +214,7 @@ async def test_sent_claim_release_restores_inbound():
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         claims = SentMessageClaims()
         mh._sent_claims = claims
         text = "被拦截的发言"
@@ -272,8 +258,8 @@ async def test_ws_sent_claim_blocks_inbound_copy():
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        ws = _make_ws(tmp, dual_write=False, bot_qq=111)
-        mh = _make_handler(tmp, dual_write=False)
+        ws = _make_ws(tmp, bot_qq=111)
+        mh = _make_handler(tmp)
         mh._sent_claims = ws._sent_claims
         text = "这条会被别的 bot 收到"
         try:
@@ -308,7 +294,7 @@ async def test_same_account_same_second_repeat_kept():
     """同一 bot 连接同一秒收到两条相同文本 → 是两条真实消息, 都要保留。"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        mh = _make_handler(tmp, dual_write=False)
+        mh = _make_handler(tmp)
         for mid in (11, 12):
             raw = _group_raw(mid, user_id=10001, text="hello")
             raw["time"] = 1700000650
@@ -319,7 +305,7 @@ async def test_same_account_same_second_repeat_kept():
         print("[12] 同账号同秒重复文本保留 OK")
 
 
-def _make_ws(tmp: Path, dual_write: bool = True, bot_qq: int = 111):
+def _make_ws(tmp: Path, bot_qq: int = 111):
     from mohobot.bot_manager import BotInstance, BotManager
     from mohobot.models.config import BotConfig
     from mohobot.ws_server import WSServer
@@ -332,14 +318,13 @@ def _make_ws(tmp: Path, dual_write: bool = True, bot_qq: int = 111):
     inst = BotInstance("bot_001", _Sock(),
                        BotConfig(bot_id="bot_001", qq=bot_qq, nickname="天依"))
     bm._bots["bot_001"] = inst
-    cfg = BotConfig and type("C", (), {"history_dual_write": dual_write})()
-    ws = WSServer(bot_manager=bm, data_dir=str(tmp), global_config=cfg)
+    ws = WSServer(bot_manager=bm, data_dir=str(tmp), global_config=type("C", (), {})())
     ws._ARCHIVE_ECHO_TIMEOUT = 0.05
     return ws
 
 
 async def test_ws_sent_archive_merged():
-    """WSServer bot 发言: 群写合并文件(带 bot_id + 双写旧布局), 私聊按 bot 分目录。"""
+    """WSServer bot 发言: 群只写合并文件(带 bot_id), 私聊按 bot 分目录。"""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         ws = _make_ws(tmp)
@@ -351,8 +336,8 @@ async def test_ws_sent_archive_merged():
             assert merged[0]["post_type"] == "message_sent"
             assert merged[0]["bot_id"] == "bot_001"
             assert merged[0]["message_id"] == "555"
-            legacy = _read_jsonl(tmp / "history" / "bot_001" / "group" / "20002.jsonl")
-            assert len(legacy) == 1 and legacy[0]["bot_id"] == "bot_001"
+            assert not (tmp / "history" / "bot_001" / "group" / "20002.jsonl").exists(), \
+                "旧 per-bot 布局不应再产生新文件"
 
             await ws._write_archive_line("bot_001", "private", 10001, "556",
                                          [{"type": "text", "data": {"text": "私回"}}])

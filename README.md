@@ -151,6 +151,47 @@ Bot 下拉从内存快照加载，不扫描会话历史。管理页引用数量�
 
 私聊机器人发送任意消息即可得到回复（流式回复按标点+长度分段发送、首段引用触发消息）。
 
+## 🧠 LLM 模型与多提供商（可选）
+
+默认是**单提供商**：直接填 `llm.chat_model` / `chat_base_url` / `chat_api_key`（vision、emotion 各自还有一组同名字段）。需要**同时接入多家**（例如主模型走一个中转、识图走另一家，或不同 bot 用不同 Key）时用 `providers`：
+
+```yaml
+llm:
+  providers:
+    - id: deepseek
+      name: DeepSeek
+      base_url: "https://api.deepseek.com"   # 自定义/中转地址也填这里
+      api_key: "sk-..."
+      default_model: "deepseek-chat"         # 该家默认模型
+      models: ["deepseek-chat", "deepseek-reasoner"]
+    - id: relay
+      name: 中转服务
+      base_url: "https://relay.example/v1"
+      api_key: "sk-..."
+      default_model: "gpt-4o"
+  chat_provider: "deepseek"   # 默认 chat 用哪套
+  vision_provider: ""         # 留空 → 用 vision_base_url / vision_model / vision_api_key
+  emotion_provider: ""        # 留空 → 用 emotion_* 旧字段
+```
+
+- 也可在 Web 面板「模型配置 → 🏢 多提供商」维护：Key 只显示掩码，留空表示不修改；写入口是 `PUT /api/providers`，`GET /api/config` 同样会掩码。
+- 单个 bot 可覆盖：`data/bots/{bot_id}/config.json` 里的 `chat_provider_override` / `vision_provider_override`（Bot 配置页有下拉）。
+- 解析顺序：**bot 覆盖 → 全局 `<role>_provider` → 旧字段**；模型优先级：bot `*_model_override` > 提供商 `default_model` > 全局模型。
+- 配了不存在的 provider 会打 warning 并回退，不会让消息处理失败。
+- 安全：提供商 `api_key` 留空时，只有**同一端点**（未写 `base_url`，或与 `chat_base_url` 相同）才允许继承 chat Key，避免把主 Key 发往未声明的第三方地址。
+- 未配置 `providers` 时，行为与旧版完全一致。环境变量 `MOHOBOT_LLM_API_KEY` / `MOHOBOT_VISION_API_KEY` / `MOHOBOT_EMOTION_API_KEY` 仍可作为 Key 来源。
+
+### 识图模式
+
+`llm.vision_mode`：
+
+| 值 | 行为 |
+|---|---|
+| `describe`（默认） | 先用视觉模型把图片转述成文字再交给主模型；主模型不需要视觉能力 |
+| `direct` | 图片直接放进主模型消息（要求 chat 模型多模态），失败自动回退 `describe`；不额外消耗视觉模型调用 |
+
+实测（2026-10-22，DeepSeek 官方接口）：`deepseek-chat` 能正确读出图片文字，可直接用于 `direct` 模式。
+
 ## 🚀 生产部署（Ubuntu 服务器）
 
 ### 现有生产环境与发布流程
@@ -309,7 +350,7 @@ NapCat / LLOneBot / Lagrange 等配置**反向 WebSocket** 连接 `ws://<服务�
 - Web 面板返回 200：`curl -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/`
 - 私聊 bot 发消息验证回复；群内 `/status` 验证多 bot 去重（只由一个 bot 回复）
 - 更新部署：参见上方“现有生产环境与发布流程”；常规使用 `git pull --ff-only origin main`，生产通过 systemd 重启，切勿随意 `kill -9` 或用面板内重启代替代码发布
-- **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码默认 `history_dual_write: true` 双写过渡，确认稳定后在 WebUI 关闭
+- **history 合并布局迁移（旧版本升级到群聊合并存储时执行一次）**：停机后 `python scripts/migrate_history_layout.py --data-dir /opt/mohobot/data`（先把旧 `history/{bot_id}/group/` 与遗留 QQ 号目录按 message_id 去重合并进 `history/group/`，旧文件移入 `data/history_legacy_{时间戳}/` 备份；可用 `--dry-run` 预览）。新代码只写合并布局（旧 `history_dual_write` 配置与旧布局写入已移除，读侧仍兼容存量旧文件）
 
 ### 上下文压缩与群聊最近消息
 
@@ -571,7 +612,7 @@ mohobot/
 | 会话上下文 | `data/contexts/` | 可读写工作区 | JSON（数组） | LLM 实时推理的记忆（**保持原有管理方式不变**） |
 | 对话记录 | SQLite `conversations` 表 | 可读写 | SQL | 历史入库（独立 `mohobot.db`） |
 
-- **聊天历史**：**群聊跨 bot 合并存储**在 `data/history/group/{群号}.jsonl`（同一群号一个文件；同一条群消息多只 bot 都会收到，写入时按 `message_id` 近期窗口去重只落一份，行内 `bot_id` 标注接收 bot）；**私聊按 bot 分目录** `data/history/{bot_id}/private/{QQ号}.jsonl`（不同 bot 与同一用户的私聊是不同对话）。**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）。旧布局（`history/{bot_id}/group/`）在 `history_dual_write: true`（默认）期间仍同步写入一份作回滚保险，确认稳定后关闭；存量数据用 `python scripts/migrate_history_layout.py`（**停机运行**）一次性去重合并，旧文件移入 `data/history_legacy_{时间戳}/` 备份
+- **聊天历史**：**群聊跨 bot 合并存储**在 `data/history/group/{群号}.jsonl`（同一群号一个文件；同一条群消息多只 bot 都会收到，写入时按 `message_id` 近期窗口去重只落一份，行内 `bot_id` 标注接收 bot）；**私聊按 bot 分目录** `data/history/{bot_id}/private/{QQ号}.jsonl`（不同 bot 与同一用户的私聊是不同对话）。**绝不**用于 LLM 实时输入；包含两类事件：收到的消息（`post_type: "message"`）与 **bot 自己发送的消息**（`post_type: "message_sent"`，由 WSServer 出站层在发送时归档，echo 返回的 `message_id` 一并落档；图片/语音的 `base64://` 大字段替换为占位防膨胀）。旧布局（`history/{bot_id}/group/`）已停止写入（`history_dual_write` 配置与写入代码已删除，2026-10-23）；存量旧文件仍可按旧 session key 被 review loader 读取（面板会话列表只枚举 `history/group/`，需要时先跑迁移脚本）；存量数据可用 `python scripts/migrate_history_layout.py`（**停机运行**）一次性去重合并，旧文件移入 `data/history_legacy_{时间戳}/` 备份
 - **会话上下文**：私聊一个用户可有多个会话（`sess_001`…由 `session_index.json` 索引），群聊固定 `main.json`；满 40 轮触发 AI 总结压缩（最早的 15 轮 → 总结块插最前，详见上文配置）
 - **数据隔离**：会话上下文按 bot_id 分目录；群聊历史为所有 bot 共享
 

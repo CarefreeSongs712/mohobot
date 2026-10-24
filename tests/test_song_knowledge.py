@@ -243,6 +243,20 @@ async def test_real_db_dialogue_cases() -> None:
     if not db_path.exists():
         print("[8] 真实库不存在, 跳过自然对话用例")
         return
+    # 库存在但为空(启动时刚建的空库)同样跳过: 否则本地跑测试会假失败。
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(db_path)
+        try:
+            song_count = con.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        finally:
+            con.close()
+    except Exception:
+        song_count = 0
+    if song_count == 0:
+        print("[8] 真实库为空, 跳过自然对话用例")
+        return
     from mohobot.music_knowledge import SongInfoMatcher
     from mohobot.music_knowledge.pool import close_all
     close_all()

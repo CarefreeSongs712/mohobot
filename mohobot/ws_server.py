@@ -533,8 +533,7 @@ class WSServer:
         """写一条 message_sent 事件进 history JSONL(失败只记日志)。
 
         群聊写合并文件 data/history/group/{群号}.jsonl(与收到的群消息同文件,
-        行内 bot_id 标注发言 bot); dual_write 开启时额外按旧布局
-        {bot_id}/group/ 归档一份(回滚保险)。source 标注来源:
+        行内 bot_id 标注发言 bot); 旧 per-bot 布局已停止写入。source 标注来源:
         "llm"=LLM 生成回复, "auto"=命令/插件等机械内容(审核面板据此过滤)。
         """
         # 维护窗口内跳过归档(不写旧 inode), 见 issue #8
@@ -569,12 +568,10 @@ class WSServer:
             logger.debug(f"bot 发言归档失败(bot={bot_id}, {chat_type}:{chat_id}): {e}")
 
     def _archive_paths(self, bot_id: str, chat_type: str, chat_id: int | str) -> list[str]:
-        """bot 发言的 history 归档路径(可能多条: 群聊合并 + 双写旧布局)。"""
+        """bot 发言的 history 归档路径(群聊只有合并文件, 私聊按 bot 分目录)。"""
         if chat_type == "group":
-            paths = [f"{self._data_dir}/history/group/{chat_id}.jsonl"]
-            if bool(getattr(self._global_config, "history_dual_write", True)):
-                paths.append(f"{self._data_dir}/history/{bot_id}/group/{chat_id}.jsonl")
-            return paths
+            # 只写合并布局; 旧 per-bot 布局已停止写入(仅 review 读侧兼容存量)
+            return [f"{self._data_dir}/history/group/{chat_id}.jsonl"]
         return [f"{self._data_dir}/history/{bot_id}/private/{chat_id}.jsonl"]
 
     # ── 历史维护屏障 (issue #8) ──────────────────────────────

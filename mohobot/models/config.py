@@ -26,7 +26,17 @@ class ServerConfig:
 
 @dataclass
 class LLMConfig:
-    """LLM provider configuration."""
+    """LLM provider configuration.
+
+    支持**多提供商**：`providers` 里每项是一套独立的 base_url + api_key +
+    默认模型（例如 snowluma / deepseek 两套 key 并存），全局用
+    `chat_provider` / `vision_provider` / `emotion_provider` 指定默认用哪套；
+    每个 bot 还可用 `chat_provider_override` 等单独指定（见 BotConfig）。
+    未指定提供商时回退到旧的 `*_base_url` / `*_api_key` 字段，保持兼容。
+
+    providers 项结构（字段都可选，缺省回退旧字段）：
+        {id, name, base_url, api_key, default_model, models: [..]}
+    """
     # Chat model (primary)
     chat_model: str = "deepseek-chat"
     chat_base_url: str = "https://api.deepseek.com"
@@ -48,6 +58,14 @@ class LLMConfig:
     emotion_api_key: str = ""
     emotion_temperature: float = 0.3
     emotion_max_tokens: int = 512
+
+    # ── 多提供商(可选) ───────────────────────────────────────
+    # 每项: {"id": 唯一标识, "name": 显示名, "base_url": ..., "api_key": ...,
+    #        "default_model": ..., "models": [...]}
+    providers: list[dict] = field(default_factory=list)
+    chat_provider: str = ""       # 默认 chat 提供商 id; 空 = 用 chat_base_url/chat_api_key
+    vision_provider: str = ""     # 默认 vision 提供商 id; 空 = 用 vision_base_url/...
+    emotion_provider: str = ""    # 默认 emotion 提供商 id; 空 = 用 emotion_base_url/...
 
     # Vision model
     vision_model: str = "qwen-vl-plus"
@@ -296,6 +314,41 @@ def _normalize_vision_mode(value) -> str:
     return mode if mode in ("describe", "direct") else "describe"
 
 
+def _normalize_providers(value) -> list[dict]:
+    """归一化 llm.providers: 只保留有 id 的项, 字段转字符串并去重。
+
+    宽容处理: 接受 list[dict]; 非法项直接跳过而不是让整个配置加载失败
+    (配置错误不应导致服务起不来)。
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        models = item.get("models")
+        if isinstance(models, str):
+            models = [m.strip() for m in models.replace("，", ",").split(",") if m.strip()]
+        elif isinstance(models, (list, tuple)):
+            models = [str(m).strip() for m in models if str(m).strip()]
+        else:
+            models = []
+        out.append({
+            "id": pid,
+            "name": str(item.get("name") or pid).strip() or pid,
+            "base_url": str(item.get("base_url") or "").strip(),
+            "api_key": str(item.get("api_key") or "").strip(),
+            "default_model": str(item.get("default_model") or "").strip(),
+            "models": models,
+        })
+    return out
+
+
 def _int_list(value) -> list[int]:
     """宽松解析整数列表: 接受 list[str|int] 逗号分隔字符串; 忽略非整数字符串。"""
     if isinstance(value, str):
@@ -413,11 +466,6 @@ class GlobalConfig:
     # 判定规则写死: ① 文本以「[自动回复]」开头; ② 同一用户连续 3 条相同文本且
     # 相邻间隔 < 5 分钟(QQ 自动回复无统一标记, 见 docs/DEVELOPMENT.md)。
     ignore_auto_reply: bool = True
-    # history 双写过渡: 群聊消息除合并存储(data/history/group/{群号}.jsonl)外,
-    # 仍按旧布局 data/history/{bot_id}/group/{群号}.jsonl 归档一份(回滚保险)。
-    # 确认新布局稳定后改 false 停止旧写入(热生效)。
-    history_dual_write: bool = True
-
     @classmethod
     def load(cls, path: str | Path = "./config/global.yaml") -> "GlobalConfig":
         """Load from YAML file, filling missing values with defaults."""
@@ -487,6 +535,10 @@ class GlobalConfig:
                 chat_base_url=llm_raw.get("chat_base_url", "https://api.deepseek.com"),
                 chat_api_key=llm_raw.get("chat_api_key", ""),
                 chat_max_tokens=llm_raw.get("chat_max_tokens", 4096),
+                providers=_normalize_providers(llm_raw.get("providers")),
+                chat_provider=str(llm_raw.get("chat_provider", "") or "").strip(),
+                vision_provider=str(llm_raw.get("vision_provider", "") or "").strip(),
+                emotion_provider=str(llm_raw.get("emotion_provider", "") or "").strip(),
                 chat_temperature=llm_raw.get("chat_temperature", 0.7),
                 frequency_penalty=float(llm_raw.get("frequency_penalty", 0.0) or 0.0),
                 presence_penalty=float(llm_raw.get("presence_penalty", 0.0) or 0.0),
@@ -641,7 +693,6 @@ class GlobalConfig:
             group_recent_msgs_count=int(raw.get("group_recent_msgs_count", 10)),
             snitch_admin_group=int(raw.get("snitch_admin_group", 1070473353)),
             ignore_auto_reply=bool(raw.get("ignore_auto_reply", True)),
-            history_dual_write=bool(raw.get("history_dual_write", True)),
             music_knowledge=dict(music_raw or {}),
             touch_replies=[str(t) for t in (touch_raw or [])],
         )
@@ -668,6 +719,10 @@ class GlobalConfig:
                 "chat_base_url": self.llm.chat_base_url,
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
+                "providers": [dict(p) for p in (self.llm.providers or [])],
+                "chat_provider": self.llm.chat_provider,
+                "vision_provider": self.llm.vision_provider,
+                "emotion_provider": self.llm.emotion_provider,
                 "chat_temperature": self.llm.chat_temperature,
                 "frequency_penalty": self.llm.frequency_penalty,
                 "presence_penalty": self.llm.presence_penalty,
@@ -808,7 +863,6 @@ class GlobalConfig:
             "group_recent_msgs_count": self.group_recent_msgs_count,
             "snitch_admin_group": self.snitch_admin_group,
             "ignore_auto_reply": self.ignore_auto_reply,
-            "history_dual_write": self.history_dual_write,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -830,6 +884,10 @@ class GlobalConfig:
                 "chat_base_url": self.llm.chat_base_url,
                 "chat_api_key": self.llm.chat_api_key,
                 "chat_max_tokens": self.llm.chat_max_tokens,
+                "providers": [dict(p) for p in (self.llm.providers or [])],
+                "chat_provider": self.llm.chat_provider,
+                "vision_provider": self.llm.vision_provider,
+                "emotion_provider": self.llm.emotion_provider,
                 "chat_temperature": self.llm.chat_temperature,
                 "frequency_penalty": self.llm.frequency_penalty,
                 "presence_penalty": self.llm.presence_penalty,
@@ -970,7 +1028,6 @@ class GlobalConfig:
             "group_recent_msgs_count": self.group_recent_msgs_count,
             "snitch_admin_group": self.snitch_admin_group,
             "ignore_auto_reply": self.ignore_auto_reply,
-            "history_dual_write": self.history_dual_write,
         }
 
 
@@ -995,6 +1052,10 @@ class BotConfig:
     # Per-bot LLM overrides (optional)
     chat_model_override: str = ""
     vision_model_override: str = ""
+    # 每 bot 指定用哪个提供商(留空 = 用全局 llm.chat_provider / vision_provider)。
+    # 多套 key(如 snowluma + deepseek)时可让不同 bot 走不同提供商。
+    chat_provider_override: str = ""
+    vision_provider_override: str = ""
 
     # TTS 语音: 是否开启该 bot 的 LLM 自动朗读与 /tts 指令(MiniMax 全局配置共用)
     tts_enabled: bool = False
@@ -1030,6 +1091,8 @@ class BotConfig:
             touch_replies=list(raw.get("touch_replies", []) or []),
             chat_model_override=raw.get("chat_model_override", ""),
             vision_model_override=raw.get("vision_model_override", ""),
+            chat_provider_override=str(raw.get("chat_provider_override", "") or ""),
+            vision_provider_override=str(raw.get("vision_provider_override", "") or ""),
             tts_enabled=bool(raw.get("tts_enabled", False)),
             tts_voice_id=str(raw.get("tts_voice_id", "") or ""),
             command_prefix=raw.get("command_prefix", "/"),
@@ -1068,6 +1131,8 @@ class BotConfig:
             "touch_replies": list(self.touch_replies),
             "chat_model_override": self.chat_model_override,
             "vision_model_override": self.vision_model_override,
+            "chat_provider_override": self.chat_provider_override,
+            "vision_provider_override": self.vision_provider_override,
             "tts_enabled": self.tts_enabled,
             "tts_voice_id": self.tts_voice_id,
             "command_prefix": self.command_prefix,

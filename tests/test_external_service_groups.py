@@ -41,7 +41,6 @@ async def test_group_events_archive_then_gate_including_notice_and_request() -> 
         probe = _DispatchProbe(trace)
         cfg = GlobalConfig(
             external_service_groups=[482999198, 1059744894],
-            history_dual_write=False,
         )
 
         class Handler(MessageHandler):

@@ -2,7 +2,91 @@
 
 > 核对日期：2026-10-12（Asia/Shanghai）｜**历史代码基点**：`b63ad48`｜当时分支：`main`。
 > 本文记录该次本地检查，不代表当前 `main`、生产实时状态或发布授权。接手前工作区干净，HEAD 与当时本地缓存的 origin/main 相同；未执行 fetch/SSH，也没有部署、迁移或业务配置修改。
-> 当前状态请先看 [PR #20 的 TODO/工作台](https://github.com/CarefreeSongs712/mohobot/pull/20)、开放 PR/issue 与 GitHub Actions；不要把本文的旧基线数字直接当作当前验收结果。
+> **当前（2026-10-22）状态请看下面第 0 节**；第 1~8 节是 2026-10-12 的历史交接记录，其中的基线数字不要当作当前验收结果。
+
+---
+
+## 0. 最新交接状态（2026-10-22）
+
+> 本节是本次开发收尾的交接结论；详细待办与决策项以 [TODO.md](../TODO.md) 为准。
+
+### 0.1 仓库与远端
+
+| 项 | 状态 |
+|---|---|
+| 本地 / 远端 `dev` | 本节定稿时 CI 为 **success**；具体提交请以 `git log -1 origin/dev` 为准（文档难免在本节提交后才定稿，故不硬编码自身 SHA） |
+| 工作区 | 干净，无未推送提交、无未跟踪的受跟踪文件 |
+| `origin/main` | `a361736`（**冻结**，仅作发布线；本轮未改动、未发版） |
+| 领先量 | `dev` 比 `main` 多 **约 75 个提交**（以 `git rev-list --count origin/main..origin/dev` 为准） |
+| 开放 PR | **0** |
+| 开放 issue | `#2`（wontfix，SQLite 旧库 WAL 迁移，历史遗留） |
+
+### 0.2 本轮交付（`#51`~`#75`）
+
+- **文档**：TODO 重构、README/DEVELOPMENT/AGENTS 全量同步、识图两模式补记（`#51`/`#53`/`#68`）。
+- **知识库**：RAG 虚拟歌手知识库合并（`#52`）；中V歌曲库多源同步与模糊识别（`#47`/`#49`）。
+- **表情包插件**：去概览式偷图 + 审核门禁（`#61`）、`allowed_bots` 多 bot 分流（`#64`）、列表按事件作用域过滤 + `steal_meme` 图片来源边界 + `source_type` 规范化（`#72`，Closes `#6`）。
+- **识图**：`llm.vision_mode: describe/direct`（`#55`/`#68`），本机真 Key 已验证 direct。
+- **新闻/动态**：存储 + 审核门禁 + 注入 + LLM 工具 + WebUI 审核页 + B站采集器（`#62`/`#65`，默认关闭）。
+- **OOC 治理**：无标签自查/推理块外泄治理 + 采样惩罚参数（`#60`）、中英混杂清理（`#66`）。
+- **插件策略/关系/主动聊天**（`#67`/`#70`）、fake OneBot 契约测试环境（`#56`）。
+- **review 面板**：热维护写入屏障 + auto 消息 ID（`#69`）；缓存 inode、半行 offset、待审计数求交、前端代际（`#71`，Closes `#8`）。
+- **LLM 多提供商**：多套 `base_url + api_key + default_model` 并存、全局/每 bot 选择（`#73`）；`/api/config` Key 泄漏热修（`#74`）；复审 N13~N17 跟进（`#75`）。
+- **测试基础设施**：`pytest-xdist` 并行（全量 ~80s → ~20~27s）、CI 改 `-n auto --dist loadfile`、修 `test_wifepicker` 顺序依赖。
+- **收尾修复**：snitch 重复注册（`d826da7`）、面板创建 Bot 不接管在线连接（`a494a91`）、本地空歌曲库假失败（`9e26b90`）。
+
+### 0.3 验证基线（2026-10-22 实测，隔离快照）
+
+快照 `mkwork` 排除 `.git/.venv`，进程清空代理变量；`run_in.py` 记录 `guard_loaded=13 blocked_network=0`。
+
+| 检查 | 结果 |
+|---|---|
+| 全量 pytest（`-n auto --dist loadfile`，排除 concurrency） | **810 passed** / 约 26s |
+| 根 runner `tests/_run_all.py` | **91 passed / 0 failed** |
+| `tests/test_ban_pipeline.py`（runner 漏执行） | OK |
+| `tests/test_plugin_reload.py`（runner 漏执行） | OK |
+| `tests/test_concurrency.py` | OK |
+| `tests/smoke_startup.py` | 启动/关闭 OK |
+| `compileall` | 退出 0 |
+| Ruff 门禁（`E9,F63,F7`） | 退出 0 |
+| 表情包插件 pytest | **503 passed / 2 skipped** |
+| 主面板内联 JS `node --check` | OK |
+
+已知既有债务（非本轮引入）：6 处 Ruff 告警（`message_handler` F401、`llm_service` F401/F841、`bot_manager` 3× F821、relationship F401）；代理环境变量容错未做（见 TODO §4）。
+
+### 0.4 本机环境（这台 Linux 开发机）
+
+- `.venv` 已装齐 `requirements.txt` + `requirements-dev.txt`（含 `pytest-xdist`）。
+- `config/global.yaml`、`review/config.yaml`、`data/`、`logs/` **均被 .gitignore 排除**，只在本机，**从未提交**；里面含真实 Key 与面板密码哈希，移交/发布时不要打包。
+- 已实测可跑：OneBot 客户端（本机用 SnowLuma，QQ 2774641554，主管理号 2038427197）→ `ws://127.0.0.1:8081/ws`；面板 9090；审核面板 9091（`review/config.yaml` 已建）。
+- **代理坑（本机必看）**：`ALL_PROXY=socks://...` 会让 httpx 启动即崩；`no_proxy` 含 `[::1]` 会 `Invalid port`。启动前用：
+  ```bash
+  env -u ALL_PROXY -u all_proxy \
+      NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" \
+      no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" \
+      .venv/bin/python main.py
+  ```
+- 可选依赖未装：`playwright`（关系图渲染降级文本）、`umap-learn`（表情语义图降级 PCA）。
+
+### 0.5 待维护者决策（移交接手第一优先级）
+
+1. **`dev → main` 发版**：按 AGENTS「只以 main 发布」，需维护者授权后做整体回归 + 合并 + release notes。（唯一未决项）
+
+**2026-10-23 维护者已定取舍**（详细见 [TODO §2.9](../TODO.md)）：
+- **REQ-9 / history 双写**：已决（2026-10-23）——删除旧 per-bot 双写，群聊只写合并布局（review 读侧仅兼容存量旧文件）；flush 批量暂不启用；
+- **CI legacy runner**：PR 阶段不再跑，仅 `push main` 时运行（pytest 为超集）；
+- 发布/部署体验（Docker、Windows 安装器、对外部署文档）：**不做**（个人自用）；
+- 安全基础加固（登录锁 DoS、失败限流、计时枚举、PBKDF2 等）：**可修可不修**，不阻塞发布，按需排期；
+- 运维观测（healthz/readyz、成功率/延迟、告警）与知识库/新闻真实验收：**可做**，列入后续可选优化。
+
+### 0.6 接手注意事项（易踩）
+
+- 根 `main` 冻结：任何新改动走 `dev`，绝不直接推 `main`。
+- 插件 `plugins/snitch.py` 是「内置工具 + 插件文件」双身份，注册已幂等；不要为了去掉日志里的历史报错而删插件文件。
+- 面板「创建 Bot」现在会立即接管已在线连接（`create_bot` → `bind_qq`），修改这块时保留该行为。
+- 本地测试优先用快照（`.venv/prep/mkwork.sh` + `run_in.py`），因为工作区已有 `config/`、`data/`。
+
+---
 
 ## 1. 接手结论与范围
 
@@ -80,7 +164,7 @@ review：独立进程、配置和数据库，只读 history
 
 - 原始 history 只追加，用于回溯与审核，**不作为 LLM 实时上下文**。
 - contexts 是可变工作记忆；满轮总结失败可裁剪，周期总结失败保留待重试。
-- 群历史全 bot 共享、私聊按 bot 隔离；旧群布局默认双写，不能擅自停用回滚保险。
+- 群历史全 bot 共享、私聊按 bot 隔离；群聊**只写**合并布局（`history/group/`），旧 per-bot 布局已停止写入（review 读侧仅兼容存量）。
 - 人设正文、感知、群最近消息、情感、歌曲注解仅请求级注入。引用内容可以按现有用户文本渲染规则保存，但不能存原始 system 块、消息段 repr 或 base64。
 - 通用文件读改写采用 file_store 的同一把路径锁；不等于跨进程事务或崩溃安全替换。人设/评估已有原子替换实现须保留。
 - 人设库损坏要报错；删除/恢复必须强制检查真实引用，不能依赖显示缓存。锁序为 persona → maintenance → chat → file。

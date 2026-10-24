@@ -132,8 +132,8 @@ class LLMService:
         # 与歌曲注解同理, 只作本次请求的服务端参考资料, 不写入 context。
         self._news_annotator = None
         self._retired_clients: list[AsyncOpenAI] = []
-        identities, clients = self._prepare_clients(self._cfg.llm, [])
-        self._install_clients(self._cfg.llm, identities, clients)
+        identities, clients, provider_clients = self._prepare_clients(self._cfg.llm, [])
+        self._install_clients(self._cfg.llm, identities, clients, provider_clients)
         if not self._available:
             logger.warning("LLM chat API key not configured — LLM calls will fail")
 
@@ -180,6 +180,73 @@ class LLMService:
                                    if t["function"]["name"] != "anysearch_search"]
 
     @staticmethod
+    def _provider_specs(llm: LLMConfig) -> dict[str, dict[str, str]]:
+        """归一化 providers 列表 → {id: {base_url, api_key, default_model}}。
+
+        规则(与 WebUI 行为一致):
+        - api_key 未填时回退 chat key;
+        - base_url 未填时回退 **chat_base_url**(因此可以只换 key/模型, 复用同一端点);
+        - 两者回退后仍为空(没有任何可用 key 或地址)的项会被排除。
+        """
+        chat_key = llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
+        chat_base = str(getattr(llm, "chat_base_url", "") or "").strip()
+        specs: dict[str, dict[str, str]] = {}
+        for item in (getattr(llm, "providers", None) or []):
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("id") or "").strip()
+            if not pid or pid in specs:
+                continue
+            raw_base = str(item.get("base_url") or "").strip()
+            base_url = raw_base or chat_base
+            api_key = str(item.get("api_key") or "").strip()
+            if not api_key:
+                # 只有"同一端点"才允许继承 chat key:
+                #   - provider 没写 base_url(跟随 chat 端点) → 允许;
+                #   - 写了 base_url 且与 chat_base_url 同端点 → 允许;
+                #   - 其余(含 chat_base_url 为空却指定了新地址) → 拒绝。
+                # 否则等于把主 Key 发给未显式声明的第三方地址。
+                same_endpoint = bool(
+                    chat_base and raw_base
+                    and raw_base.rstrip("/") == chat_base.rstrip("/")
+                )
+                if not raw_base or same_endpoint:
+                    api_key = chat_key
+                else:
+                    logger.warning(
+                        f"provider {pid!r} 未配置 api_key 且 base_url 与 chat_base_url 不同, "
+                        "已跳过(避免把 chat Key 发往未声明的端点)"
+                    )
+                    continue
+            if not base_url or not api_key:
+                continue
+            specs[pid] = {
+                "base_url": base_url,
+                "api_key": api_key,
+                "default_model": str(item.get("default_model") or "").strip(),
+            }
+        return specs
+
+    def _provider_identity(
+        self, llm: LLMConfig, role: str,
+    ) -> tuple[str, tuple[str, str] | None, str]:
+        """解析某角色默认提供商的 (id, identity, default_model)。
+
+        返回 id 为空表示未使用多提供商(回退旧字段)。
+        """
+        provider_id = str(getattr(llm, f"{role}_provider", "") or "").strip()
+        if not provider_id:
+            return "", None, ""
+        spec = self._provider_specs(llm).get(provider_id)
+        if spec is None:
+            logger.warning(
+                f"llm.{role}_provider={provider_id!r} 未找到可用提供商"
+                "(需 providers 里有同 id 且 base_url/api_key 齐全), 回退旧字段"
+            )
+            return "", None, ""
+        return provider_id, (spec["api_key"], spec["base_url"]), spec["default_model"]
+
+    @staticmethod
     def _provider_identities(llm: LLMConfig) -> dict[str, tuple[str, str] | None]:
         """Resolve keys/URLs, including env and chat fallbacks, for each role."""
         chat_key = llm.chat_api_key or os.environ.get("MOHOBOT_LLM_API_KEY", "")
@@ -211,15 +278,49 @@ class LLMService:
                 created.append(client)
                 reusable[identity] = client
             clients[role] = reusable[identity]
-        return identities, clients
+        # 多提供商: 每个 provider 一套独立 client(按 api_key+base_url 复用)。
+        # 旧 provider 的 identity→client 也进入复用池, 否则每次 sync_config
+        # 都会重建全部 provider client 并堆积到退休列表(N15)。
+        old_provider_identities = getattr(self, "_provider_identity_cache", {}) or {}
+        old_provider_clients = getattr(self, "_provider_clients", {}) or {}
+        for pid, ident in old_provider_identities.items():
+            old_client = old_provider_clients.get(pid)
+            if old_client is not None and ident is not None:
+                reusable.setdefault(ident, old_client)
+        provider_clients: dict[str, AsyncOpenAI] = {}
+        for pid, spec in self._provider_specs(llm).items():
+            identity = (spec["api_key"], spec["base_url"])
+            if identity not in reusable:
+                client = AsyncOpenAI(api_key=identity[0], base_url=identity[1])
+                created.append(client)
+                reusable[identity] = client
+            provider_clients[pid] = reusable[identity]
+        return identities, clients, provider_clients
 
-    def _install_clients(self, llm: LLMConfig, identities: dict, clients: dict) -> None:
+    def _install_clients(
+        self, llm: LLMConfig, identities: dict, clients: dict,
+        provider_clients: dict[str, AsyncOpenAI] | None = None,
+    ) -> None:
         self._client_identities = identities
         self._chat_client = clients["chat"]
         self._vision_client = clients["vision"]
         self._emotion_client = clients["emotion"]
-        self._available = self._chat_client is not None
-        self._vision_available = bool(llm.vision_model and self._vision_client is not None)
+        self._provider_clients = provider_clients or {}
+        specs = self._provider_specs(llm)
+        self._provider_identity_cache = {
+            pid: (spec["api_key"], spec["base_url"])
+            for pid, spec in specs.items()
+        }
+        self._available = self._chat_client is not None or bool(self._provider_clients)
+        # per-bot 可在运行时用 vision_provider_override 指定提供商, 因此
+        # "有没有 provider client" 本身就可能让识图可用, 不能只看全局
+        # llm.vision_provider(否则多 bot 各自指定、全局留空时识图静默失效)。
+        # 视觉模型来源: 全局 vision_model, 或提供商自己的 default_model
+        # (N25: 全局留空 + 仅提供商配置时也应视为可能可用)
+        self._vision_available = bool(
+            (llm.vision_model or bool(self._provider_clients))
+            and (self._vision_client is not None or bool(self._provider_clients))
+        )
 
     async def sync_config(self, config: GlobalConfig) -> None:
         """Hot-update only shared config.llm; retire replaced clients until close().
@@ -230,7 +331,7 @@ class LLMService:
         llm = deepcopy(config.llm)
         created: list[AsyncOpenAI] = []
         try:
-            identities, clients = self._prepare_clients(llm, created)
+            identities, clients, provider_clients = self._prepare_clients(llm, created)
         except Exception:
             await self._close_clients(created)
             raise
@@ -238,15 +339,87 @@ class LLMService:
         # No await in this publication block: config and client references move together.
         retired = getattr(self, "_retired_clients", [])
         retained_ids = {id(client) for client in clients.values() if client is not None}
+        retained_ids |= {id(c) for c in provider_clients.values()}
         retired_ids = {id(client) for client in retired}
         for role in ("chat", "vision", "emotion"):
             old = getattr(self, f"_{role}_client", None)
             if old is not None and id(old) not in retained_ids and id(old) not in retired_ids:
                 retired.append(old)
                 retired_ids.add(id(old))
+        # provider client 同样要退休: 旧配置里的 key/base_url 不应继续驻留内存,
+        # 也不能在配置热更后仍被复用(此前只退休了三个 role client)。
+        for old in (getattr(self, "_provider_clients", {}) or {}).values():
+            if old is not None and id(old) not in retained_ids and id(old) not in retired_ids:
+                retired.append(old)
+                retired_ids.add(id(old))
         self._cfg.llm = llm
         self._retired_clients = retired
-        self._install_clients(llm, identities, clients)
+        self._install_clients(llm, identities, clients, provider_clients)
+
+    def _resolve_role(
+        self, role: str, bot_config=None, *, model_override: str = "",
+    ) -> tuple[Any, str]:
+        """解析某角色本轮应使用的 (client, provider_id)。
+
+        - bot 级 provider_override 优先(每 bot 可走不同提供商);
+        - 否则用全局 llm.<role>_provider;
+        - 未配置提供商时回退旧的 role client(可能为 None)。
+        返回的 provider_id 为空表示沿用旧字段。
+        """
+        cfg = getattr(self, "_cfg", None)
+        llm = getattr(cfg, "llm", None)
+        providers = getattr(self, "_provider_clients", {}) or {}
+        if llm is None:
+            # 测试替身/半初始化对象: 直接回退旧 role client
+            return getattr(self, f"_{role}_client", None), ""
+        override = str(
+            getattr(bot_config, f"{role}_provider_override", "") or ""
+        ).strip() if bot_config is not None else ""
+        global_id = str(getattr(llm, f"{role}_provider", "") or "").strip()
+        # 回退顺序: bot override → 全局 <role>_provider → 旧字段。
+        # 之前 override 无效时直接跳到旧字段, 会跳过本可用的全局 provider,
+        # 导致"只配 providers"的部署 bot 聊天直接报未配置。
+        candidates = [override] if override else []
+        if global_id and global_id != override:
+            candidates.append(global_id)
+        for candidate in candidates:
+            if candidate in providers:
+                return providers[candidate], candidate
+        if candidates:
+            logger.warning(
+                f"{role} 提供商 {candidates} 均不存在, 回退默认配置"
+            )
+        return getattr(self, f"_{role}_client", None), ""
+
+    def _resolve_chat_target(self, bot_config=None) -> tuple[Any, str, str]:
+        """(client, model, provider_id): 提供商默认模型 < bot 模型覆盖。"""
+        client, provider_id = self._resolve_role("chat", bot_config)
+        llm = getattr(getattr(self, "_cfg", None), "llm", None)
+        model = (
+            (getattr(bot_config, "chat_model_override", "") if bot_config else "")
+            or getattr(llm, "chat_model", "")
+        )
+        if provider_id and llm is not None:
+            spec = self._provider_specs(llm).get(provider_id) or {}
+            default_model = spec.get("default_model") or ""
+            if default_model and not (bot_config and getattr(bot_config, "chat_model_override", "")):
+                model = default_model
+        return client, model, provider_id
+
+    def _resolve_vision_target(self, bot_config=None) -> tuple[Any, str, str]:
+        client, provider_id = self._resolve_role("vision", bot_config)
+        llm = getattr(getattr(self, "_cfg", None), "llm", None)
+        model = (
+            (getattr(bot_config, "vision_model_override", "") if bot_config else "")
+            or getattr(llm, "vision_model", "")
+        )
+        if provider_id and llm is not None:
+            spec = self._provider_specs(llm).get(provider_id) or {}
+            if spec.get("default_model") and not (
+                bot_config and getattr(bot_config, "vision_model_override", "")
+            ):
+                model = spec["default_model"]
+        return client, model, provider_id
 
     def _current_tools_schemas(self) -> list[dict]:
         """Advertise executable tools; reserved built-in names always win conflicts."""
@@ -286,23 +459,22 @@ class LLMService:
         Returns:
             (reply_text, tool_results) — tool_results may be None if no tools were called.
         """
-        # Check if LLM is available
-        if not self._available or self._chat_client is None:
+        # Check if LLM is available(多提供商时 _chat_client 可能为空)
+        if not self._available:
             logger.warning("LLM not configured — cannot process message")
             return LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), None
 
-        # Determine which model and client to use
-        model = self._cfg.llm.chat_model
+        # 解析本轮使用哪个提供商/模型(多提供商 + bot 级覆盖)
+        client, model, provider_id = self._resolve_chat_target(bot_config)
         temperature = self._cfg.llm.chat_temperature
         max_tokens = self._cfg.llm.chat_max_tokens
-        client = self._chat_client
+        if client is None:
+            logger.warning("LLM 未配置可用的 chat 提供商/密钥")
+            return LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), None
 
         # 识图有两种模式(见 _prepare_messages):
         #   describe(默认) → 图片已由视觉模型转述成文本, 主模型只收文本;
         #   direct        → 图片以 image_url 多模态直发主模型(要求 chat 模型支持视觉)。
-        if bot_config and bot_config.chat_model_override:
-            model = bot_config.chat_model_override
-
         # Build messages array
         messages = await self._build_messages(bot_id, event, context, bot_config, persona_content)
         penalty_kwargs = _optional_penalties(self._cfg.llm)
@@ -452,21 +624,20 @@ class LLMService:
         When is_final=True, that chunk may include tool call results.
         The caller should send individual chunks as they arrive.
         """
-        if not self._available or self._chat_client is None:
+        if not self._available:
             yield (LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), True)
             return
 
-        model = self._cfg.llm.chat_model
+        client, model, provider_id = self._resolve_chat_target(bot_config)
         temperature = self._cfg.llm.chat_temperature
         max_tokens = self._cfg.llm.chat_max_tokens
-        client = self._chat_client
+        if client is None:
+            yield (LLMDiagnostic("LLM 服务未配置（缺少 API Key），请在 config/global.yaml 中设置。"), True)
+            return
 
         # 识图有两种模式(见 _prepare_messages):
         #   describe(默认) → 图片已由视觉模型转述成文本, 主模型只收文本;
         #   direct        → 图片以 image_url 多模态直发主模型(要求 chat 模型支持视觉)。
-
-        if bot_config and bot_config.chat_model_override:
-            model = bot_config.chat_model_override
 
         messages = await self._build_messages(bot_id, event, context, bot_config, persona_content)
 
@@ -999,7 +1170,8 @@ class LLMService:
         Prompt 要求 LLM 自行抉择: 先全局概要, 再对最重要的轮次(≤5)逐轮浓缩。
         失败返回 None(调用方降级为直接裁剪)。
         """
-        if not self._available or self._chat_client is None:
+        client, model, _ = self._resolve_chat_target(None)
+        if not self._available or client is None:
             logger.warning("LLM 未配置, 上下文总结不可用(直接裁剪)")
             return None
         lines = []
@@ -1025,8 +1197,8 @@ class LLMService:
             "对话内容:\n" + "\n".join(lines)
         )
         try:
-            resp = await self._chat_client.chat.completions.create(
-                model=self._cfg.llm.chat_model,
+            resp = await client.chat.completions.create(
+                model=model,
                 messages=[
                     {"role": "system", "content": "你是对话压缩助手。"},
                     {"role": "user", "content": prompt},
@@ -1035,7 +1207,7 @@ class LLMService:
                 max_tokens=int(getattr(self._cfg.llm, "summarize_max_tokens", 4096)),
             )
             await self._record_usage(
-                self._cfg.llm.chat_model, getattr(resp, "usage", None),
+                model, getattr(resp, "usage", None),
                 "", None, module="summary", kind="summary",
             )
             text = (resp.choices[0].message.content or "").strip()
@@ -1057,7 +1229,8 @@ class LLMService:
 
         复用 chat 模型; 失败返回空串(调用方自行降级), 不抛异常。
         """
-        if not self._available or self._chat_client is None:
+        client, model, _ = self._resolve_chat_target(None)
+        if not self._available or client is None:
             logger.warning("LLM 未配置, complete_text 不可用")
             return ""
         messages: list[dict[str, str]] = []
@@ -1065,14 +1238,14 @@ class LLMService:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         try:
-            resp = await self._chat_client.chat.completions.create(
-                model=self._cfg.llm.chat_model,
+            resp = await client.chat.completions.create(
+                model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
             await self._record_usage(
-                self._cfg.llm.chat_model, getattr(resp, "usage", None),
+                model, getattr(resp, "usage", None),
                 "", None, module=module, kind="complete",
             )
             return (resp.choices[0].message.content or "").strip()
@@ -1086,11 +1259,17 @@ class LLMService:
         model: 按次指定模型(队列积压时的快速模型 burst); 留空用配置的 emotion_model。
         失败/未配置返回 None, 调用方(EmotionExpert)自行降级。
         """
-        if self._emotion_client is None:
+        emotion_client, emotion_provider_id = self._resolve_role("emotion", None)
+        if emotion_client is None:
             return None
-        model = model or self._cfg.llm.emotion_model or self._cfg.llm.chat_model
+        # 模型优先级: 调用方指定 > emotion_model > 提供商默认模型 > chat 模型
+        model = model or self._cfg.llm.emotion_model
+        if not model and emotion_provider_id:
+            spec = self._provider_specs(self._cfg.llm).get(emotion_provider_id) or {}
+            model = spec.get("default_model") or ""
+        model = model or self._cfg.llm.chat_model
         try:
-            resp = await self._emotion_client.chat.completions.create(
+            resp = await emotion_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=float(getattr(self._cfg.llm, "emotion_temperature", 0.3)),
@@ -1272,11 +1451,11 @@ class LLMService:
 
     def freeze_completion(self, bot_config=None):
         """Capture the actual client and public parameters before any preparation await."""
-        client = self._chat_client
+        client, model, _provider = self._resolve_chat_target(bot_config)
         if client is not None and hasattr(client, "with_options"):
             client = client.with_options(max_retries=0)  # service owns the sole controlled retry
         return {"client": client, "parameters": {
-            "model": (getattr(bot_config, "chat_model_override", "") or self._cfg.llm.chat_model),
+            "model": model,
             "temperature": self._cfg.llm.chat_temperature,
             "max_tokens": self._cfg.llm.chat_max_tokens,
         }}
@@ -1453,7 +1632,9 @@ class LLMService:
             # describe 模式的图片语义: 先预调用视觉模型取描述,
             # 主模型只接收「图文文本 + 描述」, 不接收图片原始信息(image_url)。
             # (direct 模式不进入本分支, 见下方 direct_image 构造)
-            vision_desc = await self._describe_image_for_text(image_urls[0])
+            # 无视觉能力时 _describe_image_for_text 会在下载前提前返回空串,
+            # 因此这里保持原调用即可(不做额外分支, 避免测试替身语义变化)。
+            vision_desc = await self._describe_image_for_text(image_urls[0], bot_config)
             if user_text and vision_desc:
                 user_content = f"{user_text}（图片内容：{vision_desc}）"
             elif vision_desc:
@@ -1509,33 +1690,33 @@ class LLMService:
 
         return messages
 
-    async def _describe_image_for_text(self, url: str) -> str:
+    async def _describe_image_for_text(self, url: str, bot_config=None) -> str:
         """Legacy 路径用: 预调用视觉模型把图片转述为文本描述。
 
         优先走 ImageCache(下载 → phash 去重 → 描述缓存, 命中缓存不再调 vision);
         未注入 image_cache 时降级直调 describe_image(每次调用)。
         视觉不可用或调用失败返回空串(调用方降级为占位文本)。
         """
-        if not self._vision_available or self._vision_client is None:
+        if not getattr(self, "_vision_available", False):
             return ""
         if self._image_cache is not None:
             try:
                 _, description = await self._image_cache.get_or_describe(
-                    url, vision_callback=self._vision_callback(),
+                    url, vision_callback=self._vision_callback(bot_config),
                 )
                 return description or ""
             except Exception as e:
                 logger.warning(f"ImageCache failed in _build_messages: {e}")
                 return ""
         # 无缓存注入: 直调 describe_image(不支持下载的 URL 可能返回空)
-        return await self.describe_image(url)
+        return await self.describe_image(url, bot_config=bot_config)
 
-    def _vision_callback(self):
+    def _vision_callback(self, bot_config=None):
         """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。"""
         async def _cb(image_url: str, local_path: str) -> str:
             try:
                 return await asyncio.wait_for(
-                    self.describe_image_file(local_path),
+                    self.describe_image_file(local_path, bot_config=bot_config),
                     timeout=30.0,
                 )
             except asyncio.TimeoutError:
@@ -1546,13 +1727,22 @@ class LLMService:
                 return ""
         return _cb
 
-    async def describe_image(self, url: str, max_tokens: int | None = None) -> str:
+    async def describe_image(self, url: str, max_tokens: int | None = None, bot_config=None) -> str:
         """用视觉模型描述一张图片,供 agent 流水线使用。
 
         提示词取全局配置 llm.vision_prompt(默认含中V人物特征参照);
         视觉不可用或调用失败时返回空串(调用方降级为占位符)。
         """
-        if not self._vision_available or self._vision_client is None:
+        vision_client, vision_model, vision_provider_id = self._resolve_vision_target(bot_config)
+        if not self._vision_available or vision_client is None:
+            # loguru 用 {} 插值, 不支持 logging 的 %s/%r(会原样输出并丢字段)
+            _llm_cfg = getattr(getattr(self, "_cfg", None), "llm", None)
+            logger.warning(
+                "识图不可用: 未配置可用的视觉提供商"
+                f"(clients={bool(getattr(self, '_provider_clients', None))}, "
+                f"vision_provider={getattr(_llm_cfg, 'vision_provider', '')!r}, "
+                f"bot_override={getattr(bot_config, 'vision_provider_override', '') if bot_config else ''!r})"
+            )
             return ""
         # 参数可在 WebUI 配置(llm.vision_max_tokens / vision_temperature);
         # 推理型视觉模型思考会烧 token, 预算太小会导致正文为空。
@@ -1561,8 +1751,8 @@ class LLMService:
         vision_temperature = float(getattr(self._cfg.llm, "vision_temperature", 0.3))
         try:
             prompt = (self._cfg.llm.vision_prompt or "").strip() or "请用一句简短、客观的话描述这张图片的内容。"
-            response = await self._vision_client.chat.completions.create(
-                model=self._cfg.llm.vision_model,
+            response = await vision_client.chat.completions.create(
+                model=vision_model,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -1574,7 +1764,7 @@ class LLMService:
                 temperature=vision_temperature,
             )
             await self._record_usage(
-                self._cfg.llm.vision_model, getattr(response, "usage", None),
+                vision_model, getattr(response, "usage", None),
                 "", None, module="vision", kind="vision",
             )
             text = (response.choices[0].message.content or "").strip()
@@ -1585,13 +1775,13 @@ class LLMService:
             logger.warning(f"Vision describe failed: {e}")
             return ""
 
-    async def describe_image_file(self, local_path: str, max_tokens: int | None = None) -> str:
+    async def describe_image_file(self, local_path: str, max_tokens: int | None = None, bot_config=None) -> str:
         """用视觉模型描述本地图片文件。
 
         图片以 base64 data URI 内嵌请求体发送, 不依赖网关访问外网
         (QQ 图源 gchat.qpic.cn 需鉴权, 直接传 URL 常导致模型返回空)。
         """
-        if not self._vision_available or self._vision_client is None:
+        if not getattr(self, "_vision_available", False):
             return ""
         try:
             import base64 as _b64
@@ -1602,7 +1792,9 @@ class LLMService:
             }.get(ext, "image/jpeg")
             with open(local_path, "rb") as f:
                 data = _b64.b64encode(f.read()).decode()
-            return await self.describe_image(f"data:{mime};base64,{data}", max_tokens)
+            return await self.describe_image(
+                f"data:{mime};base64,{data}", max_tokens, bot_config=bot_config,
+            )
         except Exception as e:
             logger.warning(f"Vision describe file failed: {e}")
             return ""
@@ -1717,6 +1909,10 @@ class LLMService:
         for role in ("chat", "vision", "emotion"):
             clients.append(getattr(self, f"_{role}_client", None))
             setattr(self, f"_{role}_client", None)
+        for provider_client in (getattr(self, "_provider_clients", {}) or {}).values():
+            clients.append(provider_client)
+        self._provider_clients = {}
+        self._provider_identity_cache = {}
         self._available = False
         self._vision_available = False
         self._client_identities = {}

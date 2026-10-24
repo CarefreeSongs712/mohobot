@@ -101,7 +101,7 @@ async def test_web_config_changes_live_components():
                     "llm_excluded_groups": [1002],
                     "external_service_groups": [482999198, 1059744894],
                     "ignore_auto_reply": False,
-                    "history_dual_write": False, "group_recent_msgs_count": 0,
+                    "group_recent_msgs_count": 0,
                     "admins": [3001], "touch_replies": ["new reply"],
                     "usage_excluded_models": ["excluded"],
                     "reply": {"stream": False, "segment_max_len": 100,
@@ -114,7 +114,6 @@ async def test_web_config_changes_live_components():
                 handler = app._message_handler
                 assert handler._group_llm_excluded(1002)
                 assert not handler._ignore_auto_reply_enabled()
-                assert not cfg.history_dual_write
                 assert handler._group_recent_count == 0
                 assert handler._seg_max_len == 100 and not handler._stream
                 assert not handler._reply_quote
@@ -153,7 +152,7 @@ async def test_main_image_cache_shared_with_llm_and_context():
             uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
             calls = []
 
-            async def describe(path, max_tokens=None):
+            async def describe(path, max_tokens=None, bot_config=None):
                 calls.append(path)
                 await asyncio.sleep(0.01)
                 return "一张红色图片"
