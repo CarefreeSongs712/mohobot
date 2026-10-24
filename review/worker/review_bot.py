@@ -34,7 +34,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PARALLEL, RETRIES = int(CFG.get("parallel", 5)), 3
 MIN_CONF = float(CFG.get("min_conf", 0.7))
 MAX_ATTEMPTS = int(CFG.get("max_attempts", 3))
-FORCE_AFTER = float(CFG.get("force_after_hours", 72)) * 3600
+try:
+    FORCE_AFTER = float(CFG.get("force_after_hours") or 72) * 3600  # null/缺省 → 72h
+except (TypeError, ValueError):
+    FORCE_AFTER = 72 * 3600
 RUN_AT = CFG.get("run_at") or "09:00"
 LOG_PATH = CFG.get("log_path") or "review_log.jsonl"
 if not os.path.isabs(LOG_PATH): LOG_PATH = os.path.join(HERE, LOG_PATH)
@@ -115,7 +118,10 @@ def forced_indices(s, now=None):
         if e.get("kind") == "summary" or is_bot(e) or e.get("status") != "unreviewed":
             continue
         seq += 1
-        ts = float(e.get("timestamp") or 0)
+        try:
+            ts = float(e.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
         if FORCE_AFTER > 0 and ts > 0 and now - ts > FORCE_AFTER:
             out.add(seq)
     return out
@@ -229,6 +235,8 @@ def force_verdicts(req, text, per, forced, tags):
     """积压超时条目: 未给出有效判决的追问一次; 仍不行按宽松标准兜底判正常。
 
     原地更新 per, 返回追问回复文本(没追问为空)。
+    追问回复不带条目序号时: 只有一条待定 → 采用整体结论; 多条无法对应 →
+    保持存疑转人工(带 [追问无序号] 标记), 不兜底——避免把回复里的异常洗白。
     """
     pending = sorted(i for i in forced if per.get(i, {}).get("action", "skip") == "skip")
     follow = ""
@@ -239,9 +247,18 @@ def force_verdicts(req, text, per, forced, tags):
                 .replace("{idx}", " ".join(f"#{i}" for i in pending))},
         ])
         follow, _ = _post_llm(req2)
-        again, _ = parse_verdicts(follow, tags) if follow else ({}, None)
+        again, all_v = parse_verdicts(follow, tags) if follow else ({}, None)
+        # 整条回复都没带序号: 单条可安全采用整体结论; 多条无法对应 → 不猜、不洗白
+        unindexed = all_v if (all_v is not None and not again) else None
         for i in pending:
             v = again.get(i)
+            if v is None and unindexed is not None and len(pending) == 1:
+                v = unindexed
+            if v is None and unindexed is not None:
+                per[i] = {"action": "skip", "tags": [], "conf": None, "label": "",
+                          "no_index": True,
+                          "note": "[追问无序号] 追问回复未带条目序号, 无法对应到具体消息, 保持存疑转人工"}
+                continue
             v = decide(v, forced=True) if v else None
             if v and v["action"] != "skip":
                 per[i] = dict(v, note="[追问] " + v["note"])
@@ -352,34 +369,50 @@ def handle(r):
             groups[vd["action"]].append((i, fp, vd))
         n_fps = [fp for _, fp, _ in groups["normal"]]
         resolved = False
-        forced_n = sum(1 for g in groups.values() for _, _, vd in g if vd.get("forced"))
-        fallback_n = sum(1 for _, _, vd in groups["normal"] if vd.get("fallback"))
-        if forced_n:
-            STATS["forced"] += forced_n
-            STATS["fallback"] += fallback_n
-            print(f"    ⏱ 积压超 {FORCE_AFTER / 3600:.0f}h 必须判决 {forced_n} 条" + (f" (其中兜底判正常 {fallback_n} 条)" if fallback_n else ""))
+        forced_ids = [i for g in groups.values() for i, _, vd in g if vd.get("forced")]
+        fallback_ids = [i for i, _, vd in groups["normal"] if vd.get("fallback")]
+        noindex_ids = [i for i, _, vd in groups["skip"] if vd.get("no_index")]
+        if forced_ids:
+            print(f"    ⏱ 积压超 {FORCE_AFTER / 3600:.0f}h 必须判决 {len(forced_ids)} 条"
+                  + (f" (其中兜底判正常 {len(fallback_ids)} 条)" if fallback_ids else ""))
             for i, _, vd in groups["normal"]:
                 if vd.get("fallback"):
                     print(f"    ⏱ #{i} {vd['note'][:160]}")
+            for i, _, vd in groups["skip"]:
+                if vd.get("no_index"):
+                    print(f"    ? #{i} {vd['note'][:160]}")
+        forced_done = 0
         if n_fps:
             okn = submit(sk, "normal", n_fps)
             resolved = resolved or okn
             STATS["normal"] += len(n_fps) if okn else 0
+            if okn:
+                forced_done += len([1 for i, _, _ in groups["normal"] if i in forced_ids])
+                STATS["forced"] += forced_done
+                STATS["fallback"] += len(fallback_ids)
             lo = min((vd["conf"] for _, _, vd in groups["normal"] if vd["conf"] is not None), default=None)
             print(f"    ✓ {len(n_fps)} 条标正常" + (f" (最低 conf={lo:.2f})" if lo is not None else " conf=?") + ("" if okn else " ✗ 提交失败"))
         for i, fp, vd in groups["abnormal"]:
             oka = submit(sk, "abnormal", [fp], tags=vd["tags"], note="[LLM] " + vd["note"])
             resolved = resolved or oka
             STATS["abnormal"] += 1 if oka else 0
+            if oka and vd.get("forced"):
+                forced_done += 1
+                STATS["forced"] += 1
             print(f"    ⚑ #{i} 异常 {conf_str(vd)} [{'/'.join(vd['tags'])}] {vd['note']}" + ("" if oka else " ✗ 提交失败"))
         for i, fp, vd in groups["skip"]:
             print(f"    ? #{i} 存疑 {conf_str(vd)} → 保持未审: {vd['note']}")
         if resolved and bot_fps:
             okb = submit(sk, "normal", bot_fps)
             if okb: print(f"    ✓ 另 {len(bot_fps)} 条 bot 回复标正常")
-        log_rec(sk, s, {"action": "mixed", "tags": [], "conf": None,
-                        "note": f"逐条判定: 正常 {len(n_fps)} / 异常 {len(groups['abnormal'])} / 存疑 {len(groups['skip'])}"
-                                + (f" / 积压必判 {forced_n} (兜底 {fallback_n})" if forced_n else "")}, text)
+        detail = (f"逐条判定: 正常 {len(n_fps)} / 异常 {len(groups['abnormal'])} / 存疑 {len(groups['skip'])}")
+        if forced_ids:
+            detail += f" / 积压必判 {forced_done}·已提交 (共 {len(forced_ids)})"
+            if fallback_ids:
+                detail += f" / 兜底正常: " + " ".join(f"#{i}" for i in fallback_ids)
+            if noindex_ids:
+                detail += f" / 追问无序号转人工: " + " ".join(f"#{i}" for i in noindex_ids)
+        log_rec(sk, s, {"action": "mixed", "tags": [], "conf": None, "note": detail}, text)
         if groups["skip"]:
             STATS["skip"] += len(groups["skip"])
             if not resolved:
@@ -433,7 +466,7 @@ def summary():
     c = STATS
     print(f"----- 本轮结束: 正常 {c['normal']} / 异常 {c['abnormal']} / 存疑跳过 {c['skip']} / "
           f"LLM失败 {c['llm_fail']} / 取会话失败 {c['fetch_fail']} / 仅bot {c['bot_only']}"
-          + (f" / 积压必判 {c['forced']} (兜底正常 {c['fallback']})" if c['forced'] else "")
+          + (f" / 积压判决已提交 {c['forced']} (兜底正常 {c['fallback']})" if c['forced'] else "")
           + ("　(只读试跑, 未提交任何结果)" if DRY else ""))
 
 
