@@ -204,7 +204,8 @@ class MohobotData:
     """
 
     # v6: bot 发言增加 source 标记(llm/auto), 机械内容不参与审核; 旧缓存作废
-    _CACHE_VERSION = 7
+    # v8: offset 改为字节偏移; v7 缓存里存的是字符偏移(含中文时错位), 必须作废
+    _CACHE_VERSION = 8
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None,
@@ -436,24 +437,30 @@ class MohobotData:
                 idx.offset = 0
             new_rows: list[dict[str, Any]] = []
             try:
-                with open(path, "r", encoding="utf-8") as fh:
+                # offset 是字节偏移: 必须二进制读、按字节切分再解码。文本模式下
+                # 用字符下标累加 offset 会在含中文(多字节 UTF-8)的文件上 seek
+                # 到字符中间, 下次读取 UnicodeDecodeError, 整个会话列表 500。
+                with open(path, "rb") as fh:
                     start_offset = idx.offset
                     if start_offset:
                         fh.seek(start_offset)
-                    new_text = fh.read()
+                    new_bytes = fh.read()
                 # 只消费到最后一个换行: 跨分块写入的半行留到下次(文件增长后)
                 # 再解析, 避免"丢弃半行 + 已推进 offset"导致该行永久漏审
                 # (issue #8 第 5 点/半行问题)。
-                cut = new_text.rfind("\n")
+                cut = new_bytes.rfind(b"\n")
                 if cut >= 0:
-                    new_text = new_text[: cut + 1]
+                    new_bytes = new_bytes[: cut + 1]
                     idx.offset = start_offset + cut + 1
                 else:
-                    new_text = ""
+                    new_bytes = b""
                     idx.offset = start_offset
                 idx.mtime, idx.size, idx.inode = mtime, size, inode
             except OSError:
                 return None
+            # 换行符在 UTF-8 中不会出现在多字节序列内, 切分点总在字符边界;
+            # 个别坏字节只影响所在行(替换后该行 JSON 解析失败被跳过)。
+            new_text = new_bytes.decode("utf-8", errors="replace")
             # 布局判定: history/group/{群号}.jsonl 为群合并文件(倒数第三段是
             # "history"); 其余为 per-bot 文件 {bot_id}/{private|group}/{id}.jsonl
             merged_group = (
