@@ -668,6 +668,22 @@ def is_chinese_trigger(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]{2,}", text or ""))
 
 
+# 段首引导字符(引号/加粗/括号/标点)后的首个非标点字符: 用于判断段落是否以汉字开头。
+_HAN_LEAD_PREFIX_RE = re.compile(r"^[\s\"'“”‘’*_>\[（(「『【\-—–、，。！？:：]*")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’\-]*")
+
+
+def _led_by_han(text: str) -> bool:
+    """段落是否以汉字开头(允许前置引号/加粗/标点)。"""
+    cleaned = _HAN_LEAD_PREFIX_RE.sub("", text or "")
+    return bool(re.match(r"[\u4e00-\u9fff]", cleaned))
+
+
+def _count_english_words(text: str) -> int:
+    """英文单词数(CamelCase/连字符专名算一个词, 如 Cadillac-Class)。"""
+    return len(_ENGLISH_WORD_RE.findall(text or ""))
+
+
 def looks_like_monologue(text: str) -> bool:
     """回复是否以内心独白句式开头(模型推理外泄的变体, 无 #60 的自查表头)。
 
@@ -682,7 +698,8 @@ def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
 
     返回非空字符串 = 命中原因(调用方丢弃该段); 空串 = 放行。
     判定(全部满足): 触发消息含≥2个汉字(中文会话); 段落无模板标记;
-    英文字母≥15且是汉字数的4倍以上(车名/型号混排不受影响)。
+    英文字母≥15且是汉字数的4倍以上(车名/型号混排不受影响);
+    段首以汉字开头且英文词≤6 的中英夹聊句不拦(2026-10-25 生产误拦样本)。
     """
     seg = (segment or "").strip()
     if len(seg) < 12:
@@ -698,5 +715,11 @@ def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
     n_latin = len(re.findall(r"[A-Za-z]", seg))
     n_han = len(re.findall(r"[\u4e00-\u9fff]", seg))
     if n_latin >= 15 and n_latin > n_han * 4:
+        # 中文引导语开头、英文词又少的段是正常的中英夹聊(生产误拦样本:
+        # "比如 rain falling on the roof"、"哈哈 Cadillac-Class Aircraft Carrier，"),
+        # 不按漂移丢弃; 真正的整段漂移段首即英文(生产样本 "user just calls
+        # “老婆”. Tickled response,"), 或英文句较长(>6 词)时仍拦。
+        if _led_by_han(seg) and _count_english_words(seg) <= 6:
+            return ""
         return f"latin={n_latin}/han={n_han}"
     return ""

@@ -750,3 +750,58 @@ def test_example_config_and_webui_expose_ooc_guard():
     assert "ooc_guard_enabled" in example
     html = (root / "mohobot" / "web_panel" / "static" / "index.html").read_text(encoding="utf-8")
     assert "reply.ooc_guard_enabled" in html
+
+
+# ── 7. 混排句误拦回归(2026-10-25 生产样本) + guard 作用范围钉住 ──
+
+def test_han_led_code_switching_not_flagged():
+    """中文引导语+少量英文词的中英夹聊句不按漂移丢弃。
+
+    生产误拦样本(72h 内 3 条): 段首即汉字、英文只是专名/短语, 却因
+    latin>han*4 被整段丢掉, 用户看到回复缺半截。
+    """
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "你说说这车怎么样"
+    miss = [
+        "比如 rain falling on the roof",           # bot_006 14:14:37 误拦
+        "哈哈 Cadillac-Class Aircraft Carrier，",   # bot_011 20:54:59 误拦
+        "哈哈 Mercedes-Class Aircraft Carrier，",   # bot_011 20:56:41 误拦
+        "“比如 rain falling on the roof”",          # 带引号变体同判
+    ]
+    for seg in miss:
+        assert not is_foreign_language_reply(seg, zh_trigger), seg
+
+
+def test_han_led_long_english_still_flagged():
+    """豁免不能被滥用: 汉字引导语兜不住长英文句(>6 词仍视为整段漂移)。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    hit = [
+        "哈哈 Since you asked me to write a song for you, my own decision",
+        "好的 So here is what I will do now my friend listen to me",
+    ]
+    for seg in hit:
+        assert is_foreign_language_reply(seg, "帮我写一首歌吧"), seg
+
+
+async def test_plugin_reply_path_bypasses_ooc_guard():
+    """guard 只作用于 LLM 生成内容: 插件/命令回复走 _send_reply, 不过三防。
+
+    插件输出(如"今日老婆"抽签)会原样转述用户昵称里的冷门符号与英文,
+    这是用户自己提供的内容, 不是模型漂移, 必须原样发送。
+    """
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._forward_min_len = 10**9  # 关闭合并转发, 走普通文本
+    handler._ws = None
+
+    plugin_reply = "你今天已经有老婆了哦❤️~\n她是：【镜花ౄ༉ོ】"
+    await handler._send_reply("bot", _Ev("今日老婆"), plugin_reply)
+    assert sent == [plugin_reply], sent
+
+    # 对照: 同样的内容走 LLM 发送口, 藏文区符号会被乱码清理剥掉(泰卢固 ౄ 不在
+    # 清理范围, 原样保留) —— 说明两条路径的治理行为确实不同。
+    sent.clear()
+    await handler._send_segment("bot", _Ev("今日老婆"), plugin_reply, False)
+    assert sent == ["你今天已经有老婆了哦❤️~\n她是：【镜花ౄ】"], sent
