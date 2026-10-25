@@ -33,6 +33,25 @@ from mohobot.utils.llm_diagnostic import LLMDiagnostic
 # 历史符号条目在占位文本里最多复现的原文长度(超出截断)
 _HISTORY_SYMBOL_MAX_CHARS = 40
 
+# 全局语言约束(2026-10 漂移治理): 紧跟人设、先于环境/上下文, 不被长上下文稀释。
+# 措辞用"使用简体中文"而非"禁止英文", 车名/歌名/专有名词的合法使用不受影响。
+# 用户明确要求其它语言/翻译时用放宽版(否则与"翻译成英文"类需求冲突)。
+_LANGUAGE_INSTRUCTION = (
+    "回复语言：始终使用简体中文回复。即使上下文中出现其它语言的歌名、"
+    "专有名词或内容，你发出的回复本身也必须是简体中文。"
+)
+_LANGUAGE_INSTRUCTION_ALLOW_FOREIGN = (
+    "回复语言：默认使用简体中文回复。即使上下文中出现其它语言的歌名、"
+    "专有名词或内容，你发出的回复本身也应是简体中文；但用户明确要求其它语言"
+    "或翻译时，按用户要求的语言输出。"
+)
+
+
+def _persona_with_language(persona: str, system: str) -> str:
+    """最终 system 顺序: 人设 → 语言约束 → 环境/上下文(人设与约束间用空行分隔)。"""
+    head = (persona.strip() + "\n\n") if persona and persona.strip() else ""
+    return head + system.lstrip("\n")
+
 
 def _normalize_vision_mode(value: Any) -> str:
     """识图模式归一化: 只接受 describe / direct, 其余(含空)回退 describe。"""
@@ -1469,7 +1488,7 @@ class LLMService:
         if client is None:
             raise RuntimeError("LLM unavailable")
         messages = deepcopy(prepared)
-        messages[0]["content"] = persona_content + messages[0]["content"]
+        messages[0]["content"] = _persona_with_language(persona_content, messages[0]["content"])
         response = await client.chat.completions.create(messages=messages, **frozen["parameters"])
         await self._record_usage(frozen["parameters"]["model"], getattr(response, "usage", None), bot_id, event, module="persona_ab")
         choice = response.choices[0] if response.choices else None
@@ -1488,7 +1507,7 @@ class LLMService:
         messages = await self._prepare_messages(
             bot_id, event, context, bot_config, force_describe=force_describe,
         )
-        messages[0]["content"] = persona + messages[0]["content"]
+        messages[0]["content"] = _persona_with_language(persona, messages[0]["content"])
         return messages
 
     async def _prepare_messages(
@@ -1515,13 +1534,14 @@ class LLMService:
         from mohobot.utils.cq_code import has_meaningful_text
 
         # 1. System prompt
-        # 语言约束(2026-10): 漂移普查显示 glm-5.3-flash 会整段漂成英文/夹外语词
-        # (生产样本见 reply_filter 的 OOC 三防一节), 而全部 15 个人设均无语言约束。
-        # 全局一行, 位置在 system 前部不被长上下文稀释; 措辞是"使用简体中文"而非
-        # "禁止英文"——车名/歌名/专有名词的合法使用不受影响。
+        # 语言约束: 紧跟人设之后、环境/上下文之前; 用户明确要外语/翻译时放宽。
+        from mohobot.utils.reply_filter import wants_foreign_language
+        from mohobot.utils.cq_code import extract_plain_text as _plain_text
+        _trigger = _plain_text(getattr(event, "message", None) or [])
         system_content = (
-            "回复语言：始终使用简体中文回复。即使上下文中出现其它语言的歌名、"
-            "专有名词或内容，你发出的回复本身也必须是简体中文。"
+            _LANGUAGE_INSTRUCTION_ALLOW_FOREIGN
+            if wants_foreign_language(_trigger)
+            else _LANGUAGE_INSTRUCTION
         )
 
         # Add user profile info to system prompt

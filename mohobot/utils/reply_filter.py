@@ -599,8 +599,9 @@ def strip_reply_artifacts(text: str) -> tuple[str, str]:
 # (生产样本: "同款CT5别رخ被借"、"بالمأنح有话直说"、单发的"ค")。
 _EXOTIC_GLYPH_RE = re.compile(
     "[\u0530-\u058F\u0590-\u05FF\u0600-\u06FF\u0700-\u074F\u0750-\u077F"
-    "\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF\u0E00-\u0E7F\u0E80-\u0EFF"
-    "\u10A0-\u10FF\u1200-\u137F\u1780-\u17FF\u2D00-\u2D2F]"
+    "\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF\u0D80-\u0DFF\u0E00-\u0E7F"
+    "\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u10A0-\u10FF\u1200-\u137F"
+    "\u1780-\u17FF\u2D00-\u2D2F]"
 )
 
 # 内心独白开头(模型把推理过程写成正文)。生产样本均为英文("Wait, no — the
@@ -619,21 +620,61 @@ _FOREIGN_TEMPLATE_MARK = re.compile(
     r"|^\d+\s*[.、)．]|《[^》]{1,60}》|\d+:\d{2}"
 )
 
+# 代码/报错/URL/命令等"引用型内容"豁免: 中文会话里贴英文报错、代码、链接是正常需求,
+# 不能被当成 OOC 整段丢弃。
+_FOREIGN_REFERENCE_MARK = re.compile(
+    r"```|`[^`]{2,}`|https?://|\bwww\.|"
+    r"\b(?:Traceback|Error|Exception|TypeError|ValueError|KeyError|"
+    r"ModuleNotFoundError|ImportError|AttributeError|SyntaxError)\b|"
+    r"\b(?:pip|npm|npx|git|docker|sudo|apt|systemctl)\s+\S|"
+    r"\b(?:import|def|class|return)\s+\w+|\{\s*\""
+)
+
+# 用户明确要求英文/翻译时, 中文触发也不拦英文回复(约束见 #88 的全局语言指令)。
+_TRIGGER_ALLOWS_FOREIGN = re.compile(
+    r"翻译|译成|译为|英文|英语|外语|translate|english|日文|日语", re.IGNORECASE
+)
+
+
+def wants_foreign_language(text: str) -> bool:
+    """用户是否明确要求其它语言/翻译(用于放宽外语判定与语言约束)。"""
+    return bool(_TRIGGER_ALLOWS_FOREIGN.search(text or ""))
+
 
 def strip_exotic_glyphs(text: str) -> str:
-    """删除正常聊天用不到的文字系统字符(阿拉伯/泰/藏等), 其余原样保留。"""
+    """删除正常聊天用不到的文字系统字符(阿拉伯/泰/藏等), 其余原样保留。
+
+    豁免: 外文字符 ≥8 的长句视为合法翻译/引用内容(可带中文引导语)原样保留;
+    生产 badcase 都是中文句子里混入的短碎片(؋/رخ/ค/بالمأنح, 最多 7 字), 仍会清理。
+    """
     if not text:
         return ""
+    exotic = _EXOTIC_GLYPH_RE.findall(text)
+    if not exotic:
+        return text
+    if len(exotic) >= 8:
+        from loguru import logger
+        logger.info(f"[ooc-guard] 疑似合法外文, 保留: {text[:60]!r}")
+        return text
     cleaned = _EXOTIC_GLYPH_RE.sub("", text)
     if cleaned != text:
         from loguru import logger
-        logger.debug(f"[ooc-guard] 删除乱码符号: {text[:60]!r}")
+        logger.info(f"[ooc-guard] 删除乱码符号({len(exotic)}): {text[:60]!r}")
     return cleaned
 
 
+def is_chinese_trigger(text: str) -> bool:
+    """触发消息是否为中文会话(≥2 个汉字)。"""
+    return bool(re.search(r"[\u4e00-\u9fff]{2,}", text or ""))
+
+
 def looks_like_monologue(text: str) -> bool:
-    """回复是否以内心独白句式开头(模型推理外泄的变体, 无 #60 的自查表头)。"""
-    return bool(_MONOLOGUE_RE.match((text or "").lstrip()))
+    """回复是否以内心独白句式开头(模型推理外泄的变体, 无 #60 的自查表头)。
+
+    允许前置引号/加粗/句读/列表符号: 生产出现过 "�Wait, …"、"**Wait, …**" 变体。
+    """
+    cleaned = re.sub(r'^[\s"\'“”‘’*_>「『（(\-—–、，。！？:：]+', "", text or "")
+    return bool(_MONOLOGUE_RE.match(cleaned))
 
 
 def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
@@ -646,10 +687,14 @@ def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
     seg = (segment or "").strip()
     if len(seg) < 12:
         return ""
-    if not re.search(r"[\u4e00-\u9fff]{2,}", trigger_text or ""):
+    if not is_chinese_trigger(trigger_text):
         return ""  # 触发不是中文会话(用户在用英文聊), 不拦
+    if _TRIGGER_ALLOWS_FOREIGN.search(trigger_text or ""):
+        return ""  # 用户明确要英文/翻译, 放行
     if _FOREIGN_TEMPLATE_MARK.search(seg):
         return ""
+    if _FOREIGN_REFERENCE_MARK.search(seg):
+        return ""  # 代码/报错/URL 等引用型内容, 不按漂移丢弃
     n_latin = len(re.findall(r"[A-Za-z]", seg))
     n_han = len(re.findall(r"[\u4e00-\u9fff]", seg))
     if n_latin >= 15 and n_latin > n_han * 4:

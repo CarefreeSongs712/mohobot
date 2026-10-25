@@ -141,6 +141,9 @@ reply:
   # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话(Well,/Okay so,/As an AI…)
   # 只清理白名单句首词, 不影响正常英文内容(Vocaloid/BPM 等保留)
   strip_english_fillers: true
+  # OOC 三防: 删除乱码符号字符 / 丢弃内心独白段 / 丢弃中文会话下的整段英文漂移
+  # 发送口与 TTS 文案统一生效; 关闭后三防原样放行(仍保留其它过滤器)
+  ooc_guard_enabled: true
 
 web_panel:
   enabled: true
