@@ -1515,7 +1515,14 @@ class LLMService:
         from mohobot.utils.cq_code import has_meaningful_text
 
         # 1. System prompt
-        system_content = ""
+        # 语言约束(2026-10): 漂移普查显示 glm-5.3-flash 会整段漂成英文/夹外语词
+        # (生产样本见 reply_filter 的 OOC 三防一节), 而全部 15 个人设均无语言约束。
+        # 全局一行, 位置在 system 前部不被长上下文稀释; 措辞是"使用简体中文"而非
+        # "禁止英文"——车名/歌名/专有名词的合法使用不受影响。
+        system_content = (
+            "回复语言：始终使用简体中文回复。即使上下文中出现其它语言的歌名、"
+            "专有名词或内容，你发出的回复本身也必须是简体中文。"
+        )
 
         # Add user profile info to system prompt
         if isinstance(event, GroupMessageEvent):
