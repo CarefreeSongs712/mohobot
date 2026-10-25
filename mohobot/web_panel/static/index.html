@@ -1412,6 +1412,7 @@ async function loadConfigPage() {
       checkField('reply.stream', '流式请求', globalConfigCache.reply?.stream, '逐 token 接收,false 则等完整回复') +
       checkField('reply.segment_reply', '分段回复', globalConfigCache.reply?.segment_reply, '按标点符号+长度切分为多条消息') +
       checkField('reply.reply_quote', '引用触发消息', globalConfigCache.reply?.reply_quote, '首条回复引用用户的消息') +
+      checkField('reply.ooc_guard_enabled', 'OOC 三防', globalConfigCache.reply?.ooc_guard_enabled, '删除乱码符号字符/丢弃内心独白/丢弃中文会话下的整段英文漂移; TTS 同步生效') +
       formField('reply.segment_min_len', '分段最小长度', globalConfigCache.reply?.segment_min_len, { hint: '字符数,低于此长度不切分' }) +
       formField('reply.segment_max_len', '分段硬上限', globalConfigCache.reply?.segment_max_len, { hint: '字符数,超过即使无标点也强制切' }) +
       formField('reply.segment_delay_min', '分段延迟下限(秒)', globalConfigCache.reply?.segment_delay_min) +
@@ -1587,6 +1588,7 @@ async function saveGlobalConfig() {
       stream: document.getElementById('cfg-reply.stream')?.checked ?? true,
       segment_reply: document.getElementById('cfg-reply.segment_reply')?.checked ?? true,
       reply_quote: document.getElementById('cfg-reply.reply_quote')?.checked ?? true,
+      ooc_guard_enabled: document.getElementById('cfg-reply.ooc_guard_enabled')?.checked ?? true,
       segment_min_len: num('cfg-reply.segment_min_len', 12),
       segment_max_len: num('cfg-reply.segment_max_len', 60),
       segment_delay_min: num('cfg-reply.segment_delay_min', 0.2),
