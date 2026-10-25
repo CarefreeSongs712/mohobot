@@ -267,3 +267,23 @@ if __name__ == "__main__":
     print("---")
     assert _failed == 0, f"{_failed} 个测试失败"
     print("ALL EMPTY MESSAGE TESTS PASSED")
+
+
+async def test_global_language_instruction_present():
+    """全局语言约束必须出现在主 system 消息最前部(群聊/私聊两条路径)。"""
+    service = _StubLLM()
+    from mohobot.llm_service import LLMService
+
+    service._prepare_messages = LLMService._prepare_messages.__get__(service)
+    for group_id in (None, 2001):
+        messages = await _prepare(
+            service, [{"type": "text", "data": {"text": "你好呀"}}], group_id=group_id,
+        )
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert system_msgs, "缺少 system 消息"
+        first = system_msgs[0]["content"]
+        assert first.startswith("回复语言："), f"语言约束不在 system 开头: {first[:80]!r}"
+        assert "简体中文" in first and "必须是简体中文" in first
+        # 不写成"禁止英文"式措辞(允许歌名/专名的合法英文)
+        assert "禁止" not in first
+    print("[L] 全局语言约束注入 OK")
