@@ -19,15 +19,19 @@ def _console_format(record: dict) -> str:
         f"<green>{_utc8_time(record)}</green> | "
         "<level>{level: <8}</level> | "
         "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
-        "<level>{message}</level>"
+        "<level>{message}</level>\n"
     )
 
 
 def _file_format(record: dict) -> str:
-    """File template with the timestamp pre-rendered in UTC+8."""
+    """File template with the timestamp pre-rendered in UTC+8.
+
+    末尾必须带换行: loguru 对 callable 格式按原样输出, 不自动补 \\n
+    (生产实测 4.5 万条记录只有 1174 个换行, 全部粘连, 无法按行 grep)。
+    """
     return (
         f"{_utc8_time(record)} | "
-        "{level: <8} | {name}:{function}:{line} | {message}"
+        "{level: <8} | {name}:{function}:{line} | {message}\n"
     )
 
 

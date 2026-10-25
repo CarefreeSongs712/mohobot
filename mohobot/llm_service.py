@@ -665,6 +665,17 @@ class LLMService:
         max_tokens = min(self._cfg.llm.chat_max_tokens, 131072)
         penalty_kwargs = _optional_penalties(self._cfg.llm)
 
+        # [llm] 可观测性日志: 现有 debug 行不带 bot/会话标识, 追溯只能靠时间戳
+        # 反推; 这条 info 版补齐(格式与 [tool]/[inject]/[reply] 对齐, 可直接 grep)。
+        try:
+            _n_tools = len(self._current_tools_schemas())
+        except Exception:
+            _n_tools = 0
+        logger.info(
+            f"[llm] bot={bot_id} chat={self._describe_chat(event)} model={model} "
+            f"msgs={len(messages)} stream=true temp={temperature} tools={_n_tools}"
+        )
+
         logger.debug(
             f"LLM stream call: model={model}, messages={len(messages)}, "
             f"context_len={len(context)}, max_tokens={max_tokens}, "
@@ -1831,34 +1842,86 @@ class LLMService:
         context: dict | None = None,
     ) -> str:
         """Execute a tool/function call and return the result."""
+        # [tool] 可观测性日志: 一行记录谁调了什么工具、参数与结果规模,
+        # 便于事后追溯行为(正文级内容去 history 对时间戳)。
+        _t0 = time.monotonic()
+        _tool_bot = (context or {}).get("bot_id") or "?"
+        _tool_chat = "?"
+        _ev = (context or {}).get("event")
+        if _ev is not None:
+            _tool_chat = self._describe_chat(_ev)
         try:
             args = json.loads(args_json)
         except (TypeError, ValueError):
+            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} args=<invalid json> → error")
             return json.dumps({"error": "工具参数必须是有效的 JSON"}, ensure_ascii=False)
         if not isinstance(args, dict):
+            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} args=<not object> → error")
             return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
+        _args_preview = str(args)[:120]
+
+        def _log_tool(result: str, *, note: str = "") -> None:
+            logger.info(
+                f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} "
+                f"args={_args_preview} → {len(result)} chars "
+                f"({(time.monotonic() - _t0) * 1000:.0f}ms){note}"
+            )
 
         # Built-ins win name conflicts, including unadvertised compatibility stubs.
         if func_name == "get_current_time":
             from mohobot.utils.time_utils import format_utc8
-            return format_utc8("%Y-%m-%d %H:%M:%S")
+            result = format_utc8("%Y-%m-%d %H:%M:%S")
+            _log_tool(result)
+            return result
         elif func_name == "get_group_member_info":
             # This would need a bot connection to call the API
-            return json.dumps({"error": "不在 WebSocket 连接中无法获取成员信息"}, ensure_ascii=False)
+            result = json.dumps({"error": "不在 WebSocket 连接中无法获取成员信息"}, ensure_ascii=False)
+            _log_tool(result)
+            return result
         elif func_name == "anysearch_search":
             if self._anysearch_client is None:
-                return json.dumps({"error": "Anysearch 未配置 API Key"}, ensure_ascii=False)
+                result = json.dumps({"error": "Anysearch 未配置 API Key"}, ensure_ascii=False)
+                _log_tool(result)
+                return result
             query = str(args.get("query", "")).strip()
             if not query:
-                return json.dumps({"error": "搜索查询不能为空"}, ensure_ascii=False)
+                result = json.dumps({"error": "搜索查询不能为空"}, ensure_ascii=False)
+                _log_tool(result)
+                return result
             try:
-                return await self._anysearch_client.safe_search(query, max_results=5)
+                result = await self._anysearch_client.safe_search(query, max_results=5)
+                _log_tool(result)
+                return result
             except Exception as e:
-                return json.dumps({"error": f"搜索失败: {e}"}, ensure_ascii=False)
+                result = json.dumps({"error": f"搜索失败: {e}"}, ensure_ascii=False)
+                _log_tool(result)
+                return result
         from mohobot.services.llm_tools import registry
         if registry.contains(func_name):
-            return await registry.execute(func_name, args, context=context)
-        return json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
+            try:
+                result = await registry.execute(func_name, args, context=context)
+            except Exception as e:
+                logger.info(
+                    f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} "
+                    f"args={_args_preview} → exception: {e!r}"
+                )
+                raise
+            _log_tool(result)
+            return result
+        result = json.dumps({"error": f"未知工具: {func_name}"}, ensure_ascii=False)
+        _log_tool(result, note=" (unknown)")
+        return result
+
+    @staticmethod
+    def _describe_chat(event) -> str:
+        """事件 → '私聊:QQ号' / '群聊:群号' 标识(供日志使用, 无事件返回 '?')."""
+        if event is None:
+            return "?"
+        gid = getattr(event, "group_id", None)
+        if gid:
+            return f"group:{gid}"
+        uid = getattr(event, "user_id", None)
+        return f"private:{uid}" if uid else "?"
 
     def attach_ws(self, ws_server) -> None:
         """注入 WSServer 引用(main.py 在创建 WS 后调用), 供需要主动发消息

@@ -1536,6 +1536,15 @@ class MessageHandler:
             return diagnostic
         self._submit_tts(bot_id, event, tts_text)
 
+        # [reply] 可观测性日志: 现有 debug 行不含 bot/会话/正文, "bot 说了什么"
+        # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
+        _chat = f"group:{event.group_id}" if getattr(event, "group_id", None) \
+            else f"private:{getattr(event, 'user_id', '?')}"
+        logger.info(
+            f"[reply] bot={bot_id} chat={_chat} segments={segments_sent} "
+            f"chars={len(full_reply)} text={full_reply[:120]!r}"
+        )
+
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
             f"total {len(full_reply)} chars"

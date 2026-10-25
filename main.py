@@ -575,9 +575,21 @@ class MohobotApplication:
                 injection = music_cfg.get("injection") or {}
                 max_chars = int(injection.get("max_chars", 1200) or 0)
                 context_lines = int(injection.get("lyric_context_lines", 4) or 0)
-                return match.build_annotation(
+                annotation = match.build_annotation(
                     max_chars=max_chars, lyric_context_lines=context_lines,
                 )
+                # [inject] 可观测性日志: 记录命中对象与注入规模(不记正文,
+                # 正文动辄上千字会刷屏; 内容去 history 按时间戳对)。
+                bot_id = getattr(event, "bot_id", None) or "?"
+                chat = f"group:{event.group_id}" if getattr(event, "group_id", None) \
+                    else f"private:{getattr(event, 'user_id', '?')}"
+                logger.info(
+                    f"[inject] bot={bot_id} chat={chat} "
+                    f"song=《{match.name}》 singer={match.detail.get('演唱', '?')} "
+                    f"conf={match.confidence:.2f}({match.reason}) "
+                    f"chars={len(annotation)} lyric_lines={context_lines}"
+                )
+                return annotation
             except Exception as e:
                 logger.debug(f"歌曲注解失败: {e}")
                 return ""
