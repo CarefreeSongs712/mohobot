@@ -152,6 +152,9 @@ class ReplyConfig:
     # OOC 治理: 清理中文回复里突兀的英文话语标记与 AI 套话
     # (Well,/Okay so,/As an AI…)。只清理白名单句首词, 不影响正常英文内容。
     strip_english_fillers: bool = True
+    # OOC 三防(2026-10): 删除乱码符号(阿拉伯/泰/藏等); 丢弃内心独白段
+    # ("Wait, no — the user sent…"); 丢弃中文会话下整段漂成英文的段。
+    ooc_guard_enabled: bool = True
 
 
 @dataclass
@@ -581,6 +584,7 @@ class GlobalConfig:
                 segment_delay_max=reply_raw.get("segment_delay_max", 0.5),
                 reply_quote=reply_raw.get("reply_quote", True),
                 strip_english_fillers=bool(reply_raw.get("strip_english_fillers", True)),
+                ooc_guard_enabled=bool(reply_raw.get("ooc_guard_enabled", True)),
             ),
             database=DatabaseConfig(
                 enabled=db_raw.get("enabled", True),
@@ -762,6 +766,7 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
                 "strip_english_fillers": self.reply.strip_english_fillers,
+            "ooc_guard_enabled": self.reply.ooc_guard_enabled,
             },
             "database": {
                 "enabled": self.database.enabled,
@@ -927,6 +932,7 @@ class GlobalConfig:
                 "segment_delay_max": self.reply.segment_delay_max,
                 "reply_quote": self.reply.reply_quote,
                 "strip_english_fillers": self.reply.strip_english_fillers,
+            "ooc_guard_enabled": self.reply.ooc_guard_enabled,
             },
             "database": {
                 "enabled": self.database.enabled,

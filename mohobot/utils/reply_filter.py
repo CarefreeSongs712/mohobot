@@ -588,3 +588,70 @@ def strip_reply_artifacts(text: str) -> tuple[str, str]:
     display = f.feed(text or "")
     rest, tts_text = f.finish()
     return strip_unwrapped_reasoning(display + rest), tts_text
+
+
+# ── OOC 三防: 乱码符号 / 内心独白 / 整段外语漂移(2026-10 生产样本驱动) ──
+# 设计约束: 全部保守判定 + 每次命中记日志(可统计), 宁可漏过不可误伤。
+# 希腊/西里尔字母不在删除范围(俄语歌名等是合法内容)。
+
+# 正常中文聊天用不到的文字系统: 阿拉伯/希伯来/叙利亚/孟加拉/古木基/泰米尔/
+# 泰文/老挝/格鲁吉亚/埃塞俄比亚/藏文/缅甸/高棉。bot 采样漂移会产生这类 token
+# (生产样本: "同款CT5别رخ被借"、"بالمأنح有话直说"、单发的"ค")。
+_EXOTIC_GLYPH_RE = re.compile(
+    "[\u0530-\u058F\u0590-\u05FF\u0600-\u06FF\u0700-\u074F\u0750-\u077F"
+    "\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF\u0E00-\u0E7F\u0E80-\u0EFF"
+    "\u10A0-\u10FF\u1200-\u137F\u1780-\u17FF\u2D00-\u2D2F]"
+)
+
+# 内心独白开头(模型把推理过程写成正文)。生产样本均为英文("Wait, no — the
+# user sent…"), 中文样本暂缺 — 只列"逗号/破折号紧跟"的 wait 与 the user 系,
+# 避免 "Wait a moment" 这类正常短语误伤。
+_MONOLOGUE_RE = re.compile(
+    r"^(?:wait\b[,，—–-]|wait, no\b|the (?:user|sender)\b|user (?:sent|wants|is)\b)",
+    re.IGNORECASE,
+)
+
+# 歌曲卡片/命令帮助等模板特征: 命中任一则不按外语漂移处理。
+# 编号行(N. / N、)与《》书名号是歌曲列表分段后的典型形态 —— 分段发送时
+# 歌名行会脱离"为您找到了…"卡片头独立判定, 不豁免会误拦纯外文歌名行。
+_FOREIGN_TEMPLATE_MARK = re.compile(
+    r"为您找到|为您播放|播放第|♪|🎤|💿|未知指令|/help|用法[:：]|今日老婆|剩余抽取"
+    r"|^\d+\s*[.、)．]|《[^》]{1,60}》|\d+:\d{2}"
+)
+
+
+def strip_exotic_glyphs(text: str) -> str:
+    """删除正常聊天用不到的文字系统字符(阿拉伯/泰/藏等), 其余原样保留。"""
+    if not text:
+        return ""
+    cleaned = _EXOTIC_GLYPH_RE.sub("", text)
+    if cleaned != text:
+        from loguru import logger
+        logger.debug(f"[ooc-guard] 删除乱码符号: {text[:60]!r}")
+    return cleaned
+
+
+def looks_like_monologue(text: str) -> bool:
+    """回复是否以内心独白句式开头(模型推理外泄的变体, 无 #60 的自查表头)。"""
+    return bool(_MONOLOGUE_RE.match((text or "").lstrip()))
+
+
+def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
+    """中文触发消息下, 段落是否整体漂成了英文。
+
+    返回非空字符串 = 命中原因(调用方丢弃该段); 空串 = 放行。
+    判定(全部满足): 触发消息含≥2个汉字(中文会话); 段落无模板标记;
+    英文字母≥15且是汉字数的4倍以上(车名/型号混排不受影响)。
+    """
+    seg = (segment or "").strip()
+    if len(seg) < 12:
+        return ""
+    if not re.search(r"[\u4e00-\u9fff]{2,}", trigger_text or ""):
+        return ""  # 触发不是中文会话(用户在用英文聊), 不拦
+    if _FOREIGN_TEMPLATE_MARK.search(seg):
+        return ""
+    n_latin = len(re.findall(r"[A-Za-z]", seg))
+    n_han = len(re.findall(r"[\u4e00-\u9fff]", seg))
+    if n_latin >= 15 and n_latin > n_han * 4:
+        return f"latin={n_latin}/han={n_han}"
+    return ""

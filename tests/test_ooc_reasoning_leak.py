@@ -397,3 +397,138 @@ async def test_send_segment_skips_when_only_filler():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+
+
+# ── 6. OOC 三防(2026-10 生产样本驱动): 乱码符号/内心独白/整段英文漂移 ──
+# 样本全部取自 2026-10-23~25 生产 history 的真实 badcase。
+
+class _Ev:
+    """最小事件替身: 只带 message(供英文漂移判定提取触发文本)。"""
+    def __init__(self, text: str):
+        self.message = [{"type": "text", "data": {"text": text}}]
+
+
+def test_strip_exotic_glyphs_removes_garbage():
+    from mohobot.utils.reply_filter import strip_exotic_glyphs
+
+    cases = [  # (生产样本, 清理后)
+        ("同款CT5别رخ被借，", "同款CT5别被借，"),          # 阿拉伯 10-24 bot_011
+        ("بالمأنح有话直说", "有话直说"),                    # 阿拉伯 10-24 bot_006
+        ("ค", ""),                                        # 泰文 10-23 bot_011
+        ("biting my mic? Is this some kind of wolf pack joke?؋",
+         "biting my mic? Is this some kind of wolf pack joke?"),  # 10-24 bot_002
+    ]
+    for raw, want in cases:
+        got = strip_exotic_glyphs(raw)
+        assert got == want, f"{raw!r} -> {got!r} (want {want!r})"
+
+
+def test_strip_exotic_glyphs_preserves_legit_scripts():
+    """希腊/西里尔是合法内容(俄语歌名等), 不在删除范围; 中文/emoji/英文保留。"""
+    from mohobot.utils.reply_filter import strip_exotic_glyphs
+
+    keep = [
+        "Песня о тревожной молодости",   # 俄语歌名(歌曲库真实内容)
+        "5 1 13 τιμώ",                    # 希腊字母(漂移但不删, 属另一类)
+        "компози那种歌你还记得啊！",       # 句中夹俄语词不删(误伤风险大)
+        "Golf GTI概念版四百多马力",
+        "今天天气不错😊",
+        "",
+    ]
+    for text in keep:
+        assert strip_exotic_glyphs(text) == text, text
+
+
+def test_looks_like_monologue_matches_production_samples():
+    from mohobot.utils.reply_filter import looks_like_monologue
+
+    hit = [
+        'Wait, no — the user sent "（咬天钿）" pretending to bite 天钿',  # 10-24 bot_002
+        "Wait, it's noisy because it wants to eat, right?",              # 10-23 bot_001
+        "Wait,",                                                          # 10-24 bot_001
+        "the user wants me to write a song",
+        "user sent a sticker just now",
+    ]
+    for text in hit:
+        assert looks_like_monologue(text), text
+    miss = [
+        "Wait a moment 我想想",        # wait+空格+词, 不是标号紧跟
+        "等等，我想想",
+        "今天天气不错",
+        "waiting for you 这首歌很好听",  # 词中 wait 不匹配(有词首边界)
+    ]
+    for text in miss:
+        assert not looks_like_monologue(text), text
+
+
+def test_foreign_language_reply_detection():
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "帮我写一首歌吧"
+    # 生产样本: bot_004 10-23 21:29 的整段英文
+    hit = [
+        "Since you asked me to write a song for you,",
+        "but it is my own decision. Let me now decide on my own terms.",
+        "I won't write a song for you at this time, and I won't write a",
+    ]
+    for seg in hit:
+        assert is_foreign_language_reply(seg, zh_trigger), seg
+    miss = [
+        ("Golf GTI概念版四百多马力的前驱怪", zh_trigger),   # 大量汉字
+        ("Model Y保有量大、", zh_trigger),
+        # 拉丁已够多但汉字没被压到 1/4 以下(混排正常内容, 生产 bot_011 聊车样本)
+        ("这首歌 BPM 很高，Never Gonna Give You Up 你听过吗？一起听听吧", zh_trigger),
+        # 歌曲卡片模板(生产 bot_002 真实输出): 拉丁远超汉字, 只有模板豁免能放行
+        ("1. Never Gonna Give You Up - Rick Astley 《Whenever You Need Somebody》",
+         "放一下那首 never gonna give you up"),
+        ("为您找到了 5 首歌曲 Never Gonna Give You Up", zh_trigger),  # 模板
+        ("Since you asked me to write a song", "write me a song please"),  # 英文会话
+        ("Since you asked me to write a song", ""),                     # 无触发文本不拦
+        ("ok", zh_trigger),                                             # 太短
+    ]
+    for seg, trig in miss:
+        assert not is_foreign_language_reply(seg, trig), seg
+
+
+async def test_send_segment_ooc_guard_end_to_end():
+    """发送口三防集成: 乱码删除、独白丢弃、英文漂移丢弃、开关可关。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    ev = _Ev("（咬天钿）")
+
+    await handler._send_segment("bot", ev, "同款CT5别رخ被借，", False)
+    assert sent == ["同款CT5别被借，"], sent
+    sent.clear()
+
+    await handler._send_segment("bot", ev, "Wait, no — the user sent something pretending", False)
+    assert sent == [], sent
+    await handler._send_segment("bot", ev, "Since you asked me to write a song for you,", False)
+    assert sent == [], sent
+    # 正常中文照发
+    await handler._send_segment("bot", ev, "那就这么定了，明天见！", False)
+    assert sent == ["那就这么定了，明天见！"], sent
+    sent.clear()
+
+    # 英文触发消息下英文回复放行
+    ev_en = _Ev("please write me a song in english")
+    await handler._send_segment("bot", ev_en, "Since you asked, I will write it now ok", False)
+    assert len(sent) == 1, sent
+    sent.clear()
+
+    # event=None(测试/无消息上下文): 不炸, 且英文漂移不拦(无触发语言可判)
+    await handler._send_segment("bot", None, "Since you asked me to write a song now", False)
+    assert len(sent) == 1, sent
+    sent.clear()
+
+    # 总开关关闭: 独白/乱码原样发出
+    handler._ooc_guard = False
+    await handler._send_segment("bot", ev, "Wait, no — raw passthrough ؋", False)
+    assert sent == ["Wait, no — raw passthrough ؋"], sent
+
+
+def test_reply_config_exposes_ooc_guard_switch():
+    from mohobot.models.config import ReplyConfig
+    import inspect
+
+    assert "ooc_guard_enabled" in inspect.getsource(ReplyConfig)
+    assert ReplyConfig().ooc_guard_enabled is True
