@@ -130,6 +130,7 @@ class MessageHandler:
         self._strip_english_fillers = bool(
             getattr(reply_config, "strip_english_fillers", True)
         )
+        self._ooc_guard = bool(getattr(reply_config, "ooc_guard_enabled", True))
         self._seg_min_len = reply_config.segment_min_len
         self._seg_max_len = reply_config.segment_max_len
         self._seg_delay_min = reply_config.segment_delay_min
@@ -1651,6 +1652,27 @@ class MessageHandler:
                 seg = cleaned
                 if not seg.strip():
                     return first_sent
+        # OOC 三防(2026-10 生产样本驱动): 删乱码符号; 丢弃内心独白段; 丢弃中文
+        # 会话下整段漂成英文的段。同样在发送口统一覆盖; 开关见 reply.ooc_guard_enabled。
+        # LLMDiagnostic 是系统文案(常为纯英文的错误提示), 不属于模型输出, 跳过。
+        if (getattr(self, "_ooc_guard", True) and isinstance(seg, str) and seg
+                and not isinstance(seg, LLMDiagnostic)):
+            from mohobot.utils.cq_code import extract_plain_text
+            from mohobot.utils.reply_filter import (
+                is_foreign_language_reply, looks_like_monologue, strip_exotic_glyphs,
+            )
+            seg = strip_exotic_glyphs(seg)
+            if looks_like_monologue(seg):
+                logger.debug(f"[ooc-guard] 丢弃内心独白段(bot={bot_id}): {seg[:80]!r}")
+                return first_sent
+            trigger = ""
+            msg = getattr(event, "message", None)
+            if msg:
+                trigger = extract_plain_text(msg)
+            foreign = is_foreign_language_reply(seg, trigger)
+            if foreign:
+                logger.debug(f"[ooc-guard] 丢弃英文漂移段(bot={bot_id}, {foreign}): {seg[:80]!r}")
+                return first_sent
         seg = seg.strip()
         if not seg:
             return first_sent  # Empty after strip — skip
