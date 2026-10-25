@@ -1437,9 +1437,9 @@ class MessageHandler:
             full_reply = reply_text or ""
             from mohobot.utils.reply_filter import strip_reply_artifacts
             full_reply, tts_text = strip_reply_artifacts(full_reply)
-            await self._send_full_text(bot_id, event, full_reply)
+            sent = await self._send_full_text(bot_id, event, full_reply)
             self._submit_tts(bot_id, event, tts_text)
-            return full_reply
+            return full_reply if sent else ""
 
         from mohobot.utils.reply_filter import ReplyArtifactFilter
         # 产物过滤对所有 bot 生效(非 TTS bot 也要剥 <text>/<tool_call> 等泄漏),
@@ -1579,6 +1579,16 @@ class MessageHandler:
             await self._send_message(bot_id, event, message, source="llm")
             return diagnostic
         full_reply, tts_text = strip_reply_artifacts(full_reply)
+        # 非分段路径同样过发送口治理(此前完全绕过填充词清理与 OOC 三防)
+        if getattr(self, "_strip_english_fillers", True):
+            from mohobot.utils.reply_filter import strip_english_fillers
+            full_reply = strip_english_fillers(full_reply)
+        guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
+        if drop_reason:
+            logger.info(f"[ooc-guard] 单条回复丢弃(bot={bot_id}, {drop_reason})")
+            self._submit_tts(bot_id, event, tts_text)
+            return ""
+        full_reply = guarded
 
         text = full_reply.strip()
         if text:
@@ -1614,6 +1624,13 @@ class MessageHandler:
         """
         if not tts_text or not self._tts_active(bot_id):
             return
+        tts_text, drop_reason = self._apply_ooc_guard(tts_text, event)
+        if drop_reason:
+            logger.info(f"[ooc-guard] 跳过 TTS(bot={bot_id}, {drop_reason})")
+            return
+        tts_text = tts_text.strip()
+        if not tts_text:
+            return
         from mohobot.services.tts import TTSJob
         if isinstance(event, GroupMessageEvent):
             chat_type, chat_id = "group", str(event.group_id)
@@ -1628,16 +1645,71 @@ class MessageHandler:
         if accepted:
             logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")
 
-    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> None:
-        """Segment a complete reply text and send with configured delays."""
+    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> bool:
+        """Segment a complete reply text and send with configured delays.
+
+        OOC 英文漂移按**整条回复**判定: 整条回复正常(含中文解释)时不再逐段
+        丢弃, 避免把回复中的英文报错/代码块/URL 引用腰斩; 整条漂移才整体丢弃。
+        """
+        from mohobot.utils.cq_code import extract_plain_text
+        from mohobot.utils.reply_filter import is_foreign_language_reply
+        trigger = extract_plain_text(getattr(event, "message", None) or [])
+        # LLMDiagnostic 是系统文案(常为英文错误提示), 不属于模型输出, 不判漂移。
+        whole_drift = (
+            "" if isinstance(text, LLMDiagnostic)
+            else is_foreign_language_reply(text, trigger)
+        )
+        if whole_drift:
+            logger.info(f"[ooc-guard] 整条回复英文漂移, 整条丢弃(bot={bot_id}, {whole_drift})")
+            return False
         first_sent = False
         flushed = self._flush_ready_segments(text)
         for seg in flushed["segments"]:
-            first_sent = await self._send_segment(bot_id, event, seg, first_sent, quote=quote)
+            first_sent = await self._send_segment(
+                bot_id, event, seg, first_sent, quote=quote, check_foreign=False)
         if flushed["rest"].strip():
-            await self._send_segment(bot_id, event, flushed["rest"], first_sent, quote=quote)
+            first_sent = await self._send_segment(
+                bot_id, event, flushed["rest"], first_sent, quote=quote, check_foreign=False)
+        if not first_sent:
+            logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
+        return first_sent
 
-    async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *, quote: bool = True) -> bool:
+    def _apply_ooc_guard(self, seg: str, event, *, check_foreign: bool = True) -> tuple[str, str]:
+        """OOC 三防统一入口: 返回 (清理后文本, 丢弃原因)。
+
+        原因非空 = 该段应丢弃。文本发送口与 TTS 文案共用同一判定, 避免
+        「文字被清了、TTS 还在念漂移内容」。LLMDiagnostic 是系统文案(常为
+        英文错误提示), 不参与治理。
+        """
+        if not getattr(self, "_ooc_guard", True) or not isinstance(seg, str) or not seg:
+            return seg, ""
+        if isinstance(seg, LLMDiagnostic):
+            return seg, ""
+        from mohobot.utils.cq_code import extract_plain_text
+        from mohobot.utils.reply_filter import (
+            is_chinese_trigger, is_foreign_language_reply, looks_like_monologue,
+            strip_exotic_glyphs,
+        )
+        from mohobot.utils.cq_code import has_meaningful_text
+        seg = strip_exotic_glyphs(seg)
+        trigger = ""
+        msg = getattr(event, "message", None)
+        if msg:
+            trigger = extract_plain_text(msg)
+        # 清理后只剩标点/空白(如整段外文被删后残留 ".")→ 整段不发
+        if not has_meaningful_text(seg):
+            return "", "清理后无有效内容"
+        # 内心独白只在中文会话里判: 英文会话里 "Wait, ..." 是正常表达。
+        if is_chinese_trigger(trigger) and looks_like_monologue(seg):
+            return "", f"内心独白: {seg[:40]!r}"
+        if check_foreign:
+            foreign = is_foreign_language_reply(seg, trigger)
+            if foreign:
+                return "", f"英文漂移({foreign}): {seg[:40]!r}"
+        return seg, ""
+
+    async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *,
+                            quote: bool = True, check_foreign: bool = True) -> bool:
         """Send one segmented message, stripped of whitespace.
 
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
@@ -1653,26 +1725,15 @@ class MessageHandler:
                 if not seg.strip():
                     return first_sent
         # OOC 三防(2026-10 生产样本驱动): 删乱码符号; 丢弃内心独白段; 丢弃中文
-        # 会话下整段漂成英文的段。同样在发送口统一覆盖; 开关见 reply.ooc_guard_enabled。
-        # LLMDiagnostic 是系统文案(常为纯英文的错误提示), 不属于模型输出, 跳过。
-        if (getattr(self, "_ooc_guard", True) and isinstance(seg, str) and seg
-                and not isinstance(seg, LLMDiagnostic)):
-            from mohobot.utils.cq_code import extract_plain_text
-            from mohobot.utils.reply_filter import (
-                is_foreign_language_reply, looks_like_monologue, strip_exotic_glyphs,
-            )
-            seg = strip_exotic_glyphs(seg)
-            if looks_like_monologue(seg):
-                logger.debug(f"[ooc-guard] 丢弃内心独白段(bot={bot_id}): {seg[:80]!r}")
+        # 会话下整段漂成英文的段。发送口与 TTS 文案共用 _apply_ooc_guard;
+        # 开关见 reply.ooc_guard_enabled。
+        if getattr(self, "_ooc_guard", True) and isinstance(seg, str) and seg:
+            cleaned, drop_reason = self._apply_ooc_guard(
+                seg, event, check_foreign=check_foreign)
+            if drop_reason:
+                logger.info(f"[ooc-guard] 丢弃段(bot={bot_id}, {drop_reason})")
                 return first_sent
-            trigger = ""
-            msg = getattr(event, "message", None)
-            if msg:
-                trigger = extract_plain_text(msg)
-            foreign = is_foreign_language_reply(seg, trigger)
-            if foreign:
-                logger.debug(f"[ooc-guard] 丢弃英文漂移段(bot={bot_id}, {foreign}): {seg[:80]!r}")
-                return first_sent
+            seg = cleaned
         seg = seg.strip()
         if not seg:
             return first_sent  # Empty after strip — skip
@@ -1711,9 +1772,14 @@ class MessageHandler:
             self._submit_tts(bot_id, event, tts_text)
             return ""
         if self._segment_reply:
-            await self._send_full_text(bot_id, event, full_reply, quote=False)
+            if not await self._send_full_text(bot_id, event, full_reply, quote=False):
+                return ""
         else:
-            await self._send_message(bot_id, event, full_reply, source="llm")
+            guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
+            if drop_reason:
+                logger.info(f"[ooc-guard] 主动消息丢弃(bot={bot_id}, {drop_reason})")
+                return ""
+            await self._send_message(bot_id, event, guarded, source="llm")
         self._submit_tts(bot_id, event, tts_text)
         return full_reply
 

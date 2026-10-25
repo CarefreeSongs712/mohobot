@@ -270,20 +270,37 @@ if __name__ == "__main__":
 
 
 async def test_global_language_instruction_present():
-    """全局语言约束必须出现在主 system 消息最前部(群聊/私聊两条路径)。"""
+    """全局语言约束: 紧跟人设、先于环境/上下文, 且与人设之间有分隔。
+
+    回归(复审 N4): 原实现 `persona + system_content` 直接拼接, 人设末句与
+    「回复语言：」粘连; 且 PR 声明「先于全部人设」与实际不符。这里断言最终
+    system 的**真实顺序**与分隔符, 不再只测 _prepare_messages 的内部字符串。
+    """
     service = _StubLLM()
     from mohobot.llm_service import LLMService
 
     service._prepare_messages = LLMService._prepare_messages.__get__(service)
-    for group_id in (None, 2001):
-        messages = await _prepare(
-            service, [{"type": "text", "data": {"text": "你好呀"}}], group_id=group_id,
-        )
-        system_msgs = [m for m in messages if m["role"] == "system"]
-        assert system_msgs, "缺少 system 消息"
-        first = system_msgs[0]["content"]
-        assert first.startswith("回复语言："), f"语言约束不在 system 开头: {first[:80]!r}"
-        assert "简体中文" in first and "必须是简体中文" in first
-        # 不写成"禁止英文"式措辞(允许歌名/专名的合法英文)
-        assert "禁止" not in first
-    print("[L] 全局语言约束注入 OK")
+    service._build_messages = LLMService._build_messages.__get__(service)
+    event = _FakeEvent([{"type": "text", "data": {"text": "你好呀"}}])
+    messages = await service._build_messages(
+        "bot_001", event, [], persona_content="你是测试人设，说话简短。",
+    )
+    first = messages[0]["content"]
+    assert first.startswith("你是测试人设"), f"人设不在最前(既有约定): {first[:80]!r}"
+    assert "回复语言：" in first and "简体中文" in first
+    # 不写成"禁止英文"式措辞(允许歌名/专名的合法英文)
+    assert "禁止" not in first
+    i_persona = first.index("你是测试人设")
+    i_lang = first.index("回复语言")
+    i_env = first.index("当前对话环境")
+    assert i_persona < i_lang < i_env, (i_persona, i_lang, i_env)
+    # 人设与语言约束之间必须有分隔(不能粘连成人设末句的一部分)
+    assert "。\n\n回复语言：" in first, first[:120]
+    # 用户明确要求英文/翻译 → 放宽版指令(允许按用户要求输出其它语言)
+    event_foreign = _FakeEvent([{"type": "text", "data": {"text": "把这句话翻译成英文"}}])
+    messages2 = await service._build_messages(
+        "bot_001", event_foreign, [], persona_content="你是测试人设。",
+    )
+    second = messages2[0]["content"]
+    assert "按用户要求的语言输出" in second, second[:160]
+    print("[L] 全局语言约束注入(人设后/环境前 + 翻译豁免) OK")

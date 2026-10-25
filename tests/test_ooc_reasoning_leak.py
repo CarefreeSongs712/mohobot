@@ -403,9 +403,12 @@ if __name__ == "__main__":
 # 样本全部取自 2026-10-23~25 生产 history 的真实 badcase。
 
 class _Ev:
-    """最小事件替身: 只带 message(供英文漂移判定提取触发文本)。"""
+    """最小事件替身: message(触发文本) + TTS/发送需要的用户字段。"""
     def __init__(self, text: str):
         self.message = [{"type": "text", "data": {"text": text}}]
+        self.user_id = 10001
+        self.self_id = 111
+        self.time = 1700000000
 
 
 def test_strip_exotic_glyphs_removes_garbage():
@@ -532,3 +535,218 @@ def test_reply_config_exposes_ooc_guard_switch():
 
     assert "ooc_guard_enabled" in inspect.getsource(ReplyConfig)
     assert ReplyConfig().ooc_guard_enabled is True
+
+
+def test_strip_exotic_glyphs_keeps_pure_foreign_translation():
+    """纯外文长句是合法翻译/引用(用户明确要求), 不能当乱码删空。
+
+    回归: 原实现无条件按文字系统删字符, 「翻译成阿拉伯语/泰语」的回复会被删没。
+    生产 badcase 是中文句子里混入的短碎片, 仍应清理(现有用例继续覆盖)。
+    """
+    from mohobot.utils.reply_filter import strip_exotic_glyphs
+
+    keep = [
+        "مرحبا بالعالم، كيف حالك اليوم؟",      # 阿拉伯语整句
+        "สวัสดีครับ วันนี้อากาศดีมาก",           # 泰语整句
+        "ሰላም እንዴት ነህ",                       # 阿姆哈拉语
+    ]
+    for text in keep:
+        assert strip_exotic_glyphs(text) == text, text
+    # 混在中文里的碎片仍清理(生产样本)
+    assert strip_exotic_glyphs("同款CT5别رخ被借，") == "同款CT5别被借，"
+
+
+def test_foreign_language_reply_exempts_references_and_translation():
+    """代码/报错/URL 引用, 以及用户明确要英文/翻译时, 不得整段丢弃。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "这报错什么意思"
+    references = [
+        "Traceback (most recent call last):\nImportError: No module named foo",
+        "ModuleNotFoundError: No module named 'requests'",
+        "pip install requests 然后重试",
+        "see https://example.com/docs/install-guide for details",
+        "Usage: git commit -m \"message\"",
+    ]
+    for seg in references:
+        assert not is_foreign_language_reply(seg, zh_trigger), seg
+
+    # 用户明确要求英文/翻译 → 中文触发也放行
+    for trigger in ("帮我翻译成英文", "用英文回答我", "translate this to english"):
+        assert not is_foreign_language_reply(
+            "Since you asked me to write a song for you,", trigger), trigger
+
+    # 普通整段英文漂移仍拦截(回归)
+    assert is_foreign_language_reply(
+        "Since you asked me to write a song for you,", "帮我写一首歌吧")
+
+
+async def test_monologue_guard_only_in_chinese_conversation():
+    """内心独白句式只在中文会话里丢; 英文会话里 "Wait, ..." 是正常表达。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+
+    wait_line = "Wait, I think you mean something else here"
+    await handler._send_segment("bot", _Ev("wait what do you mean by that"), wait_line, False)
+    assert sent == [wait_line], sent
+    sent.clear()
+
+    await handler._send_segment("bot", _Ev("（咬天钿）"), wait_line, False)
+    assert sent == [], sent
+
+
+async def test_tts_text_passes_ooc_guard():
+    """TTS 文案不能绕过三防: 被丢弃的段不朗读, 乱码字符不在语音里出现。"""
+    from mohobot.message_handler import MessageHandler
+
+    class _TTS:
+        def __init__(self):
+            self.jobs = []
+
+        def submit(self, job):
+            self.jobs.append(job)
+            return True
+
+    handler = object.__new__(MessageHandler)
+    tts = _TTS()
+    handler._tts = tts
+    handler._tts_active = lambda bot_id: True   # type: ignore[assignment]
+    handler._bot_config = lambda bot_id: None   # type: ignore[assignment]
+    handler._ooc_guard = True
+    ev = _Ev("（咬天钿）")
+
+    # 英文漂移/内心独白: 不提交 TTS
+    handler._submit_tts("bot", ev, "Wait, no — the user sent something pretending")
+    handler._submit_tts("bot", ev, "Since you asked me to write a song for you,")
+    assert tts.jobs == [], [j.text for j in tts.jobs]
+
+    # 乱码字符: 朗读文本里被清理
+    handler._submit_tts("bot", ev, "同款CT5别رخ被借，")
+    assert [j.text for j in tts.jobs] == ["同款CT5别被借，"]
+
+    # 正常中文照常朗读
+    tts.jobs.clear()
+    handler._submit_tts("bot", ev, "那就这么定了，明天见！")
+    assert [j.text for j in tts.jobs] == ["那就这么定了，明天见！"]
+
+
+async def test_full_text_with_english_reference_is_sent():
+    """中文提问 + 英文报错/URL/代码引用: 整条回复必须完整发出(复审 N1/N3)。
+
+    回归: 旧实现逐段判定, 英文引用段被整段丢弃, 用户收到 0 条或残片;
+    现在按整条回复判定 —— 有中文解释就不算漂移, 段级不再重复丢弃。
+    """
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._ooc_guard = True
+    handler._segment_reply = True
+    handler._seg_min_len = 12
+    handler._seg_max_len = 120
+
+    async def _send_message(bot_id, event, message, source="llm"):
+        sent.append(message if isinstance(message, str) else str(message))
+        return None
+
+    handler._send_message = _send_message
+    ev = _Ev("这个报错什么意思")
+    cases = [
+        "报错是 ModuleNotFoundError: No module named 'requests'，缺依赖。",
+        "详见 https://github.com/psf/requests/issues/1234 这个 issue。",
+        "你先跑 pip install requests 就可以。",
+        "```python\nimport requests\nprint(requests.get('https://example.com'))\n```\n就这样。",
+    ]
+    for text in cases:
+        sent.clear()
+        await handler._send_full_text("bot", ev, text)
+        assert sent, f"整段被丢: {text[:40]!r}"
+        assert "".join(sent).replace(" ", ""), sent
+
+    # 整条都是英文漂移 → 整条丢弃
+    sent.clear()
+    await handler._send_full_text(
+        "bot", ev, "Since you asked me to write a song for you, I will not.")
+    assert sent == [], sent
+
+
+async def test_single_reply_path_also_guarded():
+    """reply.segment_reply=false 的旁路也不能绕过三防(复审 N8)。"""
+    from mohobot.message_handler import MessageHandler
+
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield ""
+            yield "Wait, no — the user sent something pretending", None
+
+    sent: list[str] = []
+    handler = object.__new__(MessageHandler)
+    handler._llm = _LLM()
+    handler._ooc_guard = True
+    handler._strip_english_fillers = True
+    handler._reply_quote = False
+    handler._segment_reply = False
+    handler._tts = None
+    handler._bot_config = lambda bot_id: None
+    handler._tts_active = lambda bot_id: False
+
+    async def _send_message(bot_id, event, message, source="llm"):
+        sent.append(str(message))
+        return None
+
+    handler._send_message = _send_message
+    handler._send_reply = MessageHandler._send_single_reply.__get__(handler)
+    out = await MessageHandler._send_single_reply(
+        handler, "bot", _Ev("（咬天钿）"), [], {})
+    assert sent == [] and out == "", (sent, out)
+
+    # 正常中文照发
+    class _LLM2:
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield ""
+            yield "好的，那就这样吧。", None
+
+    handler._llm = _LLM2()
+    out = await MessageHandler._send_single_reply(handler, "bot", _Ev("（咬天钿）"), [], {})
+    assert sent == ["好的，那就这样吧。"] and out == "好的，那就这样吧。", (sent, out)
+
+
+async def test_send_segment_drops_monologue_with_chinese_content():
+    """中文会话里「英文开头 + 中文主体」的独白也必须被发送口丢弃。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._ooc_guard = True
+    await handler._send_segment("bot", _Ev("（咬天钿）"), "the user 想让我写首歌", False)
+    assert sent == [], sent
+
+
+def test_monologue_detected_even_with_chinese_content():
+    """独白判定必须有独立用例(变异: 删独白分支后不能仍全绿)。
+
+    英文独白同时会被外语判定救下, 所以用「英文开头 + 中文主体」的独白来
+    锁定独白分支本身 (复审 B9: 原测试对独白分支零承重)。
+    """
+    from mohobot.utils.reply_filter import looks_like_monologue
+
+    assert looks_like_monologue("the user 想让我写一首歌")
+    assert looks_like_monologue("**Wait,** 用户是在说那首歌吧")
+    assert not looks_like_monologue("等等，我想想")
+
+
+def test_reference_mark_does_not_hide_pure_english_drift():
+    """引用豁免不能被纯英文漂移滥用(URL/代码特征之外的整段英文仍拦)。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    assert is_foreign_language_reply(
+        "Since you asked me to write a song for you, I will now decide.", "帮我写首歌")
+    assert is_foreign_language_reply(
+        "Sure, let me explain what this configuration option does.", "这个配置项什么意思")
+
+
+def test_example_config_and_webui_expose_ooc_guard():
+    """新配置必须同步示例配置与 WebUI 开关(开发守则 §4)。"""
+    root = Path(__file__).resolve().parent.parent
+    example = (root / "config" / "global.example.yaml").read_text(encoding="utf-8")
+    assert "ooc_guard_enabled" in example
+    html = (root / "mohobot" / "web_panel" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "reply.ooc_guard_enabled" in html

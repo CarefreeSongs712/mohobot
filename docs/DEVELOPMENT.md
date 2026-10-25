@@ -452,7 +452,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `llm` | chat/vision/emotion 三组 model+base_url+api_key+温度+max_tokens；`models: list[str]` 供 WebUI 下拉 |
 | `web_panel` | `enabled/host/port=9090/username/password_hash` |
 | `interceptor` | `keyword_file="./data/keywords.json"` |
-| `reply` | `stream/segment_reply/segment_min_len=12/segment_max_len=60/segment_delay_min=0.2/segment_delay_max=0.5/reply_quote` |
+| `reply` | `stream/segment_reply/segment_min_len=12/segment_max_len=60/segment_delay_min=0.2/segment_delay_max=0.5/reply_quote/strip_english_fillers=true/ooc_guard_enabled=true` |
 | `database` | `enabled/folder="./data/database"/file="luotianyi.db"`（示例 yaml 写 `mohobot.db`） |
 | `anysearch` | `enabled/api_key/base_url/timeout=30` |
 | `ban` | `enabled` |
@@ -460,6 +460,8 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
 | 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
+
+OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删除冷门文字系统乱码、丢弃内心独白段、整条回复级判定英文漂移(中文回复中的英文报错/代码/URL 引用放行, 用户明确要求外语/翻译时豁免); `strip_english_fillers` 清理句首英文填充词。命中记 `[ooc-guard]` 日志。LLM 语言约束(始终简体中文, 翻译请求放宽)由 `_persona_with_language` 拼在人设之后、环境信息之前。
 
 `BotConfig`（`data/bots/{bot_id}/config.json`）：`bot_id / qq / nickname / persona_id / enabled / touch_replies / chat_model_override / vision_model_override / tts_enabled / tts_voice_id / command_prefix / keyword_replies`。旧 `persona` 仅作已有配置迁移输入，不再是页面中独立编辑的人设。
 
