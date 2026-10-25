@@ -1438,7 +1438,7 @@ class MessageHandler:
             from mohobot.utils.reply_filter import strip_reply_artifacts
             full_reply, tts_text = strip_reply_artifacts(full_reply)
             sent = await self._send_full_text(bot_id, event, full_reply)
-            self._submit_tts(bot_id, event, tts_text)
+            self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
             return full_reply if sent else ""
 
         from mohobot.utils.reply_filter import ReplyArtifactFilter
@@ -1516,7 +1516,7 @@ class MessageHandler:
             if cleaned:
                 segments_sent += 1
                 first_sent = await self._send_segment(bot_id, event, cleaned, first_sent)
-            self._submit_tts(bot_id, event, tts_text)
+            self._submit_tts(bot_id, event, tts_text, fallback_text=cleaned)
             logger.debug(
                 f"Streamed reply (reasoning-suppressed) done: "
                 f"{len(full_reply)} -> {len(cleaned)} chars"
@@ -1534,7 +1534,7 @@ class MessageHandler:
             await self._send_segment(bot_id, event, diagnostic, first_sent)
             logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
             return diagnostic
-        self._submit_tts(bot_id, event, tts_text)
+        self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
@@ -1600,7 +1600,7 @@ class MessageHandler:
             else:
                 message = text
             await self._send_message(bot_id, event, message, source="llm")
-        self._submit_tts(bot_id, event, tts_text)
+        self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
         logger.debug(f"Single reply sent: {len(full_reply)} chars")
         return full_reply
 
@@ -1616,14 +1616,27 @@ class MessageHandler:
         cfg = self._bot_config(bot_id)
         return bool(cfg and cfg.tts_enabled)
 
-    def _submit_tts(self, bot_id: str, event: MessageEvent, tts_text: str) -> None:
+    def _submit_tts(
+        self, bot_id: str, event: MessageEvent, tts_text: str,
+        fallback_text: str | None = None,
+    ) -> None:
         """提交 TTS 合成任务; 队列满丢最新, 失败不影响已发出的文本。
 
         voice_id 在提交时按 per-bot 配置解析好(BotConfig.tts_voice_id,
         留空用全局默认), 队列 worker 无需再查 bot 配置。
+
+        fallback_text: 回复没有 <tts> 标注时的概率朗读兜底(untagged_tts_prob,
+        仅队列未满时抽样, 命中后朗读整条文本); 有标注时忽略该参数。
         """
-        if not tts_text or not self._tts_active(bot_id):
+        if not self._tts_active(bot_id):
             return
+        if tts_text:
+            origin = "llm"
+        else:
+            tts_text = self._maybe_untagged_tts(bot_id, fallback_text)
+            if not tts_text:
+                return
+            origin = "llm-untagged"
         tts_text, drop_reason = self._apply_ooc_guard(tts_text, event)
         if drop_reason:
             logger.info(f"[ooc-guard] 跳过 TTS(bot={bot_id}, {drop_reason})")
@@ -1643,7 +1656,27 @@ class MessageHandler:
             voice_id=(cfg.tts_voice_id or None) if cfg else None,
         ))
         if accepted:
-            logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")
+            logger.info(f"TTS 任务已入队({origin}): {tts_text[:30]!r}")
+
+    def _maybe_untagged_tts(self, bot_id: str, text: str | None) -> str:
+        """无标注回复的概率朗读抽样; 关闭/未命中/队列满返回空串。
+
+        untagged_tts_prob(0~1, 0=关闭): 命中则朗读整条展示文本, 后续与
+        标注路径同管道(同一队列 + OOC 守卫); 队列满时整轮直接不参与抽样。
+        """
+        text = (text or "").strip()
+        if not text:
+            return ""
+        tts_cfg = getattr(getattr(self, "_global_config", None), "tts", None)
+        prob = float(getattr(tts_cfg, "untagged_tts_prob", 0.0) or 0.0)
+        if prob <= 0:
+            return ""
+        if self._tts.queue_full:
+            return ""
+        if random.random() >= min(prob, 1.0):
+            return ""
+        logger.debug(f"无标注回复命中概率朗读(bot={bot_id}, prob={prob})")
+        return text
 
     async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> bool:
         """Segment a complete reply text and send with configured delays.
@@ -1780,7 +1813,7 @@ class MessageHandler:
                 logger.info(f"[ooc-guard] 主动消息丢弃(bot={bot_id}, {drop_reason})")
                 return ""
             await self._send_message(bot_id, event, guarded, source="llm")
-        self._submit_tts(bot_id, event, tts_text)
+        self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
         return full_reply
 
     def _flush_ready_segments(self, buffer: str) -> dict:

@@ -279,6 +279,9 @@ class TTSConfig:
     # 指令 TTS(/tts) 限制(管理员不受限)
     cmd_max_chars: int = 30
     cmd_cooldown: int = 120          # 非管理员冷却(秒)
+    # 无标注概率朗读: 回复没有 <tts> 标注时, 整条展示文本按此概率(0~1)入队朗读
+    # (0=关闭; 仅队列未满时参与抽样; 命中后与标注路径同管道, 同样过 OOC 守卫)
+    untagged_tts_prob: float = 0.10
 
 
 @dataclass
@@ -665,6 +668,7 @@ class GlobalConfig:
                 ),
                 cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),
                 cmd_cooldown=max(0, int(tts_raw.get("cmd_cooldown", 120))),
+                untagged_tts_prob=min(1.0, max(0.0, float(tts_raw.get("untagged_tts_prob", 0.10)))),
             ),
             knowledge=KnowledgeConfig(
                 enabled=bool(knowledge_raw.get("enabled", False)),
@@ -838,6 +842,7 @@ class GlobalConfig:
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+                "untagged_tts_prob": self.tts.untagged_tts_prob,
             },
             "knowledge": {
                 "enabled": self.knowledge.enabled,
@@ -1004,6 +1009,7 @@ class GlobalConfig:
                 "tts_prompt_template": self.tts.tts_prompt_template,
                 "cmd_max_chars": self.tts.cmd_max_chars,
                 "cmd_cooldown": self.tts.cmd_cooldown,
+                "untagged_tts_prob": self.tts.untagged_tts_prob,
             },
             "knowledge": {
                 "enabled": self.knowledge.enabled,

@@ -147,7 +147,7 @@ def _make_handler(sent: list, chunks: list):
 
     handler._llm = _Llm()
     handler._send_segment = send_segment
-    handler._submit_tts = lambda *args: None
+    handler._submit_tts = lambda *args, **kwargs: None
     return handler
 
 

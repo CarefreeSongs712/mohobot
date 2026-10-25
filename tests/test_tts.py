@@ -331,7 +331,7 @@ def test_tts_config_roundtrip() -> None:
         model="speech-2.8-turbo", voice_id="ltyclone01",
         speed=1.1, vol=1.2, pitch=2, sample_rate=24000, bitrate=96000,
         format="mp3", queue_maxsize=8, timeout=90,
-        cmd_max_chars=50, cmd_cooldown=60,
+        cmd_max_chars=50, cmd_cooldown=60, untagged_tts_prob=0.25,
     )
     with tempfile.TemporaryDirectory(prefix="tts_cfg_") as tmp:
         path = Path(tmp) / "global.yaml"
@@ -352,6 +352,9 @@ def test_tts_config_roundtrip() -> None:
     assert loaded.tts.timeout == 90
     assert loaded.tts.cmd_max_chars == 50
     assert loaded.tts.cmd_cooldown == 60
+    assert abs(loaded.tts.untagged_tts_prob - 0.25) < 1e-6
+    # 默认值 + 越界钳制
+    assert abs(TTSConfig().untagged_tts_prob - 0.10) < 1e-6
     # BotConfig tts_voice_id
     bot = BotConfig(bot_id="bot_001", tts_enabled=True, tts_voice_id="bot001_voice")
     assert bot.to_dict()["tts_voice_id"] == "bot001_voice"
@@ -527,6 +530,7 @@ async def test_tts_reply_modes_keep_display_speech_and_context_consistent() -> N
             handler._seg_delay_min = handler._seg_delay_max = 0
             handler._global_config = GlobalConfig()
             handler._global_config.tts.enabled = True
+            handler._global_config.tts.untagged_tts_prob = 0.0  # 本测试只验证标注路径
             bot_config = BotConfig(bot_id="bot_001", tts_enabled=True)
             handler._bot_config = lambda bot_id: bot_config
             jobs = []
@@ -690,3 +694,113 @@ def _none_async(wav):
     async def inner():
         return None
     return inner()
+
+
+# ── 9. 无标注概率朗读(untagged_tts_prob) ─────────────────────
+
+
+class _QueueTTS:
+    """带 queue_full 的假 TTSService(模拟队列满/未满)。"""
+
+    def __init__(self, full: bool = False):
+        self.jobs = []
+        self._full = full
+
+    @property
+    def queue_full(self) -> bool:
+        return self._full
+
+    def submit(self, job):
+        if self._full:
+            return False
+        self.jobs.append(job)
+        return True
+
+
+def _untagged_handler(tts, prob: float):
+    from mohobot.message_handler import MessageHandler
+
+    handler = object.__new__(MessageHandler)
+    handler._tts = tts
+    handler._tts_active = lambda bot_id: True   # type: ignore[assignment]
+    handler._bot_config = lambda bot_id: None   # type: ignore[assignment]
+    handler._ooc_guard = False
+    handler._global_config = GlobalConfig()
+    handler._global_config.tts = TTSConfig(enabled=True, untagged_tts_prob=prob)
+    return handler
+
+
+def test_untagged_tts_prob_hit_and_text():
+    """无标注 + 命中(prob=1) → 整条 fallback 文本入队, source 仍为 llm。"""
+    from mohobot.message_handler import MessageHandler  # noqa: F401  (确保可导入)
+
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 1.0)
+    ev = _make_event()
+    handler._submit_tts("bot_001", ev, "", fallback_text="这条回复没有标注文本。")
+    assert [j.text for j in tts.jobs] == ["这条回复没有标注文本。"]
+    assert tts.jobs[0].source == "llm"
+    assert tts.jobs[0].bot_id == "bot_001"
+    assert tts.jobs[0].chat_type == "group"
+
+
+def test_untagged_tts_prob_zero_never_triggers():
+    """prob=0(关闭) → 无标注回复不产生任何任务。"""
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 0.0)
+    handler._submit_tts("bot_001", _make_event(), "", fallback_text="不读我")
+    assert tts.jobs == []
+
+
+def test_untagged_tts_prob_sampling_boundary():
+    """抽样边界: random() >= prob 不触发; < prob 触发。"""
+    from unittest.mock import patch
+
+    import mohobot.message_handler as mh
+
+    ev = _make_event()
+    # random()=0.5, prob=0.3 → 未命中
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 0.3)
+    with patch.object(mh.random, "random", return_value=0.5):
+        handler._submit_tts("bot_001", ev, "", fallback_text="未命中")
+    assert tts.jobs == []
+    # random()=0.5, prob=0.6 → 命中
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 0.6)
+    with patch.object(mh.random, "random", return_value=0.5):
+        handler._submit_tts("bot_001", ev, "", fallback_text="命中")
+    assert [j.text for j in tts.jobs] == ["命中"]
+
+
+def test_untagged_tts_queue_full_never_rolls():
+    """队列满 → 无标注回复直接不参与抽样(即便 prob=1)。"""
+    tts = _QueueTTS(full=True)
+    handler = _untagged_handler(tts, 1.0)
+    handler._submit_tts("bot_001", _make_event(), "", fallback_text="队列满不读")
+    assert tts.jobs == []
+
+
+def test_untagged_tts_fallback_ignored_when_tagged():
+    """有 <tts> 标注时 fallback_text 被忽略, 只朗读标注内容。"""
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 1.0)
+    handler._submit_tts("bot_001", _make_event(), "标注朗读", fallback_text="整条正文")
+    assert [j.text for j in tts.jobs] == ["标注朗读"]
+
+
+def test_untagged_tts_empty_fallback_noop():
+    """fallback 为空/纯空白 → 不入队。"""
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 1.0)
+    handler._submit_tts("bot_001", _make_event(), "", fallback_text="   ")
+    handler._submit_tts("bot_001", _make_event(), "", fallback_text=None)
+    assert tts.jobs == []
+
+
+def test_untagged_tts_prob_clamped_to_one():
+    """prob>1 视为 1(必中), 不会异常。"""
+    tts = _QueueTTS()
+    handler = _untagged_handler(tts, 5.0)
+    handler._submit_tts("bot_001", _make_event(), "", fallback_text="必中")
+    assert [j.text for j in tts.jobs] == ["必中"]
