@@ -537,6 +537,9 @@ class ProactiveEngine:
         ws_server = self._ref("ws_server")
         if ws_server is None:
             return ""
+        # 已知缺口: 兜底 WS 直发不经过 MessageHandler 的 OOC 三防。仅当
+        # message_handler 未注入或没有 send_proactive_reply 时走到这里;
+        # 正常路径已由 handler 治理。此处不在本 PR 范围内。
         await ws_server.send_private_msg(bot_id, user_id, reply, source="llm")
         return reply
 
