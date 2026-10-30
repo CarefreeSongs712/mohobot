@@ -1442,8 +1442,12 @@ class MessageHandler:
             # 不能用过滤前的 full_reply, 否则被删掉的段也会被概率朗读。
             display_parts: list[str] = []
             sent = await self._send_full_text(bot_id, event, full_reply, collected=display_parts)
-            self._submit_tts(
-                bot_id, event, tts_text, fallback_text="".join(display_parts))
+            # 有展示文本但整条被 OOC 丢弃时不能朗读; 纯 <tts> 标注(没有展示
+            # 文本)仍保留原有的“只发语音”行为。
+            if sent or not full_reply.strip():
+                # 用换行保留段边界: 空串拼接会让英文/无标点分段粘成 "worldHow"。
+                self._submit_tts(
+                    bot_id, event, tts_text, fallback_text="\n".join(display_parts))
             return full_reply if sent else ""
 
         from mohobot.utils.reply_filter import ReplyArtifactFilter
@@ -1528,8 +1532,11 @@ class MessageHandler:
                 segments_sent += 1
                 first_sent = await self._send_segment(
                     bot_id, event, cleaned, first_sent, collected=display_parts)
-            self._submit_tts(
-                bot_id, event, tts_text, fallback_text="".join(display_parts))
+            # 清洗后正文若被 OOC 整段丢弃(first_sent 仍为 False), 标注 TTS
+            # 也不能念; 但纯 <tts>(cleaned 为空)仍按原行为只发语音。
+            if first_sent or not cleaned:
+                self._submit_tts(
+                    bot_id, event, tts_text, fallback_text="\n".join(display_parts))
             logger.debug(
                 f"Streamed reply (reasoning-suppressed) done: "
                 f"{len(full_reply)} -> {len(cleaned)} chars"
@@ -1548,8 +1555,11 @@ class MessageHandler:
             await self._send_segment(bot_id, event, diagnostic, first_sent)
             logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
             return diagnostic
-        self._submit_tts(
-            bot_id, event, tts_text, fallback_text="".join(display_parts))
+        # 所有展示段都被逐段丢弃(first_sent 保持 False)时用户什么都没看到,
+        # 标注/无标注朗读都不能念; 纯 <tts>(full_reply 为空)保留只发语音。
+        if first_sent or not full_reply.strip():
+            self._submit_tts(
+                bot_id, event, tts_text, fallback_text="\n".join(display_parts))
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
@@ -1844,7 +1854,7 @@ class MessageHandler:
             if not await self._send_full_text(
                     bot_id, event, full_reply, quote=False, collected=display_parts):
                 return ""
-            display_text = "".join(display_parts)
+            display_text = "\n".join(display_parts)
         else:
             guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
             if drop_reason:

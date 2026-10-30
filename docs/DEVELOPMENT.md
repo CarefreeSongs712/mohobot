@@ -870,7 +870,8 @@ await supervisor.shutdown()
 
 - MiniMax `t2a_v2` 同步合成。两条通路：LLM 自标 `<tts>` 句自动朗读、`/tts <文本>` 指令。
 - 无标注概率朗读：回复没有任何 `<tts>` 标注时，按 `tts.untagged_tts_prob`（0~1，0=关闭）整条朗读。**仅队列未满时抽样**；有标注的回复不受影响；NaN/Inf 视为关闭（`random() >= nan` 恒为 False，会让概率变成 100%）。
-- fallback 文案 = **实际逐段发出的展示文本**（填充词清理/OOC 丢弃之后），不是过滤前全文。共 5 个 fallback 调用点：流式分段、非流式分段、无标签自查降级、单条发送、主动消息；另有 2 处正确省略 fallback（纯 `<tts>` 主动消息无展示文本、单条回复整条被 OOC 丢弃）。
+- fallback 文案 = **实际逐段发出的展示文本**（填充词清理/OOC 丢弃之后），不是过滤前全文，段之间用换行保留边界（空串拼接会让英文分段粘成 `worldHow`）。共 5 个 fallback 调用点：流式分段、非流式分段、无标签自查降级、单条发送、主动消息；另有 2 处正确省略 fallback（纯 `<tts>` 主动消息无展示文本、单条回复整条被 OOC 丢弃）。
+- 被动回复没有发出任何展示段时（整条英文漂移、全部段被 OOC 丢弃、自查降级后正文被丢弃）不提交 TTS：用户什么都没看到，标注与无标注朗读都不念（主动消息的纯 `<tts>` 无展示文本仍按原逻辑朗读）。
 - 全局 FIFO 单飞行队列（`queue_maxsize` 默认 16），**队列满丢最新**。
 - `<tts>` 标签剥离在 `message_handler` + `utils/tts_marker.py`：`TTSMarkerFilter` 会**扣留**半个标签防止跨 chunk 撕裂；标注句超长截到第一个句末标点、多标注取第一个、忘写闭标签容错。
 - 音色：全局 `tts.voice_id`，per-bot `BotConfig.tts_voice_id` 覆盖（提交任务时就解析好）。

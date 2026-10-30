@@ -894,7 +894,8 @@ def _attach_llm(handler, raw: str) -> None:
         chat=AsyncMock(return_value=(raw, None)), chat_stream=chat_stream)
 
 
-def _displayed(handler) -> str:
+def _sent_texts(handler) -> list[str]:
+    """逐条实际发出的展示文本(段边界保留)。"""
     parts = []
     for call in handler._send_message.await_args_list:
         message = call.args[2]
@@ -904,7 +905,16 @@ def _displayed(handler) -> str:
                 for part in message if part.get("type") == "text"
             )
         parts.append(message)
-    return "".join(parts)
+    return parts
+
+
+def _displayed(handler) -> str:
+    return "".join(_sent_texts(handler))
+
+
+def _displayed_text(handler) -> str:
+    """模拟朗读 fallback: 段之间用换行保留边界。"""
+    return "\n".join(_sent_texts(handler))
 
 
 async def test_untagged_fallback_streaming_uses_cleaned_segments() -> None:
@@ -918,7 +928,7 @@ async def test_untagged_fallback_streaming_uses_cleaned_segments() -> None:
 
     displayed = _displayed(handler)
     assert displayed == "今天天气不错。我不能这样做。我们明天再聊吧。", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
     assert "Well," not in tts.jobs[0].text and "As an AI" not in tts.jobs[0].text
 
 
@@ -933,7 +943,7 @@ async def test_untagged_fallback_streaming_excludes_ooc_dropped_segment() -> Non
 
     displayed = _displayed(handler)
     assert displayed == "今天的天气真的很不错呢。我们明天再聊吧。", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
     assert "the user" not in tts.jobs[0].text
 
 
@@ -948,7 +958,7 @@ async def test_untagged_fallback_non_streaming_segmented() -> None:
 
     displayed = _displayed(handler)
     assert displayed == "你好呀。我们走吧。", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
 
 
 async def test_untagged_fallback_reasoning_suppressed_uses_cleaned_body() -> None:
@@ -965,7 +975,7 @@ async def test_untagged_fallback_reasoning_suppressed_uses_cleaned_body() -> Non
 
     displayed = _displayed(handler)
     assert displayed == "那就这样吧", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
 
 
 async def test_untagged_fallback_single_reply_uses_guarded_text() -> None:
@@ -979,7 +989,7 @@ async def test_untagged_fallback_single_reply_uses_guarded_text() -> None:
 
     displayed = _displayed(handler)
     assert displayed == "你好呀。我们走吧。", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
 
 
 async def test_untagged_fallback_proactive_uses_display_text() -> None:
@@ -998,7 +1008,7 @@ async def test_untagged_fallback_proactive_uses_display_text() -> None:
 
     displayed = _displayed(handler)
     assert displayed == "今天的天气真的很不错呢。我们明天再聊吧。", displayed
-    assert [j.text for j in tts.jobs] == [displayed]
+    assert [j.text for j in tts.jobs] == [_displayed_text(handler)]
 
 
 async def test_single_reply_ooc_drop_does_not_read_tagged_tts() -> None:
@@ -1014,3 +1024,122 @@ async def test_single_reply_ooc_drop_does_not_read_tagged_tts() -> None:
     assert out == ""
     assert _displayed(handler) == ""
     assert tts.jobs == []
+
+
+# ── 9c. 复审收尾: 段边界分隔 + 整条丢弃不朗读 ─────────────────
+
+
+async def test_untagged_fallback_preserves_segment_boundaries() -> None:
+    """英文/无标点分段朗读时不能空串粘连成 "worldHow"。"""
+    raw = "Hello there, it is a lovely day\n\nGood to see you again my friend"
+    tts = _QueueTTS()
+    handler = _live_handler(tts, stream=False)
+    _attach_llm(handler, raw)
+
+    await handler._stream_llm_reply("bot_001", _event_with_text("hello there"), [], {})
+
+    sent = _sent_texts(handler)
+    assert len(sent) == 2, sent
+    assert [j.text for j in tts.jobs] == ["\n".join(sent)]
+    assert "dayGood" not in tts.jobs[0].text
+
+
+async def test_streaming_all_segments_dropped_skips_tagged_tts() -> None:
+    """流式分段: 所有展示段都被 OOC 丢弃时, 标注 TTS 也不得朗读。"""
+    raw = (
+        "<tts>好的</tts>"
+        "Since you asked me to write a song for you, "
+        "I will absolutely not do that because it is against my policy "
+        "and I must refuse this request entirely."
+    )
+    tts = _QueueTTS()
+    handler = _live_handler(tts)
+    _attach_llm(handler, raw)
+
+    out = await handler._stream_llm_reply(
+        "bot_001", _event_with_text("（咬天钿）"), [], {})
+
+    assert out != ""  # 文本仍是英文漂移内容, 只是没发出去
+    assert _displayed(handler) == ""
+    assert tts.jobs == []
+
+
+async def test_non_streaming_whole_drift_skips_tagged_tts() -> None:
+    """非流式分段: 整条英文漂移被丢弃时, 标注 TTS 也不得朗读。"""
+    raw = (
+        "<tts>好的</tts>"
+        "Since you asked me to write a song for you, "
+        "I will absolutely not do that because it is against my policy."
+    )
+    tts = _QueueTTS()
+    handler = _live_handler(tts, stream=False)
+    _attach_llm(handler, raw)
+
+    out = await handler._stream_llm_reply(
+        "bot_001", _event_with_text("（咬天钿）"), [], {})
+
+    assert out == ""
+    assert _displayed(handler) == ""
+    assert tts.jobs == []
+
+
+async def test_reasoning_suppressed_dropped_body_skips_tagged_tts() -> None:
+    """自查降级: 清洗后正文被 OOC 整段丢弃时, 标注 TTS 也不得朗读。"""
+    raw = (
+        "检查系统约束：\n- 严格控制在50字以内\n\n"
+        "编写回复：\n<tts>好的。</tts>"
+        "Since you asked me to write a song for you, "
+        "I will absolutely not do that because it is against my policy."
+    )
+    tts = _QueueTTS()
+    handler = _live_handler(tts)
+    _attach_llm(handler, raw)
+
+    await handler._stream_llm_reply("bot_001", _event_with_text("（咬天钿）"), [], {})
+
+    assert _displayed(handler) == ""
+    assert tts.jobs == []
+
+
+async def test_non_streaming_partial_drop_reads_only_sent_text() -> None:
+    """部分段被 OOC 丢弃时, 仍按实际展示文本朗读(只念发出的段)。"""
+    raw = (
+        "今天的天气真的很不错呢。\n\n"
+        "Wait, no — the user sent something pretending。\n\n"
+        "我们明天再聊吧。"
+    )
+    tts = _QueueTTS()
+    handler = _live_handler(tts, stream=False)
+    _attach_llm(handler, raw)
+
+    await handler._stream_llm_reply("bot_001", _event_with_text("（咬天钿）"), [], {})
+
+    sent = _sent_texts(handler)
+    assert sent == ["今天的天气真的很不错呢。", "我们明天再聊吧。"], sent
+    assert [j.text for j in tts.jobs] == ["\n".join(sent)]
+    assert "the user" not in tts.jobs[0].text
+
+
+async def test_pure_tagged_reply_still_reads_non_streaming() -> None:
+    """纯 <tts> 标注(没有任何展示文本)保留只发语音的既有行为。"""
+    raw = "<tts>晚安啦</tts>"
+    tts = _QueueTTS()
+    handler = _live_handler(tts, stream=False)
+    _attach_llm(handler, raw)
+
+    out = await handler._stream_llm_reply("bot_001", _event_with_text("在吗"), [], {})
+
+    assert out == "晚安啦"
+    assert [j.text for j in tts.jobs] == ["晚安啦"]
+
+
+async def test_pure_tagged_reply_still_reads_streaming() -> None:
+    raw = "<tts>晚安啦</tts>"
+    tts = _QueueTTS()
+    handler = _live_handler(tts)
+    _attach_llm(handler, raw)
+
+    out = await handler._stream_llm_reply("bot_001", _event_with_text("在吗"), [], {})
+
+    assert out == "晚安啦"
+    assert [j.text for j in tts.jobs] == ["晚安啦"]
