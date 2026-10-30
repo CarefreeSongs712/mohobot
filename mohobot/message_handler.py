@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time as time_module
 from collections import OrderedDict
@@ -1437,8 +1438,12 @@ class MessageHandler:
             full_reply = reply_text or ""
             from mohobot.utils.reply_filter import strip_reply_artifacts
             full_reply, tts_text = strip_reply_artifacts(full_reply)
-            sent = await self._send_full_text(bot_id, event, full_reply)
-            self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
+            # fallback 必须是玩家实际看到的展示文本(逐段经过填充词清理/OOC 治理),
+            # 不能用过滤前的 full_reply, 否则被删掉的段也会被概率朗读。
+            display_parts: list[str] = []
+            sent = await self._send_full_text(bot_id, event, full_reply, collected=display_parts)
+            self._submit_tts(
+                bot_id, event, tts_text, fallback_text="".join(display_parts))
             return full_reply if sent else ""
 
         from mohobot.utils.reply_filter import ReplyArtifactFilter
@@ -1448,6 +1453,9 @@ class MessageHandler:
 
         buffer = ""
         full_reply = ""
+        # 实际发给用户的逐段文本(填充词清理/OOC 丢弃/乱码清理之后), 作为
+        # 无标注概率朗读的 fallback; 不能直接用 full_reply(过滤前全文)。
+        display_parts: list[str] = []
         first_sent = False
         segments_sent = 0
         diagnostic: LLMDiagnostic | None = None
@@ -1470,7 +1478,8 @@ class MessageHandler:
                 diagnostic = chunk
                 if buffer.strip():
                     segments_sent += 1
-                    first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                    first_sent = await self._send_segment(
+                        bot_id, event, buffer, first_sent, collected=display_parts)
                     buffer = ""
                 continue
             if chunk:
@@ -1498,12 +1507,14 @@ class MessageHandler:
             buffer = flushed["rest"]
             for seg in flushed["segments"]:
                 segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, seg, first_sent)
+                first_sent = await self._send_segment(
+                    bot_id, event, seg, first_sent, collected=display_parts)
 
             if is_final and buffer:
                 # Stream ended with text left in the buffer — always flush it
                 segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                first_sent = await self._send_segment(
+                    bot_id, event, buffer, first_sent, collected=display_parts)
                 buffer = ""
 
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
@@ -1515,8 +1526,10 @@ class MessageHandler:
             cleaned = strip_unwrapped_reasoning(full_reply).strip()
             if cleaned:
                 segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, cleaned, first_sent)
-            self._submit_tts(bot_id, event, tts_text, fallback_text=cleaned)
+                first_sent = await self._send_segment(
+                    bot_id, event, cleaned, first_sent, collected=display_parts)
+            self._submit_tts(
+                bot_id, event, tts_text, fallback_text="".join(display_parts))
             logger.debug(
                 f"Streamed reply (reasoning-suppressed) done: "
                 f"{len(full_reply)} -> {len(cleaned)} chars"
@@ -1527,14 +1540,16 @@ class MessageHandler:
             return cleaned
         if rest.strip():
             segments_sent += 1
-            first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+            first_sent = await self._send_segment(
+                bot_id, event, rest, first_sent, collected=display_parts)
         if diagnostic is not None:
             # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
             # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
             await self._send_segment(bot_id, event, diagnostic, first_sent)
             logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
             return diagnostic
-        self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
+        self._submit_tts(
+            bot_id, event, tts_text, fallback_text="".join(display_parts))
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
@@ -1586,7 +1601,8 @@ class MessageHandler:
         guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
         if drop_reason:
             logger.info(f"[ooc-guard] 单条回复丢弃(bot={bot_id}, {drop_reason})")
-            self._submit_tts(bot_id, event, tts_text)
+            # 整条回复被 OOC 丢弃: 文本没发出去, 标注/无标注朗读都不能念,
+            # 否则用户听到的是自己从未看到的 content。
             return ""
         full_reply = guarded
 
@@ -1627,6 +1643,8 @@ class MessageHandler:
 
         fallback_text: 回复没有 <tts> 标注时的概率朗读兜底(untagged_tts_prob,
         仅队列未满时抽样, 命中后朗读整条文本); 有标注时忽略该参数。
+        该文本必须是**实际逐段发出的展示文本**(填充词清理/OOC 丢弃之后),
+        不能传过滤前全文。
         """
         if not self._tts_active(bot_id):
             return
@@ -1668,8 +1686,12 @@ class MessageHandler:
         if not text:
             return ""
         tts_cfg = getattr(getattr(self, "_global_config", None), "tts", None)
-        prob = float(getattr(tts_cfg, "untagged_tts_prob", 0.0) or 0.0)
-        if prob <= 0:
+        try:
+            prob = float(getattr(tts_cfg, "untagged_tts_prob", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        # NaN/Inf 防护: WebUI 可传 "nan", 而 random() >= nan 恒为 False 会变成 100% 命中。
+        if not math.isfinite(prob) or prob <= 0:
             return ""
         if self._tts.queue_full:
             return ""
@@ -1678,11 +1700,17 @@ class MessageHandler:
         logger.debug(f"无标注回复命中概率朗读(bot={bot_id}, prob={prob})")
         return text
 
-    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> bool:
+    async def _send_full_text(
+        self, bot_id, event, text: str, *, quote: bool = True,
+        collected: list[str] | None = None,
+    ) -> bool:
         """Segment a complete reply text and send with configured delays.
 
         OOC 英文漂移按**整条回复**判定: 整条回复正常(含中文解释)时不再逐段
         丢弃, 避免把回复中的英文报错/代码块/URL 引用腰斩; 整条漂移才整体丢弃。
+
+        collected: 可选列表, 逐段追加**实际发出**的文本(填充词清理/OOC 丢弃后),
+        供无标注概率朗读使用; 不用过滤前全文。
         """
         from mohobot.utils.cq_code import extract_plain_text
         from mohobot.utils.reply_filter import is_foreign_language_reply
@@ -1699,10 +1727,12 @@ class MessageHandler:
         flushed = self._flush_ready_segments(text)
         for seg in flushed["segments"]:
             first_sent = await self._send_segment(
-                bot_id, event, seg, first_sent, quote=quote, check_foreign=False)
+                bot_id, event, seg, first_sent, quote=quote, check_foreign=False,
+                collected=collected)
         if flushed["rest"].strip():
             first_sent = await self._send_segment(
-                bot_id, event, flushed["rest"], first_sent, quote=quote, check_foreign=False)
+                bot_id, event, flushed["rest"], first_sent, quote=quote, check_foreign=False,
+                collected=collected)
         if not first_sent:
             logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
         return first_sent
@@ -1742,10 +1772,13 @@ class MessageHandler:
         return seg, ""
 
     async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *,
-                            quote: bool = True, check_foreign: bool = True) -> bool:
+                            quote: bool = True, check_foreign: bool = True,
+                            collected: list[str] | None = None) -> bool:
         """Send one segmented message, stripped of whitespace.
 
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
+        collected: 非 None 时追加**实际发出**的清洗后文本(被丢弃的段不追加),
+        供无标注概率朗读取“用户真正看到的文本”。
         Returns the updated first_sent flag.
         """
         # OOC 治理: 清理中文回复里突兀的英文话语标记(Well,/Okay so,/As an AI…)。
@@ -1787,6 +1820,8 @@ class MessageHandler:
             first_sent = True
 
         await self._send_message(bot_id, event, message, source="llm")
+        if collected is not None:
+            collected.append(seg)
         return first_sent
 
     async def send_proactive_reply(self, bot_id: str, event: MessageEvent, text: str) -> str:
@@ -1805,15 +1840,19 @@ class MessageHandler:
             self._submit_tts(bot_id, event, tts_text)
             return ""
         if self._segment_reply:
-            if not await self._send_full_text(bot_id, event, full_reply, quote=False):
+            display_parts: list[str] = []
+            if not await self._send_full_text(
+                    bot_id, event, full_reply, quote=False, collected=display_parts):
                 return ""
+            display_text = "".join(display_parts)
         else:
             guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
             if drop_reason:
                 logger.info(f"[ooc-guard] 主动消息丢弃(bot={bot_id}, {drop_reason})")
                 return ""
             await self._send_message(bot_id, event, guarded, source="llm")
-        self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
+            display_text = guarded
+        self._submit_tts(bot_id, event, tts_text, fallback_text=display_text)
         return full_reply
 
     def _flush_ready_segments(self, buffer: str) -> dict:

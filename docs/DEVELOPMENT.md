@@ -457,7 +457,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `anysearch` | `enabled/api_key/base_url/timeout=30` |
 | `ban` | `enabled` |
 | `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*` |
-| `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120` |
+| `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120/untagged_tts_prob=0.1` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
 | 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
 
@@ -869,11 +869,14 @@ await supervisor.shutdown()
 ### 8.4 TTS `services/minimax_tts.py`
 
 - MiniMax `t2a_v2` 同步合成。两条通路：LLM 自标 `<tts>` 句自动朗读、`/tts <文本>` 指令。
+- 无标注概率朗读：回复没有任何 `<tts>` 标注时，按 `tts.untagged_tts_prob`（0~1，0=关闭）整条朗读。**仅队列未满时抽样**；有标注的回复不受影响；NaN/Inf 视为关闭（`random() >= nan` 恒为 False，会让概率变成 100%）。
+- fallback 文案 = **实际逐段发出的展示文本**（填充词清理/OOC 丢弃之后），不是过滤前全文。共 5 个 fallback 调用点：流式分段、非流式分段、无标签自查降级、单条发送、主动消息；另有 2 处正确省略 fallback（纯 `<tts>` 主动消息无展示文本、单条回复整条被 OOC 丢弃）。
 - 全局 FIFO 单飞行队列（`queue_maxsize` 默认 16），**队列满丢最新**。
 - `<tts>` 标签剥离在 `message_handler` + `utils/tts_marker.py`：`TTSMarkerFilter` 会**扣留**半个标签防止跨 chunk 撕裂；标注句超长截到第一个句末标点、多标注取第一个、忘写闭标签容错。
 - 音色：全局 `tts.voice_id`，per-bot `BotConfig.tts_voice_id` 覆盖（提交任务时就解析好）。
 - 失败降级：LLM 来源静默（文本已发）；指令来源回错误提示。
 - 面板保存后除 `queue_maxsize` 外全部热生效（`sync_config`）。
+- **升级提示**：`untagged_tts_prob` 默认 0.1，已启用 TTS 的 bot 升级后无需额外配置即按 10% 概率朗读无标注回复；不需要该行为时显式设为 0。
 
 ### 8.5 封禁 `ban/`
 

@@ -141,7 +141,7 @@ def _make_handler(sent: list, chunks: list):
             for chunk, is_final in chunks:
                 yield chunk, is_final
 
-    async def send_segment(bot_id, event, text, first_sent, *, quote=True):
+    async def send_segment(bot_id, event, text, first_sent, *, quote=True, **kwargs):
         sent.append(text)
         return True
 
