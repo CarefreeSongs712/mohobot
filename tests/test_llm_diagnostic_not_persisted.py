@@ -287,8 +287,8 @@ async def test_stream_diagnostic_preserves_partial_body_order():
             yield "<te", False
             yield LLMDiagnostic("[diag]"), True
 
-    async def send_segment(bot_id, event, text, first_sent, *,
-                           quote=True, sent_counter=None):
+    async def send_segment(bot_id, event, text, first_sent, *, quote=True,
+                           collected=None, sent_counter=None):
         sent.append(text)
         if sent_counter is not None:
             sent_counter[0] += 1

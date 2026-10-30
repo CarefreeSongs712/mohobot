@@ -259,6 +259,11 @@ class TTSService:
     def queued(self) -> int:
         return self._queue.qsize()
 
+    @property
+    def queue_full(self) -> bool:
+        """队列是否已满(无标注概率朗读据此决定是否参与抽样)。"""
+        return self._queue.full()
+
     # ── 状态(面板) ───────────────────────────────────────────
 
     async def service_status(self) -> dict[str, Any]:
