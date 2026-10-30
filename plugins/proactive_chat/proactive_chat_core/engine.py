@@ -53,13 +53,19 @@ _DECISION_GUIDANCE = (
 # 与决策协议一样作为服务端固定段附加, 保证用户自定义提示词不会覆盖协议本身。
 _SCHEDULE_GUIDANCE = (
     "\n\n【可选的延后发送】\n"
+    "当前时间是: {{current_time}}。\n"
     "如果你觉得现在不适合开口, 但希望在之后某个具体时间再主动找对方"
     "(例如明天晚上 18:00 或几天后), 可以在整条回复的最后单独写一行:\n"
     "[SCHEDULE: YYYY-MM-DD HH:MM]\n"
     "- 时间按北京时间(UTC+8)填写, 必须晚于当前时间, 且不超过 {{max_schedule_days}} 天;\n"
     "- 若整条回复只有该标记, 本轮不发送正文, 服务端会按该时间安排下一次主动消息;\n"
-    "- 若标记前还有正文, 服务端会先发送正文, 再把下一次主动消息安排到该时间;\n"
-    "- 同一次主动任务尽量不超过 2 条消息; 是否继续、何时继续由你结合上下文自行判断。"
+    "- 若标记前还有正文, 服务端会先发送正文, 再把下一次主动消息安排到该时间。"
+)
+
+# 条数约束只作提示词参考, 不实现硬限制; 与排期开关解耦, 始终附加。
+_MESSAGE_COUNT_GUIDANCE = (
+    "\n\n【主动消息节奏】\n"
+    "同一次主动任务尽量不超过 2 条消息; 是否继续、何时继续由你结合上下文自行判断。"
 )
 
 _DEFAULT_CONFIG: dict[str, Any] = {
@@ -400,12 +406,15 @@ class ProactiveEngine:
             reply = (reply or "").strip()
             scheduled_at: float | None = None
             if self._cfg().get("enable_llm_schedule", True):
-                schedule_raw, reply = self._extract_schedule(reply)
+                schedule_raws, reply = self._extract_schedule(reply)
                 reply = reply.strip()
-                if schedule_raw is not None:
+                # 多个标记时取第一个“可解析且校验通过”的, 避免最后一个写坏的
+                # 标记把前面合法排期一起丢掉。
+                for schedule_raw in schedule_raws:
                     scheduled_at = self._resolve_schedule(schedule_raw, cfg, self._clock())
                     if scheduled_at is not None:
                         logger.info(f"[主动消息] {key} 模型排期下一次主动消息: {schedule_raw}")
+                        break
             if not reply and scheduled_at is None:
                 await self._reschedule(key, cfg, self._clock())
                 return
@@ -417,8 +426,10 @@ class ProactiveEngine:
                 return
 
             if not reply:
-                # 只有排期标记: 本轮不发送、不计数, 直接安排下一次
-                await self._mutate_state(_set_next_trigger(key, scheduled_at))
+                # 只有排期标记: 本轮不发送、不计数, 直接安排下一次。
+                # CAS: 生成期间用户已回复或被移出跟踪时, 不覆盖观察钩子的新状态。
+                await self._mutate_state(_set_next_trigger_if_idle(
+                    key, scheduled_at, gen_start_message_time))
                 return
 
             # LLM 自主决策(可关): [SKIP]=本次不发(不计数, 正常重排);
@@ -431,7 +442,8 @@ class ProactiveEngine:
                     if choice == "skip":
                         logger.info(f"[主动消息] {key} 模型判断此刻不适合主动开口, 本次跳过")
                         if scheduled_at is not None:
-                            await self._mutate_state(_set_next_trigger(key, scheduled_at))
+                            await self._mutate_state(_set_next_trigger_if_idle(
+                                key, scheduled_at, gen_start_message_time))
                         else:
                             await self._reschedule(key, cfg, self._clock())
                     else:
@@ -469,19 +481,21 @@ class ProactiveEngine:
                 return
 
             now = self._clock()
-
-            def _update(state: dict) -> None:
-                entry_now = state.setdefault("sessions", {}).setdefault(key, {})
-                entry_now["unanswered_count"] = unanswered_count + 1
-                entry_now["last_scheduled_at"] = now
-                if scheduled_at is not None:
-                    entry_now["next_trigger_time"] = scheduled_at
-                else:
-                    entry_now["next_trigger_time"] = now + random_interval_seconds(
-                        cfg.get("min_interval_minutes", 30), cfg.get("max_interval_minutes", 600),
-                    )
-
-            await self._mutate_state(_update)
+            next_trigger = scheduled_at if scheduled_at is not None else (
+                now + random_interval_seconds(
+                    cfg.get("min_interval_minutes", 30),
+                    cfg.get("max_interval_minutes", 600),
+                )
+            )
+            # CAS: 读状态与写状态之间是 await 边界, 用户在缝隙里回复时
+            # 不能把观察钩子刚写入的归零/重排覆盖掉。
+            await self._mutate_state(_record_sent_if_idle(
+                key,
+                expected_last_message_time=gen_start_message_time,
+                unanswered_count=unanswered_count,
+                now=now,
+                next_trigger=next_trigger,
+            ))
             schedule_note = f", 下一次排期: {scheduled_at:.0f}" if scheduled_at is not None else ""
             logger.info(
                 f"[主动消息] {key} 第 {unanswered_count + 1} 次主动消息已发送, "
@@ -500,8 +514,10 @@ class ProactiveEngine:
         self, instance: Any, user_id: str, entry: dict, unanswered_count: int,
     ) -> tuple[PrivateMessageEvent, str]:
         """构造合成私聊事件: 提示词作为当轮用户输入, 不写入上下文。"""
+        max_schedule_days = int(self._cfg().get("max_schedule_days", 7) or 7)
         prompt = render_prompt(
             self._cfg().get("proactive_prompt", ""), unanswered_count,
+            max_schedule_days=max_schedule_days,
         )
         if self._cfg().get("enable_llm_choice", True):
             # 自主决策协议是服务端固定段: 渲染占位符后整体附加
@@ -509,8 +525,10 @@ class ProactiveEngine:
         if self._cfg().get("enable_llm_schedule", True):
             prompt += render_prompt(
                 _SCHEDULE_GUIDANCE, unanswered_count,
-                max_schedule_days=int(self._cfg().get("max_schedule_days", 7) or 7),
+                max_schedule_days=max_schedule_days,
             )
+        # “单任务尽量≤2条”只作提示词参考, 与排期开关解耦。
+        prompt += render_prompt(_MESSAGE_COUNT_GUIDANCE, unanswered_count)
         sender_name = str(entry.get("sender_name") or f"User-{user_id}")
         event = PrivateMessageEvent(
             time=int(self._clock()),
@@ -525,24 +543,49 @@ class ProactiveEngine:
         return event, prompt
 
     _CHOICE_RE = re.compile(r"[\[【(（]\s*(skip|pause)\s*[\]】)）]", re.IGNORECASE)
-    _SCHEDULE_RE = re.compile(
-        r"[\[【(（]\s*schedule\s*[:：]?\s*([^\]】)）]{6,40}?)\s*[\]】)）]",
-        re.IGNORECASE,
+    _SCHEDULE_OPENERS = {"[": "]", "【": "】", "(": ")", "（": "）"}
+    _SCHEDULE_PREFIX_RE = re.compile(r"[\[【(（]\s*schedule\s*[:：]?", re.IGNORECASE)
+    _SCHEDULE_DATETIME_RE = re.compile(
+        r"^\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)"
     )
 
-    def _extract_schedule(self, reply: str) -> tuple[str | None, str]:
-        """提取排期标记, 返回 (标记内时间文本, 剥除标记后的正文)。"""
-        markers = self._SCHEDULE_RE.findall(reply)
-        if not markers:
-            return None, reply
-        return markers[-1].strip(), self._SCHEDULE_RE.sub("", reply).strip()
+    def _extract_schedule(self, reply: str) -> tuple[list[str], str]:
+        """提取全部排期标记, 返回 (时间文本列表, 剥除标记后的正文)。
+
+        按配对的括号整段剥除: 标记内允许出现补充说明
+        (如 ``[SCHEDULE: 2026-10-31 18:00（明天傍晚）]``), 不能因内层
+        括号提前截断而把残留的 ``]`` 当正文发出。
+        """
+        spans: list[tuple[int, int, str]] = []
+        for match in self._SCHEDULE_PREFIX_RE.finditer(reply):
+            opener = reply[match.start()]
+            closer = self._SCHEDULE_OPENERS.get(opener)
+            if closer is None:
+                continue
+            end = reply.find(closer, match.end())
+            if end < 0:
+                continue
+            content = reply[match.end():end].strip()
+            datetime_match = self._SCHEDULE_DATETIME_RE.match(content)
+            raw = datetime_match.group(1) if datetime_match else content
+            spans.append((match.start(), end + 1, raw.strip()))
+        if not spans:
+            return [], reply
+        parts: list[str] = []
+        last = 0
+        for start, end, _raw in spans:
+            parts.append(reply[last:start])
+            last = end
+        parts.append(reply[last:])
+        return [raw for _start, _end, raw in spans], "".join(parts).strip()
 
     @staticmethod
     def _parse_schedule_time(raw: str) -> float | None:
         """把标记里的时间文本解析成 UTC+8 时间戳; 无法解析返回 None。"""
         text = str(raw or "").strip()
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
-                    "%Y/%m/%d %H:%M", "%Y-%m-%dT%H:%M"):
+                    "%Y/%m/%d %H:%M", "%Y/%m/%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
             try:
                 return datetime.strptime(text, fmt).replace(tzinfo=TZ_UTC8).timestamp()
             except ValueError:
@@ -550,24 +593,30 @@ class ProactiveEngine:
         return None
 
     def _resolve_schedule(self, raw: str, cfg: dict, now: float) -> float | None:
-        """校验 LLM 排期: 必须是未来时间、不超过 max_schedule_days, 并挪出免打扰时段。"""
+        """校验 LLM 排期: 未来时间、日历天不超过 max_schedule_days, 并避开免打扰。"""
         target = self._parse_schedule_time(raw)
         if target is None:
             logger.info(f"[主动消息] 忽略无法解析的排期标记: {raw!r}")
             return None
         max_days = max(1, int(cfg.get("max_schedule_days", 7) or 7))
+        now_dt = datetime.fromtimestamp(now, TZ_UTC8)
+        target_dt = datetime.fromtimestamp(target, TZ_UTC8)
         if target <= now + 60:
             logger.info(f"[主动消息] 忽略已过期或过近的排期标记: {raw!r}")
             return None
-        if target > now + max_days * 86400:
+        # 按“日历天”而不是滚动 24h 判断, 与“明天/几天后”的直觉一致。
+        if (target_dt.date() - now_dt.date()).days > max_days:
             logger.info(f"[主动消息] 忽略超过 {max_days} 天的排期标记: {raw!r}")
             return None
         quiet_hours = cfg.get("quiet_hours", "1-7")
-        target_dt = datetime.fromtimestamp(target, TZ_UTC8)
         if is_quiet_time(quiet_hours, target_dt):
-            target_dt = next_non_quiet_time(quiet_hours, target_dt)
-            target = target_dt.timestamp()
-            if target > now + max_days * 86400:
+            moved = next_non_quiet_time(quiet_hours, target_dt)
+            if is_quiet_time(quiet_hours, moved):
+                logger.info("[主动消息] 配置为全天免打扰, 忽略排期标记")
+                return None
+            target_dt = moved
+            target = moved.timestamp()
+            if (target_dt.date() - now_dt.date()).days > max_days:
                 logger.info(f"[主动消息] 排期挪出免打扰时段后超出 {max_days} 天, 已忽略")
                 return None
         return target
@@ -636,8 +685,51 @@ class ProactiveEngine:
 
 def _set_next_trigger(key: str, when: float) -> Callable[[dict], None]:
     def _update(state: dict) -> None:
+        if when is None:  # 防 None 写入后 tick/自动触发都无法处理的“永久挂起”
+            return
         entry = state.setdefault("sessions", {}).setdefault(key, {})
         entry["next_trigger_time"] = when
+    return _update
+
+
+def _set_next_trigger_if_idle(
+    key: str, when: float, expected_last_message_time: float,
+) -> Callable[[dict], None]:
+    """仅当生成窗口内用户没有新消息、会话仍存在时写入排期。
+
+    避免仅排期分支在 await 缝隙里覆盖观察钩子的归零重排, 也不会把
+    被 exclude_users 删除的会话重新建出来。
+    """
+    def _update(state: dict) -> None:
+        if when is None:
+            return
+        entry = state.get("sessions", {}).get(key)
+        if not isinstance(entry, dict):
+            return
+        if entry.get("last_message_time", 0) > expected_last_message_time:
+            return
+        entry["next_trigger_time"] = when
+    return _update
+
+
+def _record_sent_if_idle(
+    key: str,
+    *,
+    expected_last_message_time: float,
+    unanswered_count: int,
+    now: float,
+    next_trigger: float,
+) -> Callable[[dict], None]:
+    """消息已发出后的计数/排期写入, 同样带用户回复 CAS。"""
+    def _update(state: dict) -> None:
+        entry = state.get("sessions", {}).get(key)
+        if not isinstance(entry, dict):
+            return
+        if entry.get("last_message_time", 0) > expected_last_message_time:
+            return
+        entry["unanswered_count"] = unanswered_count + 1
+        entry["last_scheduled_at"] = now
+        entry["next_trigger_time"] = next_trigger
     return _update
 
 
