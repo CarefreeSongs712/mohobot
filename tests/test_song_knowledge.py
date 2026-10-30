@@ -169,7 +169,7 @@ async def test_legacy_injection() -> None:
     m = SongInfoMatcher(db_folder=cfg["song_database"]["db_folder"],
                         db_file=cfg["song_database"]["db_file"])
 
-    async def annotator(event):
+    async def annotator(event, bot_id: str = "?"):
         from mohobot.utils.cq_code import extract_plain_text
         text = (extract_plain_text(event.message) or "").strip()
         match = m.match(text) if text else None

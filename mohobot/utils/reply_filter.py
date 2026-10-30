@@ -593,6 +593,13 @@ def strip_reply_artifacts(text: str) -> tuple[str, str]:
 # ── OOC 三防: 乱码符号 / 内心独白 / 整段外语漂移(2026-10 生产样本驱动) ──
 # 设计约束: 全部保守判定 + 每次命中记日志(可统计), 宁可漏过不可误伤。
 # 希腊/西里尔字母不在删除范围(俄语歌名等是合法内容)。
+#
+# 作用范围(务必区分): 本模块只提供判定函数, 是否生效取决于调用方。当前仅
+# MessageHandler 的 LLM 发送路径接入(单条回复 / _send_full_text 整条判定 /
+# TTS / 分段发送 / 主动消息)。以下两条既有旁路**不经过** handler 三防, 属已知
+# 缺口, 不能据此宣称"全部 LLM 输出"都受治理:
+#   1. persona_ab.py 的 A/B 候选经 ws.send_private_msg 直发;
+#   2. proactive_chat engine 在拿不到 message_handler 时经 ws 直发兜底。
 
 # 正常中文聊天用不到的文字系统: 阿拉伯/希伯来/叙利亚/孟加拉/古木基/泰米尔/
 # 泰文/老挝/格鲁吉亚/埃塞俄比亚/藏文/缅甸/高棉。bot 采样漂移会产生这类 token
@@ -668,6 +675,68 @@ def is_chinese_trigger(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]{2,}", text or ""))
 
 
+# 段首判定: 跳过所有非字母字符(emoji/标点/列表符号/数字), 看首个字母是否为汉字。
+# 不逐一枚举前缀字符 —— 生产前缀形态太多("😂 "、"# "、"……"、"• "、"**"),
+# 白名单必然漏; 而英文开头的段落首个字母仍是拉丁字母, 不会被误判为汉字引导。
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’\-]*")
+
+
+def _led_by_han(text: str) -> bool:
+    """段落首个字母/汉字是否为汉字(允许任意前置符号/emoji/标点)。"""
+    for ch in text or "":
+        if ch.isalpha():
+            return "\u4e00" <= ch <= "\u9fff"
+    return False
+
+
+def _count_english_words(text: str) -> int:
+    """英文单词数(CamelCase/连字符专名算一个词, 如 Cadillac-Class)。"""
+    return len(_ENGLISH_WORD_RE.findall(text or ""))
+
+
+# 英文推理/指令脚手架词: 汉字引导 + 短英文的豁免分支专用。
+# 只列保守子集 —— 这些短语几乎不会出现在正常中英夹聊的专名/歌曲引用里,
+# 一旦出现通常意味着模型把内部推理或指令性话语写进了正文。
+#
+# 词表刻意收窄(复审 P2): 过宽会把正常中英夹聊/歌词整段丢掉。已验证的误伤有
+# "let me check the lyrics"、"let me be your hero"、"I will write you a song"、
+# "the model is really fast"、"forget the previous song"。因此:
+#   - "let me" 只跟推理/元话语动词(think/consider/see/rephrase/clarify/…),
+#     不拦 check/write/be 这类动作或歌词用法;
+#   - "the model"/"prompt" 不再单独算脚手架; "the user/sender/assistant"
+#     要求后接 sent/said/says/wants/asked/just/is 等, 避免 "the user manual";
+#   - "I will/I'll + 动作" 去掉 write/say/tell, 只保留指令性/元话语动词;
+#   - "ignore/disregard/forget ... previous" 要求宾语是
+#     instructions/prompts/rules/messages/context, 不能命中 "previous song"。
+# 若线上仍出现该类误伤, 优先继续收窄词表而不是放宽整段判定。
+_ENGLISH_SCAFFOLD_RE = re.compile(
+    # "the user/sender/assistant + 元话语动作"(后接词是必要条件)
+    r"\bthe (?:user|sender|assistant)\s+(?:just\s+)?"
+    r"(?:sent|says?|said|wants?|asked|asks?|is|was|means?|called|needs?|told)\b"
+    # 段首直接 "user just/sent/wants …"(生产漂移样本)
+    r"|\buser (?:sent|wants|is|just|said|says|calls?|asked)\b"
+    # "let me" 只认推理/元话语动词, 不拦 check/write/be
+    r"|\blet me\s+"
+    r"(?:think|consider|see|rephrase|clarify|explain|answer|respond|reply|try)\b"
+    # "I will/I'll + 指令性/元话语动作"(去掉 write/say/tell 等歌词常用动词)
+    r"|\bI(?:'ll| (?:will|should|need to|must|am going to))\s+"
+    r"(?:not\s+)?(?:respond|reply|answer|ignore|follow|generate|output|refuse|"
+    r"stop|decide|choose|explain)\b"
+    # 忽略/遗忘指令: 宾语必须是指令/上下文类名词
+    r"|\b(?:ignore|disregard|forget)\b[^.!?\n]{0,40}"
+    r"\b(?:instructions?|prompts?|rules?|messages?|context)\b"
+    r"|\b(?:previous|above|prior|earlier) (?:instructions?|prompts?|rules?)\b"
+    r"|\bas an ai\b|\bAI language model\b"
+    r"|\b(?:my|the) (?:response|reply|answer) (?:is|will be)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_english_scaffold(text: str) -> bool:
+    """段内是否出现英文推理脚手架词(用于否决汉字引导豁免)。"""
+    return bool(_ENGLISH_SCAFFOLD_RE.search(text or ""))
+
+
 def looks_like_monologue(text: str) -> bool:
     """回复是否以内心独白句式开头(模型推理外泄的变体, 无 #60 的自查表头)。
 
@@ -682,7 +751,9 @@ def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
 
     返回非空字符串 = 命中原因(调用方丢弃该段); 空串 = 放行。
     判定(全部满足): 触发消息含≥2个汉字(中文会话); 段落无模板标记;
-    英文字母≥15且是汉字数的4倍以上(车名/型号混排不受影响)。
+    英文字母≥15且是汉字数的4倍以上(车名/型号混排不受影响);
+    段首以汉字开头、英文词≤6 且不含英文推理脚手架词的中英夹聊句不拦
+    (2026-10-25 生产误拦样本; 单个汉字前缀不再能兜住 "嗯 the user…" 类漂移)。
     """
     seg = (segment or "").strip()
     if len(seg) < 12:
@@ -698,5 +769,17 @@ def is_foreign_language_reply(segment: str, trigger_text: str) -> str:
     n_latin = len(re.findall(r"[A-Za-z]", seg))
     n_han = len(re.findall(r"[\u4e00-\u9fff]", seg))
     if n_latin >= 15 and n_latin > n_han * 4:
+        # 中文引导语开头、英文词又少的段是正常的中英夹聊(生产误拦样本:
+        # "比如 rain falling on the roof"、"哈哈 Cadillac-Class Aircraft Carrier，"),
+        # 不按漂移丢弃; 真正的整段漂移段首即英文(生产样本 "user just calls
+        # “老婆”. Tickled response,"), 或英文句较长(>6 词)时仍拦。
+        # 但单个汉字前缀("嗯 the user…")也能满足段首汉字, 因此豁免前先查
+        # 英文推理脚手架词 —— 命中即按漂移拦截。
+        if _led_by_han(seg) and _count_english_words(seg) <= 6:
+            if _has_english_scaffold(seg):
+                return "英文推理脚手架"
+            from loguru import logger
+            logger.info(f"[ooc-guard] 中英混排句放行: {seg[:60]!r}")
+            return ""
         return f"latin={n_latin}/han={n_han}"
     return ""
