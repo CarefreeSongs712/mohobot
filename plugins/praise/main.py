@@ -13,6 +13,8 @@ from typing import Any
 
 from loguru import logger
 
+from mohobot.history_dedup import message_signature
+
 PRAISE_TRIGGERS = {"赞我", "/赞我", "zanwo", "/zanwo"}
 
 
@@ -49,33 +51,57 @@ class Plugin:
     _THROTTLE_WINDOW = 60.0
     _throttle_cache: dict[int, float] = {}
 
-    # 同一消息事件的节流提示去重: message_id -> 占用时间戳。
+    # 同一消息事件的提示去重: 跨账号稳定事件键 -> 占用时间戳。
     # 每条消息上提示语只出一次(由先到的 bot 出, 其余静默); 点赞本身不做
     # 主权声明 —— 每个 bot 都以自己的身份点赞并汇报各自结果。
-    _event_owner_cache: dict[str, float] = {}
+    _event_owner_cache: dict[Any, float] = {}
 
     @staticmethod
-    def _claim_event(raw_event: dict) -> bool:
-        """声明本条消息事件提示类的唯一发言权; 已被占用的 message_id 返回 False。"""
+    def _event_key(raw_event: dict) -> Any:
+        """跨账号稳定的事件身份(用于提示去重与兄弟 bot 判定)。
+
+        NapCat 等实现的 ``message_id`` 按账号分配: 同一条群消息经不同 bot
+        推送时 id 不同, 不能只靠它去重。优先用发送者/时间/消息内容指纹;
+        拿不到消息段时退回 message_id(非标准事件), 都没有则返回 None。
+        """
+        try:
+            message = raw_event.get("message")
+        except AttributeError:
+            return None
+        if message is not None:
+            return (
+                str(raw_event.get("group_id") or raw_event.get("user_id") or ""),
+                str(raw_event.get("user_id") or ""),
+                str(raw_event.get("time") or ""),
+                message_signature(message, strict=True),
+            )
         try:
             mid = str(raw_event.get("message_id") or "")
         except AttributeError:
-            return True  # 拿不到 id(非标准事件)时保持旧行为
-        if not mid:
-            return True
+            return None
+        return ("mid", mid) if mid else None
+
+    @classmethod
+    def _claim_event(cls, raw_event: dict) -> bool:
+        """声明本条消息事件提示类的唯一发言权; 已被占用的事件键返回 False。"""
+        key = cls._event_key(raw_event)
+        if key is None:
+            return True  # 拿不到稳定身份时保持旧行为
         now = time.time()
-        stale = [k for k, ts in Plugin._event_owner_cache.items() if now - ts > 120]
+        stale = [k for k, ts in cls._event_owner_cache.items() if now - ts > 120]
         for k in stale:
-            del Plugin._event_owner_cache[k]
-        if mid in Plugin._event_owner_cache:
+            del cls._event_owner_cache[k]
+        if key in cls._event_owner_cache:
             return False
-        Plugin._event_owner_cache[mid] = now
+        cls._event_owner_cache[key] = now
         return True
 
     @staticmethod
-    def _set_throttle(user_id: int, mid: str) -> None:
-        """写入节流窗口(带来源的 message_id, 用于区分"同一条消息的兄弟 bot")。"""
-        Plugin._throttle_cache[int(user_id)] = {"ts": time.time(), "mid": mid}
+    def _set_throttle(user_id: int, event_key: Any) -> None:
+        """写入节流窗口(带跨账号事件键, 用于区分"同一条消息的兄弟 bot")。"""
+        Plugin._throttle_cache[int(user_id)] = {
+            "ts": time.time(), "id": event_key,
+        }
 
     # 默认配置(_conf_schema.json 注入覆盖; 无 schema 时的兜底)
     _DEFAULTS = {
@@ -277,14 +303,10 @@ class Plugin:
         # - 无窗口/已过期 → 点赞。
         throttle_msg = self._cfg("throttle_msg", self._DEFAULTS["throttle_msg"])
         now_ts = time.time()
-        raw_mid = ""
-        try:
-            raw_mid = str(raw_event.get("message_id") or "")
-        except AttributeError:
-            raw_mid = ""
+        event_key = self._event_key(raw_event)
         entry = Plugin._throttle_cache.get(int(user_id))
         if entry is not None and now_ts - entry["ts"] < Plugin._THROTTLE_WINDOW:
-            if entry.get("mid") != raw_mid:
+            if entry.get("id") != event_key:
                 if self._claim_event(raw_event):
                     logger.debug(f"Praise throttled(new msg): {user_id} (retry in "
                                  f"{Plugin._THROTTLE_WINDOW - (now_ts - entry['ts']):.0f}s)")
@@ -315,7 +337,7 @@ class Plugin:
         # 当日已达上限 → 直接提示, 不再调用 API
         if self._like_limit_cache.get(cache_key) == today:
             logger.debug(f"Praise daily limit cached: {user_id}")
-            self._set_throttle(int(user_id), raw_mid)
+            self._set_throttle(int(user_id), event_key)
             return (True, limit_msg)
 
         # 真正开始点赞前先立刻提示一次(只由本条消息的首个 bot 发);
@@ -349,7 +371,7 @@ class Plugin:
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"send_like failed: {e}")
-            self._set_throttle(int(user_id), raw_mid)
+            self._set_throttle(int(user_id), event_key)
             return (True, f"❌ 点赞失败: {e}")
 
         if errors:
@@ -358,8 +380,8 @@ class Plugin:
             # 平台拒绝(如已达上限) → 缓存当天, 之后不再重复调用 API
             if any(hint in detail for hint in self._LIMIT_HINTS):
                 self._mark_like_limit(cache_key, today)
-            self._set_throttle(int(user_id), raw_mid)
+            self._set_throttle(int(user_id), event_key)
             return (True, self._render(fail_msg, detail=detail))
         total_sent = ok_count * times_per_call
-        self._set_throttle(int(user_id), raw_mid)
+        self._set_throttle(int(user_id), event_key)
         return (True, self._render(success_msg, count=total_sent))

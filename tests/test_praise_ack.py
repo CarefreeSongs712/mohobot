@@ -33,25 +33,38 @@ def _reset(Plugin):
     Plugin._like_limit_cache.clear()
 
 
-def _group_event(user_id, text, message_id=101, group_id=888):
+def _group_event(user_id, text, message_id=101, group_id=888, at_time=1000):
     from mohobot.models.onebot import GroupMessageEvent, Sender
 
     return GroupMessageEvent(
-        time=0, self_id=1000, post_type="message", message_type="group",
+        time=at_time, self_id=1000, post_type="message", message_type="group",
         message_id=message_id, user_id=user_id, group_id=group_id,
         sender=Sender(user_id=user_id),
         message=[{"type": "text", "data": {"text": text}}],
     )
 
 
-def _private_event(user_id, text, message_id=201):
+def _private_event(user_id, text, message_id=201, at_time=1000):
     from mohobot.models.onebot import PrivateMessageEvent, Sender
 
     return PrivateMessageEvent(
-        time=0, self_id=1000, post_type="message", message_id=message_id,
+        time=at_time, self_id=1000, post_type="message", message_id=message_id,
         user_id=user_id, sender=Sender(user_id=user_id),
         message=[{"type": "text", "data": {"text": text}}],
     )
+
+
+def _raw(event, message_id, at_time=1000):
+    """模拟 OneBot 原始事件; message_id 按账号分配, 兄弟 bot 可不同。"""
+    payload = {
+        "message_id": message_id,
+        "time": at_time,
+        "user_id": event.user_id,
+        "message": event.message,
+    }
+    if getattr(event, "group_id", None):
+        payload["group_id"] = event.group_id
+    return payload
 
 
 class RecordingWS:
@@ -78,8 +91,8 @@ async def test_group_notice_once_before_likes():
     inst.plugin_config = {"like_total": 10, "like_times_per_call": 10,
                           "success_msg": "✅ {count}"}
 
-    raw = {"message_id": 101}
-    handled, reply = await inst.on_message("bot_001", _group_event(2001, "/赞我"), raw)
+    ev = _group_event(2001, "/赞我", message_id=101, at_time=1000)
+    handled, reply = await inst.on_message("bot_001", ev, _raw(ev, 101))
     assert handled and reply == "✅ 10", reply
     # 提示在第一批点赞之前
     assert ws.order[0][0] == "notice_group", ws.order
@@ -87,9 +100,11 @@ async def test_group_notice_once_before_likes():
     assert ws.order[0][3] == PENDING
     assert [c[0] for c in ws.order[1:]] == ["like"], ws.order
 
-    # 同一条消息的兄弟 bot: 不重复提示, 但仍点赞并保留原有汇报
+    # 同一条消息的兄弟 bot: message_id 按账号不同, 但内容/时间相同 →
+    # 不重复提示, 仍点赞并保留原有汇报。
     before = len(ws.order)
-    handled2, reply2 = await inst.on_message("bot_002", _group_event(2001, "/赞我"), raw)
+    sibling = _group_event(2001, "/赞我", message_id=222, at_time=1000)
+    handled2, reply2 = await inst.on_message("bot_002", sibling, _raw(sibling, 222))
     assert handled2 and reply2 == "✅ 10", reply2
     new_calls = ws.order[before:]
     assert [c[0] for c in new_calls] == ["like"], new_calls
@@ -104,14 +119,14 @@ async def test_throttle_and_limit_paths_skip_notice():
     inst.plugin_config = {"like_total": 10, "like_times_per_call": 10}
 
     # 首条消息正常: 发提示 + 点赞
-    await inst.on_message("bot_001", _group_event(2001, "/赞我"), {"message_id": 101})
+    first = _group_event(2001, "/赞我", message_id=101, at_time=1000)
+    await inst.on_message("bot_001", first, _raw(first, 101))
     assert ws.order and ws.order[0][0] == "notice_group"
 
-    # 60 秒内新消息: 节流, 不点赞也不发提示
+    # 60 秒内新消息(内容相同但时间不同): 节流, 不点赞也不发提示
     before = len(ws.order)
-    handled, reply = await inst.on_message(
-        "bot_001", _group_event(2001, "/赞我", message_id=102), {"message_id": 102}
-    )
+    second = _group_event(2001, "/赞我", message_id=102, at_time=1061)
+    handled, reply = await inst.on_message("bot_001", second, _raw(second, 102, 1061))
     assert handled and "不需要发送多次" in reply, reply
     assert len(ws.order) == before, ws.order[before:]
 
@@ -120,9 +135,8 @@ async def test_throttle_and_limit_paths_skip_notice():
     Plugin._throttle_cache.clear()
     Plugin._like_limit_cache["bot_001:2001"] = format_utc8("%Y-%m-%d")
     before = len(ws.order)
-    handled, reply = await inst.on_message(
-        "bot_001", _group_event(2001, "/赞我", message_id=103), {"message_id": 103}
-    )
+    third = _group_event(2001, "/赞我", message_id=103, at_time=2000)
+    handled, reply = await inst.on_message("bot_001", third, _raw(third, 103, 2000))
     assert handled and "上限" in reply, reply
     assert len(ws.order) == before, ws.order[before:]
 
@@ -135,7 +149,8 @@ async def test_private_notice_and_disable():
     inst = Plugin()
     inst.plugin_config = {"like_total": 10, "like_times_per_call": 10}
 
-    await inst.on_message("bot_001", _private_event(2001, "赞我"), {"message_id": 201})
+    ev = _private_event(2001, "赞我", message_id=201, at_time=1000)
+    await inst.on_message("bot_001", ev, _raw(ev, 201))
     assert ws.order[0] == ("notice_private", "bot_001", 2001, PENDING), ws.order
     assert ws.order[1][0] == "like"
 
@@ -143,7 +158,8 @@ async def test_private_notice_and_disable():
     _reset(Plugin)
     ws.order.clear()
     inst.plugin_config["pending_msg"] = ""
-    await inst.on_message("bot_001", _private_event(2002, "赞我", message_id=202), {"message_id": 202})
+    ev2 = _private_event(2002, "赞我", message_id=202, at_time=1100)
+    await inst.on_message("bot_001", ev2, _raw(ev2, 202, 1100))
     assert [c[0] for c in ws.order] == ["like"], ws.order
 
 
