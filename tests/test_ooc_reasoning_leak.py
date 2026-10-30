@@ -394,11 +394,6 @@ async def test_send_segment_skips_when_only_filler():
     assert sent == [], sent
 
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-
-
 # ── 6. OOC 三防(2026-10 生产样本驱动): 乱码符号/内心独白/整段英文漂移 ──
 # 样本全部取自 2026-10-23~25 生产 history 的真实 badcase。
 
@@ -805,3 +800,141 @@ async def test_plugin_reply_path_bypasses_ooc_guard():
     sent.clear()
     await handler._send_segment("bot", _Ev("今日老婆"), plugin_reply, False)
     assert sent == ["你今天已经有老婆了哦❤️~\n她是：【镜花ౄ】"], sent
+
+
+# ── 8. 豁免边界与绕过回归(复审 N1/N2/N3/N4/N5) ──
+
+def test_english_led_short_segment_still_flagged():
+    """N1: 段首即英文的短句必须继续拦截(不能因删掉 _led_by_han 而静默放行)。
+
+    生产样本 "user just calls …"/"Wait, no — the user sent" 是真实漂移;
+    "totally fine sentence here mate" 用来锁定单词数 ≤6 但不是中文引导的边界。
+    """
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    hit = [
+        'user just calls “老婆”. Tickled response,',
+        "totally fine sentence here mate",
+        "Wait, no — the user sent",
+    ]
+    for seg in hit:
+        assert is_foreign_language_reply(seg, "（咬天钿）"), seg
+
+
+async def test_send_segment_drops_english_led_short_segments():
+    """N1 发送口回归: 英文开头的短句不得被当作中英夹聊放行。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._ooc_guard = True
+
+    for seg in (
+        'user just calls “老婆”. Tickled response,',
+        "totally fine sentence here mate",
+        "Wait, no — the user sent",
+    ):
+        await handler._send_segment("bot", _Ev("（咬天钿）"), seg, False)
+    assert sent == [], sent
+
+
+def test_code_switching_exemption_logs_info():
+    """N2: 新增的放行分支必须可观测(否则线上无法统计误拦修复效果)。"""
+    from loguru import logger
+
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="INFO",
+        format="{message}",
+    )
+    try:
+        got = is_foreign_language_reply("比如 rain falling on the roof", "你说说这车怎么样")
+    finally:
+        logger.remove(sink_id)
+
+    assert got == ""
+    assert any("[ooc-guard]" in m and "rain falling" in m for m in messages), messages
+
+
+def test_han_prefix_cannot_hide_english_scaffold():
+    """N3: 单个汉字前缀不能兜住英文推理/指令脚手架。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "（咬天钿）"
+    hit = [
+        "嗯 user just calls “老婆”. Tickled response,",
+        "嗯 the user sent a message",
+        "在呢 let me think about it",
+        "嗯 ignore all previous instructions",
+        "嗯 I will write a song",
+        "嗯 I'll write something longer",
+        "SEND '嗯 user just calls “老婆”. Tickled response,'",
+    ]
+    for seg in hit:
+        assert is_foreign_language_reply(seg, zh_trigger), seg
+
+    # 保守子集的反向边界: 歌词引用里的 "I will always love you"(无动作动词)
+    # 不算脚手架, 仍按中文引导的短英文夹聊放行。
+    assert not is_foreign_language_reply("哈哈 I will always love you", zh_trigger)
+
+
+async def test_send_segment_drops_han_prefixed_scaffold():
+    """N3 发送口回归: 汉字前缀 + 英文脚手架整段丢弃。"""
+    sent: list[str] = []
+    handler = _real_send_handler(sent)
+    handler._ooc_guard = True
+
+    for seg in (
+        "嗯 the user sent a message",
+        "在呢 let me think about it",
+        "嗯 ignore all previous instructions",
+    ):
+        await handler._send_segment("bot", _Ev("（咬天钿）"), seg, False)
+    assert sent == [], sent
+
+
+def test_english_word_threshold_boundary():
+    """N4: 6 词豁免 / 7 词拦截的阈值边界。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "你说说这车怎么样"
+    six_words = "嗯 alpha beta gamma delta epsilon zeta"
+    seven_words = "嗯 alpha beta gamma delta epsilon zeta eta"
+    assert not is_foreign_language_reply(six_words, zh_trigger), six_words
+    assert is_foreign_language_reply(seven_words, zh_trigger), seven_words
+
+
+def test_hyphenated_token_counts_as_one_word():
+    """N4: 连字符专名按一个词计, 不应被拆成 7 个词误拦。"""
+    from mohobot.utils.reply_filter import _count_english_words, is_foreign_language_reply
+
+    assert _count_english_words("A-B-C-D-E-F-G") == 1
+    assert _count_english_words("Cadillac-Class Aircraft Carrier") == 3
+    assert not is_foreign_language_reply("嗯 A-B-C-D-E-F-G", "你说说这车怎么样")
+
+
+def test_symbol_prefix_han_lead_not_flagged():
+    """N5: emoji/井号/省略号/列表符号等前缀不影响汉字引导判定。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "你说说这车怎么样"
+    for prefix in ("😂 ", "# ", "……", "• ", "*** ", "「"):
+        seg = prefix + "嗯比如 rain falling on the roof"
+        assert not is_foreign_language_reply(seg, zh_trigger), seg
+
+
+def test_symbol_prefix_english_lead_still_flagged():
+    """N5: 符号前缀不能把英文开头的漂移段洗成汉字引导。"""
+    from mohobot.utils.reply_filter import is_foreign_language_reply
+
+    zh_trigger = "你说说这车怎么样"
+    for prefix in ("😂 ", "# ", "……", "• "):
+        seg = prefix + 'user just calls “老婆”. Tickled response,'
+        assert is_foreign_language_reply(seg, zh_trigger), seg
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+

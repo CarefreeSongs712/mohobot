@@ -1680,6 +1680,14 @@ class MessageHandler:
         原因非空 = 该段应丢弃。文本发送口与 TTS 文案共用同一判定, 避免
         「文字被清了、TTS 还在念漂移内容」。LLMDiagnostic 是系统文案(常为
         英文错误提示), 不参与治理。
+
+        范围: 本函数只覆盖经过 MessageHandler 的 LLM 内容路径 ——
+        _send_single_reply(单条)、_send_full_text(整条漂移判定直接调用
+        is_foreign_language_reply, 分段再走 _send_segment)、_submit_tts、
+        send_proactive_reply(主动消息)。以下既有旁路不经过本函数, 属已知缺口,
+        不能宣称覆盖全部 LLM 输出: persona_ab.py 的 A/B 候选经
+        ws.send_private_msg 直发; proactive_chat engine 在拿不到
+        message_handler 时也会 WS 直发兜底。
         """
         if not getattr(self, "_ooc_guard", True) or not isinstance(seg, str) or not seg:
             return seg, ""

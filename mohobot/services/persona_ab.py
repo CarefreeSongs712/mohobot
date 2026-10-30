@@ -120,6 +120,9 @@ class PersonaABService:
             record.update(changes)
             await self.repo.update(bot_id, user_id, identifier, **changes)
         async def send(segments):
+            # 已知缺口: A/B 候选经 ws 直发, 不经过 MessageHandler 的 OOC 三防
+            # (乱码符号/内心独白/英文漂移)。本 PR 只治理 handler 内的 LLM 发送
+            # 路径, 这里不在范围内; 若需覆盖, 应改走 send_proactive_reply 类入口。
             try:
                 response = await asyncio.wait_for(ws.send_private_msg(bot_id, user_id, segments, source="persona_ab", wait_response=True), self.SEND_TIMEOUT)
                 return delivery_status(response)
