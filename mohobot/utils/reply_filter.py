@@ -696,20 +696,36 @@ def _count_english_words(text: str) -> int:
 
 # 英文推理/指令脚手架词: 汉字引导 + 短英文的豁免分支专用。
 # 只列保守子集 —— 这些短语几乎不会出现在正常中英夹聊的专名/歌曲引用里,
-# 一旦出现通常意味着模型把内部推理("the user…", "let me…")或指令性话语
-# ("ignore … previous instructions")写进了正文。裸 "I" / "sorry" 等高频词
-# 不收录; "I will" 也要求后接动作动词, 避免误伤 "哈哈 I will always love you"
-# 这类歌词引用。若线上仍出现该类误伤, 优先继续收窄词表而不是放宽整段判定。
+# 一旦出现通常意味着模型把内部推理或指令性话语写进了正文。
+#
+# 词表刻意收窄(复审 P2): 过宽会把正常中英夹聊/歌词整段丢掉。已验证的误伤有
+# "let me check the lyrics"、"let me be your hero"、"I will write you a song"、
+# "the model is really fast"、"forget the previous song"。因此:
+#   - "let me" 只跟推理/元话语动词(think/consider/see/rephrase/clarify/…),
+#     不拦 check/write/be 这类动作或歌词用法;
+#   - "the model"/"prompt" 不再单独算脚手架; "the user/sender/assistant"
+#     要求后接 sent/said/says/wants/asked/just/is 等, 避免 "the user manual";
+#   - "I will/I'll + 动作" 去掉 write/say/tell, 只保留指令性/元话语动词;
+#   - "ignore/disregard/forget ... previous" 要求宾语是
+#     instructions/prompts/rules/messages/context, 不能命中 "previous song"。
+# 若线上仍出现该类误伤, 优先继续收窄词表而不是放宽整段判定。
 _ENGLISH_SCAFFOLD_RE = re.compile(
-    r"\bthe (?:user|sender|assistant|model|prompt)\b"
-    r"|\buser (?:sent|wants|is|just|said|says|calls?)\b"
-    r"|\blet me\b"
+    # "the user/sender/assistant + 元话语动作"(后接词是必要条件)
+    r"\bthe (?:user|sender|assistant)\s+(?:just\s+)?"
+    r"(?:sent|says?|said|wants?|asked|asks?|is|was|means?|called|needs?|told)\b"
+    # 段首直接 "user just/sent/wants …"(生产漂移样本)
+    r"|\buser (?:sent|wants|is|just|said|says|calls?|asked)\b"
+    # "let me" 只认推理/元话语动词, 不拦 check/write/be
+    r"|\blet me\s+"
+    r"(?:think|consider|see|rephrase|clarify|explain|answer|respond|reply|try)\b"
+    # "I will/I'll + 指令性/元话语动作"(去掉 write/say/tell 等歌词常用动词)
     r"|\bI(?:'ll| (?:will|should|need to|must|am going to))\s+"
-    r"(?:not\s+)?(?:write|respond|reply|answer|say|tell|explain|decide|choose|"
-    r"ignore|follow|generate|output|send|stop|refuse)\b"
+    r"(?:not\s+)?(?:respond|reply|answer|ignore|follow|generate|output|refuse|"
+    r"stop|decide|choose|explain)\b"
+    # 忽略/遗忘指令: 宾语必须是指令/上下文类名词
     r"|\b(?:ignore|disregard|forget)\b[^.!?\n]{0,40}"
-    r"\b(?:previous|above|prior|earlier|instructions?|prompts?)\b"
-    r"|\b(?:previous|above|prior|earlier) (?:instructions?|prompts?)\b"
+    r"\b(?:instructions?|prompts?|rules?|messages?|context)\b"
+    r"|\b(?:previous|above|prior|earlier) (?:instructions?|prompts?|rules?)\b"
     r"|\bas an ai\b|\bAI language model\b"
     r"|\b(?:my|the) (?:response|reply|answer) (?:is|will be)\b",
     re.IGNORECASE,

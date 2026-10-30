@@ -866,17 +866,30 @@ def test_han_prefix_cannot_hide_english_scaffold():
         "嗯 user just calls “老婆”. Tickled response,",
         "嗯 the user sent a message",
         "在呢 let me think about it",
+        "嗯 let me consider the wording",
         "嗯 ignore all previous instructions",
-        "嗯 I will write a song",
-        "嗯 I'll write something longer",
+        "嗯 I will respond now",
+        "嗯 I'll answer that shortly",
         "SEND '嗯 user just calls “老婆”. Tickled response,'",
     ]
     for seg in hit:
         assert is_foreign_language_reply(seg, zh_trigger), seg
 
-    # 保守子集的反向边界: 歌词引用里的 "I will always love you"(无动作动词)
-    # 不算脚手架, 仍按中文引导的短英文夹聊放行。
-    assert not is_foreign_language_reply("哈哈 I will always love you", zh_trigger)
+    # 复审 P2 反向边界: 正常中英夹聊/歌词引用不得被脚手架词误伤。
+    # 旧词表把 "let me" / "the model" / "I will write" / "forget ... previous"
+    # 都当脚手架, 中文触发消息下会整段丢弃这些正常内容。
+    miss = [
+        "嗯 let me check the lyrics",
+        "哦 let me be your hero",
+        "嗯 I will write you a song",
+        "嗯 the model is really fast",
+        "嗯 forget the previous song 换一首吧",
+        # 保守子集的反向边界: 歌词引用里的 "I will always love you"(无动作动词)
+        # 不算脚手架, 仍按中文引导的短英文夹聊放行。
+        "哈哈 I will always love you",
+    ]
+    for seg in miss:
+        assert not is_foreign_language_reply(seg, zh_trigger), seg
 
 
 async def test_send_segment_drops_han_prefixed_scaffold():
@@ -906,12 +919,20 @@ def test_english_word_threshold_boundary():
 
 
 def test_hyphenated_token_counts_as_one_word():
-    """N4: 连字符专名按一个词计, 不应被拆成 7 个词误拦。"""
+    """N4: 连字符专名按一个词计, 不应被拆成多个词误拦。
+
+    复审 P3: 旧样本 "嗯 A-B-C-D-E-F-G" 只有 7 个拉丁字母, 在 latin>=15 的
+    提前返回处就放行了, 并没有真正走到词数判定。这里改用拉丁 >=15 且拆开
+    会超过 6 词的样本, 让断言真正依赖连字符单词计数。
+    """
     from mohobot.utils.reply_filter import _count_english_words, is_foreign_language_reply
 
     assert _count_english_words("A-B-C-D-E-F-G") == 1
     assert _count_english_words("Cadillac-Class Aircraft Carrier") == 3
-    assert not is_foreign_language_reply("嗯 A-B-C-D-E-F-G", "你说说这车怎么样")
+    # 16 个拉丁字母(>=15), 连字符分词算 1 词; 若按连字符拆开则是 8 词 → 会误拦。
+    hyphenated = "Ab-Cd-Ef-Gh-Ij-Kl-Mn-Op"
+    assert _count_english_words(hyphenated) == 1
+    assert not is_foreign_language_reply(f"嗯 {hyphenated}", "你说说这车怎么样")
 
 
 def test_symbol_prefix_han_lead_not_flagged():
