@@ -81,6 +81,7 @@ class Plugin:
     _DEFAULTS = {
         "like_total": 20,
         "like_times_per_call": 10,
+        "pending_msg": "正在点赞中，一次点赞就是一天的量，请勿重复点赞",
         "success_msg": "✅ 已给你点了 {count} 个赞~",
         "fail_msg": "❌ 点赞失败: {detail}",
         "limit_msg": "😴 今天已经给你点过很多赞啦,QQ 每日点赞有上限,明天再来吧~",
@@ -127,6 +128,34 @@ class Plugin:
         for key, val in kwargs.items():
             text = text.replace("{" + key + "}", str(val))
         return text
+
+    async def _send_pending_notice(self, bot_id: str, event: Any, raw_event: dict) -> None:
+        """在真正调用点赞 API 前立刻发一句提示(同一条消息只由一个 bot 发)。
+
+        直接走 WSServer 发送而不是返回给框架, 因为后续点赞要等 API 回包,
+        返回式回复只能等全部批次结束后才发出。发送失败不影响点赞流程。
+        """
+        cfg = getattr(self, "plugin_config", None) or {}
+        # 这里不走 _cfg: 它把空串当作"未配置"回退默认值, 而本项需要支持留空关闭。
+        text = str(cfg.get("pending_msg", self._DEFAULTS["pending_msg"]) or "").strip()
+        ws = self._ws_server
+        if not text or ws is None:
+            return
+        if not self._claim_event(raw_event):
+            return
+        try:
+            if getattr(event, "message_type", "") == "group":
+                sender = getattr(ws, "send_group_msg", None)
+                group_id = getattr(event, "group_id", None)
+                if sender is not None and group_id is not None:
+                    await sender(bot_id, group_id, text)
+            else:
+                sender = getattr(ws, "send_private_msg", None)
+                user_id = getattr(event, "user_id", None)
+                if sender is not None and user_id is not None:
+                    await sender(bot_id, user_id, text)
+        except Exception as e:  # noqa: BLE001 - 提示失败不应阻断点赞
+            logger.debug(f"Praise pending notice failed: {e}")
 
     # ── 每日定时点赞 ──────────────────────────────────────────
 
@@ -288,6 +317,10 @@ class Plugin:
             logger.debug(f"Praise daily limit cached: {user_id}")
             self._set_throttle(int(user_id), raw_mid)
             return (True, limit_msg)
+
+        # 真正开始点赞前先立刻提示一次(只由本条消息的首个 bot 发);
+        # 随后的成功/失败汇报保持原有返回式回复, 不改变既有形态。
+        await self._send_pending_notice(bot_id, event, raw_event)
 
         # 按配置的每次点数分批调用(QQ 单次上限 10)。
         # Wait for each response and report the REAL result — do not claim
