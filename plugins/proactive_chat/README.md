@@ -22,6 +22,11 @@ bot 在私聊中按随机窗口主动发起消息的插件。机制与默认提�
   只输出 `[SKIP]` 表示"此刻不合适"(本次不发、不计数、正常重排);
   只输出 `[PAUSE]` 表示"对方不希望被打扰"(暂停该会话, 对方回复后自动恢复)。
   判断指令为服务端固定段, 自定义提示词不影响协议; 固定次数上限仍作硬保底。
+- **LLM 自主排期**(`enable_llm_schedule`, 默认开): 模型可在回复末尾输出
+  `[SCHEDULE: YYYY-MM-DD HH:MM]`(北京时间), 把下一次主动消息安排到未来某天/某个时刻
+  (例如明天 18:00), 最远 `max_schedule_days` 天。只有标记时本轮不发正文; 标记前有正文时
+  先发正文、再按标记时间排期。排期自动避开免打扰时段, 非法/过期/超期标记忽略。
+  协议同时提示"同一次主动任务尽量不超过 2 条消息", 仅作提示词参考, 不硬性限制条数。
 - **冷启动**: `enable_auto_trigger` 开启时, 启动后静默 `auto_trigger_after_minutes` 分钟且无消息的已跟踪会话自动补建一次任务。
 - **重启恢复**: 调度状态持久化于 `data/proactive_chat/state.json`; 重启后到期任务照常触发, 停机期间已过期(>60s)的任务清理不补发, 交由自动触发或用户下一条消息重建。
 
@@ -42,6 +47,7 @@ bot 在私聊中按随机窗口主动发起消息的插件。机制与默认提�
 | `quiet_hours` | `1-7` | 免打扰时段(24h, 支持跨天) |
 | `max_unanswered_times` | 4 | 连续未回复上限(0 不限制, 作硬保底) |
 | `enable_llm_choice` | true | 触发时允许 LLM 自主决定发送([SKIP]/[PAUSE]) |
+| `enable_llm_schedule` / `max_schedule_days` | true / 7 | 允许 LLM 用 `[SCHEDULE: YYYY-MM-DD HH:MM]` 排期下次主动消息, 最远 7 天 |
 | `proactive_prompt` | (内置模板) | 主动开口提示词, 占位符 `{{unanswered_count}}` / `{{current_time}}` |
 | `exclude_users` | [] | 排除用户 QQ 列表 |
 | `enable_auto_trigger` / `auto_trigger_after_minutes` | false / 5 | 启动后静默自动补建任务 |
