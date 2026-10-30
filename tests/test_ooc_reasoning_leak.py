@@ -141,8 +141,11 @@ def _make_handler(sent: list, chunks: list):
             for chunk, is_final in chunks:
                 yield chunk, is_final
 
-    async def send_segment(bot_id, event, text, first_sent, *, quote=True):
+    async def send_segment(bot_id, event, text, first_sent, *,
+                           quote=True, sent_counter=None):
         sent.append(text)
+        if sent_counter is not None:
+            sent_counter[0] += 1
         return True
 
     handler._llm = _Llm()

@@ -560,7 +560,7 @@ class MohobotApplication:
         """
         matcher = self._song_matcher
 
-        async def annotator(event) -> str:
+        async def annotator(event, bot_id: str = "?") -> str:
             if matcher is None:
                 return ""
             try:
@@ -575,9 +575,23 @@ class MohobotApplication:
                 injection = music_cfg.get("injection") or {}
                 max_chars = int(injection.get("max_chars", 1200) or 0)
                 context_lines = int(injection.get("lyric_context_lines", 4) or 0)
-                return match.build_annotation(
+                annotation = match.build_annotation(
                     max_chars=max_chars, lyric_context_lines=context_lines,
                 )
+                # [inject] 可观测性日志: 记录命中对象与注入规模(不记正文,
+                # 正文动辄上千字会刷屏; 内容去 history 按时间戳对)。
+                # bot_id 由 LLMService._build_messages 的外层上下文传入
+                # (MessageEvent 没有 bot_id 属性); 歌名/歌手用 !r 转义,
+                # 防止库内文本伪造额外日志行。
+                chat = f"group:{event.group_id}" if getattr(event, "group_id", None) \
+                    else f"private:{getattr(event, 'user_id', '?')}"
+                logger.info(
+                    f"[inject] bot={bot_id} chat={chat} "
+                    f"song={match.name!r} singer={match.detail.get('singers', '?')!r} "
+                    f"conf={match.confidence:.2f}({match.reason}) "
+                    f"chars={len(annotation)} lyric_lines={context_lines}"
+                )
+                return annotation
             except Exception as e:
                 logger.debug(f"歌曲注解失败: {e}")
                 return ""
