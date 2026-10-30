@@ -9,12 +9,20 @@
   cov >= 0.3 且 hits >= 4 → Top1 99.0%、误匹配 0%; 短歌词(< 60 字)
   cov >= 0.4 且 hits >= 5, 或 cov >= 0.5 且 hits >= 7 → Top1 92.5%、
   误匹配 0%。旧的 10 字精确滑窗在短歌词上误匹配 6.7%。
-- 性能: 6-gram 倒排单次查询 0.015ms, 5580 首建索引约 2.6s; 歌名 Damerau
-  全扫 5.3ms, 按长度分桶 2.3ms, 2 万首规模可用。
+- 性能: 6-gram 倒排单次查询 0.015ms; 5580 首建索引约 2.6s, 16k 首约
+  100~150s(GC 关闭后约 100s)。歌名 Damerau 全扫 5.3ms, 按长度分桶 2.3ms,
+  2 万首规模可用。
 
-接口约定: 本模块不 import sqlalchemy、不读数据库、不写文件; 调用方负责从
-库里取数据后调用 build()。不提供 pickle 持久化 —— 全库重建成本低, 而索引
-格式一旦落盘就要长期承担版本兼容成本。
+接口约定: 本模块不 import sqlalchemy、不读数据库、不碰文件系统; 调用方
+负责从库里取数据后调用 build()。持久化通过 ``to_compact()`` /
+``from_compact()`` 暴露**扁平结构**, 由 ``index_cache`` 负责文件格式与
+版本管理 —— 索引对象本身不直接 pickle(540 万个单元素 list 的反序列化
+成本接近重算)。
+
+加载紧凑索引时可选择两种倒排布局(``from_compact`` 内部用小样本 benchmark
+自动选择): ``dict[str, memoryview]`` 查询 O(1) 但建表要 500 万次插入;
+有序 ``grams_blob`` + ``bisect`` 查询 O(log n)、加载几乎零成本。两者对
+``match()`` 的结果完全一致。
 
 所有公开函数/类均可在多线程下安全调用(内部 threading.RLock); match()
 在锁内完成查询, 增量 add()/remove() 与查询互斥。
@@ -22,10 +30,12 @@
 
 from __future__ import annotations
 
+import array
 import threading
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from mohobot.music_knowledge.normalize import (
     alias_keys,
@@ -39,6 +49,7 @@ __all__ = [
     "NameCandidate",
     "LyricGramIndex",
     "LyricCandidate",
+    "CompactLyricIndex",
 ]
 
 # 歌名: 允许被 Damerau 纠正的最短归一化长度。
@@ -232,18 +243,27 @@ class SongNameIndex:
 
     # ── 构建/增量 ─────────────────────────────────────────────
 
-    def build(self, entries: Iterable[tuple[str, str]]) -> int:
+    def build(
+        self,
+        entries: Iterable[tuple[str, str]],
+        *,
+        yield_every: int = 0,
+    ) -> int:
         """清空后按 ``(name, uuid)`` 重建索引, 返回载入的曲目数。
 
         调用方从数据库取出全部歌名后一次性构建; 建索引只做归一化与分桶,
-        5580 首约 0.2s, 不需要每次查询重归一化全库。
+        5580 首约 0.2s, 不需要每次查询重归一化全库。``yield_every > 0``
+        时每 N 条 ``time.sleep(0)`` 让出 GIL(后台线程构建用, 避免 16k
+        首时把事件循环卡住 1~2s)。
         """
         with self._lock:
             self._clear_locked()
             count = 0
-            for name, uuid in entries:
+            for index, (name, uuid) in enumerate(entries, 1):
                 if self._add_locked(name, uuid):
                     count += 1
+                if yield_every and index % yield_every == 0:
+                    time.sleep(0)
             return count
 
     def add(self, name: str, uuid: str) -> bool:
@@ -444,6 +464,27 @@ class LyricCandidate:
     ambiguous: bool = False
 
 
+@dataclass(frozen=True)
+class CompactLyricIndex:
+    """``LyricGramIndex`` 的扁平快照(可直接落盘)。
+
+    字段语义与 :class:`mohobot.music_knowledge.index_cache.CachedSongIndex`
+    一致; 这里用独立类型避免 fuzzy 依赖 index_cache。``doc_*`` 按 doc id
+    (0..n-1)排序, ``grams_blob`` 按 gram 字典序拼接, ``gram_off`` /
+    ``post_ptr`` 是长度为 grams+1 的偏移数组(CSR)。
+    """
+
+    gram_size: int
+    doc_uuid: list[str]
+    doc_name: list[str]
+    doc_lyrics: list[str]           # 归一化歌词
+    doc_len: array.array
+    grams_blob: bytes
+    gram_off: array.array
+    post_ptr: array.array
+    post_doc: array.array
+
+
 class LyricGramIndex:
     """歌词 6-gram 倒排索引: 覆盖率 + 命中数双判据, 纯内存线程安全。
 
@@ -456,10 +497,16 @@ class LyricGramIndex:
       ``cov >= 0.5 and hits >= 7``, Top1 92.5%、误匹配 0;
     - 查询归一化后 < 8 字直接返回空, 300 句日常聊天误报 0。
 
-    内存: 倒排为 ``dict[str, list[int]]``(gram -> 文档整数 id 列表)。
+    倒排有两种等价布局:
+
+    - ``dict[str, list[int]]`` / ``dict[str, memoryview]``: O(1) 查询,
+      全量构建/加载要逐 gram 插入(5.4M 次);
+    - 有序 ``grams_blob`` + ``bisect``: 加载零成本、内存更低, 查询
+      O(log grams) 且每次比较切片 6 字节。两者 ``match()`` 结果一致,
+      ``from_compact()`` 用小样本 benchmark 自动选择, 见 ``last_load_stats``。
+
     文档 id 用整数而非 uuid 字符串, 且不额外保存"每首歌的 gram 元组"
-    (删除时按已存歌词重算), 5580 首实测常驻约 120MB,
-    比 ``dict[str, set[str]]`` 方案省约 4 倍。
+    (删除时按已存歌词重算), 5580 首 dict 布局实测常驻约 120MB。
     """
 
     def __init__(self, gram_size: int = 6) -> None:
@@ -467,29 +514,77 @@ class LyricGramIndex:
             raise ValueError("gram_size 必须 >= 1")
         self._gram_size = int(gram_size)
         self._lock = threading.RLock()
-        self._postings: dict[str, list[int]] = {}
+        self._postings: Optional[dict[str, list[int]]] = {}
         self._doc_id: dict[str, int] = {}      # uuid -> int
         self._doc_uuid: dict[int, str] = {}    # int -> uuid
         self._doc_name: dict[str, str] = {}    # uuid -> 歌名
         self._doc_lyrics: dict[str, str] = {}  # uuid -> 归一化歌词
         self._doc_len: dict[str, int] = {}     # uuid -> 归一化长度
         self._next_id = 0
+        # 紧凑布局(方案 B: bisect)的底层数组; dict 布局下为 None。
+        self._compact_source: Optional[CompactLyricIndex] = None
+        self._grams_blob: Optional[bytes] = None
+        self._gram_off: Optional[array.array] = None
+        self._post_ptr: Optional[array.array] = None
+        self._post_doc: Optional[array.array] = None
+        self._post_doc_mv: Optional[memoryview] = None
+        self._gram_count = 0
+        # 最近一次 from_compact 的布局 benchmark 结果(便于日志/测试)。
+        self.last_load_stats: dict[str, object] = {}
 
     # ── 构建/增量 ─────────────────────────────────────────────
 
-    def build(self, entries: Iterable[tuple[str, str, str]]) -> int:
+    def build(
+        self,
+        entries: Iterable[tuple[str, str, str]],
+        *,
+        gc_control: bool = False,
+        yield_every: int = 0,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
         """清空后按 ``(uuid, name, lyrics)`` 重建索引, 返回曲目数。
 
         歌词内部用 ``normalize.normalize_name`` 归一化: 去标点/空白/大小写,
-        保留 CJK 与字母数字。建 5580 首索引约 2.6s, 调用方应在启动/同步后
-        一次性构建, 不要在每次查询时重归一化全库。
+        保留 CJK 与字母数字。建 16k 首索引约 100~150s, 只在启动后台构建
+        或同步后执行, 不要在每次查询时重归一化全库。
+
+        Args:
+            entries: ``(uuid, name, lyrics)`` 迭代器; 传列表时可用进度。
+            gc_control: True 时构建期间 ``gc.disable()``(实测省约 60s),
+                结束后恢复原状态。仅后台线程构建使用。
+            yield_every: 每处理 N 首 ``time.sleep(0)`` 让出 GIL(避免事件
+                循环被纯 Python 循环长时间饿死)。
+            progress: 可选回调 ``progress(done, total)``, 每 yield 一次。
         """
+        import gc
+
+        rows = entries if isinstance(entries, (list, tuple)) else list(entries)
+        total = len(rows)
+        was_enabled = gc.isenabled()
         with self._lock:
             self._clear_locked()
             count = 0
-            for uuid, name, lyrics in entries:
-                if self._add_locked(uuid, name, lyrics):
-                    count += 1
+            if gc_control:
+                gc.disable()
+            try:
+                for index, (uuid, name, lyrics) in enumerate(rows, 1):
+                    if self._add_locked(uuid, name, lyrics):
+                        count += 1
+                    if yield_every and index % yield_every == 0:
+                        time.sleep(0)
+                        if progress is not None:
+                            try:
+                                progress(index, total)
+                            except Exception:
+                                pass
+                if progress is not None and total:
+                    try:
+                        progress(total, total)
+                    except Exception:
+                        pass
+            finally:
+                if gc_control and was_enabled:
+                    gc.enable()
             return count
 
     def add(self, uuid: str, name: str, lyrics: str) -> bool:
@@ -501,6 +596,7 @@ class LyricGramIndex:
         uid = str(uuid or "").strip()
         if not uid:
             return False
+        self._ensure_postings_dict()
         self._remove_locked(uid)
         norm = normalize_name(lyrics or "")
         grams = self._gram_set(norm)
@@ -512,12 +608,18 @@ class LyricGramIndex:
         self._doc_lyrics[uid] = norm
         self._doc_len[uid] = len(norm)
         postings = self._postings
+        assert postings is not None
         for gram in grams:
             bucket = postings.get(gram)
             if bucket is None:
                 postings[gram] = [doc]
             else:
+                if not isinstance(bucket, list):
+                    # 缓存加载后的 memoryview 切片不可 append, 先转 list。
+                    bucket = list(bucket)
+                    postings[gram] = bucket
                 bucket.append(doc)
+        self._compact_source = None
         return True
 
     def remove(self, uuid: str) -> bool:
@@ -530,20 +632,27 @@ class LyricGramIndex:
         doc = self._doc_id.pop(uid, None)
         if doc is None:
             return False
+        self._ensure_postings_dict()
+        postings = self._postings
+        assert postings is not None
         norm = self._doc_lyrics.pop(uid, "")
         self._doc_name.pop(uid, None)
         self._doc_len.pop(uid, None)
         self._doc_uuid.pop(doc, None)
         for gram in self._gram_set(norm):
-            bucket = self._postings.get(gram)
+            bucket = postings.get(gram)
             if bucket is None:
                 continue
+            if not isinstance(bucket, list):
+                bucket = list(bucket)
+                postings[gram] = bucket
             try:
                 bucket.remove(doc)
             except ValueError:
                 pass
             if not bucket:
-                del self._postings[gram]
+                del postings[gram]
+        self._compact_source = None
         return True
 
     def clear(self) -> None:
@@ -552,13 +661,20 @@ class LyricGramIndex:
             self._clear_locked()
 
     def _clear_locked(self) -> None:
-        self._postings.clear()
+        self._postings = {}
         self._doc_id.clear()
         self._doc_uuid.clear()
         self._doc_name.clear()
         self._doc_lyrics.clear()
         self._doc_len.clear()
         self._next_id = 0
+        self._compact_source = None
+        self._grams_blob = None
+        self._gram_off = None
+        self._post_ptr = None
+        self._post_doc = None
+        self._post_doc_mv = None
+        self._gram_count = 0
 
     def size(self) -> int:
         """当前索引中的曲目数。"""
@@ -573,12 +689,247 @@ class LyricGramIndex:
     def stats(self) -> dict[str, int]:
         """返回索引规模: 曲目数、唯一 gram 数、posting 总数、gram 长度。"""
         with self._lock:
+            if self._postings is None:
+                return {
+                    "songs": len(self._doc_id),
+                    "grams": self._gram_count,
+                    "postings": len(self._post_doc or ()),
+                    "gram_size": self._gram_size,
+                }
             return {
                 "songs": len(self._doc_id),
                 "grams": len(self._postings),
                 "postings": sum(len(ids) for ids in self._postings.values()),
                 "gram_size": self._gram_size,
             }
+
+    # ── 紧凑序列化 ────────────────────────────────────────────
+
+    @property
+    def layout(self) -> str:
+        """当前倒排布局: ``dict`` 或 ``bisect``。"""
+        return "dict" if self._postings is not None else "bisect"
+
+    def to_compact(self) -> CompactLyricIndex:
+        """导出扁平快照(供 ``index_cache`` 落盘)。
+
+        排序规则固定: doc 按整数 id 升序, gram 按字符串字典序升序。
+        从缓存加载且未做增量修改时直接返回原快照(零拷贝)。
+        """
+        with self._lock:
+            if self._compact_source is not None:
+                return self._compact_source
+            if self._postings is None:
+                self._materialize_postings_dict()
+            postings = self._postings
+            assert postings is not None
+
+            doc_ids = sorted(self._doc_uuid)
+            remap = {old: new for new, old in enumerate(doc_ids)}
+            doc_uuid = [self._doc_uuid[old] for old in doc_ids]
+            doc_name = [self._doc_name.get(uid, "") for uid in doc_uuid]
+            doc_lyrics = [self._doc_lyrics.get(uid, "") for uid in doc_uuid]
+            doc_len = array.array(
+                "i", (len(text) for text in doc_lyrics)
+            )
+
+            grams = sorted(postings)
+            grams_blob = "".join(grams).encode("utf-8")
+            gram_off = array.array("Q", [0])
+            post_ptr = array.array("Q", [0])
+            post_doc = array.array("i")
+            offset = 0
+            for gram in grams:
+                offset += len(gram.encode("utf-8"))
+                gram_off.append(offset)
+                for doc in postings[gram]:
+                    post_doc.append(remap.get(doc, doc))
+                post_ptr.append(len(post_doc))
+            return CompactLyricIndex(
+                gram_size=self._gram_size,
+                doc_uuid=doc_uuid,
+                doc_name=doc_name,
+                doc_lyrics=doc_lyrics,
+                doc_len=doc_len,
+                grams_blob=grams_blob,
+                gram_off=gram_off,
+                post_ptr=post_ptr,
+                post_doc=post_doc,
+            )
+
+    @classmethod
+    def from_compact(
+        cls,
+        data: CompactLyricIndex,
+        *,
+        layout: Optional[str] = None,
+        benchmark: bool = True,
+    ) -> "LyricGramIndex":
+        """从扁平快照恢复索引。
+
+        Args:
+            data: :meth:`to_compact` 的产物。
+            layout: ``dict`` / ``bisect``; 省略时按小样本 benchmark 自动选。
+            benchmark: 是否运行布局 benchmark(测试可关掉以固定行为)。
+        """
+        if data.gram_size < 1:
+            raise ValueError("gram_size 必须 >= 1")
+        obj = cls(gram_size=data.gram_size)
+        docs = len(data.doc_uuid)
+        if (
+            len(data.doc_name) != docs
+            or len(data.doc_lyrics) != docs
+            or len(data.doc_len) != docs
+        ):
+            raise ValueError("紧凑索引 doc 列表长度不一致")
+        if (
+            len(data.gram_off) != len(data.post_ptr)
+        ):
+            raise ValueError("紧凑索引偏移数组长度不一致")
+
+        with obj._lock:
+            obj._doc_uuid = dict(enumerate(data.doc_uuid))
+            obj._doc_id = {uid: i for i, uid in enumerate(data.doc_uuid)}
+            obj._doc_name = {
+                uid: data.doc_name[i] for i, uid in enumerate(data.doc_uuid)
+            }
+            obj._doc_lyrics = {
+                uid: data.doc_lyrics[i] for i, uid in enumerate(data.doc_uuid)
+            }
+            obj._doc_len = {
+                uid: int(data.doc_len[i]) for i, uid in enumerate(data.doc_uuid)
+            }
+            obj._next_id = docs
+            obj._grams_blob = data.grams_blob
+            obj._gram_off = data.gram_off
+            obj._post_ptr = data.post_ptr
+            obj._post_doc = data.post_doc
+            obj._post_doc_mv = memoryview(data.post_doc)
+            obj._gram_count = len(data.gram_off) - 1
+            obj._compact_source = data
+            # 先置空 dict, 否则 _materialize_postings_dict() 会误以为已展开。
+            obj._postings = None
+            chosen = layout
+            if chosen is None:
+                chosen = obj._choose_layout(benchmark=benchmark)
+            if chosen == "dict":
+                obj._materialize_postings_dict()
+            obj.last_load_stats["layout"] = chosen
+        return obj
+
+    def _choose_layout(self, *, benchmark: bool = True) -> str:
+        """在小样本上 benchmark 方案 A(dict) 与方案 B(bisect), 返回胜者。
+
+        估计值 = 加载耗时 + 假定 200 次 gram 查询的查询耗时。dict 的加载
+        成本与 gram 数线性相关(5.4M 次插入约数秒), bisect 加载几乎为零
+        但每次查询多 ~23 次 6 字节切片比较。小库上 dict 往往胜出, 16k
+        大库上 bisect 明显更快; 两种布局 ``match()`` 结果相同。
+        """
+        grams = self._gram_count
+        blob = self._grams_blob or b""
+        off = self._gram_off
+        ptr = self._post_ptr
+        mv = self._post_doc_mv
+        if not benchmark or grams == 0 or off is None or ptr is None or mv is None:
+            chosen = "bisect"
+            self.last_load_stats.update(
+                {"layout": chosen, "reason": "empty", "grams": grams}
+            )
+            return chosen
+
+        sample_target = min(grams, 20000)
+        stride = max(1, grams // sample_target)
+        indices = list(range(0, grams, stride))[:sample_target]
+        sample: dict[str, memoryview] = {}
+        sample_keys: list[str] = []
+        start = time.perf_counter()
+        for i in indices:
+            # gram 的字符数固定为 gs, 但 UTF-8 字节长度随字符变化,
+            # 必须用 gram_off[i+1] 取真实结束位置。
+            key = blob[off[i]:off[i + 1]].decode("utf-8")
+            sample[key] = mv[ptr[i]:ptr[i + 1]]
+            if len(sample_keys) < 200:
+                sample_keys.append(key)
+        sample_time = time.perf_counter() - start
+        sample_n = max(1, len(sample))
+        est_dict_setup = sample_time * grams / sample_n
+
+        # dict 查询
+        start = time.perf_counter()
+        for key in sample_keys:
+            ids = sample.get(key)
+            if ids:
+                for _doc in ids:
+                    pass
+        dict_query = (time.perf_counter() - start) / max(1, len(sample_keys))
+
+        # bisect 查询(直接用完整数组)
+        start = time.perf_counter()
+        for key in sample_keys:
+            ids = self._lookup_compact(key.encode("utf-8"))
+            if ids:
+                for _doc in ids:
+                    pass
+        bisect_query = (time.perf_counter() - start) / max(1, len(sample_keys))
+
+        assumed_queries = 200
+        dict_total = est_dict_setup + assumed_queries * dict_query
+        bisect_total = 0.0005 + assumed_queries * bisect_query
+        chosen = "dict" if dict_total < bisect_total else "bisect"
+        self.last_load_stats.update(
+            {
+                "layout": chosen,
+                "grams": grams,
+                "sample_grams": sample_n,
+                "dict_setup_ms": round(est_dict_setup * 1000, 1),
+                "bisect_setup_ms": 0.5,
+                "dict_query_us": round(dict_query * 1e6, 1),
+                "bisect_query_us": round(bisect_query * 1e6, 1),
+                "assumed_queries": assumed_queries,
+            }
+        )
+        return chosen
+
+    def _materialize_postings_dict(self) -> None:
+        """把 CSR 数组展开成 ``{gram: memoryview}``(方案 A)。"""
+        if self._postings is not None:
+            return
+        blob = self._grams_blob or b""
+        off = self._gram_off
+        ptr = self._post_ptr
+        mv = self._post_doc_mv
+        if off is None or ptr is None or mv is None:
+            self._postings = {}
+            return
+        postings: dict[str, memoryview] = {}
+        for i in range(self._gram_count):
+            key = blob[off[i]:off[i + 1]].decode("utf-8")
+            postings[key] = mv[ptr[i]:ptr[i + 1]]
+        self._postings = postings
+
+    def _ensure_postings_dict(self) -> None:
+        if self._postings is None:
+            self._materialize_postings_dict()
+
+    def _lookup_compact(self, target: bytes):
+        """在有序 grams_blob 上二分, 返回 ``post_doc`` 的 memoryview 切片。"""
+        blob = self._grams_blob
+        off = self._gram_off
+        ptr = self._post_ptr
+        mv = self._post_doc_mv
+        if blob is None or off is None or ptr is None or mv is None:
+            return None
+        lo, hi = 0, self._gram_count
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if blob[off[mid]:off[mid + 1]] < target:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < self._gram_count:
+            if blob[off[lo]:off[lo + 1]] == target:
+                return mv[ptr[lo]:ptr[lo + 1]]
+        return None
 
     # ── 查询 ──────────────────────────────────────────────────
 
@@ -606,12 +957,21 @@ class LyricGramIndex:
         with self._lock:
             counts: dict[int, int] = {}
             postings = self._postings
-            for gram in query_grams:
-                ids = postings.get(gram)
-                if not ids:
-                    continue
-                for doc in ids:
-                    counts[doc] = counts.get(doc, 0) + 1
+            if postings is not None:
+                for gram in query_grams:
+                    ids = postings.get(gram)
+                    if not ids:
+                        continue
+                    for doc in ids:
+                        counts[doc] = counts.get(doc, 0) + 1
+            else:
+                # 方案 B: 有序 grams_blob 上二分, 保持与 dict 布局相同结果。
+                for gram in query_grams:
+                    ids = self._lookup_compact(gram.encode("utf-8"))
+                    if not ids:
+                        continue
+                    for doc in ids:
+                        counts[doc] = counts.get(doc, 0) + 1
 
             passed: list[tuple[int, float, str]] = []
             for doc, hits in counts.items():

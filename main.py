@@ -95,6 +95,8 @@ class MohobotApplication:
 
         # 全局歌曲知识库(识别 + LLM 前注入)。
         # music_knowledge 未启用/初始化失败 → 降级(正常聊天不受影响)。
+        # 索引缓存/后台构建: 缓存命中时数秒内就绪; miss 时先启动服务,
+        # 索引在后台构建(期间歌曲识别为空, 不影响聊天)。
         self._song_matcher: SongInfoMatcher | None = None
         music_cfg = (self._config.music_knowledge or {})
         if music_cfg.get("enabled", True):
@@ -103,15 +105,55 @@ class MohobotApplication:
                 song_db_cfg = music_cfg.get("song_database") or {}
                 db_folder = song_db_cfg.get("db_folder", "./data/song_knowledge")
                 db_file = song_db_cfg.get("db_file", "knowledge_db.db")
+
+                index_cache_cfg = music_cfg.get("index_cache")
+                if not isinstance(index_cache_cfg, dict):
+                    index_cache_cfg = {}
+                index_cache_cfg = dict(index_cache_cfg)
+                index_cache_cfg.setdefault("enabled", True)
+                index_cache_cfg.setdefault("keep", 2)
+                if not index_cache_cfg.get("dir"):
+                    # 默认落在 data/cache 下(备份已排除该目录)。
+                    index_cache_cfg["dir"] = os.path.join(
+                        self._config.data_dir, "cache", "song_index",
+                    )
+                build_cfg = music_cfg.get("build")
+                if not isinstance(build_cfg, dict):
+                    build_cfg = {}
+                build_cfg = dict(build_cfg)
+                build_cfg.setdefault("mode", "thread")
+                build_cfg.setdefault("yield_every", 500)
+
                 self._song_matcher = SongInfoMatcher(
                     db_folder=db_folder, db_file=db_file,
                     fuzzy=bool(music_cfg.get("fuzzy_enabled", True)),
                     min_confidence=float(music_cfg.get("min_confidence", 0.8) or 0.8),
+                    index_cache=index_cache_cfg,
+                    build=build_cfg,
                 )
                 self._song_info_service: SongInfoService | None = SongInfoService(music_cfg)
-                if not self._song_matcher._index:
-                    logger.warning("歌曲知识库为空, 歌曲识别将在 VCPedia 同步完成前不可用")
-                logger.info("全局歌曲知识库已加载(SongInfoMatcher + SongInfoService)")
+                source = self._song_matcher.index_source
+                count = self._song_matcher.song_count()
+                if source == "cache":
+                    logger.info(
+                        f"全局歌曲知识库已加载(SongInfoMatcher + SongInfoService): "
+                        f"索引缓存命中, {count} 首"
+                    )
+                elif self._song_matcher.is_ready():
+                    if count:
+                        logger.info(
+                            f"全局歌曲知识库已加载(SongInfoMatcher + SongInfoService): "
+                            f"索引已构建, {count} 首"
+                        )
+                    else:
+                        logger.warning(
+                            "歌曲知识库为空, 歌曲识别将在 VCPedia 同步完成前不可用"
+                        )
+                else:
+                    logger.info(
+                        "全局歌曲知识库已加载(SongInfoMatcher + SongInfoService): "
+                        "索引缓存未命中/已失效, 后台构建中(构建完成前歌曲识别降级为空)"
+                    )
             except Exception as e:
                 self._song_matcher = None
                 self._song_info_service = None

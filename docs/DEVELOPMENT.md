@@ -927,6 +927,13 @@ await supervisor.shutdown()
   - 模式：`new_only`（只抓新歌）/ `fill_missing`（默认，补残缺字段）/ `full_refresh`（全量重抓）。断点写在 `sync_state`，进程重启可续跑；单来源连续失败达 `max_fail` 熔断，不影响其它来源。
   - 入口：`/sync-songs [new|fill|refresh|status|来源名]`（管理员，支持定时）、`python scripts/sync_songs.py [--status]`。定时由 `song_sync` 插件 `on_tick` 驱动，开关在 `music_knowledge.sync.enabled`。
   - 库为 **WAL + busy_timeout=10s**，同步写库时匹配器仍可读；同步与匹配器共用 `pool.py` 的 engine，不再开第二套连接池。
+- **索引缓存与后台构建**（`index_cache.py` + `matcher.py`）：
+  - 歌词 6-gram 倒排按**紧凑扁平格式**落盘（`data/cache/song_index/<指纹>.bin`，默认 `keep=2`）：头部 magic/version/header_json + body 的 doc_uuid/doc_name/归一化歌词/原始歌词/`doc_len`/`grams_blob`/`gram_off`/`post_ptr`/`post_doc`，body sha256 校验、临时文件 + `os.replace` 原子写入、`.lock` 防多进程并发写。原始歌词单独存一份，保证 `_find_by_lyrics` 的精确子串行为与直接构建一致（该路径只去空白、不去标点）。
+  - 指纹 = 主库与 `-wal` 的 `mtime_ns/size` + 格式/归一化/gram/`fuzzy` 版本（sha256 前 16 位）。只改 `-wal` 也会失效；改序列化或归一化规则必须递增 `INDEX_FORMAT_VERSION` / `NORMALIZE_VERSION`。
+  - 启动时命中缓存 → 同步加载并安装快照；未命中 → **立即返回**，后台线程构建。未就绪期间 `match()` 返回 `None`（歌曲识别降级为空），`_find_by_lyrics()` **不会**触发同步重建。构建完成后先写缓存、再在锁内原子替换快照；旧快照仍可被在途查询安全读取。
+  - 线程模式构建期间 `gc.disable()`、每 `build.yield_every`（默认 500）首 `time.sleep(0)` 让出并每 10% 打进度日志；`build.mode=subprocess` 时子进程建索引并写缓存、主进程等待后加载（失败自动回退线程构建）。`build.mode=sync` 或 `index_cache.enabled=false` 完全回退旧的同步构建。`song_sync` 插件同步完成后只调用 `request_rebuild(reason="song_sync")`，不再同步 reload。
+  - 加载紧凑索引时按小样本 benchmark 在两种等价的倒排布局间选择：`dict[str, memoryview]`（查询 O(1)、加载要逐 gram 插入）或有序 `grams_blob` + 二分（加载近零成本、内存更低）。选择结果与耗时见 `LyricGramIndex.last_load_stats` / 启动日志。
+  - 配置：`music_knowledge.index_cache {enabled, dir, keep}` 与 `music_knowledge.build {mode, yield_every}`；缓存默认 `./data/cache/song_index`（备份已排除 `data/cache`），整目录删除等同强制重建。
 - 许可：VCPedia / voca.wiki 为 CC BY-NC-SA 4.0，萌娘百科为 CC BY-NC-SA 3.0 CN；适配器把来源与协议写进 `song_sources.license`，本库为本地非商业自用。
 
 ### 8.7 知识库 `knowledge/`（虚拟歌手 RAG）
