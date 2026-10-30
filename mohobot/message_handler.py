@@ -1450,7 +1450,8 @@ class MessageHandler:
         buffer = ""
         full_reply = ""
         first_sent = False
-        segments_sent = 0
+        sent_counter = [0]   # 实际发出的段数; 尝试数由 attempted 单独累计
+        attempted = 0
         diagnostic: LLMDiagnostic | None = None
         # Issue #57: 模型可能把"检查约束/编写回复/字数检查"写成无标签正文。
         # 这类块只出现在回复开头且被分段逻辑拆成多气泡直发用户, 因此在流式阶段
@@ -1470,8 +1471,9 @@ class MessageHandler:
                 # 先冲刷此前缓冲的正文, 诊断在最后单独发出。
                 diagnostic = chunk
                 if buffer.strip():
-                    segments_sent += 1
-                    first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                    attempted += 1
+                    first_sent = await self._send_segment(
+                        bot_id, event, buffer, first_sent, sent_counter=sent_counter)
                     buffer = ""
                 continue
             if chunk:
@@ -1498,13 +1500,15 @@ class MessageHandler:
             flushed = self._flush_ready_segments(buffer)
             buffer = flushed["rest"]
             for seg in flushed["segments"]:
-                segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, seg, first_sent)
+                attempted += 1
+                first_sent = await self._send_segment(
+                    bot_id, event, seg, first_sent, sent_counter=sent_counter)
 
             if is_final and buffer:
                 # Stream ended with text left in the buffer — always flush it
-                segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, buffer, first_sent)
+                attempted += 1
+                first_sent = await self._send_segment(
+                    bot_id, event, buffer, first_sent, sent_counter=sent_counter)
                 buffer = ""
 
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
@@ -1515,34 +1519,52 @@ class MessageHandler:
             from mohobot.utils.reply_filter import strip_unwrapped_reasoning
             cleaned = strip_unwrapped_reasoning(full_reply).strip()
             if cleaned:
-                segments_sent += 1
-                first_sent = await self._send_segment(bot_id, event, cleaned, first_sent)
+                attempted += 1
+                first_sent = await self._send_segment(
+                    bot_id, event, cleaned, first_sent, sent_counter=sent_counter)
             self._submit_tts(bot_id, event, tts_text)
             logger.debug(
                 f"Streamed reply (reasoning-suppressed) done: "
                 f"{len(full_reply)} -> {len(cleaned)} chars"
             )
             if diagnostic is not None:
-                await self._send_segment(bot_id, event, diagnostic, first_sent)
+                attempted += 1
+                await self._send_segment(
+                    bot_id, event, diagnostic, first_sent, sent_counter=sent_counter)
+                self._log_reply(
+                    bot_id, event, segments=sent_counter[0],
+                    text=f"{cleaned}\n{diagnostic}" if cleaned else str(diagnostic),
+                    note=" (diagnostic)", attempted=attempted)
                 return diagnostic
+            self._log_reply(
+                bot_id, event, segments=sent_counter[0], text=cleaned, attempted=attempted)
             return cleaned
         if rest.strip():
-            segments_sent += 1
-            first_sent = await self._send_segment(bot_id, event, rest, first_sent)
+            attempted += 1
+            first_sent = await self._send_segment(
+                bot_id, event, rest, first_sent, sent_counter=sent_counter)
         if diagnostic is not None:
             # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
             # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
-            await self._send_segment(bot_id, event, diagnostic, first_sent)
-            logger.debug(f"Streamed reply ended with LLM diagnostic after {segments_sent} segment(s)")
+            attempted += 1
+            await self._send_segment(
+                bot_id, event, diagnostic, first_sent, sent_counter=sent_counter)
+            logger.debug(f"Streamed reply ended with LLM diagnostic after {sent_counter[0]} segment(s)")
+            self._log_reply(
+                bot_id, event, segments=sent_counter[0],
+                text=f"{full_reply}\n{diagnostic}" if full_reply else str(diagnostic),
+                note=" (diagnostic)", attempted=attempted)
             return diagnostic
         self._submit_tts(bot_id, event, tts_text)
 
         # [reply] 可观测性日志: 现有 debug 行不含 bot/会话/正文, "bot 说了什么"
         # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
-        self._log_reply(bot_id, event, segments=segments_sent, text=full_reply)
+        self._log_reply(
+            bot_id, event, segments=sent_counter[0], text=full_reply,
+            attempted=attempted)
 
         logger.debug(
-            f"Streamed reply done: {segments_sent} segment(s), "
+            f"Streamed reply done: {sent_counter[0]} segment(s), "
             f"total {len(full_reply)} chars"
         )
         return full_reply
@@ -1556,11 +1578,20 @@ class MessageHandler:
         uid = getattr(event, "user_id", None)
         return f"private:{uid}" if uid else "?"
 
-    def _log_reply(self, bot_id, event, *, segments: int, text: str, note: str = "") -> None:
-        """发送口统一的 [reply] 日志(正文只留 120 字预览, 且用 !r 防伪造日志行)。"""
+    def _log_reply(self, bot_id, event, *, segments: int, text: str,
+                   note: str = "", attempted: int | None = None) -> None:
+        """发送口统一的 [reply] 日志(正文只留 120 字预览, 且用 !r 防伪造日志行)。
+
+        segments 是**实际发出**的条数; attempted 是本轮尝试发送的段数(填充词清空 /
+        OOC 丢弃 / strip 为空的分段不会真正发送)。0 < segments < attempted 时补
+        ``(partial drop)``; segments == 0 仍由调用方给 ``(dropped)``。
+        """
+        if attempted is not None and 0 < segments < attempted:
+            note += " (partial drop)"
+        attempted_part = f" attempted={attempted}" if attempted is not None else ""
         logger.info(
-            f"[reply] bot={bot_id} chat={self._chat_label(event)} segments={segments} "
-            f"chars={len(text)} text={text[:120]!r}{note}"
+            f"[reply] bot={bot_id} chat={self._chat_label(event)} segments={segments}"
+            f"{attempted_part} chars={len(text)} text={text[:120]!r}{note}"
         )
 
     async def _send_single_reply(self, bot_id, event, context, raw, *, reply_options=None) -> str:
@@ -1610,6 +1641,8 @@ class MessageHandler:
         guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
         if drop_reason:
             logger.info(f"[ooc-guard] 单条回复丢弃(bot={bot_id}, {drop_reason})")
+            self._log_reply(
+                bot_id, event, segments=0, text=full_reply, note=" (dropped)", attempted=1)
             self._submit_tts(bot_id, event, tts_text)
             return ""
         full_reply = guarded
@@ -1679,6 +1712,9 @@ class MessageHandler:
         """
         from mohobot.utils.cq_code import extract_plain_text
         from mohobot.utils.reply_filter import is_foreign_language_reply
+        if not text or not text.strip():
+            # 空文本不是"被丢弃"的回复: 不发送、不打 warning、不记 [reply](避免噪声)。
+            return False
         trigger = extract_plain_text(getattr(event, "message", None) or [])
         # LLMDiagnostic 是系统文案(常为英文错误提示), 不属于模型输出, 不判漂移。
         whole_drift = (
@@ -1687,22 +1723,26 @@ class MessageHandler:
         )
         if whole_drift:
             logger.info(f"[ooc-guard] 整条回复英文漂移, 整条丢弃(bot={bot_id}, {whole_drift})")
-            self._log_reply(bot_id, event, segments=0, text=text, note=" (dropped)")
+            self._log_reply(
+                bot_id, event, segments=0, text=text, note=" (dropped)", attempted=1)
             return False
         first_sent = False
+        sent_counter = [0]
         flushed = self._flush_ready_segments(text)
-        segments_sent = len(flushed["segments"])
+        attempted = len(flushed["segments"])
         for seg in flushed["segments"]:
             first_sent = await self._send_segment(
-                bot_id, event, seg, first_sent, quote=quote, check_foreign=False)
+                bot_id, event, seg, first_sent, quote=quote, check_foreign=False,
+                sent_counter=sent_counter)
         if flushed["rest"].strip():
-            segments_sent += 1
+            attempted += 1
             first_sent = await self._send_segment(
-                bot_id, event, flushed["rest"], first_sent, quote=quote, check_foreign=False)
-        if not first_sent:
+                bot_id, event, flushed["rest"], first_sent, quote=quote,
+                check_foreign=False, sent_counter=sent_counter)
+        if attempted and not sent_counter[0]:
             logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
         self._log_reply(
-            bot_id, event, segments=segments_sent, text=text,
+            bot_id, event, segments=sent_counter[0], text=text, attempted=attempted,
             note=note if first_sent else note + " (dropped)",
         )
         return first_sent
@@ -1742,10 +1782,13 @@ class MessageHandler:
         return seg, ""
 
     async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *,
-                            quote: bool = True, check_foreign: bool = True) -> bool:
+                            quote: bool = True, check_foreign: bool = True,
+                            sent_counter: list[int] | None = None) -> bool:
         """Send one segmented message, stripped of whitespace.
 
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
+        sent_counter 可选: 只有真正调用 _send_message 之后才 +1, 供调用方区分
+        「尝试发送」与「实际发出」(填充词清空/OOC 丢弃/strip 为空都不会发送)。
         Returns the updated first_sent flag.
         """
         # OOC 治理: 清理中文回复里突兀的英文话语标记(Well,/Okay so,/As an AI…)。
@@ -1787,6 +1830,8 @@ class MessageHandler:
             first_sent = True
 
         await self._send_message(bot_id, event, message, source="llm")
+        if sent_counter is not None:
+            sent_counter[0] += 1
         return first_sent
 
     async def send_proactive_reply(self, bot_id: str, event: MessageEvent, text: str) -> str:

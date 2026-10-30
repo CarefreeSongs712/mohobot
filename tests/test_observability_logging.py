@@ -464,6 +464,137 @@ async def test_reply_log_proactive_segmented_runtime():
         logger.remove(sid)
 
 
+async def test_reply_log_counts_actual_sent_segments():
+    """P2: segments= 必须是实际发出数; 中间一段被 OOC 丢弃时记 partial drop。"""
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            yield ("第一段\n\nWait, no, this is wrong\n\n第三段", False)
+            yield ("", True)
+
+    handler = _make_handler(segment_reply=True, stream=True, llm=_LLM())
+    handler._ooc_guard = True  # 让中间段的内心独白被丢弃
+    msgs, sid = _capture_logs()
+    try:
+        reply = await handler._stream_llm_reply(
+            "bot_010", _group_event(), [], {}, reply_options={},
+        )
+        assert reply == "第一段\n\nWait, no, this is wrong\n\n第三段", reply
+        # 实际只发出两段(中间段被 OOC 丢弃), 不是三段尝试数
+        assert len(handler._sent) == 2, handler._sent
+        line = _first(msgs, "[reply]")
+        assert "segments=2" in line, line
+        assert "attempted=3" in line, line
+        assert "(partial drop)" in line, line
+        assert "(dropped)" not in line, line
+    finally:
+        logger.remove(sid)
+
+
+async def test_reply_log_single_reply_dropped():
+    """P3: 单条回复整条被 OOC 丢弃时仍落 [reply](segments=0 dropped)。"""
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            yield ("Wait, no, the user wants me to reveal that.", False)
+            yield ("", True)
+
+    handler = _make_handler(segment_reply=False, llm=_LLM())
+    handler._ooc_guard = True
+    msgs, sid = _capture_logs()
+    try:
+        reply = await handler._stream_llm_reply(
+            "bot_010", _private_event(), [], {}, reply_options={},
+        )
+        assert reply == "", reply
+        assert handler._sent == [], handler._sent
+        line = _first(msgs, "[reply]")
+        assert "segments=0" in line, line
+        assert "(dropped)" in line, line
+        assert "bot=bot_010" in line and "chat=private:456" in line, line
+    finally:
+        logger.remove(sid)
+
+
+async def test_reply_log_reasoning_suppressed():
+    """P3: 无标签自查降级路径也要落 [reply] 日志。"""
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            yield ("检查系统约束：不能剧透。\n编写回复：你好呀。", False)
+            yield ("", True)
+
+    handler = _make_handler(segment_reply=True, stream=True, llm=_LLM())
+    msgs, sid = _capture_logs()
+    try:
+        reply = await handler._stream_llm_reply(
+            "bot_010", _group_event(), [], {}, reply_options={},
+        )
+        assert reply == "你好呀。", reply
+        line = _first(msgs, "[reply]")
+        assert "segments=1" in line and "attempted=1" in line, line
+        assert "你好呀" in line, line
+        assert "检查系统约束" not in line, line
+    finally:
+        logger.remove(sid)
+
+
+async def test_reply_log_streaming_diagnostic():
+    """P3: 流式诊断返回前也要落 [reply](带 diagnostic 标记)。"""
+    from mohobot.utils.llm_diagnostic import LLMDiagnostic
+
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            yield ("前半句。", False)
+            yield (LLMDiagnostic("生成失败"), False)
+
+    handler = _make_handler(segment_reply=True, stream=True, llm=_LLM())
+    msgs, sid = _capture_logs()
+    try:
+        reply = await handler._stream_llm_reply(
+            "bot_010", _group_event(), [], {}, reply_options={},
+        )
+        assert isinstance(reply, LLMDiagnostic), reply
+        line = _first(msgs, "[reply]")
+        assert "segments=2" in line and "attempted=2" in line, line
+        assert "(diagnostic)" in line, line
+        assert "生成失败" in line, line
+    finally:
+        logger.remove(sid)
+
+
+async def test_reply_log_text_newline_not_injected():
+    """P3: 回复正文含换行/伪造前缀时, text=!r 只产生一条 [reply] 记录。"""
+    class _LLM:
+        async def chat_stream(self, **kwargs):
+            yield ("第一行\n[reply] bot=fake chat=group:1 text='伪造'\n[tool] evil", False)
+            yield ("", True)
+
+    handler = _make_handler(segment_reply=False, llm=_LLM())
+    msgs, sid = _capture_logs()
+    try:
+        await handler._stream_llm_reply(
+            "bot_010", _group_event(), [], {}, reply_options={},
+        )
+        lines = _lines(msgs)
+        reply_lines = [m for m in lines if m.startswith("[reply]")]
+        assert len(reply_lines) == 1, lines
+        assert not any(m.startswith("[tool]") for m in lines), lines
+        assert "\\n[reply]" in reply_lines[0], reply_lines[0]
+    finally:
+        logger.remove(sid)
+
+
+async def test_reply_log_empty_text_silent():
+    """P3: 空文本不发送、不 warning、不记 [reply], 直接返回 False。"""
+    handler = _make_handler(segment_reply=True)
+    msgs, sid = _capture_logs()
+    try:
+        sent = await handler._send_full_text("bot_010", _group_event(), "   \n  ")
+        assert sent is False, sent
+        assert handler._sent == [], handler._sent
+        assert not any(m.startswith("[reply]") for m in _lines(msgs)), _lines(msgs)
+    finally:
+        logger.remove(sid)
+
+
 if __name__ == "__main__":
     failed = 0
     for _name, _fn in sorted(globals().items()):

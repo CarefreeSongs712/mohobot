@@ -1925,7 +1925,7 @@ class LLMService:
 
     @staticmethod
     def _describe_chat(event) -> str:
-        """事件 → '私聊:QQ号' / '群聊:群号' 标识(供日志使用, 无事件返回 '?')."""
+        """事件 → 'private:QQ号' / 'group:群号' 标识(供日志使用, 无事件返回 '?')."""
         if event is None:
             return "?"
         gid = getattr(event, "group_id", None)

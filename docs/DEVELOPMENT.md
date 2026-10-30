@@ -842,7 +842,7 @@ registry.register(LLMTool(
 |---|---|---|
 | `[tool]` | `LLMService._execute_tool` | `bot/chat/call/args/结果规模/耗时`；参数非法、未知工具、工具异常都落日志 |
 | `[inject]` | `main._make_song_annotator` | `bot/chat/song/singer/conf/chars/lyric_lines`（不记正文） |
-| `[llm]` | `LLMService.chat_stream` | `bot/chat/model/msgs/stream/temp/tools`；工具 schema 在同一请求内只快照一次 |
+| `[llm]` | `LLMService.chat_stream` | `bot/chat/model/msgs/stream/temp/tools`；初始请求与 `[llm]` 日志共用一次 schema 快照；工具跟进轮按轮重算 |
 | `[reply]` | `MessageHandler` 发送口 | `bot/chat/segments/chars/text`（正文 120 字预览） |
 
 - `chat` 统一为 `group:<群号>` / `private:<QQ号>`，无事件时为 `?`。
