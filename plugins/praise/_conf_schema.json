@@ -11,6 +11,12 @@
     "description": "每次调用点数",
     "hint": "QQ 单次上限 10, 超过会被截断"
   },
+  "pending_msg": {
+    "type": "string",
+    "default": "正在点赞中，一次点赞就是一天的量，请勿重复点赞",
+    "description": "点赞开始前的即时提示",
+    "hint": "真正调用点赞 API 前立刻发送; 同一条消息只由一个 bot 发一次。留空则不提示"
+  },
   "success_msg": {
     "type": "string",
     "default": "✅ 已给你点了 {count} 个赞,去名片看看吧~",
