@@ -833,6 +833,30 @@ registry.register(LLMTool(
 
 `LLMService.summarize_context(entries) -> str | None`：prompt 要求「2-4 句全局概要 + 最多 5 条重点轮次浓缩，≤800 字，不要 markdown」；失败返回 `None`，由调用方决定降级（见 4.3）。
 
+### 7.6 行为日志前缀约定
+
+行为追溯日志统一为 `[前缀] key=value ...` 单行格式，字段顺序固定，可直接
+`grep '\[tool\]'`。正文/参数只留约 120 字预览，完整内容以 history 为准。
+
+| 前缀 | 位置 | 内容 |
+|---|---|---|
+| `[tool]` | `LLMService._execute_tool` | `bot/chat/call/args/结果规模/耗时`；参数非法、未知工具、工具异常都落日志 |
+| `[inject]` | `main._make_song_annotator` | `bot/chat/song/singer/conf/chars/lyric_lines`（不记正文） |
+| `[llm]` | `LLMService.chat_stream` | `bot/chat/model/msgs/stream/temp/tools`；工具 schema 在同一请求内只快照一次 |
+| `[reply]` | `MessageHandler` 发送口 | `bot/chat/segments/chars/text`（正文 120 字预览） |
+
+- `chat` 统一为 `group:<群号>` / `private:<QQ号>`，无事件时为 `?`。
+  `_tool_call_context()` 的返回 dict 没有 `event` 键，`[tool]` 的会话标识由其中的
+  `chat_type`/`chat_id` 构造。
+- 模型/知识库可控字段（工具名、参数预览、歌名、歌手、回复正文）一律用 `!r`
+  转义，防止换行伪造出额外的日志行。
+- `[reply]` 当前覆盖 handler 的 LLM 发送口：流式分段、非流式分段、单条发送、
+  主动消息 `send_proactive_reply`；LLM 诊断文案带 `(diagnostic)` 标记，主动消息带
+  `(proactive)`。**不覆盖**：A/B 评估 `PersonaABService.run` 的发送、内置命令 /
+  PONG / 关键词等非 LLM 回复（这些走 `_send_reply`，不是模型输出）。
+- 日志模板末尾必须自带 `\n`：loguru 对 callable 格式按原样输出，不自动补换行，
+  否则所有记录会粘连（见 `mohobot/utils/logger.py`）。
+
 ---
 
 ## 8. 各子系统速查

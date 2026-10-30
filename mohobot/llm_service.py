@@ -665,15 +665,16 @@ class LLMService:
         max_tokens = min(self._cfg.llm.chat_max_tokens, 131072)
         penalty_kwargs = _optional_penalties(self._cfg.llm)
 
+        # 工具 schema 只取一次: 请求与 [llm] 日志共用同一快照, 避免热路径重复
+        # 扫描 registry(_current_tools_schemas 每次都会重读插件状态)。
+        tools_schemas = self._current_tools_schemas() or []
+
         # [llm] 可观测性日志: 现有 debug 行不带 bot/会话标识, 追溯只能靠时间戳
         # 反推; 这条 info 版补齐(格式与 [tool]/[inject]/[reply] 对齐, 可直接 grep)。
-        try:
-            _n_tools = len(self._current_tools_schemas())
-        except Exception:
-            _n_tools = 0
         logger.info(
             f"[llm] bot={bot_id} chat={self._describe_chat(event)} model={model} "
-            f"msgs={len(messages)} stream=true temp={temperature} tools={_n_tools}"
+            f"msgs={len(messages)} stream=true temp={temperature} "
+            f"tools={len(tools_schemas)}"
         )
 
         logger.debug(
@@ -688,7 +689,7 @@ class LLMService:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=self._current_tools_schemas(),
+                tools=tools_schemas,
                 tool_choice="auto",
                 stream=True,
                 stream_options={"include_usage": True},
@@ -710,7 +711,7 @@ class LLMService:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    tools=self._current_tools_schemas(),
+                    tools=tools_schemas,
                     tool_choice="auto",
                     stream=True,
                     stream_options={"include_usage": True},
@@ -1709,7 +1710,8 @@ class LLMService:
         # 歌曲检索结果仅作本次请求的服务端参考资料, 不归入用户发言或持久化上下文。
         if self._song_annotator is not None:
             try:
-                annotation = await self._song_annotator(event)
+                # bot_id 传给注解回调用于 [inject] 日志(MessageEvent 自身没有 bot_id)
+                annotation = await self._song_annotator(event, bot_id)
                 if annotation:
                     messages[0]["content"] += f"\n\n【歌曲参考资料（服务端检索）】\n{annotation}"
             except Exception as e:
@@ -1845,25 +1847,34 @@ class LLMService:
         # [tool] 可观测性日志: 一行记录谁调了什么工具、参数与结果规模,
         # 便于事后追溯行为(正文级内容去 history 对时间戳)。
         _t0 = time.monotonic()
-        _tool_bot = (context or {}).get("bot_id") or "?"
+        _ctx = context or {}
+        _tool_bot = _ctx.get("bot_id") or "?"
+        # 会话标识优先用 _tool_call_context 提供的 chat_type/chat_id(该 dict 没有
+        # event 键, 旧实现读 context["event"] 导致 chat 恒为 "?")。保留 event
+        # 回退, 兼容调用方直接传入事件的场景。
         _tool_chat = "?"
-        _ev = (context or {}).get("event")
-        if _ev is not None:
-            _tool_chat = self._describe_chat(_ev)
+        _chat_type = _ctx.get("chat_type")
+        _chat_id = _ctx.get("chat_id")
+        if _chat_type and _chat_id is not None:
+            _tool_chat = f"{_chat_type}:{_chat_id}"
+        else:
+            _ev = _ctx.get("event")
+            if _ev is not None:
+                _tool_chat = self._describe_chat(_ev)
         try:
             args = json.loads(args_json)
         except (TypeError, ValueError):
-            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} args=<invalid json> → error")
+            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name!r} args=<invalid json> → error")
             return json.dumps({"error": "工具参数必须是有效的 JSON"}, ensure_ascii=False)
         if not isinstance(args, dict):
-            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} args=<not object> → error")
+            logger.info(f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name!r} args=<not object> → error")
             return json.dumps({"error": "工具参数必须是 JSON 对象"}, ensure_ascii=False)
         _args_preview = str(args)[:120]
 
         def _log_tool(result: str, *, note: str = "") -> None:
             logger.info(
-                f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} "
-                f"args={_args_preview} → {len(result)} chars "
+                f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name!r} "
+                f"args={_args_preview!r} → {len(result)} chars "
                 f"({(time.monotonic() - _t0) * 1000:.0f}ms){note}"
             )
 
@@ -1902,8 +1913,8 @@ class LLMService:
                 result = await registry.execute(func_name, args, context=context)
             except Exception as e:
                 logger.info(
-                    f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name} "
-                    f"args={_args_preview} → exception: {e!r}"
+                    f"[tool] bot={_tool_bot} chat={_tool_chat} call={func_name!r} "
+                    f"args={_args_preview!r} → exception: {e!r}"
                 )
                 raise
             _log_tool(result)

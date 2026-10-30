@@ -1432,7 +1432,8 @@ class MessageHandler:
             )
             if isinstance(reply_text, LLMDiagnostic):
                 # 诊断文案照常告知用户(不朗读、不过滤), 标记原样返回给调用方用于跳过持久化。
-                await self._send_full_text(bot_id, event, reply_text)
+                await self._send_full_text(
+                    bot_id, event, reply_text, note=" (diagnostic)")
                 return reply_text
             full_reply = reply_text or ""
             from mohobot.utils.reply_filter import strip_reply_artifacts
@@ -1538,18 +1539,29 @@ class MessageHandler:
 
         # [reply] 可观测性日志: 现有 debug 行不含 bot/会话/正文, "bot 说了什么"
         # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
-        _chat = f"group:{event.group_id}" if getattr(event, "group_id", None) \
-            else f"private:{getattr(event, 'user_id', '?')}"
-        logger.info(
-            f"[reply] bot={bot_id} chat={_chat} segments={segments_sent} "
-            f"chars={len(full_reply)} text={full_reply[:120]!r}"
-        )
+        self._log_reply(bot_id, event, segments=segments_sent, text=full_reply)
 
         logger.debug(
             f"Streamed reply done: {segments_sent} segment(s), "
             f"total {len(full_reply)} chars"
         )
         return full_reply
+
+    @staticmethod
+    def _chat_label(event) -> str:
+        """事件 → 日志用会话标识(group:123 / private:456, 无标识返回 '?')。"""
+        gid = getattr(event, "group_id", None)
+        if gid:
+            return f"group:{gid}"
+        uid = getattr(event, "user_id", None)
+        return f"private:{uid}" if uid else "?"
+
+    def _log_reply(self, bot_id, event, *, segments: int, text: str, note: str = "") -> None:
+        """发送口统一的 [reply] 日志(正文只留 120 字预览, 且用 !r 防伪造日志行)。"""
+        logger.info(
+            f"[reply] bot={bot_id} chat={self._chat_label(event)} segments={segments} "
+            f"chars={len(text)} text={text[:120]!r}{note}"
+        )
 
     async def _send_single_reply(self, bot_id, event, context, raw, *, reply_options=None) -> str:
         """Non-segmented path: wait for full reply (streaming or not), send once.
@@ -1586,6 +1598,9 @@ class MessageHandler:
             else:
                 message = text
             await self._send_message(bot_id, event, message, source="llm")
+            self._log_reply(
+                bot_id, event, segments=1 if text else 0, text=text,
+                note=" (diagnostic)")
             return diagnostic
         full_reply, tts_text = strip_reply_artifacts(full_reply)
         # 非分段路径同样过发送口治理(此前完全绕过填充词清理与 OOC 三防)
@@ -1610,6 +1625,7 @@ class MessageHandler:
                 message = text
             await self._send_message(bot_id, event, message, source="llm")
         self._submit_tts(bot_id, event, tts_text)
+        self._log_reply(bot_id, event, segments=1 if text else 0, text=full_reply)
         logger.debug(f"Single reply sent: {len(full_reply)} chars")
         return full_reply
 
@@ -1654,7 +1670,8 @@ class MessageHandler:
         if accepted:
             logger.info(f"TTS 任务已入队(llm): {tts_text[:30]!r}")
 
-    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True) -> bool:
+    async def _send_full_text(self, bot_id, event, text: str, *, quote: bool = True,
+                              note: str = "") -> bool:
         """Segment a complete reply text and send with configured delays.
 
         OOC 英文漂移按**整条回复**判定: 整条回复正常(含中文解释)时不再逐段
@@ -1670,17 +1687,24 @@ class MessageHandler:
         )
         if whole_drift:
             logger.info(f"[ooc-guard] 整条回复英文漂移, 整条丢弃(bot={bot_id}, {whole_drift})")
+            self._log_reply(bot_id, event, segments=0, text=text, note=" (dropped)")
             return False
         first_sent = False
         flushed = self._flush_ready_segments(text)
+        segments_sent = len(flushed["segments"])
         for seg in flushed["segments"]:
             first_sent = await self._send_segment(
                 bot_id, event, seg, first_sent, quote=quote, check_foreign=False)
         if flushed["rest"].strip():
+            segments_sent += 1
             first_sent = await self._send_segment(
                 bot_id, event, flushed["rest"], first_sent, quote=quote, check_foreign=False)
         if not first_sent:
             logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
+        self._log_reply(
+            bot_id, event, segments=segments_sent, text=text,
+            note=note if first_sent else note + " (dropped)",
+        )
         return first_sent
 
     def _apply_ooc_guard(self, seg: str, event, *, check_foreign: bool = True) -> tuple[str, str]:
@@ -1781,7 +1805,8 @@ class MessageHandler:
             self._submit_tts(bot_id, event, tts_text)
             return ""
         if self._segment_reply:
-            if not await self._send_full_text(bot_id, event, full_reply, quote=False):
+            if not await self._send_full_text(
+                    bot_id, event, full_reply, quote=False, note=" (proactive)"):
                 return ""
         else:
             guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
@@ -1789,6 +1814,8 @@ class MessageHandler:
                 logger.info(f"[ooc-guard] 主动消息丢弃(bot={bot_id}, {drop_reason})")
                 return ""
             await self._send_message(bot_id, event, guarded, source="llm")
+            self._log_reply(
+                bot_id, event, segments=1, text=guarded, note=" (proactive)")
         self._submit_tts(bot_id, event, tts_text)
         return full_reply
 
