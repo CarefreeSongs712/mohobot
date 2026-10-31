@@ -9,6 +9,7 @@ are multiplexed on the same connection per bot.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time as time_module
 from pathlib import Path
@@ -54,12 +55,15 @@ class WSServer:
         outbound_interval: float = 0.5,
         outbound_maxsize: int = 100,
         outbound_enqueue_timeout: float = 2.0,
+        access_token: str = "",
         data_dir: str = "./data",
         global_config=None,
     ):
         self._host = host
         self._port = port
         self._max_size = max_size
+        # 反向 WS 鉴权(OneBot v11): 空=不校验; 非空时握手后先验 token
+        self._access_token = (access_token or "").strip()
         self._bot_manager = bot_manager
         self._task_supervisor = task_supervisor
         self._data_dir = data_dir
@@ -116,6 +120,29 @@ class WSServer:
         """Alias for lifecycle integrations that expose close()."""
         await self.stop()
 
+    @staticmethod
+    def _token_ok(configured: str, headers: dict[str, str], path: str) -> bool:
+        """校验 OneBot v11 access_token: Bearer 头或 ?access_token= 查询参数。
+
+        configured 为空 → 不校验(放行, 兼容旧部署); 常数时间比较防计时侧信道。
+        """
+        if not configured:
+            return True
+        supplied = ""
+        for key in ("authorization", "Authorization"):
+            auth = headers.get(key, "")
+            if auth.lower().startswith("bearer "):
+                supplied = auth[7:].strip()
+                break
+        if not supplied and "?" in path:
+            from urllib.parse import parse_qs, urlsplit
+
+            query = urlsplit(path).query or path.split("?", 1)[1]
+            supplied = (parse_qs(query).get("access_token") or [""])[0]
+        if not supplied:
+            return False
+        return hmac.compare_digest(supplied, configured)
+
     async def _handle_connection(
         self, websocket: websockets.asyncio.server.ServerConnection
     ) -> None:
@@ -134,6 +161,18 @@ class WSServer:
             f"New connection: qq={qq}, role={client_role}, "
             f"remote={websocket.remote_address}"
         )
+
+        # 鉴权(OneBot v11 access_token): 配置了 token 但客户端未提供/不匹配
+        # → 握手后立即 1008 关闭, 不注册、不处理任何消息。
+        if self._access_token and not self._token_ok(
+            dict(websocket.request.headers),
+            str(getattr(websocket.request, "path", "") or ""),
+        ):
+            logger.warning(
+                f"WS 连接鉴权失败(token 不匹配), 拒绝: remote={websocket.remote_address}"
+            )
+            await websocket.close(code=1008, reason="invalid access token")
+            return
 
         # Register bot (按 QQ 查找绑定; 未绑定则接受但不处理)
         instance = self._bot_manager.register(qq, websocket)

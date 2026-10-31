@@ -53,6 +53,9 @@ server:
   outbound_interval: 0.5         # 每个 bot 的消息发送间隔(秒)
   outbound_maxsize: 100          # 每个 bot 的发送队列容量
   outbound_enqueue_timeout: 2.0  # 已废弃, 不再生效: 队列满时立即失败(保留字段兼容旧配置)
+  access_token: ""               # 反向 WS 鉴权(OneBot v11): 空=不校验; 客户端以
+                                 # Authorization: Bearer <token> 或 ?access_token= 传入
+                                 # 同值。仅本机/内网使用可留空; 暴露公网强烈建议设置
 
 llm:
   # ── 多提供商(可选) ─────────────────────────────────────────
@@ -95,6 +98,10 @@ llm:
 
   # Vision model
   vision_model: "Qwen3.5-122B-A10B"
+  # 实验开关(测试服务器验证用): true 时首条 system 仅保留稳定内容,
+  # 发送者/感知/情感/时间/新闻/歌曲注解移到历史之后的尾部 system,
+  # 保住 DeepSeek/OpenAI 前缀缓存。命中率用 scripts/usage_hit_rate.py 观测。
+  stable_system_prefix: false
   vision_base_url: "https://api.openai.com/v1"
   vision_api_key: ""          # 必填（无视觉需求可留空），或设置环境变量 MOHOBOT_VISION_API_KEY
 

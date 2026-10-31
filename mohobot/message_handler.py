@@ -125,6 +125,9 @@ class MessageHandler:
         # (仅内存; 连续 REPEAT_LIMIT 条相同文本且相邻间隔 < REPEAT_WINDOW 秒判定为自动回复)
         self._repeat_state: dict[tuple[str, int], dict] = {}
 
+        # 引用消息解析缓存(实例级; 见 _quote_cache 注记)
+        self._quote_cache: dict[str, tuple[float, str | None]] = {}
+
     def _sync_reply_config(self, reply_config) -> None:
         """更新构造时复制的回复参数(不能只更新 GlobalConfig.reply)。"""
         self._segment_reply = reply_config.segment_reply
@@ -206,7 +209,15 @@ class MessageHandler:
         try:
             # Step 1: Archive to history (if it's a message event)
             if isinstance(event, MessageEvent):
-                await self._archive_event(bot_id, event, raw)
+                try:
+                    await self._archive_event(bot_id, event, raw)
+                except Exception as archive_exc:
+                    # 归档失败(如协议端发来含孤立代理对的坏文本导致 UTF-8 编码错)
+                    # 不能吞掉整条消息的后续处理: 封禁/gate/LLM 仍要执行。
+                    logger.warning(
+                        f"归档失败(消息处理继续): bot={bot_id}, "
+                        f"{type(archive_exc).__name__}: {archive_exc}"
+                    )
 
             # Archive messages first, then gate all group events (including
             # notices/requests and extension events) before any downstream hooks.
@@ -792,7 +803,7 @@ class MessageHandler:
             if written is False:
                 return  # Deleted/replaced generation must not leak into DB or emotion.
             # history → 数据库 (SQLite)
-            self._persist_legacy_turn(
+            await self._persist_legacy_turn(
                 bot_id, chat_type, chat_id, event,
                 user_msg["content"], full_reply,
             )
@@ -943,7 +954,7 @@ class MessageHandler:
 
     # 引用消息解析缓存: {message_id: (过期时间, 展示文本 | None)}
     # None 为负缓存(get_msg 查不到时短缓存, 防同一 id 反复打接口)
-    _quote_cache: dict[str, tuple[float, str | None]] = {}
+    # (实例属性, 在 __init__ 初始化; 类属性会让多实例/测试间相互污染)
     _QUOTE_CACHE_TTL = 600.0    # 解析成功缓存 10 分钟
     _QUOTE_FAIL_TTL = 60.0      # 解析失败缓存 60 秒
     _QUOTE_CACHE_MAX = 500
@@ -1114,6 +1125,9 @@ class MessageHandler:
             logger.debug(f"get_image 失败({file_ref[:40]}): {e}")
         return ""
 
+    # 每条消息最多为前 N 张缺 url 的图片调 get_image(见 _normalize_image_segments)
+    _IMAGE_NORMALIZE_MAX = 4
+
     async def _normalize_image_segments(self, bot_id: str, event: MessageEvent) -> None:
         """把无 url 的图片段(file 为文件名/路径)通过 OneBot get_image 换成 data URI。
 
@@ -1124,7 +1138,13 @@ class MessageHandler:
         """
         if not isinstance(event.message, list):
             return
+        # 上限: 每条消息最多为前 N 张缺 url 的图片调 get_image(与视觉描述
+        # "只取第一张照片"的口径对齐)。恶意/异常消息塞几十个图片段时,
+        # 不至于把事件 task 占在串行 API 调用上(单次超时 8s)。
+        attempts = 0
         for seg in event.message:
+            if attempts >= self._IMAGE_NORMALIZE_MAX:
+                break
             if not (isinstance(seg, dict) and seg.get("type") == "image"):
                 continue
             data = seg.setdefault("data", {})
@@ -1133,10 +1153,13 @@ class MessageHandler:
             file_ref = str(data.get("file", "") or "")
             if not file_ref or file_ref.startswith("base64://"):
                 continue
+            attempts += 1
             uri = await self._resolve_image_data_uri(bot_id, file_ref)
             if uri:
                 data["url"] = uri
                 logger.debug(f"图片 get_image 成功: {file_ref[:40]} → data URI")
+        if attempts >= self._IMAGE_NORMALIZE_MAX:
+            logger.debug(f"图片归一化达到上限({self._IMAGE_NORMALIZE_MAX}), 其余段保持原样")
 
     def _vision_callback(self, bot_id: str):
         """视觉描述回调(供 ImageCache 使用): 本地文件 base64 内嵌, 30s 超时。
@@ -1347,11 +1370,16 @@ class MessageHandler:
             return text[:idx]
         return text
 
-    def _persist_legacy_turn(
+    async def _persist_legacy_turn(
         self, bot_id: str, chat_type: str, chat_id: str,
         event: MessageEvent, user_text: str, ai_text: str,
     ) -> None:
-        """Legacy 路径下把这一轮对话写入数据库 (history → DB)。"""
+        """Legacy 路径下把这一轮对话写入数据库 (history → DB)。
+
+        SQLite 写是同步 SQLAlchemy 调用, 经 asyncio.to_thread 移出 event loop:
+        正常 1~2ms 无感, 但 WAL 锁竞争时单次写可阻塞至 busy_timeout(15s),
+        不能让整条事件链跟着卡住。
+        """
         if self._db is None:
             return
         try:
@@ -1360,13 +1388,15 @@ class MessageHandler:
                 speaker_nickname = event.sender.card or event.sender.nickname
             else:
                 speaker_nickname = event.sender.nickname
-            self._db.add_conversation(
+            await asyncio.to_thread(
+                self._db.add_conversation,
                 user_id, bot_id, "user", user_text,
                 msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
                 speaker_id=str(event.user_id),
                 speaker_nickname=speaker_nickname or None,
             )
-            self._db.add_conversation(
+            await asyncio.to_thread(
+                self._db.add_conversation,
                 user_id, bot_id, "agent", ai_text,
                 msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
             )
@@ -1963,63 +1993,102 @@ class MessageHandler:
           3. Segment ≥ _SEG_MIN_LEN may flush at last strong/soft punctuation
         """
         segments: list[str] = []
+        n = len(buffer)
 
+        # 一次线性扫描收集全部"长引号对"(绝对索引)与首个未闭合引号位;
+        # 循环用游标 pos 在原字符串上推进, 不再每轮重扫剩余文本。
+        # (旧实现每轮 find + 切片重扫, 引号密集长文本为 O(n²/60):
+        #  实测 400KB 单次调用 65s 且同步阻塞 event loop, 见审查 G3。)
+        spans, unclosed_at = self._scan_long_quotes(buffer)
+        si = 0
+        pos = 0
         while True:
             # 0. 长引文保护(优先于其它规则)
-            quote = self._find_long_quote(buffer)
-            if quote is not None:
-                kind, open_idx, close_idx = quote
-                before = buffer[:open_idx]
+            kind = open_idx = close_idx = None
+            while si < len(spans) and spans[si][0] < pos:
+                si += 1
+            if si < len(spans):
+                o, c = spans[si]
+                if unclosed_at is not None and pos <= unclosed_at < o:
+                    kind, open_idx = "unclosed", unclosed_at - pos
+                else:
+                    kind, open_idx, close_idx = "closed", o - pos, c - pos
+            elif unclosed_at is not None and unclosed_at >= pos:
+                kind, open_idx = "unclosed", unclosed_at - pos
+            if kind is not None and open_idx is not None and open_idx >= 0:
+                before = buffer[pos : pos + open_idx]
                 cut = self._quote_prefix_cut(before) if before else None
                 if kind == "unclosed":
                     # 引文未闭合(流式中途): 引号前的文字按边界先发,
                     # 引文部分留在缓冲等待闭合, 绝不在引文中间切分
                     if cut:
-                        segments.append(buffer[:cut])
-                        buffer = buffer[cut:]
+                        segments.append(buffer[pos : pos + cut])
+                        pos += cut
                     break
                 # 引文已闭合且足够长 → 引文整体单独成段
                 if cut is not None and 0 < cut <= open_idx:
-                    segments.append(buffer[:cut])
-                    buffer = buffer[cut:]
+                    segments.append(buffer[pos : pos + cut])
+                    pos += cut
                     continue
                 if not before.strip():
-                    segments.append(buffer[open_idx : close_idx + 1])
-                    buffer = buffer[close_idx + 1 :]
+                    segments.append(buffer[pos + open_idx : pos + close_idx + 1])
+                    pos += close_idx + 1
+                    si += 1
                     continue
                 # 引号前有文字但无边界 → 与引文黏在一起成段(不在句中硬切)
-                segments.append(buffer[: close_idx + 1])
-                buffer = buffer[close_idx + 1 :]
+                segments.append(buffer[pos : pos + close_idx + 1])
+                pos += close_idx + 1
+                si += 1
                 continue
 
             # 1. Double newline paragraph break — split regardless of length
-            idx = buffer.find("\n\n")
+            idx = buffer.find("\n\n", pos)
             if idx != -1:
-                cut = idx + 2
-                segments.append(buffer[:cut])
-                buffer = buffer[cut:]
+                cut = (idx - pos) + 2
+                segments.append(buffer[pos : pos + cut])
+                pos += cut
                 continue
 
             # 2. Hard cap reached — cut at last punctuation within cap, else force
-            if len(buffer) >= self._seg_max_len:
-                cut = self._find_cut(buffer[: self._seg_max_len])
+            if n - pos >= self._seg_max_len:
+                cut = self._find_cut(buffer[pos : pos + self._seg_max_len])
                 if cut is None:
                     cut = self._seg_max_len
-                segments.append(buffer[:cut])
-                buffer = buffer[cut:]
+                segments.append(buffer[pos : pos + cut])
+                pos += cut
                 continue
 
             # 3. Min length + punctuation break
-            if len(buffer) >= self._seg_min_len:
-                cut = self._find_cut(buffer)
+            if n - pos >= self._seg_min_len:
+                cut = self._find_cut(buffer[pos:])
                 if cut is not None and cut >= self._seg_min_len:
-                    segments.append(buffer[:cut])
-                    buffer = buffer[cut:]
+                    segments.append(buffer[pos : pos + cut])
+                    pos += cut
                     continue
 
             break
 
-        return {"segments": segments, "rest": buffer}
+        return {"segments": segments, "rest": buffer[pos:]}
+
+    def _scan_long_quotes(self, text: str) -> tuple[list[tuple[int, int]], int | None]:
+        """一次线性扫描: 收集全部"长引号对"(绝对索引, 按出现序)与首个未闭合引号位。
+
+        语义与原 `_find_long_quote` 的跳步扫描完全一致:
+        从第一个 ``“`` 起, 找其后第一个 ``”``; 长度不足则跳过该对(从 ``”`` 后继续),
+        长度足够则记为一个 span 并从 ``”`` 后继续; 某个 ``“`` 后再无 ``”`` 即为未闭合。
+        返回 (closed spans, unclosed open 位或 None); unclosed 之后的 span 不存在
+        (扫描在未闭合处停止), 与逐段调用的旧语义等价。
+        """
+        spans: list[tuple[int, int]] = []
+        o = text.find(self._QUOTE_OPEN)
+        while o != -1:
+            c = text.find(self._QUOTE_CLOSE, o + 1)
+            if c == -1:
+                return spans, o
+            if c - o - 1 >= self._QUOTE_MIN_LEN:
+                spans.append((o, c))
+            o = text.find(self._QUOTE_OPEN, c + 1)
+        return spans, None
 
     def _find_long_quote(self, text: str) -> tuple[str, int, int] | None:
         """找第一对长度 ≥ _QUOTE_MIN_LEN 的引号。
@@ -2027,6 +2096,9 @@ class MessageHandler:
         返回 ("closed", 引号起, 引号止) / ("unclosed", 引号起, 占位);
         引号未闭合(流式中途)时即使后面还有成对引号也视为未闭合。
         没有长引文返回 None(短引语走普通分段规则)。
+
+        .. note:: 分段主循环已改用 `_scan_long_quotes`(一次线性扫描 + 游标),
+           本方法保留供外部调用/兼容; 两者语义一致。
         """
         open_idx = text.find(self._QUOTE_OPEN)
         while open_idx != -1:

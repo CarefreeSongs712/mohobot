@@ -110,7 +110,7 @@ def _remove_file_background(path: str):
 
 
 class WebPanel:
-    """FastAPI-based web admin panel with 7 dashboard sections."""
+    """FastAPI-based web admin panel with 11 dashboard sections."""
 
     _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
     _MASK = "********"
@@ -295,7 +295,9 @@ class WebPanel:
                 return False
             token = auth[7:]
             expiry = self._tokens.get(token, 0)
-            return bool(expiry > now and hmac.compare_digest(token, token))
+            # token 有效性 = 进程内字典命中 + 未过期。(旧代码此处还有一个
+            # compare_digest(token, token) 的自我比较恒真空操作, 已移除。)
+            return bool(expiry > now)
 
         async def _require_auth(request: Request):
             if not await _verify_token(request):

@@ -413,7 +413,7 @@ class ProactiveEngine:
                 for schedule_raw in schedule_raws:
                     scheduled_at = self._resolve_schedule(schedule_raw, cfg, self._clock())
                     if scheduled_at is not None:
-                        logger.info(f"[主动消息] {key} 模型排期下一次主动消息: {schedule_raw}")
+                        logger.info(f"[主动消息] {key} 模型排期下一次主动消息: {schedule_raw!r}")
                         break
             if not reply and scheduled_at is None:
                 await self._reschedule(key, cfg, self._clock())
