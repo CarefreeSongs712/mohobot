@@ -229,6 +229,10 @@ def _lyric_excerpt(lyrics: str, span: str, context_lines: int) -> str:
     return excerpt
 
 
+class _BuildCancelled(Exception):
+    """后台构建收到 close() 取消信号(仅线程内部使用)。"""
+
+
 @dataclass(frozen=True)
 class _IndexSnapshot:
     """一次性安装的只读索引快照。
@@ -298,7 +302,7 @@ class SongInfoMatcher:
         self._min_confidence = float(min_confidence)
 
         # 缓存配置: 缺省开启; 目录缺省为 <db_folder 的父目录>/cache/song_index
-        # (生产 ./data/song_knowledge → ./data/cache/song_index, 备份已排除)。
+        # (生产 ./data/song_knowledge → ./data/cache/song_index, 备份默认跳过)。
         ic_cfg = dict(index_cache or {})
         self._index_cache_enabled = bool(ic_cfg.get("enabled", True))
         default_cache_dir = os.path.join(
@@ -343,6 +347,8 @@ class SongInfoMatcher:
         self._build_error: Optional[str] = None
         self._index_loaded = False
         self._fingerprint = ""
+        # close() 后不再启动新构建; 线程在下一个 yield 点抛出 _BuildCancelled。
+        self._closing = False
 
         # 短时匹配缓存: msg -> SongMatch(避免同文案反复查库)
         self._cache: Dict[str, SongMatch] = {}
@@ -401,6 +407,25 @@ class SongInfoMatcher:
         )
         self._schedule_build(reason="startup")
 
+    def _load_rows_with_stable_fingerprint(
+        self, *, attempts: int = 2,
+    ) -> Tuple[List[Tuple[str, str, str]], str]:
+        """读取歌曲行, 并确认读取前后的 DB 指纹一致。
+
+        SQLite 可能在本函数执行期间被同步进程/手工脚本写入。若「旧行 + 新
+        指纹」被写进缓存, 下次启动会长期把旧索引当命中; 因此指纹不一致时
+        重试一次, 仍不一致则返回空指纹(调用方只安装本次快照、不写缓存)。
+        """
+        rows: List[Tuple[str, str, str]] = []
+        for _ in range(max(1, attempts)):
+            before = self._safe_fingerprint()
+            rows = _load_song_rows()
+            after = self._safe_fingerprint()
+            if before == after:
+                return rows, after
+            logger.info("歌曲库在读取索引行期间发生变化, 重试一次")
+        return rows, ""
+
     def reload_index(self) -> None:
         """同步重建全部索引(测试/工具/同步模式使用)。
 
@@ -408,16 +433,22 @@ class SongInfoMatcher:
         才是运行时入口。缓存开启时会顺带写入缓存文件。
         """
         try:
-            rows = _load_song_rows()
-            fingerprint = self._safe_fingerprint()
+            rows, fingerprint = self._load_rows_with_stable_fingerprint()
             snap = self._build_snapshot_from_rows(
                 rows,
                 fingerprint=fingerprint,
                 gc_control=False,
                 yield_every=0,
             )
-            if self._index_cache_enabled and self._build_mode != "sync":
+            if (
+                self._index_cache_enabled
+                and self._build_mode != "sync"
+                and fingerprint
+                and self._safe_fingerprint() == fingerprint
+            ):
                 self._write_cache(snap, rows, fingerprint)
+            elif fingerprint:
+                logger.info("歌曲库在构建期间发生变化, 跳过缓存写入")
             self._install(snap, source="built")
             logger.info(
                 f"歌曲歌词索引已加载: {len(snap.index)} 首 "
@@ -452,6 +483,8 @@ class SongInfoMatcher:
                 state = {"next": 10}
 
                 def progress(done: int, total: int) -> None:  # noqa: F811
+                    if self._closing:
+                        raise _BuildCancelled("shutdown")
                     if total <= 0:
                         return
                     pct = int(done * 100 / total)
@@ -573,6 +606,9 @@ class SongInfoMatcher:
 
     def _schedule_build(self, *, reason: str) -> None:
         with self._lock:
+            if self._closing:
+                logger.debug(f"歌曲索引已关闭, 忽略构建请求(reason={reason})")
+                return
             if self._building:
                 # 正在构建: 标记脏, 结束后再跑一轮(不重复起线程)。
                 self._dirty = True
@@ -631,16 +667,45 @@ class SongInfoMatcher:
         snap = self._snapshot
         return len(snap.index) if snap is not None else 0
 
+    def close(self, timeout: float = 5.0) -> None:
+        """请求后台构建停止并等待线程退出(进程内重启时避免双构建)。
+
+        构建线程是纯 CPU 循环, 只能在每 ``yield_every`` 首的让出点响应取消;
+        超时后不杀线程(daemon), 但会在下一个让出点抛 _BuildCancelled 退出。
+        """
+        self._closing = True
+        with self._lock:
+            thread = self._build_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+        if thread is not None and thread.is_alive():
+            logger.warning(
+                f"歌曲索引构建线程未在 {timeout:.1f}s 内退出, "
+                "将在下一个让出点取消"
+            )
+
     def _build_worker(self, reason: str) -> None:
         current = reason
+        failures = 0
         while True:
             try:
                 self._build_once(current)
+                failures = 0
+            except _BuildCancelled:
+                self._build_error = "cancelled"
+                logger.info("歌曲索引后台构建已取消")
             except Exception as e:  # 后台构建失败不影响已有快照/聊天
+                failures += 1
                 self._build_error = str(e)
                 logger.warning(f"歌曲索引后台构建失败(reason={current}): {e}")
+                # SQLite busy 等瞬时错误: 退避后重试一次, 避免必须重启才恢复。
+                if failures < 2 and not self._closing:
+                    logger.info("歌曲索引构建失败, 2s 后自动重试一次")
+                    time.sleep(2)
+                    if not self._closing:
+                        continue
             with self._lock:
-                if not self._dirty:
+                if self._closing or not self._dirty:
                     self._building = False
                     self._build_thread = None
                     return
@@ -648,6 +713,8 @@ class SongInfoMatcher:
                 current = "dirty"
 
     def _build_once(self, reason: str) -> None:
+        if self._closing:
+            raise _BuildCancelled("shutdown")
         started = time.time()
         if self._build_mode == "subprocess":
             if self._build_via_subprocess():
@@ -673,18 +740,24 @@ class SongInfoMatcher:
             else:
                 logger.warning("歌曲索引子进程不可用, 回退线程构建")
 
-        rows = _load_song_rows()
-        fingerprint = self._safe_fingerprint()
+        rows, fingerprint = self._load_rows_with_stable_fingerprint()
         snap = self._build_snapshot_from_rows(
             rows,
             fingerprint=fingerprint,
             gc_control=True,
             yield_every=self._yield_every,
         )
-        # 先写缓存再替换: 下次启动可直接命中。
-        if fingerprint:
-            self._write_cache(snap, rows, fingerprint)
         self._fingerprint = fingerprint
+        if self._closing:
+            logger.info("歌曲索引构建完成但已收到关闭请求, 不安装快照")
+            return
+        # 先写缓存再替换: 下次启动可直接命中。构建期间若 DB 又变了,
+        # 宁可不写缓存, 也不能用旧行配新指纹。
+        if fingerprint:
+            if self._safe_fingerprint() == fingerprint:
+                self._write_cache(snap, rows, fingerprint)
+            else:
+                logger.info("歌曲库在构建期间发生变化, 跳过缓存写入")
         self._install(snap, source="built")
         logger.info(
             f"歌曲索引后台构建完成(reason={reason}): {len(snap.index)} 首, "
@@ -764,7 +837,7 @@ class SongInfoMatcher:
             return cached
         result = self._match_uncached(text, snap)
         if result is not None:
-            self._put_cache(text, result)
+            self._put_cache(text, result, snap=snap)
         return result
 
     def _match_uncached(
@@ -1013,8 +1086,11 @@ class SongInfoMatcher:
 
     # ── 缓存 ───────────────────────────────────────────────────
 
-    def _put_cache(self, text: str, result: SongMatch) -> None:
+    def _put_cache(self, text: str, result: SongMatch, *, snap: Optional[_IndexSnapshot] = None) -> None:
         with self._lock:
+            # 计算期间快照已被替换: 旧结果不能写进新快照的缓存。
+            if snap is not None and snap is not self._snapshot:
+                return
             if len(self._cache) >= self._cache_size:
                 # 简单淘汰: 清空重来(命中缓存暗示重复消息, 成本低)
                 self._cache.clear()
@@ -1044,11 +1120,17 @@ def build_song_index_cache(
         # 没有 gram 索引时缓存收益很低, 与 matcher 的同步降级保持一致。
         return None
     ensure_init(db_folder, db_file)
-    rows = _load_song_rows()
     db_path = os.path.join(db_folder, db_file)
-    fingerprint = compute_fingerprint(
-        db_path, gram_size=gram_size, fuzzy=fuzzy
-    )
+
+    def _fp() -> str:
+        return compute_fingerprint(db_path, gram_size=gram_size, fuzzy=fuzzy)
+
+    before = _fp()
+    rows = _load_song_rows()
+    fingerprint = _fp()
+    if before != fingerprint:
+        logger.info("歌曲库在子进程读取索引行期间发生变化, 放弃写缓存")
+        return None
     lyric_index = LyricGramIndex(gram_size=gram_size)
 
     state = {"next": 10}
@@ -1094,4 +1176,7 @@ def build_song_index_cache(
             "builder": "subprocess",
         },
     )
+    if _fp() != fingerprint:
+        logger.info("歌曲库在子进程构建期间发生变化, 放弃写缓存")
+        return None
     return save_cache(cache_dir, data, keep=keep)

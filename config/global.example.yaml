@@ -200,7 +200,7 @@ music_knowledge:
   # 歌词 6-gram 倒排索引持久化缓存: 启动时用 DB 指纹(主库 + -wal 的
   # mtime/size + 格式/归一化/gram/fuzzy 版本)判断是否命中; 命中直接加载
   # (数秒), 未命中则先启动服务、索引在后台构建(期间歌曲识别降级为空,
-  # 不影响聊天)。缓存必须放 data/cache 下(备份已排除), 整目录可删除。
+  # 不影响聊天)。缓存必须放 data/cache 下(备份默认跳过 cache/song_index), 整目录可删除。
   # enabled=false 或 build.mode=sync 完全回退旧的同步构建行为。
   index_cache:
     enabled: true

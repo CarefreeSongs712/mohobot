@@ -169,6 +169,8 @@ class Plugin:
             return
         if not self._claim_event(raw_event):
             return
+        # 同一条消息只提示一次: 即使本 bot 的 send_like 全部失败, 其它 bot 仍会
+        # 各自点赞并汇报结果; 失败后释放 claim 只会让兄弟 bot 重复刷提示。
         try:
             if getattr(event, "message_type", "") == "group":
                 sender = getattr(ws, "send_group_msg", None)
