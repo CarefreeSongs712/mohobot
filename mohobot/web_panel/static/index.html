@@ -2179,6 +2179,7 @@ function renderTtsSendForm(cfg) {
     formField('tts.queue_maxsize', '等待队列上限', cfg.queue_maxsize, { hint: '单飞行串行, 队列满丢最新; 修改需重启生效' }) +
     formField('tts.cmd_max_chars', '/tts 文本上限(字)', cfg.cmd_max_chars, { hint: '非管理员使用 /tts 的文本长度上限(默认 30)' }) +
     formField('tts.cmd_cooldown', '/tts 冷却(秒)', cfg.cmd_cooldown, { hint: '非管理员两次 /tts 的最小间隔(默认 120), 管理员不受限' }) +
+    formField('tts.untagged_tts_prob', '无标注朗读概率', cfg.untagged_tts_prob, { hint: '回复没有 <tts> 标注时, 按此概率(0~1)把整条回复入队朗读(默认 0.1, 0=关闭); 仅队列未满时参与抽样, 命中后同样过 OOC 守卫' }) +
     textareaField('tts.tts_prompt_template', '标注提示词模板', cfg.tts_prompt_template, '开启 TTS 的 bot 注入 system prompt 的朗读标注规则; 留空恢复默认') +
     '<hr style="border-color:var(--border);margin:14px 0">' +
     '<div class="card-title" style="font-size:15px">MiniMax 后端参数 ' + (isMini ? '' : '<span style="color:var(--text-dim);font-size:12px">（当前未启用）</span>') + '</div>' +
@@ -2204,6 +2205,7 @@ async function saveTtsConfig() {
     queue_maxsize: parseInt(document.getElementById('cfg-tts.queue_maxsize').value) || 16,
     cmd_max_chars: parseInt(document.getElementById('cfg-tts.cmd_max_chars').value) || 30,
     cmd_cooldown: parseInt(document.getElementById('cfg-tts.cmd_cooldown').value) || 120,
+    untagged_tts_prob: num('cfg-tts.untagged_tts_prob', 0.10),
     tts_prompt_template: document.getElementById('cfg-tts.tts_prompt_template')?.value || '',
     // MiniMax 后端参数(仅 backend=minimax 时生效, 原样回传保持)
     model: document.getElementById('cfg-tts.model')?.value?.trim() || 'speech-2.8-hd',

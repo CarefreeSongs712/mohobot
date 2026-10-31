@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from mohobot.utils.time_utils import format_utc8, now_utc8
 
@@ -27,6 +27,28 @@ def is_quiet_time(quiet_hours: str, now: datetime | None = None) -> bool:
         return False
 
 
+def next_non_quiet_time(quiet_hours: str, when: datetime) -> datetime:
+    """返回 when 及其之后第一个非免打扰时刻(按整点对齐)。
+
+    用于把 LLM 指定的未来时间挪出免打扰时段; 配置非法时原样返回,
+    避免把任务排到不可预期的时段。
+    """
+    try:
+        start_str, end_str = str(quiet_hours or "").split("-")
+        int(start_str)
+        int(end_str)
+    except (ValueError, TypeError):
+        return when
+    candidate = when.replace(minute=0, second=0, microsecond=0)
+    if candidate < when:
+        candidate += timedelta(hours=1)
+    for _ in range(26):
+        if not is_quiet_time(quiet_hours, candidate):
+            return candidate
+        candidate += timedelta(hours=1)
+    return when
+
+
 def random_interval_seconds(min_interval_minutes: int, max_interval_minutes: int) -> int:
     """在 [min, max] 分钟内随机取下一次触发间隔(秒), 降低触发规律性。"""
     import random
@@ -36,10 +58,15 @@ def random_interval_seconds(min_interval_minutes: int, max_interval_minutes: int
     return random.randint(lo, hi)
 
 
-def render_prompt(template: str, unanswered_count: int) -> str:
-    """渲染主动消息提示词模板, 支持 {{unanswered_count}} 与 {{current_time}}。"""
+def render_prompt(template: str, unanswered_count: int,
+                  max_schedule_days: int | None = None) -> str:
+    """渲染主动消息提示词模板, 支持 {{unanswered_count}} / {{current_time}} /
+    {{max_schedule_days}}。"""
     text = str(template or "")
-    return (
+    text = (
         text.replace("{{unanswered_count}}", str(int(unanswered_count)))
         .replace("{{current_time}}", format_utc8("%Y-%m-%d %H:%M:%S %A"))
     )
+    if max_schedule_days is not None:
+        text = text.replace("{{max_schedule_days}}", str(int(max_schedule_days)))
+    return text

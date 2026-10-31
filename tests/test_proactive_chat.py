@@ -15,9 +15,20 @@ _PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "proactive_ch
 sys.path.insert(0, str(_PLUGIN_DIR))
 
 from mohobot.file_store import json_update
+from mohobot.utils.time_utils import TZ_UTC8
 
-from proactive_chat_core.engine import ProactiveEngine, session_key
-from proactive_chat_core.schedule import is_quiet_time, random_interval_seconds, render_prompt
+from proactive_chat_core.engine import (
+    ProactiveEngine,
+    _record_sent_if_idle,
+    _set_next_trigger_if_idle,
+    session_key,
+)
+from proactive_chat_core.schedule import (
+    is_quiet_time,
+    next_non_quiet_time,
+    random_interval_seconds,
+    render_prompt,
+)
 
 
 # ── 桩服务 ────────────────────────────────────────────────────
@@ -714,3 +725,308 @@ async def test_plugin_loads_through_plugin_system():
         assert state["sessions"]["bot_001:123"]["unanswered_count"] == 1
 
         await ps.shutdown_plugins()
+
+
+# ── LLM 自主排期([SCHEDULE]) ────────────────────────────────
+
+def _ts(y: int, mo: int, d: int, h: int, mi: int) -> float:
+    from datetime import datetime
+    return datetime(y, mo, d, h, mi, tzinfo=TZ_UTC8).timestamp()
+
+
+def test_next_non_quiet_time_helper():
+    from datetime import datetime
+    # 03:20 处于 1-7 免打扰 → 07:00
+    assert next_non_quiet_time("1-7", datetime(2026, 10, 31, 3, 20)) == datetime(2026, 10, 31, 7, 0)
+    # 跨天 23-7: 01:10 → 07:00
+    assert next_non_quiet_time("23-7", datetime(2026, 10, 31, 1, 10)) == datetime(2026, 10, 31, 7, 0)
+    # 非免打扰时段原样返回
+    noon = datetime(2026, 10, 31, 12, 0)
+    assert next_non_quiet_time("1-7", noon) == noon
+    # 非法配置原样返回
+    assert next_non_quiet_time("bad", noon) == noon
+
+
+def test_render_prompt_schedule_placeholder():
+    text = render_prompt("最多 {{max_schedule_days}} 天, 未回复 {{unanswered_count}} 次", 2,
+                         max_schedule_days=5)
+    assert "最多 5 天" in text and "未回复 2 次" in text
+    assert "{{" not in text and "}}" not in text
+
+
+async def test_schedule_only_defers_without_sending():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00]"
+
+        await engine.tick()
+
+        assert mh.sent == [] and ctx.appended == []
+        state = await _read_state(state_path)
+        entry = state["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 0  # 只排期, 不计数
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_with_content_sends_then_defers():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "晚安呀\n[SCHEDULE: 2026-10-31 18:00]"
+
+        await engine.tick()
+
+        assert len(mh.sent) == 1 and mh.sent[0]["text"] == "晚安呀"
+        assert ctx.appended[0]["entries"][0]["content"] == "晚安呀"
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 1
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_invalid_or_far_ignored():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        for bad in ("[SCHEDULE: 2020-01-01 00:00]", "[SCHEDULE: 2027-12-31 18:00]"):
+            await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+            llm.reply = f"在吗 {bad}"
+            await engine.tick()
+
+        # 非法标记被剥掉但仍按正文发送, 回落到随机窗口
+        assert mh.sent and mh.sent[-1]["text"] == "在吗"
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["unanswered_count"] == 1
+        assert entry["next_trigger_time"] == clock.now + 60
+
+
+async def test_schedule_guidance_and_toggle():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        llm.reply = "在吗"
+
+        await engine.tick()
+
+        raw = llm.calls[0]["event"].raw_message
+        assert "【可选的延后发送】" in raw and "[SCHEDULE:" in raw
+        assert "2 条" in raw and "7 天" in raw and "当前时间是" in raw
+
+        # 关闭排期开关: 不再附加指令, 标记按普通文本发送
+        engine.update_config({"enable_llm_schedule": False})
+        await engine._mutate_state(_seed_due("bot_001", "456", clock.now))
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00]"
+        await engine.tick()
+
+        assert mh.sent[-1]["text"] == "[SCHEDULE: 2026-10-31 18:00]"
+        last_raw = llm.calls[-1]["event"].raw_message
+        assert "【可选的延后发送】" not in last_raw
+        # “单任务≤2条”是独立的提示词参考, 不随排期开关消失。
+        assert "【主动消息节奏】" in last_raw and "2 条" in last_raw
+
+
+async def test_schedule_marker_variants():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        target = _ts(2026, 10, 31, 18, 0)
+        for variant in ("【SCHEDULE：2026-10-31 18:00】", "(schedule: 2026-10-31 18:00)"):
+            await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+            llm.reply = variant
+            await engine.tick()
+
+        assert mh.sent == []
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_discarded_when_user_replies_mid_generation():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        key = session_key("bot_001", "123")
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00]"
+
+        async def user_replies_mid_generation():
+            def _update(state: dict) -> None:
+                entry = state["sessions"][key]
+                entry["last_message_time"] = clock.now + 999
+                entry["unanswered_count"] = 0
+                entry["next_trigger_time"] = clock.now + 999 + 60
+            await engine._mutate_state(_update)
+
+        llm.on_call = user_replies_mid_generation
+        await engine.tick()
+
+        assert mh.sent == [] and ctx.appended == []
+        entry = (await _read_state(state_path))["sessions"][key]
+        # 用户已在对话: 丢弃排期意图, 保留观察钩子的重排
+        assert entry["next_trigger_time"] == clock.now + 999 + 60
+
+
+async def test_schedule_marker_with_note_strips_whole_marker():
+    """标记内允许补充说明; 不能残留 ']' 当正文, 也不能丢排期。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00（明天傍晚）]"
+
+        await engine.tick()
+
+        assert mh.sent == [] and ctx.appended == []
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_multiple_markers_uses_first_valid():
+    """最后一个标记写坏时, 前面的合法排期不能被一起丢掉。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "晚安 [SCHEDULE: 2026-10-31 18:00] [SCHEDULE: 明天傍晚]"
+
+        await engine.tick()
+
+        assert len(mh.sent) == 1 and mh.sent[0]["text"] == "晚安"
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_max_days_uses_calendar_days():
+    """max_schedule_days 按日历天判断: 7 天后同日时刻+1h 仍应允许。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 11, 6, 13, 0)  # 日历差 7 天, 滚动差 7d1h
+        llm.reply = "[SCHEDULE: 2026-11-06 13:00]"
+
+        await engine.tick()
+
+        assert mh.sent == []
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+def test_schedule_rejects_all_day_quiet():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        engine, _llm, _mh, _ctx = _make_engine(
+            dict(_BASE_CONFIG), Path(tmp) / "state.json", clock,
+        )
+        cfg = {"quiet_hours": "0-24", "max_schedule_days": 7}
+        assert engine._resolve_schedule("2026-10-31 18:00", cfg, clock.now) is None
+
+
+async def test_custom_prompt_renders_schedule_placeholders():
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        config = dict(_BASE_CONFIG, proactive_prompt="最多 {{max_schedule_days}} 天, 现在 {{current_time}}")
+        engine, llm, mh, ctx = _make_engine(config, state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        llm.reply = "在吗"
+
+        await engine.tick()
+
+        raw = llm.calls[0]["event"].raw_message
+        assert "最多 7 天" in raw
+        assert "{{" not in raw and "}}" not in raw
+
+
+# ── 复审 P3: CAS 守卫 / 嵌套括号 / 最小间隔 ─────────────────
+
+
+def test_schedule_cas_helpers_guard_user_reply() -> None:
+    """用户回复后 CAS 不得覆盖观察钩子的归零/重排, 也不得重建被移除会话。"""
+    key = "bot_001:123"
+    state = {"sessions": {key: {"last_message_time": 200, "unanswered_count": 2}}}
+
+    _set_next_trigger_if_idle(key, 999, 100)(state)
+    assert "next_trigger_time" not in state["sessions"][key]
+
+    _record_sent_if_idle(
+        key, expected_last_message_time=100, unanswered_count=2,
+        now=300, next_trigger=999,
+    )(state)
+    entry = state["sessions"][key]
+    assert entry["unanswered_count"] == 2 and "next_trigger_time" not in entry
+
+    empty = {"sessions": {}}
+    _set_next_trigger_if_idle(key, 999, 100)(empty)
+    assert key not in empty["sessions"]
+
+    valid = {"sessions": {key: {"last_message_time": 100}}}
+    _set_next_trigger_if_idle(key, 999, 100)(valid)
+    assert valid["sessions"][key]["next_trigger_time"] == 999
+    _record_sent_if_idle(
+        key, expected_last_message_time=100, unanswered_count=2,
+        now=300, next_trigger=999,
+    )(valid)
+    entry = valid["sessions"][key]
+    assert entry["unanswered_count"] == 3
+    assert entry["next_trigger_time"] == 999
+
+
+async def test_schedule_nested_same_bracket_strips_whole() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00 [明天]]"
+
+        await engine.tick()
+
+        assert mh.sent == []
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_text_with_word_schedule_is_not_stripped() -> None:
+    """没有冒号的 "[schedule of the day]" 是普通文本, 不能被当标记剥掉。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        text = "我看了下 [schedule of the day] 这个表"
+        llm.reply = text
+
+        await engine.tick()
+
+        assert mh.sent and mh.sent[0]["text"] == text
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == clock.now + 60
+
+
+def test_schedule_enforces_min_interval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        engine, _llm, _mh, _ctx = _make_engine(
+            dict(_BASE_CONFIG), Path(tmp) / "state.json", clock,
+        )
+        cfg = {"quiet_hours": "", "max_schedule_days": 7,
+               "min_interval_minutes": 30}
+        got = engine._resolve_schedule("2026-10-30 12:02", cfg, clock.now)
+        assert got == clock.now + 30 * 60

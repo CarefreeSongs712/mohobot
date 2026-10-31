@@ -251,11 +251,19 @@ class Plugin:
             await self._send_event(bot_id, event, reply)
 
     def _reload_matcher(self) -> None:
+        """同步完成后标记索引失效并请求重建(不阻塞主循环)。
+
+        同步本身在 worker 线程写库, 写完 ``-wal`` 已变化; 这里只调度
+        后台重建, 构建完成前继续用旧快照, 期间正常聊天不受影响。
+        """
         matcher = self._matcher
         if matcher is None:
             return
         try:
-            matcher.reload_index()
+            if hasattr(matcher, "request_rebuild"):
+                matcher.request_rebuild(reason="song_sync")
+            else:  # 兼容旧对象(理论上不会走到)
+                matcher.reload_index()
         except Exception as e:
             logger.warning(f"歌曲索引重载失败: {e}")
 

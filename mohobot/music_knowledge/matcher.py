@@ -15,13 +15,27 @@
 
 from __future__ import annotations
 
+import array
+import os
 import re
 import threading
-from typing import Dict, List, Optional, Tuple
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from mohobot.music_knowledge.fuzzy import LyricGramIndex, SongNameIndex
+from mohobot.music_knowledge.fuzzy import (
+    CompactLyricIndex,
+    LyricGramIndex,
+    SongNameIndex,
+)
+from mohobot.music_knowledge.index_cache import (
+    CachedSongIndex,
+    compute_fingerprint,
+    load_cache,
+    save_cache,
+)
 from mohobot.music_knowledge.knowledge_service import (
     CREDIT_KEYS,
     _escape_like,
@@ -30,6 +44,12 @@ from mohobot.music_knowledge.knowledge_service import (
 from mohobot.music_knowledge.normalize import bracket_core, normalize_name
 from mohobot.music_knowledge.pool import ensure_init, get_session
 from mohobot.music_knowledge.song_database import Song
+
+# 歌词倒排的 gram 长度(参与缓存指纹; 改变时必须同时递增
+# index_cache.INDEX_FORMAT_VERSION / NORMALIZE_VERSION)。
+_GRAM_SIZE = 6
+# 后台线程构建的默认让出间隔(首)。
+_DEFAULT_YIELD_EVERY = 500
 
 # 歌曲语境词(裸文本歌名匹配时要求命中其一, 防日常对话误伤)
 _SONG_CONTEXT_WORDS = (
@@ -209,6 +229,39 @@ def _lyric_excerpt(lyrics: str, span: str, context_lines: int) -> str:
     return excerpt
 
 
+class _BuildCancelled(Exception):
+    """后台构建收到 close() 取消信号(仅线程内部使用)。"""
+
+
+@dataclass(frozen=True)
+class _IndexSnapshot:
+    """一次性安装的只读索引快照。
+
+    读路径只取一次引用, 构建线程在 ``self._lock`` 内整体替换; 旧快照由
+    引用计数释放, 因此查询过程中不需要与构建互斥。
+    """
+
+    index: Tuple[Tuple[str, str], ...]
+    name_index: Optional[SongNameIndex]
+    lyric_index: Optional[LyricGramIndex]
+    source: str = "built"          # cache / built / empty
+    fingerprint: str = ""
+
+
+def _load_song_rows() -> List[Tuple[str, str, str]]:
+    """一次查出 (uuid, name, lyrics), 保持数据库返回顺序。
+
+    缓存必须复用同一顺序: ``LyricGramIndex`` 的整数 doc id 按传入顺序
+    分配, ``_find_by_lyrics`` 也按此顺序返回第一首命中。
+    """
+    with get_session() as db:
+        rows = db.query(Song.uuid, Song.name, Song.lyrics).all()
+    return [
+        (str(uuid), name or "", lyrics or "")
+        for uuid, name, lyrics in rows
+    ]
+
+
 class SongInfoMatcher:
     """全局歌曲匹配器(DB 直查 + 内存索引 + 短时缓存)。
 
@@ -216,6 +269,15 @@ class SongInfoMatcher:
     - 歌名: 精确 → 去括号核名 → Damerau 距离 <= 1 且唯一;
     - 歌词: 6-gram 倒排, 容忍漏字/错字, 阈值来自 5580 首实测。
     模糊命中带 confidence, 由调用方按 min_confidence 决定是否注入。
+
+    **索引生命周期**: 快照式(index/name_index/lyric_index 打包为不可变
+    对象)。缓存命中则同步加载(约数秒)后安装; 未命中时 ``__init__``
+    立即返回, 索引在后台线程/子进程构建, 期间 ``match()`` 返回 None
+    (歌曲识别降级为空, 不影响正常聊天)。构建完成后**先写缓存再原子
+    替换快照**, 旧快照仍可被在途查询安全读取。
+
+    构造参数向后兼容: 不传 ``build`` 时保持旧的同步构建(测试/脚本);
+    ``main.py`` 会显式传入配置(默认 thread)。
     """
 
     def __init__(
@@ -228,77 +290,563 @@ class SongInfoMatcher:
         cache_size: int = 256,
         fuzzy: bool = True,
         min_confidence: float = 0.8,
+        index_cache: Optional[Dict[str, Any]] = None,
+        build: Optional[Dict[str, Any]] = None,
     ):
         self._db_folder = db_folder
         self._db_file = db_file
+        self._db_path = os.path.join(db_folder, db_file)
         self._min_song_name_len = min_song_name_len
         self._lyric_min_len = lyric_min_len
         self._fuzzy_enabled = bool(fuzzy)
         self._min_confidence = float(min_confidence)
-        ensure_init(db_folder, db_file)
-        # 内存歌词索引: [(name, lyrics), ...](懒加载, 同步后 reload)
-        self._index: List[Tuple[str, str]] = []
+
+        # 缓存配置: 缺省开启; 目录缺省为 <db_folder 的父目录>/cache/song_index
+        # (生产 ./data/song_knowledge → ./data/cache/song_index, 备份默认跳过)。
+        ic_cfg = dict(index_cache or {})
+        self._index_cache_enabled = bool(ic_cfg.get("enabled", True))
+        default_cache_dir = os.path.join(
+            os.path.dirname(os.path.abspath(db_folder.rstrip("/\\"))),
+            "cache",
+            "song_index",
+        )
+        self._cache_dir = str(ic_cfg.get("dir") or default_cache_dir)
+        try:
+            self._cache_keep = max(1, int(ic_cfg.get("keep", 2) or 2))
+        except (TypeError, ValueError):
+            self._cache_keep = 2
+
+        # 构建模式: build=None 表示调用方未接线, 保持旧同步构建(兼容
+        # 现有测试/脚本); 显式传入时缺省 thread, 未知值降级为 thread。
+        if build is None:
+            self._build_mode = "sync"
+            self._yield_every = _DEFAULT_YIELD_EVERY
+        else:
+            bc = dict(build or {})
+            mode = str(bc.get("mode", "thread") or "thread").strip().lower()
+            self._build_mode = (
+                mode if mode in ("thread", "subprocess", "sync") else "thread"
+            )
+            try:
+                self._yield_every = int(
+                    bc.get("yield_every", _DEFAULT_YIELD_EVERY) or 0
+                )
+            except (TypeError, ValueError):
+                self._yield_every = _DEFAULT_YIELD_EVERY
+            if self._yield_every <= 0:
+                self._yield_every = _DEFAULT_YIELD_EVERY
+
+        # 快照原子替换: 读路径只取一次引用, 未就绪时 match() 返回 None。
+        self._snapshot: Optional[_IndexSnapshot] = None
+        self._snapshot_source = "pending"
+        self._ready = threading.Event()
+        self._build_thread: Optional[threading.Thread] = None
+        self._building = False
+        self._dirty = False
+        self._build_reason = ""
+        self._build_error: Optional[str] = None
         self._index_loaded = False
-        # 模糊索引(uuid 维度, 与 songs 表一致)
-        self._name_index: Optional[SongNameIndex] = None
-        self._lyric_index: Optional[LyricGramIndex] = None
+        self._fingerprint = ""
+        # close() 后不再启动新构建; 线程在下一个 yield 点抛出 _BuildCancelled。
+        self._closing = False
+
         # 短时匹配缓存: msg -> SongMatch(避免同文案反复查库)
         self._cache: Dict[str, SongMatch] = {}
         self._cache_size = cache_size
-        self._lock = threading.Lock()
-        self._ensure_index()
+        self._lock = threading.RLock()
+
+        ensure_init(db_folder, db_file)
+
+        if (
+            self._build_mode == "sync"
+            or not self._index_cache_enabled
+            or not self._fuzzy_enabled
+        ):
+            # 完全回退旧行为: 同步构建。fuzzy=False 时没有 gram 索引,
+            # 也不值得为 1.4s 的查询付出缓存版本兼容成本。
+            self.reload_index()
+            return
+
+        self._startup_load_or_build()
 
     # ── 索引(歌词匹配用) ───────────────────────────────────────
 
+    def _startup_load_or_build(self) -> None:
+        """缓存命中则同步安装快照; 否则立即返回并调度后台构建。"""
+        self._fingerprint = self._safe_fingerprint()
+        cached = None
+        if self._fingerprint:
+            cached = load_cache(
+                self._cache_dir,
+                self._fingerprint,
+                expected_gram_size=_GRAM_SIZE,
+            )
+        if cached is not None:
+            try:
+                snap = self._snapshot_from_cache(cached)
+            except Exception as e:  # 缓存内容异常 → 视为 miss
+                logger.warning(f"歌曲索引缓存解析失败, 改为后台重建: {e}")
+                snap = None
+            if snap is not None:
+                self._install(snap, source="cache")
+                stats = (
+                    snap.lyric_index.last_load_stats
+                    if snap.lyric_index is not None
+                    else {}
+                )
+                logger.info(
+                    f"歌曲索引缓存命中: {len(snap.index)} 首, "
+                    f"布局 {stats.get('layout', '?')} "
+                    f"(dict 预计 {stats.get('dict_setup_ms', '?')}ms, "
+                    f"bisect 查询 {stats.get('bisect_query_us', '?')}us)"
+                )
+                return
+        logger.info(
+            "歌曲索引缓存未命中或已失效, 后台构建中"
+            "(构建完成前歌曲识别降级为空, 不影响聊天)"
+        )
+        self._schedule_build(reason="startup")
+
+    def _load_rows_with_stable_fingerprint(
+        self, *, attempts: int = 2,
+    ) -> Tuple[List[Tuple[str, str, str]], str]:
+        """读取歌曲行, 并确认读取前后的 DB 指纹一致。
+
+        SQLite 可能在本函数执行期间被同步进程/手工脚本写入。若「旧行 + 新
+        指纹」被写进缓存, 下次启动会长期把旧索引当命中; 因此指纹不一致时
+        重试一次, 仍不一致则返回空指纹(调用方只安装本次快照、不写缓存)。
+        """
+        rows: List[Tuple[str, str, str]] = []
+        for _ in range(max(1, attempts)):
+            before = self._safe_fingerprint()
+            rows = _load_song_rows()
+            after = self._safe_fingerprint()
+            if before == after:
+                return rows, after
+            logger.info("歌曲库在读取索引行期间发生变化, 重试一次")
+        return rows, ""
+
     def reload_index(self) -> None:
-        """重新加载全部 (歌名, 歌词) 到内存(同步/迁移后调用)。"""
+        """同步重建全部索引(测试/工具/同步模式使用)。
+
+        正常启动路径不会调用这里(会阻塞事件循环); ``request_rebuild()``
+        才是运行时入口。缓存开启时会顺带写入缓存文件。
+        """
         try:
-            with get_session() as db:
-                rows = db.query(Song.uuid, Song.name, Song.lyrics).all()
-            new_index = [(name, lyrics or "") for _uuid, name, lyrics in rows]
-            name_index = None
-            lyric_index = None
-            if self._fuzzy_enabled:
-                name_index = SongNameIndex([(name, uuid) for uuid, name, _lyrics in rows])
-                lyric_index = LyricGramIndex()
-                lyric_index.build([(uuid, name, lyrics or "") for uuid, name, lyrics in rows])
-            with self._lock:
-                self._index = new_index
-                self._name_index = name_index
-                self._lyric_index = lyric_index
-                self._index_loaded = True
-                self._cache.clear()
-                count = len(self._index)
-            logger.info(f"歌曲歌词索引已加载: {count} 首 (fuzzy={self._fuzzy_enabled})")
+            rows, fingerprint = self._load_rows_with_stable_fingerprint()
+            snap = self._build_snapshot_from_rows(
+                rows,
+                fingerprint=fingerprint,
+                gc_control=False,
+                yield_every=0,
+            )
+            if (
+                self._index_cache_enabled
+                and self._build_mode != "sync"
+                and fingerprint
+                and self._safe_fingerprint() == fingerprint
+            ):
+                self._write_cache(snap, rows, fingerprint)
+            elif fingerprint:
+                logger.info("歌曲库在构建期间发生变化, 跳过缓存写入")
+            self._install(snap, source="built")
+            logger.info(
+                f"歌曲歌词索引已加载: {len(snap.index)} 首 "
+                f"(fuzzy={self._fuzzy_enabled})"
+            )
         except Exception as e:
             logger.warning(f"歌曲歌词索引加载失败: {e}")
-            with self._lock:
-                self._index = []
-                self._name_index = None
-                self._lyric_index = None
-                self._index_loaded = True
-                self._cache.clear()
+            self._install(
+                _IndexSnapshot((), None, None, "empty"), source="empty"
+            )
 
-    def _ensure_index(self) -> None:
-        if not self._index_loaded:
+    def _build_snapshot_from_rows(
+        self,
+        rows: List[Tuple[str, str, str]],
+        *,
+        fingerprint: str,
+        gc_control: bool,
+        yield_every: int,
+    ) -> _IndexSnapshot:
+        index = tuple((name, lyrics) for _uuid, name, lyrics in rows)
+        name_index: Optional[SongNameIndex] = None
+        lyric_index: Optional[LyricGramIndex] = None
+        if self._fuzzy_enabled:
+            name_index = SongNameIndex()
+            name_index.build(
+                [(name, uuid) for uuid, name, _lyrics in rows],
+                yield_every=yield_every,
+            )
+            lyric_index = LyricGramIndex(gram_size=_GRAM_SIZE)
+            progress = None
+            if yield_every:
+                state = {"next": 10}
+
+                def progress(done: int, total: int) -> None:  # noqa: F811
+                    if self._closing:
+                        raise _BuildCancelled("shutdown")
+                    if total <= 0:
+                        return
+                    pct = int(done * 100 / total)
+                    if pct >= state["next"]:
+                        logger.info(
+                            f"歌曲索引构建进度 {pct}% ({done}/{total})"
+                        )
+                        state["next"] = (pct // 10 + 1) * 10
+
+            lyric_index.build(
+                [(uuid, name, lyrics) for uuid, name, lyrics in rows],
+                gc_control=gc_control,
+                yield_every=yield_every,
+                progress=progress,
+            )
+        return _IndexSnapshot(
+            index=index,
+            name_index=name_index,
+            lyric_index=lyric_index,
+            source="built",
+            fingerprint=fingerprint,
+        )
+
+    def _snapshot_from_cache(self, cached: CachedSongIndex) -> _IndexSnapshot:
+        compact = CompactLyricIndex(
+            gram_size=cached.gram_size,
+            doc_uuid=cached.doc_uuid,
+            doc_name=cached.doc_name,
+            doc_lyrics=cached.doc_lyrics,
+            doc_len=cached.doc_len,
+            grams_blob=cached.grams_blob,
+            gram_off=cached.gram_off,
+            post_ptr=cached.post_ptr,
+            post_doc=cached.post_doc,
+        )
+        lyric_index = LyricGramIndex.from_compact(compact)
+        name_index = SongNameIndex(zip(cached.doc_name, cached.doc_uuid))
+        index = tuple(zip(cached.doc_name, cached.doc_lyrics_raw))
+        return _IndexSnapshot(
+            index=index,
+            name_index=name_index,
+            lyric_index=lyric_index,
+            source="cache",
+            fingerprint=cached.fingerprint,
+        )
+
+    def _write_cache(
+        self,
+        snap: _IndexSnapshot,
+        rows: List[Tuple[str, str, str]],
+        fingerprint: str,
+    ) -> Optional[str]:
+        if not fingerprint or snap.lyric_index is None:
+            return None
+        try:
+            compact = snap.lyric_index.to_compact()
+            raw_lyrics = [lyrics for _uuid, _name, lyrics in rows]
+            raw_off = array.array("Q", [0])
+            total = 0
+            for text in raw_lyrics:
+                total += len(text.encode("utf-8"))
+                raw_off.append(total)
+            data = CachedSongIndex(
+                fingerprint=fingerprint,
+                gram_size=compact.gram_size,
+                doc_uuid=compact.doc_uuid,
+                doc_name=compact.doc_name,
+                doc_lyrics=compact.doc_lyrics,
+                doc_lyrics_raw=raw_lyrics,
+                doc_len=compact.doc_len,
+                raw_off=raw_off,
+                grams_blob=compact.grams_blob,
+                gram_off=compact.gram_off,
+                post_ptr=compact.post_ptr,
+                post_doc=compact.post_doc,
+                meta={
+                    "docs": len(raw_lyrics),
+                    "grams": len(compact.gram_off) - 1,
+                    "layout": "compact",
+                },
+            )
+            path = save_cache(self._cache_dir, data, keep=self._cache_keep)
+            if path:
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                logger.info(
+                    f"歌曲索引缓存已写入: {path} ({size / 1024 / 1024:.1f}MB)"
+                )
+            else:
+                logger.warning("歌曲索引缓存写入失败(不影响识别)")
+            return path
+        except Exception as e:
+            logger.warning(f"歌曲索引缓存写入异常(不影响识别): {e}")
+            return None
+
+    # ── 快照安装 / 后台构建 ─────────────────────────────────────
+
+    def _install(self, snap: _IndexSnapshot, *, source: str) -> None:
+        """在锁内原子替换快照; 旧快照由在途查询自行读完释放。"""
+        with self._lock:
+            self._snapshot = snap
+            self._snapshot_source = source
+            self._build_error = None
+            self._cache.clear()
+            self._index_loaded = True
+            self._ready.set()
+
+    def _safe_fingerprint(self) -> str:
+        try:
+            return compute_fingerprint(
+                self._db_path,
+                gram_size=_GRAM_SIZE,
+                fuzzy=self._fuzzy_enabled,
+            )
+        except OSError:
+            return ""
+
+    def _schedule_build(self, *, reason: str) -> None:
+        with self._lock:
+            if self._closing:
+                logger.debug(f"歌曲索引已关闭, 忽略构建请求(reason={reason})")
+                return
+            if self._building:
+                # 正在构建: 标记脏, 结束后再跑一轮(不重复起线程)。
+                self._dirty = True
+                logger.info(f"歌曲索引构建中, 已排队下一轮(reason={reason})")
+                return
+            self._building = True
+            self._dirty = False
+            self._build_reason = reason
+            thread = threading.Thread(
+                target=self._build_worker,
+                args=(reason,),
+                name=f"song-index-build-{reason}",
+                daemon=True,
+            )
+            self._build_thread = thread
+        logger.info(
+            f"歌曲索引后台构建已调度(reason={reason}, mode={self._build_mode}, "
+            f"yield_every={self._yield_every})"
+        )
+        thread.start()
+
+    def request_rebuild(self, *, reason: str = "manual") -> None:
+        """非阻塞地请求重建索引。
+
+        - 缓存/后台构建开启: 立即返回, 构建完成后自动替换快照;
+        - ``build.mode=sync`` 或 ``index_cache.enabled=false``: 退化为
+          旧的同步 ``reload_index()``(调用方应了解会阻塞)。
+        """
+        if (
+            self._build_mode == "sync"
+            or not self._index_cache_enabled
+            or not self._fuzzy_enabled
+        ):
             self.reload_index()
+            return
+        self._schedule_build(reason=reason)
+
+    def is_ready(self) -> bool:
+        """索引快照是否已安装(缓存命中/构建完成)。"""
+        return self._snapshot is not None
+
+    def wait_ready(self, timeout: Optional[float] = None) -> bool:
+        """等待索引就绪(测试/运维脚本用, 不要在主循环里阻塞等待)。"""
+        return self._ready.wait(timeout)
+
+    @property
+    def index_source(self) -> str:
+        """当前快照来源: ``cache`` / ``built`` / ``empty`` / ``pending``。"""
+        return self._snapshot_source
+
+    @property
+    def build_mode(self) -> str:
+        return self._build_mode
+
+    def song_count(self) -> int:
+        snap = self._snapshot
+        return len(snap.index) if snap is not None else 0
+
+    def close(self, timeout: float = 5.0) -> None:
+        """请求后台构建停止并等待线程退出(进程内重启时避免双构建)。
+
+        构建线程是纯 CPU 循环, 只能在每 ``yield_every`` 首的让出点响应取消;
+        超时后不杀线程(daemon), 但会在下一个让出点抛 _BuildCancelled 退出。
+        """
+        self._closing = True
+        with self._lock:
+            thread = self._build_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+        if thread is not None and thread.is_alive():
+            logger.warning(
+                f"歌曲索引构建线程未在 {timeout:.1f}s 内退出, "
+                "将在下一个让出点取消"
+            )
+
+    def _build_worker(self, reason: str) -> None:
+        current = reason
+        failures = 0
+        while True:
+            try:
+                self._build_once(current)
+                failures = 0
+            except _BuildCancelled:
+                self._build_error = "cancelled"
+                logger.info("歌曲索引后台构建已取消")
+            except Exception as e:  # 后台构建失败不影响已有快照/聊天
+                failures += 1
+                self._build_error = str(e)
+                logger.warning(f"歌曲索引后台构建失败(reason={current}): {e}")
+                # SQLite busy 等瞬时错误: 退避后重试一次, 避免必须重启才恢复。
+                if failures < 2 and not self._closing:
+                    logger.info("歌曲索引构建失败, 2s 后自动重试一次")
+                    time.sleep(2)
+                    if not self._closing:
+                        continue
+            with self._lock:
+                if self._closing or not self._dirty:
+                    self._building = False
+                    self._build_thread = None
+                    return
+                self._dirty = False
+                current = "dirty"
+
+    def _build_once(self, reason: str) -> None:
+        if self._closing:
+            raise _BuildCancelled("shutdown")
+        started = time.time()
+        if self._build_mode == "subprocess":
+            if self._build_via_subprocess():
+                fingerprint = self._safe_fingerprint()
+                cached = (
+                    load_cache(
+                        self._cache_dir,
+                        fingerprint,
+                        expected_gram_size=_GRAM_SIZE,
+                    )
+                    if fingerprint
+                    else None
+                )
+                if cached is not None:
+                    snap = self._snapshot_from_cache(cached)
+                    self._install(snap, source="cache")
+                    logger.info(
+                        f"歌曲索引子进程构建完成(reason={reason}): "
+                        f"{len(snap.index)} 首, 用时 {time.time() - started:.1f}s"
+                    )
+                    return
+                logger.warning("歌曲索引子进程未产出可加载缓存, 回退线程构建")
+            else:
+                logger.warning("歌曲索引子进程不可用, 回退线程构建")
+
+        rows, fingerprint = self._load_rows_with_stable_fingerprint()
+        snap = self._build_snapshot_from_rows(
+            rows,
+            fingerprint=fingerprint,
+            gc_control=True,
+            yield_every=self._yield_every,
+        )
+        self._fingerprint = fingerprint
+        if self._closing:
+            logger.info("歌曲索引构建完成但已收到关闭请求, 不安装快照")
+            return
+        # 先写缓存再替换: 下次启动可直接命中。构建期间若 DB 又变了,
+        # 宁可不写缓存, 也不能用旧行配新指纹。
+        if fingerprint:
+            if self._safe_fingerprint() == fingerprint:
+                self._write_cache(snap, rows, fingerprint)
+            else:
+                logger.info("歌曲库在构建期间发生变化, 跳过缓存写入")
+        self._install(snap, source="built")
+        logger.info(
+            f"歌曲索引后台构建完成(reason={reason}): {len(snap.index)} 首, "
+            f"用时 {time.time() - started:.1f}s"
+        )
+
+    def _build_via_subprocess(self) -> bool:
+        import subprocess
+        import sys
+
+        root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        cmd = [
+            sys.executable,
+            "-m",
+            "mohobot.music_knowledge.index_cache",
+            "build",
+            "--db-folder", os.path.abspath(self._db_folder),
+            "--db-file", self._db_file,
+            "--cache-dir", os.path.abspath(self._cache_dir),
+            "--gram-size", str(_GRAM_SIZE),
+            "--keep", str(self._cache_keep),
+            "--yield-every", str(self._yield_every),
+        ]
+        if self._fuzzy_enabled:
+            cmd.append("--fuzzy")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = (
+            root + os.pathsep + env["PYTHONPATH"]
+            if env.get("PYTHONPATH")
+            else root
+        )
+        logger.info("歌曲索引子进程构建启动(不占用主进程 GIL)")
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                cwd=root,
+                env=env,
+            )
+        except Exception as e:
+            logger.warning(f"歌曲索引子进程启动失败: {e}")
+            return False
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-3:]
+            logger.warning(
+                f"歌曲索引子进程失败(rc={proc.returncode}): {' | '.join(tail)}"
+            )
+            return False
+        return True
+
+    @property
+    def _index(self) -> Tuple[Tuple[str, str], ...]:
+        """兼容旧代码的只读索引视图(未就绪时为空)。"""
+        snap = self._snapshot
+        return snap.index if snap is not None else ()
 
     # ── 识别 ───────────────────────────────────────────────────
 
     def match(self, text: str | None) -> Optional[SongMatch]:
-        """识别消息中的歌曲并返回行内命中结果(未命中返回 None)。"""
+        """识别消息中的歌曲并返回行内命中结果(未命中返回 None)。
+
+        索引未就绪(缓存 miss 且后台仍在构建)时直接返回 None, **绝不**
+        触发同步构建 —— 不能因为一条带歌词的消息卡住事件循环。
+        """
         if not text:
+            return None
+        snap = self._snapshot
+        if snap is None:
             return None
         with self._lock:
             cached = self._cache.get(text)
         if cached is not None:
             return cached
-        result = self._match_uncached(text)
+        result = self._match_uncached(text, snap)
         if result is not None:
-            self._put_cache(text, result)
+            self._put_cache(text, result, snap=snap)
         return result
 
-    def _match_uncached(self, text: str) -> Optional[SongMatch]:
+    def _match_uncached(
+        self, text: str, snap: Optional[_IndexSnapshot] = None
+    ) -> Optional[SongMatch]:
+        if snap is None:
+            snap = self._snapshot
+        if snap is None:
+            return None
         clean = _strip_cq_codes(text).strip()
         clean = re.sub(r"[！？!?。，、；;：:,.，？]+", " ", clean)
         if not clean:
@@ -313,7 +861,9 @@ class SongInfoMatcher:
                 if detail:
                     matched = SongMatch(detail["name"], detail)
                 else:
-                    matched = self._match_name_fuzzy(name, allow_core=True)
+                    matched = self._match_name_fuzzy(
+                        name, allow_core=True, snap=snap
+                    )
                     if matched is None:
                         matched = None
                 if matched is not None:
@@ -339,12 +889,14 @@ class SongInfoMatcher:
             # 模糊: 整句按"点歌前缀剥离后的候选词"做编辑距离匹配
             # (抓漏字/错别字, 例如"达拉崩巴"); 仅在语境词存在时启用,
             # 避免把日常对话当歌名。
-            fuzzy = self._match_name_fuzzy(candidate, allow_core=True)
+            fuzzy = self._match_name_fuzzy(
+                candidate, allow_core=True, snap=snap
+            )
             if fuzzy is not None:
                 return fuzzy
 
         # 3. 歌词片段匹配
-        hit = self._find_by_lyrics(clean)
+        hit = self._find_by_lyrics(clean, snap=snap)
         if hit:
             detail = self._query_detail(hit)
             if detail:
@@ -352,7 +904,7 @@ class SongInfoMatcher:
                                  lyric_span=clean)
 
         # 4. 模糊歌词(6-gram 倒排): 容忍漏字/错字
-        lyric_match = self._find_by_lyrics_fuzzy(clean)
+        lyric_match = self._find_by_lyrics_fuzzy(clean, snap=snap)
         if lyric_match is not None:
             return lyric_match
 
@@ -360,12 +912,19 @@ class SongInfoMatcher:
 
     # ── 模糊匹配 ───────────────────────────────────────────────
 
-    def _match_name_fuzzy(self, text: str, *, allow_core: bool = True) -> Optional[SongMatch]:
+    def _match_name_fuzzy(
+        self,
+        text: str,
+        *,
+        allow_core: bool = True,
+        snap: Optional[_IndexSnapshot] = None,
+    ) -> Optional[SongMatch]:
         """歌名模糊匹配: 归一化精确 → 核名精确 → Damerau<=1 且唯一。"""
         if not self._fuzzy_enabled or not text:
             return None
-        with self._lock:
-            index = self._name_index
+        if snap is None:
+            snap = self._snapshot
+        index = snap.name_index if snap is not None else None
         if index is None:
             return None
         candidates = index.match(text)
@@ -382,12 +941,15 @@ class SongInfoMatcher:
             return None
         return SongMatch(detail["name"], detail, confidence=best.score, reason=best.reason)
 
-    def _find_by_lyrics_fuzzy(self, text: str) -> Optional[SongMatch]:
+    def _find_by_lyrics_fuzzy(
+        self, text: str, snap: Optional[_IndexSnapshot] = None
+    ) -> Optional[SongMatch]:
         """歌词 6-gram 模糊匹配(只在精确歌词未命中时调用)。"""
         if not self._fuzzy_enabled or len(normalize_name(text)) < 10:
             return None
-        with self._lock:
-            index = self._lyric_index
+        if snap is None:
+            snap = self._snapshot
+        index = snap.lyric_index if snap is not None else None
         if index is None:
             return None
         candidates = index.match(text)
@@ -471,15 +1033,23 @@ class SongInfoMatcher:
             logger.debug(f"消息内歌名匹配失败: {e}")
             return None
 
-    def _find_by_lyrics(self, text: str) -> Optional[str]:
+    def _find_by_lyrics(
+        self, text: str, snap: Optional[_IndexSnapshot] = None
+    ) -> Optional[str]:
         """按归一化文本查歌词片段, 支持后缀疑问句和用户省略标点。
 
         只接受一段较长的连续歌词(至少 16 字), 或两段独立的短歌词同时命中,
         避免普通聊天中的十字短语在数千首歌词中偶然撞中。
+
+        注意: 这里**不做** ``_ensure_index()`` 式的同步重建。索引未就绪时
+        (缓存 miss + 后台构建中)直接返回 None, 否则第一条带歌词的消息
+        会把事件循环卡在 100s 的全量构建上。
         """
-        self._ensure_index()
-        with self._lock:
-            index = tuple(self._index)
+        if snap is None:
+            snap = self._snapshot
+        if snap is None:
+            return None
+        index = snap.index
         if not index:
             return None
         message = re.sub(r"[\s！？!?。，、；;：:,.，？]+", "", text or "")
@@ -516,8 +1086,11 @@ class SongInfoMatcher:
 
     # ── 缓存 ───────────────────────────────────────────────────
 
-    def _put_cache(self, text: str, result: SongMatch) -> None:
+    def _put_cache(self, text: str, result: SongMatch, *, snap: Optional[_IndexSnapshot] = None) -> None:
         with self._lock:
+            # 计算期间快照已被替换: 旧结果不能写进新快照的缓存。
+            if snap is not None and snap is not self._snapshot:
+                return
             if len(self._cache) >= self._cache_size:
                 # 简单淘汰: 清空重来(命中缓存暗示重复消息, 成本低)
                 self._cache.clear()
@@ -526,3 +1099,84 @@ class SongInfoMatcher:
     def clear_cache(self) -> None:
         with self._lock:
             self._cache.clear()
+
+
+def build_song_index_cache(
+    db_folder: str,
+    db_file: str,
+    cache_dir: str,
+    *,
+    gram_size: int = _GRAM_SIZE,
+    fuzzy: bool = True,
+    keep: int = 2,
+    yield_every: int = _DEFAULT_YIELD_EVERY,
+) -> Optional[str]:
+    """构建歌词索引并写入缓存文件(子进程模式 / 运维脚本入口)。
+
+    不构造 ``SongInfoMatcher``, 也不接触 WS/事件循环; 失败返回 None。
+    主进程随后用 ``load_cache()`` + ``LyricGramIndex.from_compact()`` 安装。
+    """
+    if not fuzzy:
+        # 没有 gram 索引时缓存收益很低, 与 matcher 的同步降级保持一致。
+        return None
+    ensure_init(db_folder, db_file)
+    db_path = os.path.join(db_folder, db_file)
+
+    def _fp() -> str:
+        return compute_fingerprint(db_path, gram_size=gram_size, fuzzy=fuzzy)
+
+    before = _fp()
+    rows = _load_song_rows()
+    fingerprint = _fp()
+    if before != fingerprint:
+        logger.info("歌曲库在子进程读取索引行期间发生变化, 放弃写缓存")
+        return None
+    lyric_index = LyricGramIndex(gram_size=gram_size)
+
+    state = {"next": 10}
+
+    def _progress(done: int, total: int) -> None:
+        if total <= 0:
+            return
+        pct = int(done * 100 / total)
+        if pct >= state["next"]:
+            logger.info(f"歌曲索引子进程构建进度 {pct}% ({done}/{total})")
+            state["next"] = (pct // 10 + 1) * 10
+
+    lyric_index.build(
+        [(uuid, name, lyrics) for uuid, name, lyrics in rows],
+        gc_control=True,
+        yield_every=yield_every,
+        progress=_progress,
+    )
+    compact = lyric_index.to_compact()
+
+    raw_lyrics = [lyrics for _uuid, _name, lyrics in rows]
+    raw_off = array.array("Q", [0])
+    total = 0
+    for text in raw_lyrics:
+        total += len(text.encode("utf-8"))
+        raw_off.append(total)
+    data = CachedSongIndex(
+        fingerprint=fingerprint,
+        gram_size=compact.gram_size,
+        doc_uuid=compact.doc_uuid,
+        doc_name=compact.doc_name,
+        doc_lyrics=compact.doc_lyrics,
+        doc_lyrics_raw=raw_lyrics,
+        doc_len=compact.doc_len,
+        raw_off=raw_off,
+        grams_blob=compact.grams_blob,
+        gram_off=compact.gram_off,
+        post_ptr=compact.post_ptr,
+        post_doc=compact.post_doc,
+        meta={
+            "docs": len(raw_lyrics),
+            "grams": len(compact.gram_off) - 1,
+            "builder": "subprocess",
+        },
+    )
+    if _fp() != fingerprint:
+        logger.info("歌曲库在子进程构建期间发生变化, 放弃写缓存")
+        return None
+    return save_cache(cache_dir, data, keep=keep)

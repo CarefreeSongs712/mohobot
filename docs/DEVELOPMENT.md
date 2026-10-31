@@ -457,7 +457,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `anysearch` | `enabled/api_key/base_url/timeout=30` |
 | `ban` | `enabled` |
 | `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*` |
-| `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120` |
+| `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120/untagged_tts_prob=0.1` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
 | 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
 
@@ -833,6 +833,30 @@ registry.register(LLMTool(
 
 `LLMService.summarize_context(entries) -> str | None`：prompt 要求「2-4 句全局概要 + 最多 5 条重点轮次浓缩，≤800 字，不要 markdown」；失败返回 `None`，由调用方决定降级（见 4.3）。
 
+### 7.6 行为日志前缀约定
+
+行为追溯日志统一为 `[前缀] key=value ...` 单行格式，字段顺序固定，可直接
+`grep '\[tool\]'`。正文/参数只留约 120 字预览，完整内容以 history 为准。
+
+| 前缀 | 位置 | 内容 |
+|---|---|---|
+| `[tool]` | `LLMService._execute_tool` | `bot/chat/call/args/结果规模/耗时`；参数非法、未知工具、工具异常都落日志 |
+| `[inject]` | `main._make_song_annotator` | `bot/chat/song/singer/conf/chars/lyric_lines`（不记正文） |
+| `[llm]` | `LLMService.chat_stream` | `bot/chat/model/msgs/stream/temp/tools`；初始请求与 `[llm]` 日志共用一次 schema 快照；工具跟进轮按轮重算 |
+| `[reply]` | `MessageHandler` 发送口 | `bot/chat/segments/chars/text`（正文 120 字预览） |
+
+- `chat` 统一为 `group:<群号>` / `private:<QQ号>`，无事件时为 `?`。
+  `_tool_call_context()` 的返回 dict 没有 `event` 键，`[tool]` 的会话标识由其中的
+  `chat_type`/`chat_id` 构造。
+- 模型/知识库可控字段（工具名、参数预览、歌名、歌手、回复正文）一律用 `!r`
+  转义，防止换行伪造出额外的日志行。
+- `[reply]` 当前覆盖 handler 的 LLM 发送口：流式分段、非流式分段、单条发送、
+  主动消息 `send_proactive_reply`；LLM 诊断文案带 `(diagnostic)` 标记，主动消息带
+  `(proactive)`。**不覆盖**：A/B 评估 `PersonaABService.run` 的发送、内置命令 /
+  PONG / 关键词等非 LLM 回复（这些走 `_send_reply`，不是模型输出）。
+- 日志模板末尾必须自带 `\n`：loguru 对 callable 格式按原样输出，不自动补换行，
+  否则所有记录会粘连（见 `mohobot/utils/logger.py`）。
+
 ---
 
 ## 8. 各子系统速查
@@ -869,11 +893,15 @@ await supervisor.shutdown()
 ### 8.4 TTS `services/minimax_tts.py`
 
 - MiniMax `t2a_v2` 同步合成。两条通路：LLM 自标 `<tts>` 句自动朗读、`/tts <文本>` 指令。
+- 无标注概率朗读：回复没有任何 `<tts>` 标注时，按 `tts.untagged_tts_prob`（0~1，0=关闭）整条朗读。**仅队列未满时抽样**；有标注的回复不受影响；NaN/Inf 视为关闭（`random() >= nan` 恒为 False，会让概率变成 100%）。
+- fallback 文案 = **实际逐段发出的展示文本**（填充词清理/OOC 丢弃之后），不是过滤前全文，段之间用换行保留边界（空串拼接会让英文分段粘成 `worldHow`）。共 5 个 fallback 调用点：流式分段、非流式分段、无标签自查降级、单条发送、主动消息；另有 2 处正确省略 fallback（纯 `<tts>` 主动消息无展示文本、单条回复整条被 OOC 丢弃）。
+- 被动回复没有发出任何展示段时（整条英文漂移、全部段被 OOC 丢弃、自查降级后正文被丢弃）不提交 TTS：用户什么都没看到，标注与无标注朗读都不念（主动消息的纯 `<tts>` 无展示文本仍按原逻辑朗读）。
 - 全局 FIFO 单飞行队列（`queue_maxsize` 默认 16），**队列满丢最新**。
 - `<tts>` 标签剥离在 `message_handler` + `utils/tts_marker.py`：`TTSMarkerFilter` 会**扣留**半个标签防止跨 chunk 撕裂；标注句超长截到第一个句末标点、多标注取第一个、忘写闭标签容错。
 - 音色：全局 `tts.voice_id`，per-bot `BotConfig.tts_voice_id` 覆盖（提交任务时就解析好）。
 - 失败降级：LLM 来源静默（文本已发）；指令来源回错误提示。
 - 面板保存后除 `queue_maxsize` 外全部热生效（`sync_config`）。
+- **升级提示**：`untagged_tts_prob` 默认 0.1，已启用 TTS 的 bot 升级后无需额外配置即按 10% 概率朗读无标注回复；不需要该行为时显式设为 0。
 
 ### 8.5 封禁 `ban/`
 
@@ -899,6 +927,14 @@ await supervisor.shutdown()
   - 模式：`new_only`（只抓新歌）/ `fill_missing`（默认，补残缺字段）/ `full_refresh`（全量重抓）。断点写在 `sync_state`，进程重启可续跑；单来源连续失败达 `max_fail` 熔断，不影响其它来源。
   - 入口：`/sync-songs [new|fill|refresh|status|来源名]`（管理员，支持定时）、`python scripts/sync_songs.py [--status]`。定时由 `song_sync` 插件 `on_tick` 驱动，开关在 `music_knowledge.sync.enabled`。
   - 库为 **WAL + busy_timeout=10s**，同步写库时匹配器仍可读；同步与匹配器共用 `pool.py` 的 engine，不再开第二套连接池。
+- **索引缓存与后台构建**（`index_cache.py` + `matcher.py`）：
+  - 歌词 6-gram 倒排按**紧凑扁平格式**落盘（`data/cache/song_index/<指纹>.bin`，默认 `keep=2`）：头部 magic/version/header_json + body 的 doc_uuid/doc_name/归一化歌词/原始歌词/`doc_len`/`grams_blob`/`gram_off`/`post_ptr`/`post_doc`，body sha256 校验、临时文件 + `os.replace` 原子写入、`.lock` 防多进程并发写。原始歌词单独存一份，保证 `_find_by_lyrics` 的精确子串行为与直接构建一致（该路径只去空白、不去标点）。
+  - 指纹 = 主库与 `-wal` 的 `mtime_ns/size` + 格式/归一化/gram/`fuzzy` 版本（sha256 前 16 位）。只改 `-wal` 也会失效；改序列化或归一化规则必须递增 `INDEX_FORMAT_VERSION` / `NORMALIZE_VERSION`。
+  - 启动时命中缓存 → 同步加载并安装快照；未命中 → **立即返回**，后台线程构建。未就绪期间 `match()` 返回 `None`（歌曲识别降级为空），`_find_by_lyrics()` **不会**触发同步重建。构建完成后先写缓存、再在锁内原子替换快照；旧快照仍可被在途查询安全读取。
+  - 线程模式构建期间 `gc.disable()`、每 `build.yield_every`（默认 500）首 `time.sleep(0)` 让出并每 10% 打进度日志；`build.mode=subprocess` 时子进程建索引并写缓存、主进程等待后加载（失败自动回退线程构建）。`build.mode=sync` 或 `index_cache.enabled=false` 完全回退旧的同步构建。`song_sync` 插件同步完成后只调用 `request_rebuild(reason="song_sync")`，不再同步 reload。
+  - 加载紧凑索引时按小样本 benchmark 在两种等价的倒排布局间选择：`dict[str, memoryview]`（查询 O(1)、加载要逐 gram 插入）或有序 `grams_blob` + 二分（加载近零成本、内存更低）。选择结果与耗时见 `LyricGramIndex.last_load_stats` / 启动日志。
+  - 配置：`music_knowledge.index_cache {enabled, dir, keep}` 与 `music_knowledge.build {mode, yield_every}`；缓存默认 `./data/cache/song_index`（备份默认跳过该子目录，恢复时保留现有缓存），整目录删除等同强制重建。
+  - 一致性/生命周期：读行前后各取一次 DB 指纹，不一致不写缓存（避免旧行配新指纹被长期命中）；后台构建线程支持 `close()` 取消并在 `shutdown()` 调用，失败自动退避重试一次；匹配缓存只接受当前快照的结果。
 - 许可：VCPedia / voca.wiki 为 CC BY-NC-SA 4.0，萌娘百科为 CC BY-NC-SA 3.0 CN；适配器把来源与协议写进 `song_sources.license`，本库为本地非商业自用。
 
 ### 8.7 知识库 `knowledge/`（虚拟歌手 RAG）
