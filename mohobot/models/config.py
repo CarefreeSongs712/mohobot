@@ -36,6 +36,11 @@ class ServerConfig:
     # 已废弃: 出站队列满时现在立即抛 OutboundQueueFullError, 不再等待。
     # 字段保留仅为兼容既有配置文件, 修改它不会改变行为。
     outbound_enqueue_timeout: float = 2.0
+    # 反向 WebSocket 鉴权 token(OneBot v11): 空=不校验(默认, 兼容旧部署)。
+    # 非空时客户端须以 Authorization: Bearer <token> 头或 ?access_token= 查询参数
+    # 提供相同 token, 否则握手后立即以 1008 关闭。对应业内实现
+    # (go-cqhttp / NapCat / LLOneBot 的 access_token 语义)。
+    access_token: str = ""
 
 
 @dataclass
@@ -549,6 +554,7 @@ class GlobalConfig:
                 outbound_interval=server_raw.get("outbound_interval", 0.5),
                 outbound_maxsize=server_raw.get("outbound_maxsize", 100),
                 outbound_enqueue_timeout=server_raw.get("outbound_enqueue_timeout", 2.0),
+                access_token=str(server_raw.get("access_token", "") or ""),
             ),
             llm=LLMConfig(
                 chat_model=llm_raw.get("chat_model", "deepseek-chat"),
@@ -735,6 +741,7 @@ class GlobalConfig:
                 "outbound_interval": self.server.outbound_interval,
                 "outbound_maxsize": self.server.outbound_maxsize,
                 "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
+                "access_token": self.server.access_token,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,
@@ -902,6 +909,7 @@ class GlobalConfig:
                 "outbound_interval": self.server.outbound_interval,
                 "outbound_maxsize": self.server.outbound_maxsize,
                 "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
+                "access_token": self.server.access_token,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,

@@ -110,7 +110,7 @@ def _remove_file_background(path: str):
 
 
 class WebPanel:
-    """FastAPI-based web admin panel with 7 dashboard sections."""
+    """FastAPI-based web admin panel with 11 dashboard sections."""
 
     _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
     _MASK = "********"

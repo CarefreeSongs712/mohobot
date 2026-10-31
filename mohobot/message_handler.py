@@ -125,6 +125,9 @@ class MessageHandler:
         # (仅内存; 连续 REPEAT_LIMIT 条相同文本且相邻间隔 < REPEAT_WINDOW 秒判定为自动回复)
         self._repeat_state: dict[tuple[str, int], dict] = {}
 
+        # 引用消息解析缓存(实例级; 见 _quote_cache 注记)
+        self._quote_cache: dict[str, tuple[float, str | None]] = {}
+
     def _sync_reply_config(self, reply_config) -> None:
         """更新构造时复制的回复参数(不能只更新 GlobalConfig.reply)。"""
         self._segment_reply = reply_config.segment_reply
@@ -800,7 +803,7 @@ class MessageHandler:
             if written is False:
                 return  # Deleted/replaced generation must not leak into DB or emotion.
             # history → 数据库 (SQLite)
-            self._persist_legacy_turn(
+            await self._persist_legacy_turn(
                 bot_id, chat_type, chat_id, event,
                 user_msg["content"], full_reply,
             )
@@ -951,7 +954,7 @@ class MessageHandler:
 
     # 引用消息解析缓存: {message_id: (过期时间, 展示文本 | None)}
     # None 为负缓存(get_msg 查不到时短缓存, 防同一 id 反复打接口)
-    _quote_cache: dict[str, tuple[float, str | None]] = {}
+    # (实例属性, 在 __init__ 初始化; 类属性会让多实例/测试间相互污染)
     _QUOTE_CACHE_TTL = 600.0    # 解析成功缓存 10 分钟
     _QUOTE_FAIL_TTL = 60.0      # 解析失败缓存 60 秒
     _QUOTE_CACHE_MAX = 500
@@ -1367,11 +1370,16 @@ class MessageHandler:
             return text[:idx]
         return text
 
-    def _persist_legacy_turn(
+    async def _persist_legacy_turn(
         self, bot_id: str, chat_type: str, chat_id: str,
         event: MessageEvent, user_text: str, ai_text: str,
     ) -> None:
-        """Legacy 路径下把这一轮对话写入数据库 (history → DB)。"""
+        """Legacy 路径下把这一轮对话写入数据库 (history → DB)。
+
+        SQLite 写是同步 SQLAlchemy 调用, 经 asyncio.to_thread 移出 event loop:
+        正常 1~2ms 无感, 但 WAL 锁竞争时单次写可阻塞至 busy_timeout(15s),
+        不能让整条事件链跟着卡住。
+        """
         if self._db is None:
             return
         try:
@@ -1380,13 +1388,15 @@ class MessageHandler:
                 speaker_nickname = event.sender.card or event.sender.nickname
             else:
                 speaker_nickname = event.sender.nickname
-            self._db.add_conversation(
+            await asyncio.to_thread(
+                self._db.add_conversation,
                 user_id, bot_id, "user", user_text,
                 msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
                 speaker_id=str(event.user_id),
                 speaker_nickname=speaker_nickname or None,
             )
-            self._db.add_conversation(
+            await asyncio.to_thread(
+                self._db.add_conversation,
                 user_id, bot_id, "agent", ai_text,
                 msg_type="text", meta_data={"chat_type": chat_type, "chat_id": chat_id},
             )

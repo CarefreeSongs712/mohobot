@@ -164,6 +164,8 @@ meme 插件应在独立目录执行，避免与根测试命名空间混用：
 (cd plugins/meme_stealer && python -m ruff check --isolated --select E4,E7,E9,F --ignore E402 main.py meme_stealer_core tests)
 ```
 
+> 注意口径：meme 插件目录下的 `ruff check .`（不带 `--select`）**不是门禁**——ruff 0.17 默认规则集远宽于 CI 显式集，会报数百条存量风格债（含 CI 不扫的 `pages/`）。判红请以上面的 CI 命令为准。
+
 插件 UMAP 用例和历史 schema 用例会在可选包或原始 Git 对象缺失时明确报告 skip。
 
 **测试前置修复：** PR #22 将四个 qzone 会话用例改为真正的 async 函数；PR #23 将合并回复的过时占位断言改为当前已确定行为。CI 分支包含这两项，不屏蔽失败用例。组合基线（Python 3.12）：pytest `594 passed`，根 runner `66 passed, 0 failed`。
@@ -1033,7 +1035,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 4. **单文件插件无法拥有自己的 `_conf_schema.json`**（schema 路径取 `entry_path.parent` = `plugins/`）。
 5. **`config.log_dir` 是死配置**：`main.py:547` 硬编码 `setup_logger(log_dir="./logs")`，配了没用。
 6. **`json_write` 非原子**（就地截断，非 temp+rename），崩溃可能留半截文件。
-7. **`app.py:265` 的 `hmac.compare_digest(token, token)` 是自我比较的空操作**，误导性代码（实际靠 dict 查找 + 过期判断）。
+7. ~~`hmac.compare_digest(token, token)` 自我比较空操作~~ 已移除（2026-10 审查修复包）。
 8. **旧 `_HARDCODED_PERSONAS` 与特殊用户强制覆盖已删除**：运行人设统一解析私聊 session、bot 和系统默认，不再存在源码中不可配置的特殊待遇。
 9. **`plugins/feed/` 是空目录残留**（只有 `__pycache__`），加载器静默跳过。
 

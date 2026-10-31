@@ -53,6 +53,9 @@ server:
   outbound_interval: 0.5         # 每个 bot 的消息发送间隔(秒)
   outbound_maxsize: 100          # 每个 bot 的发送队列容量
   outbound_enqueue_timeout: 2.0  # 已废弃, 不再生效: 队列满时立即失败(保留字段兼容旧配置)
+  access_token: ""               # 反向 WS 鉴权(OneBot v11): 空=不校验; 客户端以
+                                 # Authorization: Bearer <token> 或 ?access_token= 传入
+                                 # 同值。仅本机/内网使用可留空; 暴露公网强烈建议设置
 
 llm:
   # ── 多提供商(可选) ─────────────────────────────────────────

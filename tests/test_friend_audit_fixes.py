@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import sys
 import tempfile
@@ -251,3 +252,176 @@ def test_temperature_nan_guard() -> None:
         cfg2 = GlobalConfig.load(str(p2))
         assert abs(cfg2.llm.chat_temperature - 1.25) < 1e-9
     print("[X4] temperature NaN/字符串防护 OK")
+
+
+# ── 第二批: WS token / to_thread / 括号嵌套 / 缓存观测配套测试 ──
+
+def test_ws_token_ok_matrix() -> None:
+    """OneBot v11 access_token: Bearer 头 / 查询参数 / 空配置放行。"""
+    from mohobot.ws_server import WSServer
+
+    ok = WSServer._token_ok
+    # 未配置 → 放行(兼容旧部署)
+    assert ok("", {}, "/ws") is True
+    assert ok("", {"authorization": "Bearer whatever"}, "/ws") is True
+    # Bearer 头
+    assert ok("s3cret", {"authorization": "Bearer s3cret"}, "/ws") is True
+    assert ok("s3cret", {"Authorization": "Bearer s3cret"}, "/ws") is True
+    assert ok("s3cret", {"authorization": "Bearer wrong"}, "/ws") is False
+    assert ok("s3cret", {"authorization": "s3cret"}, "/ws") is False, "非 Bearer 前缀不接受"
+    # 查询参数(OneBot v11 标准备选)
+    assert ok("s3cret", {}, "/ws?access_token=s3cret") is True
+    assert ok("s3cret", {}, "/ws?access_token=wrong&x=1") is False
+    assert ok("s3cret", {}, "/ws") is False
+    print("[Y1] WS token 矩阵 OK")
+
+
+async def test_persist_legacy_turn_off_event_loop() -> None:
+    """_persist_legacy_turn 走 to_thread: 两行 conversation 落库且不阻塞。"""
+    import sqlite3
+
+    from mohobot.db.database_manager import DatabaseManager
+    from mohobot.models.onebot import PrivateMessageEvent
+
+    with tempfile.TemporaryDirectory() as td:
+        db = DatabaseManager(db_folder=td, db_file="t.db")
+        h = _make_handler(td)
+        h._db = db
+        from mohobot.models.onebot import Event
+        ev = Event.from_dict({
+            "post_type": "message", "message_type": "private", "user_id": 4242,
+            "message_id": 5, "time": 1760000000,
+            "message": [{"type": "text", "data": {"text": "hi"}}],
+            "sender": {"user_id": 4242, "nickname": "x"}})
+        await h._persist_legacy_turn("bot_001", "private", "4242", ev, "hi", "回复")
+        con = sqlite3.connect(Path(td) / "t.db")
+        try:
+            n = con.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+            sources = [r[0] for r in con.execute("SELECT source FROM conversations").fetchall()]
+        finally:
+            con.close()
+        assert n == 2, n
+        assert sorted(sources) == ["agent", "user"], sources
+    print("[Y2] persist 轮次 2 行落库(经 to_thread) OK")
+
+
+def test_schedule_nested_bracket_no_leak() -> None:
+    """内层同型括号不再把残留文本漏进正文。"""
+    from plugins.proactive_chat.proactive_chat_core.engine import ProactiveEngine
+
+    eng = ProactiveEngine.__new__(ProactiveEngine)
+    raws, body = eng._extract_schedule("[SCHEDULE: [x] 2026-10-31 18:00（明天）] 你好呀")
+    assert body.strip() == "你好呀", f"正文残留: {body!r}"
+    assert len(raws) == 1 and "2026-10-31" in raws[0]
+    # 常规用例不受影响
+    raws2, body2 = eng._extract_schedule("[SCHEDULE: 2026-10-31 18:00] 先发正文")
+    assert body2.strip() == "先发正文"
+    assert eng._parse_schedule_time(raws2[0]) is not None
+    print("[Y3] 括号深度配对 OK")
+
+
+def test_quote_cache_instance_isolated() -> None:
+    """_quote_cache 为实例属性, 多 handler 不共享。"""
+    from mohobot.message_handler import MessageHandler
+
+    h1 = MessageHandler(ws_server=None, context_manager=None, llm_service=None,
+                        plugin_system=None, data_dir=tempfile.mkdtemp(prefix="fa_q1_"))
+    h2 = MessageHandler(ws_server=None, context_manager=None, llm_service=None,
+                        plugin_system=None, data_dir=tempfile.mkdtemp(prefix="fa_q2_"))
+    h1._quote_cache["k"] = (time.time() + 60, "v")
+    assert "k" not in h2._quote_cache
+    print("[Y4] quote cache 实例隔离 OK")
+
+
+async def test_archive_echo_timeout_falls_back_to_local_id() -> None:
+    """echo 超时(8s 兜底)后仍以 local: id 归档, 不丢 bot 发言。"""
+    from mohobot.bot_manager import BotManager
+    from mohobot.ws_server import WSServer
+
+    with tempfile.TemporaryDirectory() as td:
+        ws = WSServer(bot_manager=BotManager(data_dir=td), data_dir=td)
+        ws._ARCHIVE_ECHO_TIMEOUT = 0.05  # 实例级覆盖, 测试不必等 8s
+        fut = asyncio.get_running_loop().create_future()  # 永不 resolve
+        t0 = time.perf_counter()
+        await ws._archive_sent_message(
+            "bot_001", "group", 42, "send_group_msg",
+            {"message": [{"type": "text", "data": {"text": "hi"}}]},
+            fut, "echo-test", "auto", owns_response=True)
+        dt = time.perf_counter() - t0
+        assert dt < 2.0, f"超时兜底耗时 {dt:.1f}s"
+        f = Path(td) / "history/group/42.jsonl"
+        assert f.exists(), "超时后应兜底归档"
+        line = json.loads(f.read_text(encoding="utf-8").splitlines()[0])
+        assert line["post_type"] == "message_sent"
+        assert str(line["message_id"]).startswith("local:"), line["message_id"]
+    print("[Y5] echo 超时 local: 兜底归档 OK")
+
+
+def test_old_prefix_len_guard() -> None:
+    """孤立 summary 前缀不再反复压缩; 有旧非 summary 内容才返回非 0。"""
+    from mohobot.context_manager import ContextManager
+
+    cm = ContextManager(data_dir=tempfile.mkdtemp(prefix="fa_m12_"))
+    now = time.time()
+    old = now - 10 * 3600
+    summary = {"role": "summary", "content": "s", "timestamp": old}
+    # 全是 summary → 0(防孤立总结块反复再总结)
+    assert cm._old_prefix_len([summary, dict(summary)]) == 0
+    # 前导 summary + 旧非 summary → 非零且计入
+    entries = [summary, {"role": "u", "content": "a", "timestamp": old}]
+    assert cm._old_prefix_len(entries) == 2
+    # 近期消息 → 0
+    recent = {"role": "u", "content": "a", "timestamp": now - 60}
+    assert cm._old_prefix_len([recent]) == 0
+    print("[Y6] 孤立 summary 守卫 OK")
+
+
+def test_review_login_constant_delay() -> None:
+    """review 面板登录同样有 0.5s 恒定延迟(与主面板同款防爆破)。"""
+    import time as _t
+
+    from fastapi.testclient import TestClient
+    from review.config import ReviewConfig, ReviewUser
+    from review.hash_password import hash_password
+    from review.loader import MohobotData
+    from review.app import create_app
+    from review.store import ReviewStore
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        h = hash_password("pw123")
+        cfg = ReviewConfig(users=[ReviewUser("admin", h)])
+        data = MohobotData(root)
+        store = ReviewStore(root / "review.db")
+        app = create_app(cfg, data, store, config_path=root / "config.yaml")
+        client = TestClient(app)
+        t0 = _t.monotonic()
+        r = client.post("/api/login", json={"username": "admin", "password": "wrong"})
+        dt = _t.monotonic() - t0
+        assert r.status_code == 401
+        assert dt >= 0.45, f"review 登录耗时 {dt:.2f}s, 未达 0.5s 硬延迟"
+    print("[Y7] review 登录 0.5s 硬延迟 OK")
+
+
+async def test_plugin_config_update_callback_invoked() -> None:
+    """on_config_update(同步)必须被调用——变异 M33 的缺口回归。"""
+    from mohobot.interceptors.plugin_system import PluginSystem
+
+    with tempfile.TemporaryDirectory() as td:
+        plug = Path(td) / "dummyplug"
+        plug.mkdir()
+        (plug / "main.py").write_text(
+            "class Plugin:\n"
+            "    _calls = []\n"
+            "    def on_config_update(self, config):\n"
+            "        type(self)._calls.append(dict(config))\n",
+            encoding="utf-8")
+        (plug / "_conf_schema.json").write_text(
+            '{"foo": {"type": "int", "default": 0}}', encoding="utf-8")
+        ps = PluginSystem(plugins_dir=str(td), data_dir=str(Path(td) / "data"))
+        await ps.load_plugins()
+        assert await ps.save_plugin_config("dummyplug", {"foo": 5})
+        meta = next(m for m in ps._plugins if m["name"] == "dummyplug")
+        calls = meta["instance"].__class__._calls
+        assert calls and calls[-1].get("foo") == 5, calls
+    print("[Y8] on_config_update 同步回调被调用 OK")

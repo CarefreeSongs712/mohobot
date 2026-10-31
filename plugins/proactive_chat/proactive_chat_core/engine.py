@@ -562,7 +562,20 @@ class ProactiveEngine:
             closer = self._SCHEDULE_OPENERS.get(opener)
             if closer is None:
                 continue
-            end = reply.find(closer, match.end())
+            # 同型括号按深度配对: "[SCHEDULE: [x] …]" 的内层 "]" 不再
+            # 提前截断导致残留文本进正文(内层嵌套会让内容不可解析 → 排期被
+            # 忽略, 但正文保持干净)。
+            depth = 1
+            end = -1
+            for i in range(match.end(), len(reply)):
+                ch = reply[i]
+                if ch == opener:
+                    depth += 1
+                elif ch == closer:
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
             if end < 0:
                 continue
             content = reply[match.end():end].strip()
