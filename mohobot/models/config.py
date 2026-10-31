@@ -135,6 +135,11 @@ class LLMConfig:
     #   direct         = 把图片原始内容随文本一起发给主模型(要求 chat 模型本身支持视觉,
     #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
     vision_mode: str = "describe"
+    # 实验开关: true 时首条 system 仅保留稳定内容(人设/语言约束/TTS 模板),
+    # 发送者/感知/情感/时间/新闻/歌曲注解移到历史之后的尾部 system——
+    # 保住 DeepSeek/OpenAI 前缀缓存(见 scripts/usage_hit_rate.py)。
+    # false = 旧行为(全部拼进首条 system)。测试验证后再考虑翻转默认值。
+    stable_system_prefix: bool = False
 
     # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
     models: list[str] = field(default_factory=lambda: [
@@ -576,6 +581,7 @@ class GlobalConfig:
                 vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
                 vision_temperature=_finite_or(llm_raw.get("vision_temperature", 0.3), 0.3),
                 vision_mode=_normalize_vision_mode(llm_raw.get("vision_mode")),
+                stable_system_prefix=bool(llm_raw.get("stable_system_prefix", False)),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 emotion_model=str(llm_raw.get("emotion_model", "") or ""),
@@ -762,6 +768,7 @@ class GlobalConfig:
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
                 "vision_mode": self.llm.vision_mode,
+                "stable_system_prefix": self.llm.stable_system_prefix,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,
@@ -930,6 +937,7 @@ class GlobalConfig:
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
                 "vision_mode": self.llm.vision_mode,
+                "stable_system_prefix": self.llm.stable_system_prefix,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,

@@ -425,3 +425,102 @@ async def test_plugin_config_update_callback_invoked() -> None:
         calls = meta["instance"].__class__._calls
         assert calls and calls[-1].get("foo") == 5, calls
     print("[Y8] on_config_update 同步回调被调用 OK")
+
+
+# ── C-2 稳定 system 前缀布局(实验开关) ────────────────────────
+
+def _layout_svc(stable: bool):
+    from mohobot.llm_service import LLMService
+    from mohobot.models.config import GlobalConfig
+
+    svc = LLMService.__new__(LLMService)
+    svc._cfg = GlobalConfig()
+    svc._cfg.llm.stable_system_prefix = stable
+    svc._song_annotator = None
+    svc._news_annotator = None
+    return svc
+
+
+def _layout_event(user_id: int, ts: int):
+    from mohobot.models.onebot import Event
+
+    return Event.from_dict({
+        "post_type": "message", "message_type": "group", "group_id": 42,
+        "user_id": user_id, "message_id": 1000 + user_id, "time": ts,
+        "message": [{"type": "text", "data": {"text": "你好"}}],
+        "sender": {"user_id": user_id, "nickname": f"u{user_id}", "card": f"卡{user_id}"},
+    })
+
+
+_LAYOUT_CTX = [
+    {"role": "777-测试", "content": "早", "timestamp": 1760000001},
+    {"role": "assistant", "content": "早呀", "timestamp": 1760000002},
+    {"role": "system", "content": "【群聊最近消息】\n10:00 u777: 早"},
+    {"role": "perception", "content": "【感知】今天是工作日"},
+    {"role": "emotion", "content": "【情感】好感 10"},
+]
+
+
+async def test_layout_stable_prefix() -> None:
+    from types import SimpleNamespace
+
+    svc = _layout_svc(True)
+    bot_cfg = SimpleNamespace(nickname="测试bot", tts_enabled=False)
+    m1 = await svc._prepare_messages("bot_001", _layout_event(777, 1760000000),
+                                     _LAYOUT_CTX, bot_cfg)
+    # [0] 稳定: 不含任何易变块标记
+    head = m1[0]["content"]
+    for marker in ("【服务端当前时间", "【环境感知】", "当前对话环境", "【情感】"):
+        assert marker not in head, f"messages[0] 含易变块: {marker}"
+    # 尾部 system 携带全部易变块, 且位于最终 user 之前
+    sys_idx = [i for i, m in enumerate(m1) if m["role"] == "system"]
+    tail = m1[sys_idx[-1]]["content"]
+    for marker in ("当前对话环境", "【服务端辅助信息使用规则】", "【环境感知】",
+                   "【服务端当前时间"):
+        assert marker in tail, f"尾部 system 缺 {marker}"
+    assert "【情感】好感 10" in tail
+    assert m1[-1]["role"] == "user"
+    assert sys_idx[-1] == len(m1) - 2
+    # 稳定性: 不同发送者/时间的两次构建, [0] 与整个历史前缀逐字节一致
+    m2 = await svc._prepare_messages("bot_001", _layout_event(888, 1760000900),
+                                     _LAYOUT_CTX, bot_cfg)
+    assert m1[0]["content"] == m2[0]["content"], "messages[0] 不稳定"
+    pre1 = [m["content"] for m in m1[: sys_idx[-1]]]
+    pre2 = [m["content"] for m in m2[: sys_idx[-1]]]
+    assert pre1 == pre2, "稳定前缀(至尾部 system 之前)不一致"
+    # 使用规则导语随块携带(防"评论服务端信息"回归)
+    assert "不是用户消息" in tail
+    print("[Z1] 稳定前缀布局 OK([0] 逐字节稳定, 易变块在尾部 system)")
+
+
+async def test_layout_legacy_mode_unchanged() -> None:
+    from types import SimpleNamespace
+
+    svc = _layout_svc(False)
+    bot_cfg = SimpleNamespace(nickname="测试bot", tts_enabled=False)
+    m = await svc._prepare_messages("bot_001", _layout_event(777, 1760000000),
+                                    _LAYOUT_CTX, bot_cfg)
+    # 旧行为: 易变块全部在 messages[0]
+    for marker in ("当前对话环境", "【服务端辅助信息使用规则】", "【环境感知】",
+                   "【服务端当前时间"):
+        assert marker in m[0]["content"], f"旧布局缺 {marker}"
+    assert m[-1]["role"] == "user"
+    print("[Z2] 旧布局(默认关闭)行为不变 OK")
+
+
+def test_stable_prefix_config_roundtrip() -> None:
+    import yaml
+
+    from mohobot.models.config import GlobalConfig
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.yaml"
+        p.write_text(yaml.safe_dump({"llm": {"stable_system_prefix": True}}),
+                     encoding="utf-8")
+        cfg = GlobalConfig.load(str(p))
+        assert cfg.llm.stable_system_prefix is True
+        d = cfg.to_dict()["llm"]
+        assert d["stable_system_prefix"] is True
+    # 默认关闭
+    assert GlobalConfig().llm.stable_system_prefix is False
+    print("[Z3] stable_system_prefix 配置 roundtrip + 默认关闭 OK")
