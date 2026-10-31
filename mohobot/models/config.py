@@ -6,7 +6,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import math
+
 import yaml
+
+
+def _finite_or(value: object, default: float) -> float:
+    """float() 转换 + NaN/Inf 防护: 非法值回退默认(temperature 载入专用)。
+
+    WebUI 可把 "nan"/"inf" 存进配置; NaN 一路传给 OpenAI 兼容接口会整请求 400。
+    """
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
 
 
 # ── Global Config ─────────────────────────────────────────────
@@ -545,7 +559,7 @@ class GlobalConfig:
                 chat_provider=str(llm_raw.get("chat_provider", "") or "").strip(),
                 vision_provider=str(llm_raw.get("vision_provider", "") or "").strip(),
                 emotion_provider=str(llm_raw.get("emotion_provider", "") or "").strip(),
-                chat_temperature=llm_raw.get("chat_temperature", 0.7),
+                chat_temperature=_finite_or(llm_raw.get("chat_temperature", 0.7), 0.7),
                 frequency_penalty=float(llm_raw.get("frequency_penalty", 0.0) or 0.0),
                 presence_penalty=float(llm_raw.get("presence_penalty", 0.0) or 0.0),
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
@@ -554,14 +568,14 @@ class GlobalConfig:
                 # 空/缺失时保留默认人物特征提示词
                 vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
                 vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
-                vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
+                vision_temperature=_finite_or(llm_raw.get("vision_temperature", 0.3), 0.3),
                 vision_mode=_normalize_vision_mode(llm_raw.get("vision_mode")),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 emotion_model=str(llm_raw.get("emotion_model", "") or ""),
                 emotion_base_url=str(llm_raw.get("emotion_base_url", "") or ""),
                 emotion_api_key=str(llm_raw.get("emotion_api_key", "") or ""),
-                emotion_temperature=float(llm_raw.get("emotion_temperature", 0.3)),
+                emotion_temperature=_finite_or(llm_raw.get("emotion_temperature", 0.3), 0.3),
                 emotion_max_tokens=int(llm_raw.get("emotion_max_tokens", 512)),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",

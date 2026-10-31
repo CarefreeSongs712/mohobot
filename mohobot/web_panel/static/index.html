@@ -2691,9 +2691,9 @@ function fmtBanTime(t) {
 }
 
 function banRecordHtml(r) {
-  const reason = r.reason && r.reason !== '无理由' ? ` - <span class="dim">${r.reason}</span>` : '';
+  const reason = r.reason && r.reason !== '无理由' ? ` - <span class="dim">${esc(r.reason)}</span>` : '';
   return `<div class="form-row" style="justify-content:space-between">
-    <span>👤 ${r.uid} — ${fmtBanTime(r.time)}${reason}</span>
+    <span>👤 ${esc(r.uid)} — ${fmtBanTime(r.time)}${reason}</span>
     <button class="btn btn-sm" onclick="banRemove('${r.uid}')">删除</button></div>`;
 }
 
