@@ -544,7 +544,8 @@ class ProactiveEngine:
 
     _CHOICE_RE = re.compile(r"[\[【(（]\s*(skip|pause)\s*[\]】)）]", re.IGNORECASE)
     _SCHEDULE_OPENERS = {"[": "]", "【": "】", "(": ")", "（": "）"}
-    _SCHEDULE_PREFIX_RE = re.compile(r"[\[【(（]\s*schedule\s*[:：]?", re.IGNORECASE)
+    # 必须带冒号, 避免把 "我看了下 [schedule of the day] 这个表" 当标记剥掉。
+    _SCHEDULE_PREFIX_RE = re.compile(r"[\[【(（]\s*schedule\s*[:：]", re.IGNORECASE)
     _SCHEDULE_DATETIME_RE = re.compile(
         r"^\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?)"
     )
@@ -562,7 +563,21 @@ class ProactiveEngine:
             closer = self._SCHEDULE_OPENERS.get(opener)
             if closer is None:
                 continue
-            end = reply.find(closer, match.end())
+            # 按同种括号的深度配对: 标记内允许同种嵌套
+            # (如 "[SCHEDULE: ... [明天]]"), 不能只找第一个闭括号。
+            end = -1
+            depth = 1
+            pos = match.end()
+            while pos < len(reply):
+                ch = reply[pos]
+                if ch == opener:
+                    depth += 1
+                elif ch == closer:
+                    depth -= 1
+                    if depth == 0:
+                        end = pos
+                        break
+                pos += 1
             if end < 0:
                 continue
             content = reply[match.end():end].strip()
@@ -593,7 +608,7 @@ class ProactiveEngine:
         return None
 
     def _resolve_schedule(self, raw: str, cfg: dict, now: float) -> float | None:
-        """校验 LLM 排期: 未来时间、日历天不超过 max_schedule_days, 并避开免打扰。"""
+        """校验 LLM 排期: 不早于最小间隔、不超过日历天上限, 并避开免打扰。"""
         target = self._parse_schedule_time(raw)
         if target is None:
             logger.info(f"[主动消息] 忽略无法解析的排期标记: {raw!r}")
@@ -604,6 +619,15 @@ class ProactiveEngine:
         if target <= now + 60:
             logger.info(f"[主动消息] 忽略已过期或过近的排期标记: {raw!r}")
             return None
+        # 排期不能绕过随机窗口下限, 否则模型可借 [SCHEDULE] 每隔 1~2 分钟
+        # 反复触发。早于下限时顺延到下限, 而不是静默丢弃。
+        min_gap = max(60, int(cfg.get("min_interval_minutes", 30) or 30) * 60)
+        if target < now + min_gap:
+            logger.info(
+                f"[主动消息] 排期早于最小间隔({min_gap // 60} 分钟), 已顺延"
+            )
+            target = now + min_gap
+            target_dt = datetime.fromtimestamp(target, TZ_UTC8)
         # 按“日历天”而不是滚动 24h 判断, 与“明天/几天后”的直觉一致。
         if (target_dt.date() - now_dt.date()).days > max_days:
             logger.info(f"[主动消息] 忽略超过 {max_days} 天的排期标记: {raw!r}")

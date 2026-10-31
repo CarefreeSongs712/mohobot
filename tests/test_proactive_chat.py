@@ -17,7 +17,12 @@ sys.path.insert(0, str(_PLUGIN_DIR))
 from mohobot.file_store import json_update
 from mohobot.utils.time_utils import TZ_UTC8
 
-from proactive_chat_core.engine import ProactiveEngine, session_key
+from proactive_chat_core.engine import (
+    ProactiveEngine,
+    _record_sent_if_idle,
+    _set_next_trigger_if_idle,
+    session_key,
+)
 from proactive_chat_core.schedule import (
     is_quiet_time,
     next_non_quiet_time,
@@ -946,3 +951,82 @@ async def test_custom_prompt_renders_schedule_placeholders():
         raw = llm.calls[0]["event"].raw_message
         assert "最多 7 天" in raw
         assert "{{" not in raw and "}}" not in raw
+
+
+# ── 复审 P3: CAS 守卫 / 嵌套括号 / 最小间隔 ─────────────────
+
+
+def test_schedule_cas_helpers_guard_user_reply() -> None:
+    """用户回复后 CAS 不得覆盖观察钩子的归零/重排, 也不得重建被移除会话。"""
+    key = "bot_001:123"
+    state = {"sessions": {key: {"last_message_time": 200, "unanswered_count": 2}}}
+
+    _set_next_trigger_if_idle(key, 999, 100)(state)
+    assert "next_trigger_time" not in state["sessions"][key]
+
+    _record_sent_if_idle(
+        key, expected_last_message_time=100, unanswered_count=2,
+        now=300, next_trigger=999,
+    )(state)
+    entry = state["sessions"][key]
+    assert entry["unanswered_count"] == 2 and "next_trigger_time" not in entry
+
+    empty = {"sessions": {}}
+    _set_next_trigger_if_idle(key, 999, 100)(empty)
+    assert key not in empty["sessions"]
+
+    valid = {"sessions": {key: {"last_message_time": 100}}}
+    _set_next_trigger_if_idle(key, 999, 100)(valid)
+    assert valid["sessions"][key]["next_trigger_time"] == 999
+    _record_sent_if_idle(
+        key, expected_last_message_time=100, unanswered_count=2,
+        now=300, next_trigger=999,
+    )(valid)
+    entry = valid["sessions"][key]
+    assert entry["unanswered_count"] == 3
+    assert entry["next_trigger_time"] == 999
+
+
+async def test_schedule_nested_same_bracket_strips_whole() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        target = _ts(2026, 10, 31, 18, 0)
+        llm.reply = "[SCHEDULE: 2026-10-31 18:00 [明天]]"
+
+        await engine.tick()
+
+        assert mh.sent == []
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == target
+
+
+async def test_schedule_text_with_word_schedule_is_not_stripped() -> None:
+    """没有冒号的 "[schedule of the day]" 是普通文本, 不能被当标记剥掉。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        state_path = Path(tmp) / "state.json"
+        engine, llm, mh, ctx = _make_engine(dict(_BASE_CONFIG), state_path, clock)
+        await engine._mutate_state(_seed_due("bot_001", "123", clock.now))
+        text = "我看了下 [schedule of the day] 这个表"
+        llm.reply = text
+
+        await engine.tick()
+
+        assert mh.sent and mh.sent[0]["text"] == text
+        entry = (await _read_state(state_path))["sessions"]["bot_001:123"]
+        assert entry["next_trigger_time"] == clock.now + 60
+
+
+def test_schedule_enforces_min_interval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        clock = _Clock(start=_ts(2026, 10, 30, 12, 0))
+        engine, _llm, _mh, _ctx = _make_engine(
+            dict(_BASE_CONFIG), Path(tmp) / "state.json", clock,
+        )
+        cfg = {"quiet_hours": "", "max_schedule_days": 7,
+               "min_interval_minutes": 30}
+        got = engine._resolve_schedule("2026-10-30 12:02", cfg, clock.now)
+        assert got == clock.now + 30 * 60

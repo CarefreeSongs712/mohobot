@@ -573,3 +573,91 @@ def test_file_lock_does_not_retry_body_on_oserror() -> None:
         except OSError:
             pass
         assert calls == [1], calls
+
+
+# ── 附加: 复审 P2/P3 回归 ───────────────────────────────────
+
+
+def test_load_rows_requires_stable_fingerprint() -> None:
+    """读行前后指纹不一致时必须返回空指纹, 避免旧行配新指纹写缓存。"""
+    from mohobot.music_knowledge import SongInfoMatcher
+
+    folder, filename = _fresh_db("songfpri_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename)
+    seq = iter(["a", "b", "c", "d"])
+    matcher._safe_fingerprint = lambda: next(seq)
+
+    rows, fingerprint = matcher._load_rows_with_stable_fingerprint(attempts=2)
+
+    assert rows and fingerprint == ""
+
+
+def test_build_once_skips_cache_when_fingerprint_unstable() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+    from mohobot.music_knowledge.matcher import _load_song_rows
+
+    folder, filename = _fresh_db("songnowrite_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename, build={"mode": "sync"})
+    rows = _load_song_rows()
+    matcher._load_rows_with_stable_fingerprint = lambda **kw: (rows, "")
+    written: list[int] = []
+    matcher._write_cache = lambda *a, **k: written.append(1)
+
+    matcher._build_once("fingerprint-unstable")
+
+    assert written == []
+    assert matcher.is_ready()
+
+
+def test_build_worker_retries_once_on_transient_failure() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+    import mohobot.music_knowledge.matcher as matcher_module
+
+    folder, filename = _fresh_db("songretry_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename, build={"mode": "sync"})
+    calls: list[str] = []
+
+    def flaky(reason: str) -> None:
+        calls.append(reason)
+        if len(calls) == 1:
+            raise RuntimeError("database is locked")
+
+    matcher._build_once = flaky
+    original_sleep = matcher_module.time.sleep
+    matcher_module.time.sleep = lambda _seconds: None
+    try:
+        matcher._build_worker("retry")
+    finally:
+        matcher_module.time.sleep = original_sleep
+
+    assert calls == ["retry", "retry"]
+
+
+def test_close_prevents_new_build() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+
+    folder, filename = _fresh_db("songclose_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename, build={"mode": "sync"})
+    matcher._build_mode = "thread"
+
+    matcher.close(timeout=0)
+    matcher.request_rebuild(reason="after-close")
+
+    assert matcher._closing is True
+    assert matcher._build_thread is None
+
+
+def test_put_cache_ignores_stale_snapshot() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+    from mohobot.music_knowledge.matcher import _IndexSnapshot
+
+    folder, filename = _fresh_db("songstale_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename)
+    old_snapshot = matcher._snapshot
+    result = matcher.match("唱一首赤伶")
+    assert result is not None
+
+    matcher._install(_IndexSnapshot((), None, None, "empty"), source="empty")
+    matcher._put_cache("stale", result, snap=old_snapshot)
+
+    assert matcher._cache == {}
