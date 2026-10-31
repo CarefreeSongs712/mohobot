@@ -935,7 +935,8 @@ await supervisor.shutdown()
   - 启动时命中缓存 → 同步加载并安装快照；未命中 → **立即返回**，后台线程构建。未就绪期间 `match()` 返回 `None`（歌曲识别降级为空），`_find_by_lyrics()` **不会**触发同步重建。构建完成后先写缓存、再在锁内原子替换快照；旧快照仍可被在途查询安全读取。
   - 线程模式构建期间 `gc.disable()`、每 `build.yield_every`（默认 500）首 `time.sleep(0)` 让出并每 10% 打进度日志；`build.mode=subprocess` 时子进程建索引并写缓存、主进程等待后加载（失败自动回退线程构建）。`build.mode=sync` 或 `index_cache.enabled=false` 完全回退旧的同步构建。`song_sync` 插件同步完成后只调用 `request_rebuild(reason="song_sync")`，不再同步 reload。
   - 加载紧凑索引时按小样本 benchmark 在两种等价的倒排布局间选择：`dict[str, memoryview]`（查询 O(1)、加载要逐 gram 插入）或有序 `grams_blob` + 二分（加载近零成本、内存更低）。选择结果与耗时见 `LyricGramIndex.last_load_stats` / 启动日志。
-  - 配置：`music_knowledge.index_cache {enabled, dir, keep}` 与 `music_knowledge.build {mode, yield_every}`；缓存默认 `./data/cache/song_index`（备份已排除 `data/cache`），整目录删除等同强制重建。
+  - 配置：`music_knowledge.index_cache {enabled, dir, keep}` 与 `music_knowledge.build {mode, yield_every}`；缓存默认 `./data/cache/song_index`（备份默认跳过该子目录，恢复时保留现有缓存），整目录删除等同强制重建。
+  - 一致性/生命周期：读行前后各取一次 DB 指纹，不一致不写缓存（避免旧行配新指纹被长期命中）；后台构建线程支持 `close()` 取消并在 `shutdown()` 调用，失败自动退避重试一次；匹配缓存只接受当前快照的结果。
 - 许可：VCPedia / voca.wiki 为 CC BY-NC-SA 4.0，萌娘百科为 CC BY-NC-SA 3.0 CN；适配器把来源与协议写进 `song_sources.license`，本库为本地非商业自用。
 
 ### 8.7 知识库 `knowledge/`（虚拟歌手 RAG）

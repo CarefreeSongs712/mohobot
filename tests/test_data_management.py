@@ -36,6 +36,9 @@ def setup():
     cache = data_dir / "cache" / "images"
     cache.mkdir(parents=True)
     (cache / "a.jpg").write_bytes(b"jpegdata")
+    song_index = data_dir / "cache" / "song_index"
+    song_index.mkdir(parents=True)
+    (song_index / "fp.bin").write_bytes(b"indexcache")
 
     cfg_path = tmp / "global.yaml"
     cfg_path.write_text("data_dir: ./data\n", encoding="utf-8")
@@ -71,6 +74,7 @@ def test_all():
     assert "history/bot_001/private/1.jsonl" in names
     assert "contexts/bot_002/main.json" in names
     assert "cache/images/a.jpg" in names
+    assert "cache/song_index/fp.bin" not in names, "可重建的索引缓存不应进备份"
 
     # 未选范围 → 400
     r = client.post("/api/data/backup", json={"data": {"bots": "all", "dirs": []}}, headers=auth)
@@ -89,7 +93,7 @@ def test_all():
     assert r.status_code == 400, "错误密码应被拒绝"
     assert (data_dir / "cache" / "images" / "a.jpg").exists()
     r = client.post("/api/data/cleanup", json={"data": {"password": "secret123", "scope": {"bots": "all", "dirs": ["cache"]}}}, headers=auth)
-    assert r.status_code == 200 and r.json()["removed"] == 1
+    assert r.status_code == 200 and r.json()["removed"] == 2
     assert not (data_dir / "cache").exists()
     print("[3] cleanup password check + delete OK")
 
@@ -120,6 +124,31 @@ def test_all():
     assert r.status_code == 200, r.text
     assert (data_dir / "history" / "bot_001" / "private" / "1.jsonl").exists()
     print("[5] restore with password OK")
+
+    # ── cache 备份排除 song_index; 恢复时保留现有索引缓存 ──
+    images = data_dir / "cache" / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    (images / "a.jpg").write_bytes(b"jpegdata")
+    song_index = data_dir / "cache" / "song_index"
+    song_index.mkdir(parents=True, exist_ok=True)
+    (song_index / "fp.bin").write_bytes(b"indexcache")
+
+    r = client.post("/api/data/backup", json={"data": {"bots": "all", "dirs": ["cache"]}}, headers=auth)
+    assert r.status_code == 200, r.text
+    cache_backup = r.content
+    with zipfile.ZipFile(io.BytesIO(cache_backup)) as zf:
+        cache_names = zf.namelist()
+    assert "cache/images/a.jpg" in cache_names
+    assert "cache/song_index/fp.bin" not in cache_names
+
+    shutil.rmtree(data_dir / "cache" / "images")
+    r = client.post("/api/data/restore", headers=auth,
+                    files={"file": ("c.zip", io.BytesIO(cache_backup), "application/zip")},
+                    data={"password": "secret123", "scope": json.dumps({"bots": "all", "dirs": ["cache"]})})
+    assert r.status_code == 200, r.text
+    assert (data_dir / "cache" / "images" / "a.jpg").exists()
+    assert (data_dir / "cache" / "song_index" / "fp.bin").exists(), "恢复 cache 不应删除现有 song_index"
+    print("[5b] cache backup excludes song_index + restore preserves it OK")
 
     # ── zip slip 防护 ──
     evil = io.BytesIO()

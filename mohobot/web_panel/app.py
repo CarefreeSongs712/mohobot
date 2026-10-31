@@ -1472,8 +1472,14 @@ class WebPanel:
                 cache_dir = root / "cache"
                 if cache_dir.exists():
                     for f in cache_dir.rglob("*"):
-                        if f.is_file():
-                            files.append((f"cache/{f.relative_to(cache_dir).as_posix()}", f))
+                        if not f.is_file():
+                            continue
+                        rel = f.relative_to(cache_dir).as_posix()
+                        # song_index 是可重建的派生数据(单份可达数百 MB),
+                        # 不纳入备份; 否则 ZIP 体积会被缓存淹没。
+                        if rel == "song_index" or rel.startswith("song_index/"):
+                            continue
+                        files.append((f"cache/{rel}", f))
 
             if "ban" in dir_set:
                 ban_dir = root / "ban"
@@ -1908,10 +1914,28 @@ class WebPanel:
             src = tmp_dir / "cache"
             dst = root / "cache"
             if src.exists():
-                if dst.exists():
-                    shutil.rmtree(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(src, dst)
+                # song_index 不在备份内: 恢复 cache 时保留现有索引缓存,
+                # 避免一次恢复就把 235MB 派生数据删掉并触发全量重建。
+                preserved = None
+                if dst.exists():
+                    song_index = dst / "song_index"
+                    if song_index.exists():
+                        preserved = dst.parent / f".song_index_preserve_{os.getpid()}"
+                        if preserved.exists():
+                            shutil.rmtree(preserved)
+                        shutil.move(str(song_index), str(preserved))
+                    for child in list(dst.iterdir()):
+                        if child.is_dir():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+                if preserved is not None and preserved.exists():
+                    target = dst / "song_index"
+                    if target.exists():
+                        shutil.rmtree(target)
+                    shutil.move(str(preserved), str(target))
                 restored += sum(1 for _ in src.rglob("*") if _.is_file())
 
         if "ban" in dir_set:

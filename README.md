@@ -468,6 +468,7 @@ database:
 4. **定时与手动触发** — 在 `music_knowledge.sync` 打开 `enabled` 后由 `song_sync` 插件按 `interval_hours` 自动同步；也可手动 `/sync-songs [new|fill|refresh|status|vcpedia|vocawiki|moegirl]`（管理员）或 `python scripts/sync_songs.py`。
 5. **注入预算** — 默认只注入「介绍摘要 + STAFF + 歌词命中处前后几行」，完整歌词由 LLM 调 `song_get_lyrics` 工具按需获取；改 `music_knowledge.injection.max_chars` 可调大或设为 0 恢复完整歌词。
 6. **旧数据迁移** — `python scripts/migrate_legacy_songs.py` 把旧版数据迁移进新 schema。
+7. **启动行为** — 优先加载 `data/cache/song_index/` 的索引缓存；未命中时服务先启动、索引在后台构建，期间歌曲识别降级为空，不影响正常聊天。
 
 **网易云点歌插件（`/点歌`）不受影响**：仍走独立命令路径，不进入本歌曲知识链路。
 

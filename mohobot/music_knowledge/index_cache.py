@@ -18,7 +18,7 @@
 - 写入先临时文件再 ``os.replace()``; ``.lock`` 用 flock/msvcrt 串行化
   多进程写入; 成功后按 ``keep`` 清理更旧的缓存。
 
-缓存目录默认 ``data/cache/song_index``(备份已排除 ``data/cache``),
+缓存目录默认 ``data/cache/song_index``(备份默认跳过该子目录),
 可整目录删除, 等同强制重建。本模块不 import sqlalchemy, 只负责格式与
 文件; 构建由 ``matcher`` 完成, 子进程入口见文件末尾 ``__main__``。
 """

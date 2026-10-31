@@ -113,7 +113,7 @@ class MohobotApplication:
                 index_cache_cfg.setdefault("enabled", True)
                 index_cache_cfg.setdefault("keep", 2)
                 if not index_cache_cfg.get("dir"):
-                    # 默认落在 data/cache 下(备份已排除该目录)。
+                    # 默认落在 data/cache 下(备份默认跳过 cache/song_index)。
                     index_cache_cfg["dir"] = os.path.join(
                         self._config.data_dir, "cache", "song_index",
                     )
@@ -683,6 +683,14 @@ class MohobotApplication:
         self._shutting_down = True
         logger.info("Shutting down Mohobot...")
         self._running = False
+
+        # 歌曲索引后台构建是 daemon 线程: 先请求取消并等待退出,
+        # 避免面板内重启/再次 startup 时出现两个构建线程。
+        if getattr(self, "_song_matcher", None) is not None:
+            try:
+                self._song_matcher.close(timeout=5.0)
+            except Exception as exc:
+                logger.debug(f"song matcher close failed: {exc}")
 
         # Stop web panel (await its server task so the port is freed
         # before a restart rebinds it — otherwise "Address already in use")
