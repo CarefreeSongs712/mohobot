@@ -165,6 +165,7 @@ class WSServer:
         # 鉴权(OneBot v11 access_token): 配置了 token 但客户端未提供/不匹配
         # → 握手后立即 1008 关闭, 不注册、不处理任何消息。
         if self._access_token and not self._token_ok(
+            self._access_token,
             dict(websocket.request.headers),
             str(getattr(websocket.request, "path", "") or ""),
         ):
