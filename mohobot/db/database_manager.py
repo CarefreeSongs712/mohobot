@@ -23,17 +23,94 @@ class DatabaseManager:
     """封装独立 SQLite 的读写。"""
 
     def __init__(self, db_folder: str = "data/database", db_file: str = "mohobot.db"):
-        # 旧库迁移: 早期版本名为 luotianyi.db, 改名后自动迁移
-        legacy = os.path.join(db_folder, "luotianyi.db")
-        target = os.path.join(db_folder, db_file)
-        if db_file != "luotianyi.db" and os.path.exists(legacy) and not os.path.exists(target):
-            try:
-                os.rename(legacy, target)
-                logger.info(f"数据库迁移: luotianyi.db → {db_file}")
-            except OSError as e:
-                logger.warning(f"数据库迁移失败({e}), 将新建 {db_file}")
+        self._migrate_legacy_db(db_folder, db_file)
         self._engine = sqldb.init_sql_db(db_folder, db_file)
         logger.info(f"DatabaseManager initialized: {db_folder}/{db_file}")
+
+    def _migrate_legacy_db(self, db_folder: str, db_file: str) -> None:
+        """旧库迁移: luotianyi.db → db_file (issue #2)。
+
+        旧库可能残留未 checkpoint 的 -wal(异常退出/SIGKILL): 直接 os.rename
+        只搬主库文件, 已提交事务留在旧 -wal 里, 新库静默丢最近记录。
+        改用 SQLite backup API 完整迁移(会读取 WAL 中的已提交内容),
+        quick_check + 核心表行数校验通过后原子替换; 旧 .db/-wal/-shm/-journal
+        备份保留(SIGKILL 后 close 会 checkpoint 进主库, 故备份集以实际存在
+        的文件为准); 校验失败 fail-closed(拒绝静默新建空库, 现场留给人工处理)。
+        假设迁移期间无其他进程在写旧库(启动时单进程, README 运维流成立);
+        旧进程若仍活跃写入, 行数校验会拦截(fail-closed)。
+        """
+        import sqlite3
+        import time as _time
+
+        legacy = os.path.join(db_folder, "luotianyi.db")
+        target = os.path.join(db_folder, db_file)
+        if db_file == "luotianyi.db" or not os.path.exists(legacy) or os.path.exists(target):
+            return
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        tmp = target + ".migrating"
+        if os.path.exists(tmp):
+            # 上次中断残留: 整体重来(合法半写 tmp 会被本次迁移覆盖, 安全)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        logger.info(f"检测到旧库 {legacy}, 开始迁移 → {target} (SQLite backup API)")
+        try:
+            src = sqlite3.connect(legacy)
+            try:
+                check = src.execute("PRAGMA quick_check").fetchone()
+                if not check or check[0] != "ok":
+                    raise ValueError(f"旧库 quick_check 未通过: {check!r}")
+                dst = sqlite3.connect(tmp)
+                try:
+                    src.backup(dst)
+                    dst.commit()
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            # 行数一致性校验: 旧库存在的核心表在副本中行数必须一致
+            src2 = sqlite3.connect(legacy)
+            try:
+                dst2 = sqlite3.connect(tmp)
+                try:
+                    src_tables = {
+                        r[0] for r in src2.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'")
+                    }
+                    for table in ("conversations", "users"):
+                        if table in src_tables:
+                            a = src2.execute(
+                                f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                            b = dst2.execute(
+                                f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                            if a != b:
+                                raise ValueError(
+                                    f"迁移校验失败: {table} 行数 {a} → {b}")
+                finally:
+                    dst2.close()
+            finally:
+                src2.close()
+            os.replace(tmp, target)
+        except (sqlite3.Error, ValueError, OSError) as e:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            raise ValueError(
+                f"旧库迁移失败, 已中止启动以保护数据: {e}; "
+                f"请手动处理 {legacy}(及其 -wal/-shm)后重试"
+            ) from e
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            srcf = legacy + suffix
+            if os.path.exists(srcf):
+                try:
+                    os.replace(srcf, f"{legacy}.bak-{stamp}{suffix}")
+                    logger.info(f"旧库备份: {srcf} → {legacy}.bak-{stamp}{suffix}")
+                except OSError as e:
+                    logger.warning(f"旧库备份失败({srcf}): {e}")
+        logger.info(f"数据库迁移完成: luotianyi.db → {db_file} (backup API)")
 
     # ── 用户 ─────────────────────────────────────────────────
 
