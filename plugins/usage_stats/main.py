@@ -77,6 +77,23 @@ class Plugin:
     def _usage_path(self) -> Path:
         return Path(self._data_dir) / "stats" / "llm_usage.jsonl"
 
+    @staticmethod
+    def _since_ts(now, days: int) -> float:
+        """统计窗口起点(含今日): UTC+8 当日零点往前推 days-1 天。
+
+        必须用 timedelta 而不是 now.day - N 直接构造日期——每月 1~6 日
+        day-N 会跨月变成非正数, datetime 抛 ValueError(issue #103)。
+        naive datetime 按服务器本地时区口径处理(当前调用方均为 TZ_UTC8 aware)。
+        """
+        from datetime import timedelta
+
+        from mohobot.utils.time_utils import TZ_UTC8
+
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=TZ_UTC8)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (day_start - timedelta(days=max(int(days), 1) - 1)).timestamp()
+
     def _load_records(self, since_ts: float) -> list[dict]:
         path = self._usage_path()
         if not path.exists():
@@ -101,19 +118,17 @@ class Plugin:
     def _session_reply(self, args: list[str]) -> str:
         """/用量 会话 [今日|7d|30d] — 按聊天会话聚合 Top 10。"""
         from mohobot.utils.time_utils import TZ_UTC8
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
 
         now = _dt.now(TZ_UTC8)
-        day_start = _dt(now.year, now.month, now.day, tzinfo=TZ_UTC8)
         if args and args[0] in ("7d", "7天", "近7天"):
-            since = (day_start - _td(days=6)).timestamp()
-            title = "近 7 天"
+            days = 7
         elif args and args[0] in ("30d", "30天", "近30天"):
-            since = (day_start - _td(days=29)).timestamp()
-            title = "近 30 天"
+            days = 30
         else:
-            since = day_start.timestamp()
-            title = "今日"
+            days = 1
+        since = self._since_ts(now, days)
+        title = {7: "近 7 天", 30: "近 30 天"}.get(days, "今日")
 
         records = self._load_records(since)
         sessions: dict[tuple[str, str, str], dict] = {}
@@ -194,12 +209,8 @@ class Plugin:
         from mohobot.utils.time_utils import TZ_UTC8
         from datetime import datetime as _dt
         now = _dt.now(TZ_UTC8)
-        if days == 1:
-            since = _dt(now.year, now.month, now.day, tzinfo=TZ_UTC8).timestamp()
-            title = "今日"
-        else:
-            since = _dt(now.year, now.month, now.day - 6, tzinfo=TZ_UTC8).timestamp()
-            title = "近 7 天"
+        since = self._since_ts(now, days)
+        title = "近 7 天" if days == 7 else "今日"
 
         records = self._load_records(since)
         if not records:

@@ -524,3 +524,144 @@ def test_stable_prefix_config_roundtrip() -> None:
     # 默认关闭
     assert GlobalConfig().llm.stable_system_prefix is False
     print("[Z3] stable_system_prefix 配置 roundtrip + 默认关闭 OK")
+
+
+# ── issue #103: WS token 调用点回归 + 用量窗口月初越界 ─────────
+
+class _FakeWSConn:
+    """够 _handle_connection 用的最小 websocket 桩。"""
+
+    def __init__(self, headers, path="/ws"):
+        from types import SimpleNamespace
+        self.request = SimpleNamespace(headers=headers, path=path)
+        self.remote_address = ("1.2.3.4", 11111)
+        self.closed = None
+
+    async def close(self, code=1000, reason=""):
+        self.closed = (code, reason)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+def _ws_server_with_token(token: str, td: str):
+    from mohobot.bot_manager import BotManager
+    from mohobot.ws_server import WSServer
+
+    bm = BotManager(data_dir=td)
+    ws = WSServer(bot_manager=bm, data_dir=td)
+    ws._access_token = token
+    calls = []
+    orig = bm.register
+
+    def spy_register(qq, websocket):
+        calls.append(str(qq))
+        return orig(qq, websocket)
+
+    bm.register = spy_register
+    return ws, calls
+
+
+async def test_ws_connection_auth_end_to_end() -> None:
+    """回归 issue #103 P1: 走 _handle_connection 的鉴权调用点
+    (此前只测了 _token_ok 方法本身, 调用点少传 configured 的 TypeError 没抓到)。"""
+    hdr = {"x-self-id": "4242", "x-client-role": "Universal"}
+    # 1) 正确 Bearer → 注册
+    with tempfile.TemporaryDirectory() as td:
+        ws, calls = _ws_server_with_token("s3cret", td)
+        conn = _FakeWSConn({**hdr, "authorization": "Bearer s3cret"})
+        await ws._handle_connection(conn)
+        assert calls == ["4242"], calls
+        assert conn.closed is None
+    # 2) 错误 token → 1008 拒绝且不注册
+    with tempfile.TemporaryDirectory() as td:
+        ws, calls = _ws_server_with_token("s3cret", td)
+        conn = _FakeWSConn({**hdr, "authorization": "Bearer wrong"})
+        await ws._handle_connection(conn)
+        assert calls == []
+        assert conn.closed == (1008, "invalid access token")
+    # 3) 查询参数 → 放行
+    with tempfile.TemporaryDirectory() as td:
+        ws, calls = _ws_server_with_token("s3cret", td)
+        conn = _FakeWSConn(hdr, "/ws?access_token=s3cret")
+        await ws._handle_connection(conn)
+        assert calls == ["4242"] and conn.closed is None
+    # 4) 配置了 token 但未提供 → 拒绝
+    with tempfile.TemporaryDirectory() as td:
+        ws, calls = _ws_server_with_token("s3cret", td)
+        conn = _FakeWSConn(hdr)
+        await ws._handle_connection(conn)
+        assert calls == [] and conn.closed[0] == 1008
+    # 5) 未配置 token(默认空) → 不校验直接放行
+    with tempfile.TemporaryDirectory() as td:
+        ws, calls = _ws_server_with_token("", td)
+        conn = _FakeWSConn({**hdr, "authorization": "Bearer whatever"})
+        await ws._handle_connection(conn)
+        assert calls == ["4242"]
+    print("[Y9] WS 连接鉴权端到端(调用点回归) OK")
+
+
+def test_usage_window_month_boundary() -> None:
+    """回归 issue #103 P2: /用量 7d 在每月 1~6 日不得抛 ValueError。"""
+    from datetime import datetime
+
+    from mohobot.utils.time_utils import TZ_UTC8
+    from plugins.usage_stats.main import Plugin
+
+    now = datetime(2026, 11, 1, 15, 0, tzinfo=TZ_UTC8)  # 月初(触发日)
+    expect = datetime(2026, 10, 26, 0, 0, tzinfo=TZ_UTC8).timestamp()
+    assert Plugin._since_ts(now, 7) == expect
+    assert Plugin._since_ts(now, 1) == datetime(2026, 11, 1, 0, 0, tzinfo=TZ_UTC8).timestamp()
+    now2 = datetime(2026, 10, 31, 9, 0, tzinfo=TZ_UTC8)  # 月末
+    assert Plugin._since_ts(now2, 7) == datetime(2026, 10, 25, 0, 0, tzinfo=TZ_UTC8).timestamp()
+    print("[Y10] 用量窗口月初/跨月 OK")
+
+
+async def test_usage_command_window_frozen_clock() -> None:
+    """P3-1 加固(审查发现): 冻结时钟走 /用量 7d 命令路径, 断言
+    _load_records 收到的窗口起点 == _since_ts(冻结now, 7)。
+    冻结在月初, 调用点若回退成 now.day - 6 会当场 ValueError——
+    任何一天都能杀掉该变异(此前只有每月 1~6 日 CI 才能抓到)。"""
+    import datetime as dtmod
+    from datetime import datetime
+
+    from mohobot.models.onebot import Event
+    from mohobot.utils.time_utils import TZ_UTC8
+    from plugins.usage_stats.main import Plugin
+
+    frozen = datetime(2026, 11, 1, 13, 0, tzinfo=TZ_UTC8)
+
+    class FrozenDT(dtmod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz else frozen.replace(tzinfo=None)
+
+    orig = dtmod.datetime
+    dtmod.datetime = FrozenDT
+    try:
+        plug = Plugin()
+        plug._admin_ids = ["4242"]
+        captured = {}
+
+        def fake_load(since_ts):
+            captured["since"] = since_ts
+            return []
+
+        plug._load_records = fake_load
+        ev = Event.from_dict({
+            "post_type": "message", "message_type": "private", "user_id": 4242,
+            "message_id": 9, "time": 1762000000,
+            "message": [{"type": "text", "data": {"text": "/用量 7d"}}],
+            "sender": {"user_id": 4242, "nickname": "x"}})
+        handled, reply = await plug.on_message("bot_001", ev, {})
+        assert handled is True
+        expect = frozen.replace(hour=0, minute=0, second=0, microsecond=0)
+        expect = (expect - dtmod.timedelta(days=6)).timestamp()
+        assert captured["since"] == expect, captured["since"]
+        assert "没有用量记录" in (reply or "")
+    finally:
+        dtmod.datetime = orig
+    print("[Y11] /用量 7d 命令路径冻结时钟回归 OK")
