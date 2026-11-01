@@ -199,6 +199,15 @@ knowledge:
 # 数据同步: /sync-songs 或 scripts/sync_vcpedia.py(全量/增量, Anubis PoW 自动处理)。
 # 识别命中时会在消息交给 LLM 前, 把「介绍 + 词/曲/混/调等 + 完整歌词」
 # 紧跟用户消息下方注入(仅请求级, 不写入 context)。
+# ── 每日 LLM token 配额(群聊/私聊分开) ─────────────────────
+# 计 total_tokens(prompt+completion), 每日 0 点(UTC+8)重置;
+# 群聊按群号累计, 私聊按 (bot, 用户) 累计; 管理员豁免。
+# 触顶后不调用 LLM, 直接回复"今日额度已用完"提示。0 表示不限。
+quota:
+  enabled: false
+  group_daily_tokens: 700000
+  private_daily_tokens: 150000
+
 music_knowledge:
   enabled: true
   song_database:

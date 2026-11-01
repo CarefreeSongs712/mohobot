@@ -441,6 +441,21 @@ class PersonaABConfig:
 
 
 @dataclass
+class QuotaConfig:
+    """每日 LLM token 配额（群聊 / 私聊分开）。
+
+    - 计 total_tokens（prompt+completion），每日 0 点（UTC+8）重置；
+    - 群聊按群号累计；私聊按 (bot_id, 用户 QQ) 累计；
+    - 管理员（GlobalConfig.admins）不受限；
+    - enabled=False（默认）时完全关闭，行为与旧版本一致。
+    """
+
+    enabled: bool = False
+    group_daily_tokens: int = 700_000
+    private_daily_tokens: int = 150_000
+
+
+@dataclass
 class GlobalConfig:
     """Top-level global configuration."""
     admins: list[int] = field(default_factory=list)  # 全局管理员 QQ 号(封禁/插件命令共用)
@@ -467,6 +482,8 @@ class GlobalConfig:
     tts: TTSConfig = field(default_factory=TTSConfig)
     # 虚拟歌手知识库(RAG): embedding 语义检索 + 可选 rerank, LLM 工具接入
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    # 每日 LLM token 配额(群聊/私聊分别限额, 超限跳过 LLM 并提示)
+    quota: QuotaConfig = field(default_factory=QuotaConfig)
     # 歌曲知识库(识别 + LLM 前注入; song_database/crawler/关键词文件)
     music_knowledge: dict = field(default_factory=dict)
     # 戳一戳全局兜底文案(bot 私有 touch_replies 优先, 都为空时用内置默认)
@@ -519,6 +536,7 @@ class GlobalConfig:
         emotion_raw = raw.get("emotion", {})
         tts_raw = raw.get("tts", {})
         knowledge_raw = raw.get("knowledge", {})
+        quota_raw = raw.get("quota", {}) or {}
 
         # 旧配置迁移: agent.music_knowledge / agent.reflex.touch_replies
         # 曾嵌在已删除的 agent: 段下, 读到旧键时搬到顶层并重写配置文件
@@ -710,6 +728,11 @@ class GlobalConfig:
                 search_top_n=max(1, int(knowledge_raw.get("search_top_n", 5))),
                 max_chars_per_result=max(100, int(knowledge_raw.get("max_chars_per_result", 800))),
             ),
+            quota=QuotaConfig(
+                enabled=bool(quota_raw.get("enabled", False)),
+                group_daily_tokens=max(0, int(quota_raw.get("group_daily_tokens", 700_000) or 0)),
+                private_daily_tokens=max(0, int(quota_raw.get("private_daily_tokens", 150_000) or 0)),
+            ),
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
@@ -886,6 +909,11 @@ class GlobalConfig:
                 "search_top_n": self.knowledge.search_top_n,
                 "max_chars_per_result": self.knowledge.max_chars_per_result,
             },
+            "quota": {
+                "enabled": self.quota.enabled,
+                "group_daily_tokens": self.quota.group_daily_tokens,
+                "private_daily_tokens": self.quota.private_daily_tokens,
+            },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),
             "log_dir": self.log_dir,
@@ -1054,6 +1082,11 @@ class GlobalConfig:
                 "search_top_k": self.knowledge.search_top_k,
                 "search_top_n": self.knowledge.search_top_n,
                 "max_chars_per_result": self.knowledge.max_chars_per_result,
+            },
+            "quota": {
+                "enabled": self.quota.enabled,
+                "group_daily_tokens": self.quota.group_daily_tokens,
+                "private_daily_tokens": self.quota.private_daily_tokens,
             },
             "music_knowledge": dict(self.music_knowledge or {}),
             "touch_replies": list(self.touch_replies),

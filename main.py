@@ -362,6 +362,12 @@ class MohobotApplication:
             )
 
         # 6. Initialize message handler
+        from mohobot.services.quota import DailyTokenQuota
+
+        self._token_quota = DailyTokenQuota(
+            self._config,
+            Path(self._config.data_dir) / "stats" / "llm_usage.jsonl",
+        )
         self._message_handler = MessageHandler(
             ws_server=None,  # Will be set after WS server creation
             context_manager=self._context_manager,
@@ -377,6 +383,7 @@ class MohobotApplication:
             tts_service=self._tts_service,
             persona_service=self._persona_service,
             persona_ab_service=self._persona_ab_service,
+            quota_service=self._token_quota,
         )
         self._message_handler.set_history_barrier(self._history_barrier)
 

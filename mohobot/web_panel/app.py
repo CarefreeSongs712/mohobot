@@ -516,6 +516,16 @@ class WebPanel:
                             setattr(cfg.knowledge, k, sv)
                         continue
                     setattr(cfg.knowledge, k, v)
+            if "quota" in data:
+                quota_data = data["quota"] or {}
+                if "enabled" in quota_data:
+                    cfg.quota.enabled = bool(quota_data["enabled"])
+                for key in ("group_daily_tokens", "private_daily_tokens"):
+                    if key in quota_data:
+                        try:
+                            setattr(cfg.quota, key, max(0, int(quota_data[key])))
+                        except (TypeError, ValueError):
+                            logger.warning(f"Web panel: 忽略非法 quota.{key}={quota_data[key]!r}")
             # 顶层 admins(封禁/插件命令共用管理员)
             if "admins" in data and isinstance(data["admins"], list):
                 cfg.admins = [int(a) for a in data["admins"] if str(a).isdigit()]

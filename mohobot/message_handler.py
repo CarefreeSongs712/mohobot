@@ -67,8 +67,10 @@ class MessageHandler:
         tts_service=None,
         persona_service=None,
         persona_ab_service=None,
+        quota_service=None,
     ):
         self._persona_ab = persona_ab_service
+        self._quota = quota_service
         self._ws = ws_server
         self._persona_service = persona_service
         self._ctx_mgr = context_manager
@@ -572,6 +574,23 @@ class MessageHandler:
         state["count"] += 1
         return state["count"] >= self._AUTO_REPLY_REPEAT_LIMIT
 
+    async def _quota_block_notice(self, bot_id: str, event: MessageEvent) -> str | None:
+        """每日 token 配额判定: 触顶返回提示文本; 未启用/未触顶返回 None。"""
+        quota = getattr(self, "_quota", None)
+        if quota is None:
+            return None
+        try:
+            notice = await quota.check(bot_id, event)
+        except Exception as e:  # 配额统计异常不应阻断正常对话
+            logger.warning(f"quota check failed: {e}")
+            return None
+        if notice:
+            logger.info(
+                f"Daily token quota exceeded: bot={bot_id} "
+                f"type={event.message_type} user={event.user_id}"
+            )
+        return notice
+
     async def _handle_message(self, bot_id: str, event: MessageEvent, raw: dict) -> None:
         """Process a message event through the pipeline."""
         text_preview = extract_plain_text(event.message)[:80]
@@ -716,6 +735,12 @@ class MessageHandler:
         # (群 gate 已放行 ping; 被 ban 用户已被前段 precheck 过滤)
         if self._is_ping_text(event):
             await self._send_reply(bot_id, event, "PONG")
+            return
+
+        # ── 每日 token 配额: 触顶不调用 LLM, 直接回提示(管理员豁免) ──
+        quota_notice = await self._quota_block_notice(bot_id, event)
+        if quota_notice:
+            await self._send_reply(bot_id, event, quota_notice)
             return
 
         # ── LLM path ──
