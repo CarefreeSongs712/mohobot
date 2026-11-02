@@ -6,7 +6,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import math
+
 import yaml
+
+
+def _finite_or(value: object, default: float) -> float:
+    """float() 转换 + NaN/Inf 防护: 非法值回退默认(temperature 载入专用)。
+
+    WebUI 可把 "nan"/"inf" 存进配置; NaN 一路传给 OpenAI 兼容接口会整请求 400。
+    """
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
 
 
 # ── Global Config ─────────────────────────────────────────────
@@ -22,6 +36,11 @@ class ServerConfig:
     # 已废弃: 出站队列满时现在立即抛 OutboundQueueFullError, 不再等待。
     # 字段保留仅为兼容既有配置文件, 修改它不会改变行为。
     outbound_enqueue_timeout: float = 2.0
+    # 反向 WebSocket 鉴权 token(OneBot v11): 空=不校验(默认, 兼容旧部署)。
+    # 非空时客户端须以 Authorization: Bearer <token> 头或 ?access_token= 查询参数
+    # 提供相同 token, 否则握手后立即以 1008 关闭。对应业内实现
+    # (go-cqhttp / NapCat / LLOneBot 的 access_token 语义)。
+    access_token: str = ""
 
 
 @dataclass
@@ -116,6 +135,11 @@ class LLMConfig:
     #   direct         = 把图片原始内容随文本一起发给主模型(要求 chat 模型本身支持视觉,
     #                    可省一次视觉模型调用; 请求失败会自动回退 describe)
     vision_mode: str = "describe"
+    # 实验开关: true 时首条 system 仅保留稳定内容(人设/语言约束/TTS 模板),
+    # 发送者/感知/情感/时间/新闻/歌曲注解移到历史之后的尾部 system——
+    # 保住 DeepSeek/OpenAI 前缀缓存(见 scripts/usage_hit_rate.py)。
+    # false = 旧行为(全部拼进首条 system)。测试验证后再考虑翻转默认值。
+    stable_system_prefix: bool = False
 
     # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
     models: list[str] = field(default_factory=lambda: [
@@ -535,6 +559,7 @@ class GlobalConfig:
                 outbound_interval=server_raw.get("outbound_interval", 0.5),
                 outbound_maxsize=server_raw.get("outbound_maxsize", 100),
                 outbound_enqueue_timeout=server_raw.get("outbound_enqueue_timeout", 2.0),
+                access_token=str(server_raw.get("access_token", "") or ""),
             ),
             llm=LLMConfig(
                 chat_model=llm_raw.get("chat_model", "deepseek-chat"),
@@ -545,7 +570,7 @@ class GlobalConfig:
                 chat_provider=str(llm_raw.get("chat_provider", "") or "").strip(),
                 vision_provider=str(llm_raw.get("vision_provider", "") or "").strip(),
                 emotion_provider=str(llm_raw.get("emotion_provider", "") or "").strip(),
-                chat_temperature=llm_raw.get("chat_temperature", 0.7),
+                chat_temperature=_finite_or(llm_raw.get("chat_temperature", 0.7), 0.7),
                 frequency_penalty=float(llm_raw.get("frequency_penalty", 0.0) or 0.0),
                 presence_penalty=float(llm_raw.get("presence_penalty", 0.0) or 0.0),
                 vision_model=llm_raw.get("vision_model", "qwen-vl-plus"),
@@ -554,14 +579,15 @@ class GlobalConfig:
                 # 空/缺失时保留默认人物特征提示词
                 vision_prompt=(llm_raw.get("vision_prompt") or "").strip() or LLMConfig().vision_prompt,
                 vision_max_tokens=int(llm_raw.get("vision_max_tokens", 2048)),
-                vision_temperature=float(llm_raw.get("vision_temperature", 0.3)),
+                vision_temperature=_finite_or(llm_raw.get("vision_temperature", 0.3), 0.3),
                 vision_mode=_normalize_vision_mode(llm_raw.get("vision_mode")),
+                stable_system_prefix=bool(llm_raw.get("stable_system_prefix", False)),
                 summarize_temperature=float(llm_raw.get("summarize_temperature", 0.3)),
                 summarize_max_tokens=int(llm_raw.get("summarize_max_tokens", 4096)),
                 emotion_model=str(llm_raw.get("emotion_model", "") or ""),
                 emotion_base_url=str(llm_raw.get("emotion_base_url", "") or ""),
                 emotion_api_key=str(llm_raw.get("emotion_api_key", "") or ""),
-                emotion_temperature=float(llm_raw.get("emotion_temperature", 0.3)),
+                emotion_temperature=_finite_or(llm_raw.get("emotion_temperature", 0.3), 0.3),
                 emotion_max_tokens=int(llm_raw.get("emotion_max_tokens", 512)),
                 models=[str(m) for m in (llm_raw.get("models") or [
                     "DeepSeek-V4-Flash", "Qwen3-8B", "mimo-v2.5",
@@ -721,6 +747,7 @@ class GlobalConfig:
                 "outbound_interval": self.server.outbound_interval,
                 "outbound_maxsize": self.server.outbound_maxsize,
                 "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
+                "access_token": self.server.access_token,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,
@@ -741,6 +768,7 @@ class GlobalConfig:
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
                 "vision_mode": self.llm.vision_mode,
+                "stable_system_prefix": self.llm.stable_system_prefix,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,
@@ -888,6 +916,7 @@ class GlobalConfig:
                 "outbound_interval": self.server.outbound_interval,
                 "outbound_maxsize": self.server.outbound_maxsize,
                 "outbound_enqueue_timeout": self.server.outbound_enqueue_timeout,
+                "access_token": self.server.access_token,
             },
             "llm": {
                 "chat_model": self.llm.chat_model,
@@ -908,6 +937,7 @@ class GlobalConfig:
                 "vision_max_tokens": self.llm.vision_max_tokens,
                 "vision_temperature": self.llm.vision_temperature,
                 "vision_mode": self.llm.vision_mode,
+                "stable_system_prefix": self.llm.stable_system_prefix,
                 "summarize_temperature": self.llm.summarize_temperature,
                 "summarize_max_tokens": self.llm.summarize_max_tokens,
                 "emotion_model": self.llm.emotion_model,

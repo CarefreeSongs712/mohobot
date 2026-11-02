@@ -1616,8 +1616,9 @@ async function saveGlobalConfig() {
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
     llm_excluded_groups: (document.getElementById('cfg-llm_excluded_groups')?.value || '')
       .split(',').map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number),
-    usage_excluded_models: (document.getElementById('cfg-usage_excluded_models')?.value || '')
-      .split(',').map(s => s.trim()).filter(Boolean),
+    // usage_excluded_models: 面板暂无输入项(渲染缺失), 此处不得发送该键——
+    // 旧实现每次保存都发 [] 把后端已配置的排除名单清空(静默丢配置)。
+    // 后端对缺失键跳过; 补上 UI 输入项后再恢复发送。
   };
   try {
     await apiJSON('/api/config', { method: 'PUT', body: { data } });
@@ -2691,9 +2692,9 @@ function fmtBanTime(t) {
 }
 
 function banRecordHtml(r) {
-  const reason = r.reason && r.reason !== '无理由' ? ` - <span class="dim">${r.reason}</span>` : '';
+  const reason = r.reason && r.reason !== '无理由' ? ` - <span class="dim">${esc(r.reason)}</span>` : '';
   return `<div class="form-row" style="justify-content:space-between">
-    <span>👤 ${r.uid} — ${fmtBanTime(r.time)}${reason}</span>
+    <span>👤 ${esc(r.uid)} — ${fmtBanTime(r.time)}${reason}</span>
     <button class="btn btn-sm" onclick="banRemove('${r.uid}')">删除</button></div>`;
 }
 

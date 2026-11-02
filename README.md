@@ -367,6 +367,7 @@ group_recent_msgs_count: 10                   # 群聊最近消息条数(回复�
 
 - **AI 总结压缩**：上下文满 `context_trim_at_rounds` 轮时，把最早的 `context_trim_remove_rounds` 轮交给 LLM 总结（复用全局 chat 模型，prompt 要求"全局概要 + 重点轮次浓缩"），总结作为 `role="summary"` 的块插入对话最前；总结块视为 1 轮参与后续再总结；总结失败（API 不可用）自动降级为直接裁剪
 - **时间压缩**：满轮压缩时会**顺带**把超过 `context_summary_age_hours`（默认 3h）的旧对话一并收走（两个前缀取更长者）；另有后台周期任务按 `context_summary_sweep_interval_minutes`（默认 30 分钟）扫描群聊 main 与私聊当前活动会话，把超龄旧对话交给 AI 总结；已压缩过的会话距上次压缩不足 `context_summary_min_interval_hours`（默认 24h）且未超触发轮数时不重复压缩；周期压缩总结失败会保留数据待下次重试（不裁剪）
+- **缓存成本提示**：压缩会重写历史头部，使 LLM 前缀缓存（DeepSeek/OpenAI 的 prompt cache）从该点整段失效；在意输入成本的长会话可调大 `context_summary_sweep_interval_minutes` 与 `context_summary_min_interval_hours`
 - **群聊最近消息**：MessageHandler 内存缓冲每群最近 N 条消息（含未 @bot 的，单条截断 80 字），生成回复时临时注入 prompt，**不写入上下文文件、不参与总结压缩**
 
 ### 数据库配置

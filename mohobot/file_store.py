@@ -205,7 +205,8 @@ async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, 
             return []
 
         async with aiofiles.open(path, "r", encoding="utf-8") as f:
-            # Read from end using seek for efficiency
+            # 注: 当前实现为整文件读入后取尾部(不是 seek); 大文件场景
+            # 调用方(chat_manager)应优先用 review loader 的增量索引。
             content = await f.read()
 
     lines = [line.strip() for line in content.split("\n") if line.strip()]

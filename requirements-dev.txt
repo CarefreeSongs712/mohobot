@@ -1,6 +1,6 @@
 -r requirements.txt
 
-# Keep the CI test toolchain reproducible on Python 3.10 and 3.12.
+# Keep the CI test toolchain reproducible on Python 3.12 (the only supported version).
 pytest==8.4.2
 pytest-asyncio==1.4.0
 # 并行跑用例: 本地全量 80s → ~17s(8 核); CI 2~4 核也能明显加速

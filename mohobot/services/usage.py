@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+
+from loguru import logger
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,15 @@ class UsageRecorder:
             cached = int(getattr(details, "cached_tokens", 0) or 0)
             if not cached:
                 cached = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+            # 命中率观测(审查提案 C-1): 布局改造前后靠这条日志与
+            # scripts/usage_hit_rate.py 量化 prompt cache 收益。
+            prompt_total = int(getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
+            if prompt_total or cached:
+                pct = (cached * 100 // prompt_total) if prompt_total else 0
+                logger.debug(
+                    f"[llm-cache] bot={bot_id} module={module} kind={kind} "
+                    f"prompt={prompt_total} cached={cached} hit={pct}%"
+                )
             record = {
                 "time": time.time(),
                 "request_id": request_id or uuid.uuid4().hex,
