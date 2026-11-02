@@ -959,6 +959,10 @@ class MessageHandler:
     _QUOTE_FAIL_TTL = 60.0      # 解析失败缓存 60 秒
     _QUOTE_CACHE_MAX = 500
     _QUOTE_MAX_LEN = 500        # 引用内容展示上限(防 prompt 膨胀)
+    # 单回合分段总量熔断: 正常回复只有个位数段, LLM 偶发退化为复读输出时
+    # 一次生成可产生数千段, 全部入队会以限速节奏连续刷屏数小时;
+    # 超限后剩余分段截断不再发送, 只在日志里标注截断数。
+    _MAX_SEGMENTS_PER_TURN = 20
 
     def _extract_reply_id(self, event: MessageEvent) -> str:
         """取消息里引用(reply)段的消息 id(无/非法返回 "")。"""
@@ -1494,6 +1498,7 @@ class MessageHandler:
         first_sent = False
         sent_counter = [0]   # 实际发出的段数; 尝试数由 attempted 单独累计
         attempted = 0
+        cap_dropped = 0      # 达到分段熔断上限后被截断、未尝试发送的段数
         diagnostic: LLMDiagnostic | None = None
         # Issue #57: 模型可能把"检查约束/编写回复/字数检查"写成无标签正文。
         # 这类块只出现在回复开头且被分段逻辑拆成多气泡直发用户, 因此在流式阶段
@@ -1543,6 +1548,12 @@ class MessageHandler:
             flushed = self._flush_ready_segments(buffer)
             buffer = flushed["rest"]
             for seg in flushed["segments"]:
+                if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                    # 熔断: 流必须继续消费完, 但剩余分段不再发送
+                    if cap_dropped == 0:
+                        self._warn_segment_cap(bot_id, event)
+                    cap_dropped += 1
+                    continue
                 attempted += 1
                 first_sent = await self._send_segment(
                     bot_id, event, seg, first_sent,
@@ -1559,6 +1570,7 @@ class MessageHandler:
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
         rest, tts_text = artifact_filter.finish()
         full_reply += rest
+        cap_note = f" (segment cap: -{cap_dropped})" if cap_dropped else ""
         if reasoning_suppress:
             # 整条清洗后单条发出; 自查内容不能进 TTS
             from mohobot.utils.reply_filter import strip_unwrapped_reasoning
@@ -1584,10 +1596,11 @@ class MessageHandler:
                 self._log_reply(
                     bot_id, event, segments=sent_counter[0],
                     text=f"{cleaned}\n{diagnostic}" if cleaned else str(diagnostic),
-                    note=" (diagnostic)", attempted=attempted)
+                    note=f" (diagnostic){cap_note}", attempted=attempted)
                 return diagnostic
             self._log_reply(
-                bot_id, event, segments=sent_counter[0], text=cleaned, attempted=attempted)
+                bot_id, event, segments=sent_counter[0], text=cleaned,
+                note=cap_note, attempted=attempted)
             return cleaned
         if rest.strip():
             attempted += 1
@@ -1604,7 +1617,7 @@ class MessageHandler:
             self._log_reply(
                 bot_id, event, segments=sent_counter[0],
                 text=f"{full_reply}\n{diagnostic}" if full_reply else str(diagnostic),
-                note=" (diagnostic)", attempted=attempted)
+                note=f" (diagnostic){cap_note}", attempted=attempted)
             return diagnostic
         # 所有展示段都被逐段丢弃(first_sent 保持 False)时用户什么都没看到,
         # 标注/无标注朗读都不能念; 纯 <tts>(full_reply 为空)保留只发语音。
@@ -1616,7 +1629,7 @@ class MessageHandler:
         # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
         self._log_reply(
             bot_id, event, segments=sent_counter[0], text=full_reply,
-            attempted=attempted)
+            note=cap_note, attempted=attempted)
 
         logger.debug(
             f"Streamed reply done: {sent_counter[0]} segment(s), "
@@ -1810,6 +1823,9 @@ class MessageHandler:
 
         collected: 可选列表, 逐段追加**实际发出**的文本(填充词清理/OOC 丢弃后),
         供无标注概率朗读使用; 不用过滤前全文。
+
+        分段数量受 _MAX_SEGMENTS_PER_TURN 熔断: 超限的剩余分段不再发送,
+        [reply] 日志以 ``(segment cap: -N)`` 标注截断数。
         """
         from mohobot.utils.cq_code import extract_plain_text
         from mohobot.utils.reply_filter import is_foreign_language_reply
@@ -1830,16 +1846,30 @@ class MessageHandler:
         first_sent = False
         sent_counter = [0]
         flushed = self._flush_ready_segments(text)
-        attempted = len(flushed["segments"])
+        attempted = 0
+        cap_dropped = 0
         for seg in flushed["segments"]:
+            if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                if cap_dropped == 0:
+                    self._warn_segment_cap(bot_id, event)
+                cap_dropped += 1
+                continue
+            attempted += 1
             first_sent = await self._send_segment(
                 bot_id, event, seg, first_sent, quote=quote, check_foreign=False,
                 collected=collected, sent_counter=sent_counter)
         if flushed["rest"].strip():
-            attempted += 1
-            first_sent = await self._send_segment(
-                bot_id, event, flushed["rest"], first_sent, quote=quote,
-                check_foreign=False, collected=collected, sent_counter=sent_counter)
+            if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                if cap_dropped == 0:
+                    self._warn_segment_cap(bot_id, event)
+                cap_dropped += 1
+            else:
+                attempted += 1
+                first_sent = await self._send_segment(
+                    bot_id, event, flushed["rest"], first_sent, quote=quote,
+                    check_foreign=False, collected=collected, sent_counter=sent_counter)
+        if cap_dropped:
+            note = f"{note} (segment cap: -{cap_dropped})"
         if attempted and not sent_counter[0]:
             logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
         self._log_reply(
@@ -1847,6 +1877,13 @@ class MessageHandler:
             note=note if first_sent else note + " (dropped)",
         )
         return first_sent
+
+    def _warn_segment_cap(self, bot_id: str, event) -> None:
+        """分段熔断首次触发的告警(每回合至多一条); 截断总数只进 [reply] 备注。"""
+        logger.warning(
+            f"[segment-cap] bot={bot_id} chat={self._chat_label(event)} "
+            f"单回合分段达到上限 {self._MAX_SEGMENTS_PER_TURN}, 本轮剩余分段不再发送"
+        )
 
     def _apply_ooc_guard(self, seg: str, event, *, check_foreign: bool = True) -> tuple[str, str]:
         """OOC 三防统一入口: 返回 (清理后文本, 丢弃原因)。
