@@ -246,7 +246,7 @@ class Plugin:
         gid = str(group_id)
         cached = _GROUP_NAME_CACHE.get(gid)
         now = time.time()
-        if cached and now - cached[1] < _GROUP_NAME_TTL:
+        if cached and cached[1] > now:
             return cached[0]
         ws = self._ws_server
         if ws is None:
@@ -262,9 +262,9 @@ class Plugin:
                 name = str(info.get("group_name") or "").strip()
             # 失败也缓存空值 60s, 避免每次消息都打 API
             ttl = _GROUP_NAME_TTL if name else 60
-            _GROUP_NAME_CACHE[gid] = (name, now)
+            _GROUP_NAME_CACHE[gid] = (name, now + ttl)
             return name or None
         except Exception as e:
             logger.debug(f"获取群名失败: {e}")
-            _GROUP_NAME_CACHE[gid] = ("", now)
+            _GROUP_NAME_CACHE[gid] = ("", now + 60)
             return None

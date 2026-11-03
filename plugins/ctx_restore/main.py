@@ -120,6 +120,12 @@ class Plugin:
         if dropped:
             entries = entries[-limit:]
 
+        # 顺手清扫全部过期待确认条目(用过 /恢复 后不再发言的用户
+        # 条目最多 200 条聊天内容, 否则永久驻留)
+        now_ts = time.time()
+        for k in [k for k, v in self._pending.items()
+                  if isinstance(v, dict) and time.time() > v.get("expires", 0)]:
+            del self._pending[k]
         self._pending[key] = {"entries": entries, "clean": clean,
                               "expires": time.time() + PENDING_TTL}
 
@@ -192,6 +198,15 @@ class Plugin:
             logger.info(f"ctx_restore diagnostic: referral {reply_id} segments="
                         f"{[s.get('type') if isinstance(s, dict) else type(s).__name__ for s in message]}, "
                         f"forward-id empty, types={fwd_types}")
+            # 非合并转发(如引用单条普通消息): 落回单条被引用消息,
+            # 不能落空——否则下方 for node in msgs 抛 UnboundLocalError,
+            # 异常被框架吞掉后用户无任何回复(issue 审查 P2)。
+            sender = data.get("sender") or {}
+            return [{
+                "sender": {"user_id": sender.get("user_id"),
+                           "nickname": sender.get("card") or sender.get("nickname")},
+                "message": message,
+            }]
         if fwd_id:
             tried = []
             for params in ({"message_id": int(reply_id)}, {"id": fwd_id}):
@@ -221,10 +236,10 @@ class Plugin:
                 logger.info(f"ctx_restore diagnostic: forward({fwd_id}) "
                             f"nodes={len(msgs)} {node_desc}")
                 import json as _json
-                raw_dump = _json.dumps(msgs[:6], ensure_ascii=False, default=str)
-                for ch in range(0, min(len(raw_dump), 7200), 1800):
-                    logger.info(f"ctx_restore raw dump [{ch}]: "
-                                f"{raw_dump[ch:ch+1800]}")
+                # 隐私: 用户私聊内容最多 600 字符且降 DEBUG, 不进 INFO 日志
+                raw_dump = _json.dumps(msgs[:2], ensure_ascii=False, default=str)
+                logger.debug("ctx_restore raw dump[:600]: "
+                             f"{raw_dump[:600]}")
             except Exception:
                 pass
         # 展开嵌套 forward: 节点本身是嵌套合并转发时递归拉一层
@@ -247,15 +262,6 @@ class Plugin:
         if len(expanded) != len(msgs):
             logger.info(f"ctx_restore diagnostic: expanded {len(msgs)} -> {len(expanded)} nodes")
         return expanded
-        # 没找到 forward id: 落回单条被引用消息(当前行为)
-        sender = data.get("sender") or {}
-        logger.info(f"ctx_restore diagnostic: fallback single-message restore "
-                    f"for referral {reply_id}, sender uid={sender.get('user_id')}")
-        return [{
-            "sender": {"user_id": sender.get("user_id"),
-                       "nickname": sender.get("card") or sender.get("nickname")},
-            "message": message,
-        }]
 
     @staticmethod
     def _resp_data(resp) -> Any:

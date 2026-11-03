@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -51,7 +52,8 @@ class Plugin:
         try:
             path = self._records_path()
             if path.exists():
-                return json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
         except Exception as e:
             logger.warning(f"读取占卜记录失败: {e}")
         return {}
@@ -60,7 +62,10 @@ class Plugin:
         try:
             path = self._records_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(records, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)  # 原子写: 崩溃不再截断 data/divination.json
         except Exception as e:
             logger.warning(f"保存占卜记录失败: {e}")
 

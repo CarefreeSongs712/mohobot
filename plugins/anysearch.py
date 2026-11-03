@@ -19,6 +19,8 @@ from loguru import logger
 
 
 class Plugin:
+    # 多 bot 群里 /搜索 只由抽签选中的一只 bot 响应(每只都会调一次付费 API)
+    global_triggers = {"/搜索", "/search"}
     """Anysearch 实时联网搜索: 通用搜索 / 正文提取 / 批量搜索。"""
 
     info = {
