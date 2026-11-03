@@ -117,6 +117,11 @@ llm:
   emotion_api_key: ""        # 或设置环境变量 MOHOBOT_EMOTION_API_KEY
   emotion_temperature: 0.3
   emotion_max_tokens: 512
+  summarize_temperature: 0.3   # 会话总结温度
+  summarize_max_tokens: 4096   # 会话总结 max_tokens
+  vision_prompt: ""            # 识图转述提示词(空 = 内置默认)
+  vision_max_tokens: 2048      # 识图转述 max_tokens
+  vision_temperature: 0.3
 
   # 可用模型列表(WebUI 预填, 供识图模型等下拉选择; 可增删)
   models:
@@ -135,6 +140,40 @@ news:
   inject_header: ""        # 留空用内置表头
   default_ttl_days: 14     # 条目默认有效期(天), <=0 表示不自动过期
   tool_enabled: true       # 是否注册 news_recent / news_search 工具
+  collector_enabled: false            # B 站动态采集器(默认关)
+  collector_uids: []                  # 关注的 B 站 UID 列表
+  collector_interval_seconds: 1800.0  # 轮询间隔(秒, 最小 300)
+  collector_max_items_per_uid: 5      # 单 UID 每轮最多提交条数
+  collector_ttl_days: 14.0            # 采集条目有效期(天)
+
+# ── 全局标量(节选) — 完整字段见 mohobot/models/config.py ──────
+context_summary_enabled: true        # AI 总结压缩总开关
+context_trim_at_rounds: 40           # 满多少轮触发一次压缩
+context_trim_remove_rounds: 15       # 每次把最早的多少轮交给 AI 总结
+group_recent_msgs_count: 10          # 群聊回复时临时注入的最近消息条数(0=关)
+usage_excluded_models: []            # 不计入用量统计的模型名列表
+
+# ── TTS 语音（可切换后端: http 自建 / minimax 云端） ─────────────
+tts:
+  enabled: false
+  backend: "http"                    # http = 自建合成服务; minimax = 云端(仅下线)
+  base_url: "http://127.0.0.1:9890"
+  api_key: ""                        # Bearer token; 或环境变量 MOHOBOT_TTS_API_KEY
+  convert_to_mp3: true               # wav → 本地 ffmpeg 转 mp3(仅 http 后端)
+  queue_maxsize: 16                  # 全局单飞行队列容量(修改需重启)
+  timeout: 60                        # 单次合成超时(秒)
+  tts_prompt_template: ""            # 朗读标注提示词(空 = 内置默认)
+  cmd_max_chars: 30                  # /tts 指令单条上限(管理员不受限)
+  cmd_cooldown: 120                  # /tts 指令冷却(秒)
+  untagged_tts_prob: 0.1             # 无标注回复的概率朗读(0 = 关闭)
+  model: "speech-2.8-hd"             # 以下仅 backend=minimax 时生效
+  voice_id: ""
+  speed: 1.0
+  vol: 1.0
+  pitch: 0
+  sample_rate: 32000
+  bitrate: 128000
+  format: "mp3"
 
 # ── 回复行为（系统级） ────────────────────────────────────────
 reply:
