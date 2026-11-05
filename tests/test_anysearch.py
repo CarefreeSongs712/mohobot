@@ -127,17 +127,26 @@ async def test_search_plugin() -> None:
         message = [{"type": "text", "data": {"text": ""}}]
 
     class FakeClient:
+        def __init__(self):
+            self.calls = []
+
         async def search(self, query, max_results=None):
+            self.calls.append(("search", query))
             return f"SEARCH:{query}"
 
         async def extract(self, url):
+            self.calls.append(("extract", url))
             return f"EXTRACT:{url}"
 
         async def batch_search(self, queries):
+            self.calls.append(("batch", len(queries)))
             return f"BATCH:{len(queries)}"
 
+    # PR #110 复审 P3: global_triggers 插在 docstring 前会让 Plugin.__doc__ 丢失
+    assert Plugin.__doc__, "插件类 docstring 丢失(面板 description 会为空)"
     p = Plugin()
-    Plugin.inject_anysearch_client(FakeClient())
+    fake = FakeClient()
+    Plugin.inject_anysearch_client(fake)
 
     async def run(text):
         ev = FakeEvent()
@@ -159,6 +168,13 @@ async def test_search_plugin() -> None:
     # 非触发词
     handled, _ = await run("随便聊聊")
     assert handled is False
+    # 命令边界必须与框架 global_triggers 一致: "/搜索foo" 不得被插件当作命令
+    # (否则框架不去重, 多 bot 群各自调用一次付费 API)
+    before = len(fake.calls)
+    for text in ("/搜索foo", "/searchfoo", "/搜索中"):
+        handled, _ = await run(text)
+        assert handled is False, f"{text} 不应被插件处理"
+    assert len(fake.calls) == before, fake.calls[before:]
     print("[4] /搜索 插件 OK")
 
 

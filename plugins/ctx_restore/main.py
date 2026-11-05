@@ -123,8 +123,13 @@ class Plugin:
         # 顺手清扫全部过期待确认条目(用过 /恢复 后不再发言的用户
         # 条目最多 200 条聊天内容, 否则永久驻留)
         now_ts = time.time()
-        for k in [k for k, v in self._pending.items()
-                  if isinstance(v, dict) and time.time() > v.get("expires", 0)]:
+        stale = []
+        for k, v in self._pending.items():
+            expires = v.get("expires") if isinstance(v, dict) else None
+            # 坏/缺失 expires 的条目按过期处理; 非数字不得让比较抛 TypeError
+            if not isinstance(expires, (int, float)) or now_ts > expires:
+                stale.append(k)
+        for k in stale:
             del self._pending[k]
         self._pending[key] = {"entries": entries, "clean": clean,
                               "expires": time.time() + PENDING_TTL}
@@ -201,7 +206,8 @@ class Plugin:
             # 非合并转发(如引用单条普通消息): 落回单条被引用消息,
             # 不能落空——否则下方 for node in msgs 抛 UnboundLocalError,
             # 异常被框架吞掉后用户无任何回复(issue 审查 P2)。
-            sender = data.get("sender") or {}
+            sender_raw = data.get("sender")
+            sender = sender_raw if isinstance(sender_raw, dict) else {}
             return [{
                 "sender": {"user_id": sender.get("user_id"),
                            "nickname": sender.get("card") or sender.get("nickname")},

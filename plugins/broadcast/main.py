@@ -189,9 +189,8 @@ class Plugin:
 
         content = pending["content"]
         if self._running:
-            # 先查运行态再清 pending: 否则进行中确认会把待发内容
-            # 静默丢弃, 用户还得重新预览(审查 P3)
-            self._pending = None
+            # 保留 pending: 运行中确认不得静默丢弃新的预览内容,
+            # 广播结束后用户可直接重试 /广播确认(复审 P3)。
             return (True, "⚠️ 已有广播任务在进行中, 请稍后再试。")
         self._pending = None
         self._running = True

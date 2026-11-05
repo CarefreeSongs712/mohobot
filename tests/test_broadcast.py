@@ -150,3 +150,30 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+async def test_confirm_keeps_pending_while_running() -> None:
+    """复审 P3: 广播进行中确认不得静默清空新的 pending 预览。"""
+    import time as _time
+
+    Plugin = _load_plugin()
+    Plugin._ws_server = FakeWS({}, {})
+    plugin = Plugin()
+    plugin._pending = {
+        "content": "内容", "bot_id": "", "scope": "全部",
+        "expire": _time.time() + 600, "by": ("bot_001", "private", "1"),
+    }
+    plugin._running = True
+    handled, reply = await plugin._confirm("bot_001", _make_event(), "", "全部")
+    assert handled is True
+    assert "稍后再试" in (reply or "")
+    assert plugin._pending is not None, "运行中确认不应清空 pending"
+    print("[broadcast] running 时保留 pending OK")
+
+
+async def main() -> None:
+    await test_all_bots_dedup()
+    await test_single_bot_no_dedup()
+    await test_fail_fallback()
+    await test_confirm_keeps_pending_while_running()
+    print("\nALL BROADCAST TESTS PASSED")
+
