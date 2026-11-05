@@ -138,6 +138,8 @@ class Plugin:
             if not parts[1].isdigit() or int(parts[1]) <= 0:
                 return "❌ 条数必须是正整数。"
             count = int(parts[1])
+            if count > 500:
+                count = 500  # 防大群归档整载内存(jsonl_read_tail 非增量)
 
         target = resolve_by_history(self._data_dir, bot_id, chat_id)
         if target is None:

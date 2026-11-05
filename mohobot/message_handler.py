@@ -1207,26 +1207,6 @@ class MessageHandler:
 
     # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
 
-    async def _song_annotation_for_event(self, event: MessageEvent) -> str:
-        """识别消息中的歌曲并返回【歌曲信息】注解段(无命中返回 "")。
-
-        供 LLMService 注入。
-        消息原文(含图片描述)做识别; 库为空/失败 → 空串, 正常走 LLM。
-        """
-        if self._song_matcher is None:
-            return ""
-        try:
-            text = (extract_plain_text(event.message) or "").strip()
-            if not text:
-                return ""
-            match = self._song_matcher.match(text)
-            if match is None:
-                return ""
-            return match.build_annotation()
-        except Exception as e:
-            logger.debug(f"歌曲识别失败: {e}")
-            return ""
-
     async def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
         """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。
 

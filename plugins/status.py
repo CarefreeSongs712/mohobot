@@ -35,6 +35,10 @@ class Plugin:
         ],
     }
 
+    # 注入引用的类级默认: 装配顺序异常时 getattr 防御才不至 AttributeError
+    _bot_manager = None
+    _ws_server = None
+
     def __init__(self):
         self._start_time = time.time()
 
