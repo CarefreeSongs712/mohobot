@@ -63,13 +63,17 @@ class CommandHandler(Interceptor):
     def register_plugin_commands(self, commands: dict[str, str]) -> None:
         """Register commands provided by plugins, shown in /help output."""
         for name, desc in commands.items():
-            self._plugin_commands[name] = {"desc": desc, "plugin": "", "admin": False}
+            self._plugin_commands[name] = {
+                "desc": desc, "usage": "", "aliases": [],
+                "plugin": "", "admin": False, "category": "",
+            }
 
     def collect_plugin_commands(self, bot_id: str | None = None) -> dict[str, dict]:
         """Discover plugin commands from the plugin system (status hook).
 
-        返回 {name: {"desc", "plugin", "admin"}} — plugin=插件名(分组依据),
-        admin 仅读取插件声明的 info.commands[].admin 字段。
+        返回 {name: {"desc", "usage", "aliases", "plugin", "admin", "category"}} —
+        plugin=插件名(分组依据), category 可由插件声明 help_category 覆盖;
+        admin 读取 info.commands[].admin, 描述中的"(管理员)"也会在 /help 侧识别。
         传 bot_id 时跳过 per-bot 绑定(bind_bots)不包含该 bot 的插件命令。
         """
         discovered: dict[str, dict] = {}
@@ -87,6 +91,9 @@ class CommandHandler(Interceptor):
                         continue
                 info = meta.get("info") or {}
                 cmd_list = info.get("commands") or []
+                category = ""
+                if inst is not None:
+                    category = str(getattr(inst.__class__, "help_category", "") or "")
                 for cmd in cmd_list:
                     if isinstance(cmd, dict):
                         cmd_name = cmd.get("name", "")
@@ -94,11 +101,17 @@ class CommandHandler(Interceptor):
                             continue
                         discovered[cmd_name] = {
                             "desc": cmd.get("desc", ""),
+                            "usage": cmd.get("usage", ""),
+                            "aliases": cmd.get("aliases", []),
                             "plugin": name,
                             "admin": bool(cmd.get("admin", False)),
+                            "category": category,
                         }
                     elif isinstance(cmd, str):
-                        discovered[cmd] = {"desc": "", "plugin": name, "admin": False}
+                        discovered[cmd] = {
+                            "desc": "", "usage": "", "aliases": [],
+                            "plugin": name, "admin": False, "category": category,
+                        }
         return discovered
 
     def _all_plugin_commands(self, bot_id: str | None = None) -> dict[str, dict]:
@@ -415,91 +428,312 @@ class CommandHandler(Interceptor):
         "ban-help": "封禁系统使用指南",
     }
 
+    # /help 固定分类顺序(内置 → 会话 → 情感 → 封禁 → 工具 → 娱乐 → 管理)
+    _HELP_CATEGORY_ORDER = ("内置", "会话", "情感", "封禁", "工具", "娱乐", "管理")
+    _HELP_BUILTIN_CATEGORY = {
+        "sess": "会话", "forget": "会话", "hist": "会话", "clear": "会话",
+        "help": "内置", "tts": "内置", "ab": "内置",
+        "persona": "管理",
+    }
+    _HELP_EMOTION_COMMANDS = {
+        "好感度", "关系阶段", "好感排行", "负好感排行",
+        "设置好感", "设置亲密", "设置态度", "重置好感", "查看好感", "情感重置",
+    }
+    # 插件没有声明 help_category 时的兜底分类
+    _HELP_PLUGIN_CATEGORY = {
+        "anysearch": "工具", "usage_stats": "工具", "chat_manager": "工具",
+        "broadcast": "工具", "ctx_restore": "工具", "perception": "工具",
+        "song_sync": "工具", "bilibiliparse": "工具", "status": "工具",
+        "welcome": "工具",
+        "divination": "娱乐", "neteasemusic": "娱乐", "wifepicker": "娱乐",
+        "qzone": "娱乐", "meme_stealer": "娱乐", "six66": "娱乐",
+        "praise": "娱乐",
+        "relationship": "管理", "proactive_chat": "管理",
+    }
+    _HELP_ADMIN_TAG = re.compile(r"[（(][^）)]*管理员[^）)]*[）)]")
+    _HELP_ALIAS_TAG = re.compile(r"[（(]\s*别名\s*[:：]\s*([^）)]+)[）)]")
+    _HELP_USAGE_PREFIX = re.compile(r"^(?:用法|用途)\s*[:：]\s*")
+
+    @classmethod
+    def _parse_help_desc(
+        cls, desc: str, *, admin: bool = False, usage: str = "",
+        aliases: list[str] | None = None,
+    ) -> tuple[str, str, list[str], bool]:
+        """从描述中拆出别名/管理员标记, 避免把权限写进正文。"""
+        desc = str(desc or "").strip()
+        alias_list = [str(a).strip() for a in (aliases or []) if str(a).strip()]
+        match = cls._HELP_ALIAS_TAG.search(desc)
+        if match:
+            alias_list.extend(
+                part.strip()
+                for part in re.split(r"[/,，、\s]+", match.group(1))
+                if part.strip()
+            )
+            desc = cls._HELP_ALIAS_TAG.sub("", desc).strip()
+        if cls._HELP_ADMIN_TAG.search(desc):
+            admin = True
+            desc = cls._HELP_ADMIN_TAG.sub("", desc).strip()
+        usage = cls._HELP_USAGE_PREFIX.sub("", str(usage or "").strip()).strip()
+        # 卡片每条命令只占一行说明; 多行用法压成 " / ", 避免行高计算与实际
+        # 绘制不一致导致内容越界。
+        desc = re.sub(r"\s*[\r\n]+\s*", " ", desc).strip()
+        usage = re.sub(r"\s*[\r\n]+\s*", " / ", usage).strip()
+        # 去重并保持顺序
+        alias_list = list(dict.fromkeys(a.lstrip("/") for a in alias_list if a))
+        return desc, usage, alias_list, admin
+
     def _build_help_sections(self, bot_id: str | None = None) -> list[dict]:
-        """构建 /help 的分组数据: 系统 / 封禁管理 / 各插件。"""
-        sections = []
-        # 系统(内置命令)
-        builtin = []
+        """构建 /help 分组数据: 固定分类顺序 + 插件名作为组标题。"""
+        sections: list[dict] = []
+
+        builtin_by_cat: dict[str, list[dict]] = {
+            cat: [] for cat in self._HELP_CATEGORY_ORDER
+        }
         for name, (_, help_text) in self._commands.items():
             if name == "help":
                 continue  # help 本身在标题下方说明
-            desc = help_text.split("|")[0].strip()
-            builtin.append({"name": name, "desc": desc, "admin": name == "persona"})
-        sections.append({"title": "系统", "commands": builtin})
+            desc, _, usage = help_text.partition("|")
+            desc, usage, aliases, admin = self._parse_help_desc(
+                desc, admin=name == "persona", usage=usage,
+            )
+            cat = "情感" if name in self._HELP_EMOTION_COMMANDS else (
+                self._HELP_BUILTIN_CATEGORY.get(name, "内置")
+            )
+            builtin_by_cat[cat].append({
+                "name": name, "desc": desc, "usage": usage,
+                "aliases": aliases, "admin": admin,
+            })
+        for cat in self._HELP_CATEGORY_ORDER:
+            if builtin_by_cat[cat]:
+                sections.append({
+                    "title": cat, "category": cat,
+                    "commands": sorted(builtin_by_cat[cat], key=lambda c: c["name"]),
+                })
 
-        # 封禁管理(管理员)
-        ban_cmds = [
-            {"name": name, "desc": self._BAN_CMD_DESC.get(name, ""),
-             "admin": name not in ("banlist", "ban-help")}
-            for name in ("ban", "ban-all", "pass", "pass-all",
-                         "dec-ban", "dec-ban-all", "dec-pass", "dec-pass-all",
-                         "ban-reset", "banlist", "ban-enable", "ban-disable", "ban-help")
-        ]
-        sections.append({"title": "封禁管理 (管理员)", "commands": ban_cmds})
+        # 封禁管理
+        ban_cmds = []
+        for name in ("ban", "ban-all", "pass", "pass-all",
+                     "dec-ban", "dec-ban-all", "dec-pass", "dec-pass-all",
+                     "ban-reset", "banlist", "ban-enable", "ban-disable", "ban-help"):
+            desc, usage, aliases, admin = self._parse_help_desc(
+                self._BAN_CMD_DESC.get(name, ""),
+                admin=name not in ("banlist", "ban-help"),
+            )
+            ban_cmds.append({
+                "name": name, "desc": desc, "usage": usage,
+                "aliases": aliases, "admin": admin,
+            })
+        sections.append({"title": "封禁", "category": "封禁", "commands": ban_cmds})
 
-        # 插件命令: 按插件名分组
-        by_plugin: dict[str, list[dict]] = {}
+        # 插件命令: (分类, 插件名) 分组
+        by_plugin: dict[tuple[str, str], list[dict]] = {}
         for name, meta in self._all_plugin_commands(bot_id).items():
             plugin = meta.get("plugin") or "其他"
-            by_plugin.setdefault(plugin, []).append({
-                "name": name,
-                "desc": meta.get("desc", ""),
-                "admin": bool(meta.get("admin", False)),
+            category = str(meta.get("category") or "").strip()
+            if category not in self._HELP_CATEGORY_ORDER:
+                category = self._HELP_PLUGIN_CATEGORY.get(plugin, "工具")
+            desc, usage, aliases, admin = self._parse_help_desc(
+                meta.get("desc", ""),
+                admin=bool(meta.get("admin", False)),
+                usage=meta.get("usage", ""),
+                aliases=meta.get("aliases") or [],
+            )
+            by_plugin.setdefault((category, plugin), []).append({
+                "name": name, "desc": desc, "usage": usage,
+                "aliases": aliases, "admin": admin,
             })
-        for plugin in sorted(by_plugin):
+        for (category, plugin) in sorted(
+            by_plugin,
+            key=lambda key: (self._HELP_CATEGORY_ORDER.index(key[0]), key[1]),
+        ):
             sections.append({
-                "title": f"插件 · {plugin}",
-                "commands": sorted(by_plugin[plugin], key=lambda c: c["name"]),
+                "title": f"{category} · {plugin}",
+                "category": category,
+                "commands": sorted(by_plugin[(category, plugin)], key=lambda c: c["name"]),
             })
+
+        # 同一分类内: 内置组("会话"/"情感"等)排在插件组之前
+        sections.sort(
+            key=lambda sec: (
+                self._HELP_CATEGORY_ORDER.index(sec["category"]),
+                0 if sec["title"] == sec["category"] else 1,
+                sec["title"],
+            )
+        )
         return sections
 
-    def _help_text(self, bot_id: str | None = None) -> str:
-        """文本版帮助(图片渲染失败/无法发送时的降级)。"""
-        from mohobot.utils.image_card import HELP_INFO_TEXT
+    def _build_help_pages(
+        self,
+        sections: list[dict],
+        *,
+        is_admin: bool,
+        category: str = "",
+        page_size: int = 30,
+    ) -> tuple[list[list[dict]], int, int, int]:
+        """按分类/权限/页大小切分帮助卡片。
 
-        lines = ["可用指令: 交流群 398870315 | https://7121099.xyz/"]
-        for name, (_, help_text) in self._commands.items():
-            lines.append(f"  /{name} — {help_text}")
-        for name, meta in sorted(self._all_plugin_commands(bot_id).items()):
-            desc = meta.get("desc") or "插件指令"
-            lines.append(f"  /{name} — {desc}")
+        返回 (pages, total, available, hidden_admin)。普通用户会隐藏管理员
+        命令并给出折叠条数; 管理员看到全量。
+        """
+        selected = [
+            sec for sec in sections
+            if not category or sec.get("category") == category
+        ]
+        total = sum(len(sec.get("commands") or []) for sec in selected)
+
+        visible: list[dict] = []
+        hidden = 0
+        for sec in selected:
+            cmds = list(sec.get("commands") or [])
+            if not is_admin:
+                kept = [cmd for cmd in cmds if not cmd.get("admin")]
+                hidden += len(cmds) - len(kept)
+                cmds = kept
+            if cmds:
+                visible.append({**sec, "commands": cmds})
+
+        pages: list[list[dict]] = []
+        current: list[dict] = []
+        count = 0
+
+        def flush() -> None:
+            nonlocal current, count
+            if current:
+                pages.append(current)
+                current = []
+                count = 0
+
+        for sec in visible:
+            cmds = sec["commands"]
+            if len(cmds) > page_size:
+                flush()
+                chunks = [
+                    cmds[i:i + page_size] for i in range(0, len(cmds), page_size)
+                ]
+                for index, chunk in enumerate(chunks):
+                    title = sec["title"] + ("（续）" if index else "")
+                    page_sec = {**sec, "title": title, "commands": chunk}
+                    if index < len(chunks) - 1:
+                        pages.append([page_sec])
+                    else:
+                        # 最后一段留在 current, 允许后续分组继续填满本页
+                        current = [page_sec]
+                        count = len(chunk)
+                        if count >= page_size:
+                            flush()
+                continue
+            if count and count + len(cmds) > page_size:
+                flush()
+            current.append(sec)
+            count += len(cmds)
+            if count >= page_size:
+                flush()
+        flush()
+        return pages, total, total - hidden, hidden
+
+    def _help_contacts(self) -> dict:
+        """状态卡插件配置里的管理员/交流群/须知, 缺省回退全局 admins。"""
+        cfg = None
+        if self._plugin_system:
+            try:
+                cfg = self._plugin_system.get_plugin_config("status")
+            except Exception:
+                cfg = None
+        from mohobot.utils.contact_info import resolve_contacts
+        return resolve_contacts(cfg, fallback_admins=sorted(self._admins))
+
+    def _help_text(self, bot_id: str | None = None, category: str = "") -> str:
+        """文本版帮助(图片渲染失败/无法发送时的降级)。"""
+        contacts = self._help_contacts()
+        lines = [
+            f"可用指令: 交流群 {contacts['group']} | {contacts['url']}",
+            "  /help — 显示此帮助（/help <分类> 只看某一类）",
+        ]
+        for sec in self._build_help_sections(bot_id):
+            if category and sec.get("category") != category:
+                continue
+            lines.append(f"[{sec['title']}]")
+            for cmd in sec["commands"]:
+                marker = "[管理员] " if cmd.get("admin") else ""
+                line = f"  {marker}/{cmd['name']} — {cmd['desc']}"
+                if cmd.get("usage"):
+                    line += f"（用法：{cmd['usage']}）"
+                if cmd.get("aliases"):
+                    line += "（别名：" + " ".join(cmd["aliases"]) + "）"
+                lines.append(line)
         return "\n".join(lines)
 
     async def _cmd_help(
         self, bot_id: str, event: MessageEvent, args: list[str]
     ) -> str | None:
-        """Show help — 渲染成 PIL 图片发送, 失败降级为文本。"""
+        """Show help — 渲染成 PIL 图片发送, 失败降级为文本。
+
+        `/help <分类>` 只显示该分类; 普通用户的管理员命令折叠为一行提示,
+        管理员看到全量。单页超过 30 条时自动拆图。
+        """
         import base64
         import os
 
         from mohobot.utils.image_card import render_help_card
 
-        img_path = None
+        category = args[0].strip() if args else ""
+        if category.lower() in ("all", "全部"):
+            category = ""
+        if category and category not in self._HELP_CATEGORY_ORDER:
+            return (
+                f"未知分类：{category}。可用分类："
+                + "、".join(self._HELP_CATEGORY_ORDER)
+            )
+
+        sections = self._build_help_sections(bot_id)
+        pages, total, available, hidden = self._build_help_pages(
+            sections,
+            is_admin=self._is_admin(event),
+            category=category,
+        )
+        if not pages:
+            return f"「{category}」下暂无可用指令。" if category else "暂无可用指令。"
+        if self._ws is None:
+            return self._help_text(bot_id, category)
+
+        paths: list[str] = []
         try:
-            if self._ws is not None:
-                sections = self._build_help_sections(bot_id)
-                img_path = render_help_card(sections)
-                if img_path is not None:
-                    # 仅发送帮助卡片图片(群号/网址已渲染在卡片图内), 不附带文字。
-                    with open(img_path, "rb") as image:
-                        encoded = base64.b64encode(image.read()).decode("ascii")
-                    message = [
-                        {"type": "image", "data": {"file": f"base64://{encoded}"}},
-                    ]
-                    if isinstance(event, GroupMessageEvent):
-                        await self._ws.send_group_msg(bot_id, str(event.group_id), message)
-                    else:
-                        await self._ws.send_private_msg(bot_id, str(event.user_id), message)
-                    return None  # 帮助卡片图片已发送
+            contacts = self._help_contacts()
+            for index, page_sections in enumerate(pages, 1):
+                img_path = render_help_card(
+                    page_sections,
+                    page=index,
+                    pages=len(pages),
+                    total_commands=total,
+                    available_commands=available,
+                    hidden_admin=hidden,
+                    contacts=contacts,
+                )
+                if img_path is None:
+                    raise RuntimeError("help card render returned None")
+                paths.append(img_path)
+
+            for img_path in paths:
+                # 仅发送帮助卡片图片(群号/网址已渲染在卡片图内), 不附带文字。
+                with open(img_path, "rb") as image:
+                    encoded = base64.b64encode(image.read()).decode("ascii")
+                message = [
+                    {"type": "image", "data": {"file": f"base64://{encoded}"}},
+                ]
+                if isinstance(event, GroupMessageEvent):
+                    await self._ws.send_group_msg(bot_id, str(event.group_id), message)
+                else:
+                    await self._ws.send_private_msg(bot_id, str(event.user_id), message)
+            return None  # 帮助卡片图片已发送
         except Exception as e:
             logger.warning(f"渲染或发送帮助图片失败, 降级为文本: {e}")
+            return self._help_text(bot_id, category)
         finally:
-            if img_path is not None:
+            for img_path in paths:
                 try:
                     os.remove(img_path)
                 except OSError:
                     pass
-        return self._help_text(bot_id)
 
     async def _cmd_clear(
         self, bot_id: str, event: MessageEvent, args: list[str]
