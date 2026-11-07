@@ -254,3 +254,12 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 | 5 | 真实验收 | RAG embedding 实调、B站采集器风控观察、`inject_window_days` 过滤验证、真实 bad-case 库（REQ-6/7 剩余） |
 | 6 | 环境工程 | 代理变量启动净化（P3，本机仍需 `env -u` 绕过）；Ruff 存量 F401/F841/F821 ×7；#383 `websockets` 类型注解 |
 | 7 | ImageCache per-bot vision | 缓存按图共享描述导致 per-bot vision 仅首识别生效（既有 P3，需单独排期） |
+
+### 5.3 架构演进（待设计）
+
+| # | 事项 | 现状与目标 | 关键改造 / 验收 | 状态 |
+|---|---|---|---|---|
+| 1 | **插件可更换 + 适配 AstrBot 插件市场（类似生态）** | **缘由（维护者 2026-11-07）**：当前插件是「写死」的，不能简单地增减/替换。现状：插件需手工放进 `plugins/`，没有安装/卸载/升级入口；单文件插件拿不到自己的 `_conf_schema.json`（schema 路径取 `entry_path.parent`，单文件时落在 `plugins/`）；个别插件与内置工具/框架强耦合（如 snitch 既被 `llm_tools` 注册又被插件系统加载，只能靠幂等兜底）；没有版本/来源/依赖元数据，无法从市场安装或替换。<br>**目标**：插件包化（安装到 `data/plugins/`，仓库内仅保留内置插件）+ 标准元数据（name/version/author/repo/deps/schema）+ 安装/卸载/升级/启用禁用 + 市场索引/检索，兼容或适配 AstrBot 插件格式与市场。 | **关键改造**：加载器支持目录/包/单文件与可配置 schema 路径；AstrBot 插件 API → mohobot API 适配层（事件/消息段/配置/LLM 工具/生命周期）；第三方依赖安装与隔离；第三方代码信任/权限边界；热重载与失败回滚。<br>**验收**：能用一个最小 AstrBot 兼容插件跑通「市场安装 → 面板配置 → 运行 → 升级 → 卸载」全链路；升级/卸载失败可回滚；不破坏现有内置插件、`plugins/meme_stealer` 等目录插件与 LLM 工具注册；面板能自动渲染其配置 schema。 | ⏳ 待设计（P2/架构演进，不阻塞当前发布） |
+
+> 备注：AstrBot 插件规范的参考形态为「`main.py` 入口类 + `metadata.yaml`/`_conf_schema.json` + 市场仓库索引」，具体字段与安装协议需在设计中对照核实，避免只做表面兼容。
+
