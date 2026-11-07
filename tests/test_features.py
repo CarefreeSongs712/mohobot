@@ -98,8 +98,9 @@ async def test_status_image_render() -> None:
         "system_uptime_secs": 867694,
         "cpu": {"count": 8, "average": 43.0, "cores": [23, 41, 67, 12, 88, 5, 34, 76]},
         "memory": {
-            "total": 8 * 1024**3, "used": 5 * 1024**3,
-            "cache": 2 * 1024**3, "free": 1024**3, "percent": 71.0,
+            "total": 8 * 1024**3, "used": 4 * 1024**3,
+            "cache": int(1.7 * 1024**3), "free": int(2.3 * 1024**3),
+            "percent": 71.0, "app_percent": 50.0,
             "swap_total": 2 * 1024**3, "swap_used": 0, "swap_percent": 0.0,
         },
         "disks": [{"mount": "/", "used": 40 * 1024**3,

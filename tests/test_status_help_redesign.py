@@ -225,6 +225,193 @@ async def test_help_category_route_and_multipage() -> None:
     print("[7] /help 分类路由与多页发送 OK")
 
 
+GB = 1024 ** 3
+
+
+def test_memory_conservation_psutil_7_and_5() -> None:
+    """psutil 7.x used 含 cache; 5.x 不含。两条路径都必须三分量守恒。"""
+    import plugins.status.main as status_main
+
+    class VM:
+        def __init__(self, total, available, used, buffers, cached):
+            self.total = total
+            self.available = available
+            self.used = used
+            self.buffers = buffers
+            self.cached = cached
+
+    class Swap:
+        total = 0
+        used = 0
+        percent = 0.0
+
+    class FakePsutil:
+        def __init__(self, version, vm):
+            self.version_info = version
+            self._vm = vm
+
+        def virtual_memory(self):
+            return self._vm
+
+        def swap_memory(self):
+            return Swap()
+
+    old = status_main.HAS_PSUTIL
+    status_main.HAS_PSUTIL = True
+    try:
+        # 7.x: used=80, cache=40 → app=40, available=20
+        vm7 = VM(100 * GB, 20 * GB, 80 * GB, 5 * GB, 35 * GB)
+        with patch.object(status_main, "psutil", FakePsutil((7, 0, 0), vm7)):
+            data7 = status_main._read_memory()
+        assert data7["used"] == 40 * GB
+        assert data7["cache"] == 40 * GB
+        assert data7["free"] == 20 * GB
+        assert data7["used"] + data7["cache"] + data7["free"] == 100 * GB
+        assert round(data7["percent"]) == 80
+        assert round(data7["app_percent"]) == 40
+
+        # 5.x: used=50 不含 cache=40; 可用用 free=10 避免与缓存重复
+        vm5 = VM(100 * GB, 60 * GB, 50 * GB, 5 * GB, 35 * GB)
+        with patch.object(status_main, "psutil", FakePsutil((5, 9, 0), vm5)):
+            data5 = status_main._read_memory()
+        assert data5["used"] == 50 * GB
+        assert data5["cache"] == 40 * GB
+        assert data5["free"] == 10 * GB
+        assert data5["used"] + data5["cache"] + data5["free"] == 100 * GB
+        assert round(data5["percent"]) == 90
+        assert round(data5["app_percent"]) == 50
+    finally:
+        status_main.HAS_PSUTIL = old
+    print("[8] 内存三分量守恒(psutil 7.x/5.x) OK")
+
+
+async def test_status_render_and_send_fallbacks() -> None:
+    import plugins.status.main as status_main
+
+    class StatusEvent:
+        user_id = 2001
+        message = [{"type": "text", "data": {"text": "/status"}}]
+
+    class SendFailWS:
+        async def send_image(self, *args, **kwargs):
+            raise RuntimeError("offline send")
+
+    old_bm = status_main.Plugin._bot_manager
+    old_has = status_main.HAS_PSUTIL
+    status_main.Plugin._bot_manager = None
+    status_main.HAS_PSUTIL = False
+    try:
+        plugin = status_main.Plugin()
+        plugin.plugin_config = {
+            "admin_qqs": [], "community_group": "123", "help_url": "https://x/",
+        }
+
+        # 未注入 ws: 不应渲染, 直接文本
+        plugin._ws_server = None
+        with patch("mohobot.utils.status_card.render_status_card") as render:
+            handled, reply = await plugin.on_message("bot_001", StatusEvent(), {})
+        assert handled and "Mohobot 状态" in reply
+        render.assert_not_called()
+
+        # 渲染异常: 降级文本, 不冒泡
+        plugin._ws_server = SendFailWS()
+        with patch("mohobot.utils.status_card.render_status_card",
+                   side_effect=RuntimeError("render boom")):
+            handled, reply = await plugin.on_message("bot_001", StatusEvent(), {})
+        assert handled and "Mohobot 状态" in reply
+
+        # 发送失败: 降级文本并清理临时图
+        fd, path = tempfile.mkstemp(suffix=".png", prefix="status_fail_")
+        import os
+        os.close(fd)
+        with patch("mohobot.utils.status_card.render_status_card", return_value=path):
+            handled, reply = await plugin.on_message("bot_001", StatusEvent(), {})
+        assert handled and "Mohobot 状态" in reply
+        assert not Path(path).exists(), "发送失败也应清理临时图"
+    finally:
+        status_main.Plugin._bot_manager = old_bm
+        status_main.HAS_PSUTIL = old_has
+    print("[9] /status 渲染/发送降级与临时文件 OK")
+
+
+def test_help_text_admin_filter() -> None:
+    ch = CommandHandler(None, None, None)
+    full = ch._help_text()
+    limited = ch._help_text(is_admin=False)
+    assert "/persona" in full
+    assert "/persona" not in limited
+    assert "管理员指令已折叠" in limited
+    print("[10] 文本降级管理员折叠 OK")
+
+
+async def test_help_multipage_send_failure_no_duplicate() -> None:
+    class FailingWS:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_private_msg(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("second page failed")
+
+    ws = FailingWS()
+    ch = CommandHandler(None, None, ws)
+    ch.register_plugin_commands({f"cmd{i}": "x" for i in range(35)})
+
+    created: list[str] = []
+
+    def _fake_render(*args, **kwargs):
+        import os
+        fd, path = tempfile.mkstemp(suffix=".png", prefix="help_fail_")
+        os.close(fd)
+        Path(path).write_bytes(b"img")
+        created.append(path)
+        return path
+
+    with patch("mohobot.utils.image_card.render_help_card", side_effect=_fake_render):
+        reply = await ch._cmd_help("bot_001", FakeEvent(), ["工具"])
+    assert "已发送 1/2 页" in reply
+    assert "可用指令" not in reply, "已发页后不应再整段重发文本"
+    assert len(created) == 2
+    assert all(not Path(p).exists() for p in created)
+    print("[11] 多页发送失败不重复文本 OK")
+
+
+def test_help_detail_lines_separate() -> None:
+    from PIL import ImageDraw, ImageFont
+    from mohobot.utils import image_card
+
+    fonts = {size: ImageFont.load_default(size=size) for size in (12, 14, 17, 22)}
+    sections = [{
+        "title": "工具 · demo", "category": "工具",
+        "commands": [{
+            "name": "demo", "desc": "演示", "usage": "/demo <参数>",
+            "aliases": ["d", "演示别名"], "admin": False,
+        }],
+    }]
+    original = ImageDraw.ImageDraw.text
+    with patch.object(image_card, "find_cjk_font", return_value="mock-font"), \
+            patch.object(ImageFont, "truetype", side_effect=lambda path, size: fonts[size]), \
+            patch.object(ImageDraw.ImageDraw, "text", autospec=True, side_effect=original) as draw_text:
+        path = image_card.render_help_card(
+            sections, contacts={
+                "admins": ["1"], "group": "2", "url": "https://x/",
+            },
+        )
+    try:
+        calls = [
+            call for call in draw_text.call_args_list
+            if call.args[2].startswith("用法：") or call.args[2].startswith("别名：")
+        ]
+        assert len(calls) == 2
+        usage_call = next(c for c in calls if c.args[2].startswith("用法："))
+        alias_call = next(c for c in calls if c.args[2].startswith("别名："))
+        assert alias_call.args[1][1] == usage_call.args[1][1] + 20, "别名应独立一行"
+    finally:
+        Path(path).unlink()
+    print("[12] 用法/别名分行渲染 OK")
+
+
 async def main() -> None:
     test_contacts_resolution()
     test_status_bot_list_and_fallback()
@@ -233,6 +420,11 @@ async def main() -> None:
     test_help_pagination_and_category_filter()
     test_help_desc_parsing()
     await test_help_category_route_and_multipage()
+    test_memory_conservation_psutil_7_and_5()
+    await test_status_render_and_send_fallbacks()
+    test_help_text_admin_filter()
+    await test_help_multipage_send_failure_no_duplicate()
+    test_help_detail_lines_separate()
 
 
 if __name__ == "__main__":

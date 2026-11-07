@@ -289,13 +289,20 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     # ── 内存 ──
     y += 32
     mem_total = float(mem.get("total") or 0)
-    mem_used = float(mem.get("used") or 0)
+    # `used` 是应用占用(不含缓存); `percent` 是含缓存的整体占用率。
+    mem_app = float(mem.get("used") or 0)
     mem_cache = float(mem.get("cache") or 0)
-    mem_free = float(mem.get("free") or max(mem_total - mem_used - mem_cache, 0))
+    mem_free = float(mem.get("free") or max(mem_total - mem_app - mem_cache, 0))
+    mem_used_total = mem_app + mem_cache
     mem_pct = float(mem.get("percent") or 0)
+    mem_app_pct = float(
+        mem.get("app_percent")
+        if mem.get("app_percent") is not None
+        else ((mem_app / mem_total * 100.0) if mem_total else 0.0)
+    )
     draw.text(
         (x, y),
-        f"内存  {_fmt_gb(mem_used)} / {_fmt_gb(mem_total)}  ({mem_pct:.0f}%)",
+        f"内存  {_fmt_gb(mem_used_total)} / {_fmt_gb(mem_total)}  ({mem_pct:.0f}%)",
         font=section_font, fill=FG,
     )
     y += 26
@@ -303,16 +310,16 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     bar_h = 26
     _rounded_rect(draw, (x, y, x + bar_w, y + bar_h), bar_h // 2, TRACK)
     if mem_total > 0:
-        used_w = int(bar_w * min(mem_used / mem_total, 1.0))
-        cache_w = int(bar_w * min(mem_cache / mem_total, 1.0))
+        used_w = int(bar_w * min(mem_app / mem_total, 1.0))
+        cache_w = int(bar_w * min(mem_cache / mem_total, max(0.0, 1.0 - used_w / bar_w)))
         if used_w:
-            draw.rectangle((x, y, x + used_w, y + bar_h), fill=usage_color(mem_pct))
+            draw.rectangle((x, y, x + used_w, y + bar_h), fill=usage_color(mem_app_pct))
         if cache_w:
             draw.rectangle((x + used_w, y, x + min(used_w + cache_w, bar_w), y + bar_h), fill=CACHE)
     y += bar_h + 4
 
     legend_items = [
-        ("应用", mem_used, usage_color(mem_pct)),
+        ("应用", mem_app, usage_color(mem_app_pct)),
         ("缓存", mem_cache, CACHE),
         ("可用", mem_free, TRACK),
     ]
@@ -376,7 +383,7 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     bots = list(data.get("bots") or [])
     y += 16
     draw.text(
-        (x, y), f"Bot 连接  {len(bots)} / {len(bots)}",
+        (x, y), f"Bot 连接  {len(bots)}",
         font=section_font, fill=FG,
     )
     y += 28

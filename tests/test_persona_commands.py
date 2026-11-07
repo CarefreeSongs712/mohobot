@@ -137,7 +137,6 @@ class PersonaCommandTests(unittest.IsolatedAsyncioTestCase):
         text = self.handler._help_text()
         self.assertIn("[管理员]", text)
         self.assertIn("/persona get <bot_id> <QQ> <session_id>", text)
-        self.assertIn("/persona get <bot_id> <QQ> <session_id>", text)
 
     async def test_list_names_and_ids_never_contents(self):
         for group in (False, True):

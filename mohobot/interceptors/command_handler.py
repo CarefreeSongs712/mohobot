@@ -642,18 +642,33 @@ class CommandHandler(Interceptor):
         from mohobot.utils.contact_info import resolve_contacts
         return resolve_contacts(cfg, fallback_admins=sorted(self._admins))
 
-    def _help_text(self, bot_id: str | None = None, category: str = "") -> str:
-        """文本版帮助(图片渲染失败/无法发送时的降级)。"""
+    def _help_text(
+        self, bot_id: str | None = None, category: str = "",
+        is_admin: bool = True,
+    ) -> str:
+        """文本版帮助(图片渲染失败/无法发送时的降级)。
+
+        与图片路径保持同一权限口径: 普通用户不列出管理员命令, 只给折叠提示。
+        """
         contacts = self._help_contacts()
         lines = [
             f"可用指令: 交流群 {contacts['group']} | {contacts['url']}",
             "  /help — 显示此帮助（/help <分类> 只看某一类）",
         ]
+        hidden = 0
         for sec in self._build_help_sections(bot_id):
             if category and sec.get("category") != category:
                 continue
-            lines.append(f"[{sec['title']}]")
+            visible = []
             for cmd in sec["commands"]:
+                if not is_admin and cmd.get("admin"):
+                    hidden += 1
+                    continue
+                visible.append(cmd)
+            if not visible:
+                continue
+            lines.append(f"[{sec['title']}]")
+            for cmd in visible:
                 marker = "[管理员] " if cmd.get("admin") else ""
                 line = f"  {marker}/{cmd['name']} — {cmd['desc']}"
                 if cmd.get("usage"):
@@ -661,6 +676,8 @@ class CommandHandler(Interceptor):
                 if cmd.get("aliases"):
                     line += "（别名：" + " ".join(cmd["aliases"]) + "）"
                 lines.append(line)
+        if hidden:
+            lines.append(f"管理员指令已折叠：另有 {hidden} 条（管理员可见）")
         return "\n".join(lines)
 
     async def _cmd_help(
@@ -685,18 +702,20 @@ class CommandHandler(Interceptor):
                 + "、".join(self._HELP_CATEGORY_ORDER)
             )
 
+        is_admin = self._is_admin(event)
         sections = self._build_help_sections(bot_id)
         pages, total, available, hidden = self._build_help_pages(
             sections,
-            is_admin=self._is_admin(event),
+            is_admin=is_admin,
             category=category,
         )
         if not pages:
             return f"「{category}」下暂无可用指令。" if category else "暂无可用指令。"
         if self._ws is None:
-            return self._help_text(bot_id, category)
+            return self._help_text(bot_id, category, is_admin)
 
         paths: list[str] = []
+        sent_pages = 0
         try:
             contacts = self._help_contacts()
             for index, page_sections in enumerate(pages, 1):
@@ -724,10 +743,17 @@ class CommandHandler(Interceptor):
                     await self._ws.send_group_msg(bot_id, str(event.group_id), message)
                 else:
                     await self._ws.send_private_msg(bot_id, str(event.user_id), message)
+                sent_pages += 1
             return None  # 帮助卡片图片已发送
         except Exception as e:
             logger.warning(f"渲染或发送帮助图片失败, 降级为文本: {e}")
-            return self._help_text(bot_id, category)
+            if sent_pages:
+                # 已有页发出时不再整段重发文本, 避免重复刷屏。
+                return (
+                    f"帮助卡片发送失败（已发送 {sent_pages}/{len(paths)} 页），"
+                    "请稍后重试。"
+                )
+            return self._help_text(bot_id, category, is_admin)
         finally:
             for img_path in paths:
                 try:

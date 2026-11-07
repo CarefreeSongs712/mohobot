@@ -96,22 +96,33 @@ class Plugin:
             return (False, None)
 
         data = await self._collect_status(bot_id)
+        ws = getattr(self, "_ws_server", None)
+        if ws is None:
+            # 未装配发送端时不渲染, 避免生成后无法发送的临时文件残留。
+            return (True, _text_report(data))
+
         from mohobot.utils.status_card import render_status_card
 
-        img_path = await asyncio.to_thread(render_status_card, data)
-        if img_path is not None and getattr(self, "_ws_server", None) is not None:
+        try:
+            img_path = await asyncio.to_thread(render_status_card, data)
+        except Exception as e:
+            logger.warning(f"渲染状态图片失败, 降级为文本: {e}")
+            return (True, _text_report(data))
+        if img_path is None:
+            return (True, _text_report(data))
+
+        try:
+            chat_type, chat_id = _event_chat(event)
+            await ws.send_image(bot_id, chat_type, chat_id, img_path)
+            return (True, None)  # 已发送图片, 无需文本
+        except Exception as e:
+            logger.warning(f"发送状态图片失败, 降级为文本: {e}")
+            return (True, _text_report(data))
+        finally:
             try:
-                chat_type, chat_id = _event_chat(event)
-                await self._ws_server.send_image(bot_id, chat_type, chat_id, img_path)
-                return (True, None)  # 已发送图片, 无需文本
-            except Exception as e:
-                logger.warning(f"发送状态图片失败, 降级为文本: {e}")
-            finally:
-                try:
-                    os.remove(img_path)
-                except OSError:
-                    pass
-        return (True, _text_report(data))
+                os.remove(img_path)
+            except OSError:
+                pass
 
     async def on_notice(self, bot_id: str, event: Any, raw: dict) -> None:
         pass
@@ -204,20 +215,59 @@ def _read_cpu() -> dict[str, Any]:
 
 
 def _read_memory() -> dict[str, Any]:
+    """读取内存并保证「应用 + 缓存 + 可用 == 总量」。
+
+    psutil 7.x 的 Linux `used` 已经是 `total - available`（包含 cache），
+    而 5.x 的 `used` 不含 cache；只看 `used + cache` 会得到 0 可用。
+    这里按版本 + 关系判定 used 是否包含 cache，并在两种语义下都保证三分量守恒。
+    `used` 字段表示「应用」占用（不含缓存），`percent` 是含缓存的整体占用率。
+    """
     if not HAS_PSUTIL:
         return {}
     try:
         vm = psutil.virtual_memory()
-        cache = int(getattr(vm, "buffers", 0) or 0) + int(getattr(vm, "cached", 0) or 0)
-        used = int(getattr(vm, "used", 0) or 0)
-        total = int(getattr(vm, "total", 0) or 0)
-        free = max(total - used - cache, 0)
+        total = max(int(getattr(vm, "total", 0) or 0), 0)
+        available = min(max(int(getattr(vm, "available", 0) or 0), 0), total)
+        raw_used = min(max(int(getattr(vm, "used", 0) or 0), 0), total)
+        cache = max(
+            int(getattr(vm, "buffers", 0) or 0) + int(getattr(vm, "cached", 0) or 0),
+            0,
+        )
+        cache = min(cache, total)
+
+        version = tuple(getattr(psutil, "version_info", (0, 0, 0)) or ())
+        # 7.x 统一改为 total - available；关系判定兜住未带版本信息的替身。
+        used_includes_cache = version >= (7, 0, 0) or (raw_used + cache > total)
+        if used_includes_cache:
+            app = max(raw_used - cache, 0)
+            free = available
+        else:
+            # 5.x: used 不含 cache；available 含可回收缓存，若同时展示 cache
+            # 会重复计数，因此旧语义下「可用」用 free（总量 - 应用 - 缓存）。
+            app = raw_used
+            free = max(total - app - cache, 0)
+
+        # 守恒兜底: 极端/异常数据下优先保留 available, 再压缩 cache/app。
+        overflow = app + cache + free - total
+        if overflow > 0:
+            cache = max(cache - overflow, 0)
+            overflow = app + cache + free - total
+            if overflow > 0:
+                app = max(app - overflow, 0)
+                overflow = app + cache + free - total
+                if overflow > 0:
+                    free = max(free - overflow, 0)
+
+        used_total = app + cache
+        percent = (used_total / total * 100.0) if total else 0.0
+        app_percent = (app / total * 100.0) if total else 0.0
         data = {
             "total": total,
-            "used": used,
+            "used": app,
             "cache": cache,
             "free": free,
-            "percent": float(getattr(vm, "percent", 0) or 0),
+            "percent": percent,
+            "app_percent": app_percent,
             "swap_total": 0,
             "swap_used": 0,
             "swap_percent": 0.0,
@@ -304,8 +354,9 @@ def _text_report(data: dict[str, Any]) -> str:
         lines.append(f"CPU: {int(cpu.get('average') or 0)}% ({cpu.get('count')} 核: {cores})")
     if mem:
         lines.append(
-            f"内存: {_fmt_gb(mem.get('used'))}/{_fmt_gb(mem.get('total'))} "
-            f"({int(mem.get('percent') or 0)}%) · 缓存 {_fmt_gb(mem.get('cache'))}"
+            f"内存: 应用 {_fmt_gb(mem.get('used'))} / 总量 {_fmt_gb(mem.get('total'))} "
+            f"({int(mem.get('percent') or 0)}%) · 缓存 {_fmt_gb(mem.get('cache'))} "
+            f"· 可用 {_fmt_gb(mem.get('free'))}"
             + (
                 f" · Swap {_fmt_gb(mem.get('swap_used'))}/{_fmt_gb(mem.get('swap_total'))}"
                 if mem.get("swap_total") else " · Swap 未启用"

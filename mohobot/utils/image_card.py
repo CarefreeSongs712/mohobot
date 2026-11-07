@@ -142,14 +142,6 @@ def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = 
     return tmp_path
 
 
-HELP_GROUP_TEXT = "交流群 398870315"
-HELP_LINKS_TEXT = (
-    "介绍 / 使用须知  https://7121099.xyz/\n"
-    "管理员 3831097597"
-)
-HELP_INFO_TEXT = f"{HELP_GROUP_TEXT}\n{HELP_LINKS_TEXT}"
-
-
 def _fit_text(text: str, font, max_width: float) -> str:
     """按字体实际宽度截断并以 … 结尾。"""
     if max_width <= 0:
@@ -263,18 +255,18 @@ def render_help_card(
             desc = str(c.get("desc") or "").strip()
             usage = str(c.get("usage") or "").strip()
             aliases = _normalize_aliases(c.get("aliases"))
-            detail_parts = []
+            detail_lines = []
             if usage:
-                detail_parts.append(f"用法：{usage}")
+                detail_lines.append(f"用法：{usage}")
             if aliases:
-                detail_parts.append("别名：" + " ".join(aliases))
-            detail = " · ".join(detail_parts)
+                # 别名独立一行, 不与用法挤在同一条 detail 里。
+                detail_lines.append("别名：" + " ".join(aliases))
             items.append({
                 "name": name,
                 "desc": desc,
-                "detail": detail,
+                "detail_lines": detail_lines,
                 "admin": bool(c.get("admin")),
-                "h": body_line_h + (detail_line_h if detail else 0) + item_gap,
+                "h": body_line_h + len(detail_lines) * detail_line_h + item_gap,
             })
         prepared.append({"title": str(sec.get("title") or ""), "items": items})
 
@@ -367,9 +359,12 @@ def render_help_card(
                         (pill_x + 7, y + 2), "管理员",
                         font=small_font, fill=(45, 32, 16),
                     )
-                if item["detail"]:
-                    detail = _fit_text(item["detail"], small_font, col_width)
-                    draw.text((cx, y + body_line_h), detail, font=small_font, fill=dim)
+                for line_index, detail_line in enumerate(item["detail_lines"]):
+                    detail = _fit_text(detail_line, small_font, col_width)
+                    draw.text(
+                        (cx, y + body_line_h + line_index * detail_line_h),
+                        detail, font=small_font, fill=dim,
+                    )
             y += row_h
 
         y += section_gap - item_gap
