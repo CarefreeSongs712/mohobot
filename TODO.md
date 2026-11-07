@@ -238,7 +238,7 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 | # | 事项 | 说明 | 验证方式 | 状态 |
 |---|---|---|---|---|
 | 1 | **`8e2d493` 待发布** | #108 流式尾段熔断绕过修复已推 `dev`（CI 4/4），尚未发布到 `main`（生产 `e990fa0` 不含）。下次 `dev → main` release 必须带上 | 部署后查 `[segment-cap]` 触发行为与 `[reply]` 截断备注 | ⏳ |
-| 2 | **release note / tag 补记** | #109 发布说明漏列 #101/#102/#104/#105 与直推测试 `68ffbd9`；且无 `release-2026-11-02` tag | tag 建立 + 正文补记或新 release 说明引用 | ⏳ P2 流程 |
+| 2 | **release note / tag 补记** | #109 发布说明漏列 #101/#102/#104/#105 与直推测试 `68ffbd9`；`release-2026-11-02` tag 已于 2026-11-07 补建（指向 `e990fa0`；注释中「生产回滚点 0217eb2」指上一稳定 main，沿用既有惯例） | tag 已建立，后续发布沿用同一惯例 | ✅ 2026-11-07 |
 | 3 | **#105 复审遗留 P3×3** | 行数校验/quick_check 无独立测试（变异存活）；未断言旧 `-wal/-shm` 备份；Windows 下测试可能红（打开句柄 `os.replace` 失败） | 补守卫测试/断言后变异应变红 | ⏳ P3 |
 | 4 | **#102 Pi A/B 缓存实验** | 测试服 `stable_system_prefix` 已是 `true`，缺 false 基线（先 A 后 B 或 B→A 均可，同会话 ≥40~60 次 chat/阶段）；判定标准已给 | `scripts/usage_hit_rate.py --by module` 两阶段差异 | ⏳ |
 | 5 | **`emotion.burst_model` 默认值决策** | 默认仍 `DeepSeek-V4-Flash`（`models` 列表同）——是否迁离属行为变更 | 单独 PR + 回归 | ⏳ 待决策 |
@@ -262,4 +262,3 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 | 1 | **插件可更换 + 适配 AstrBot 插件市场（类似生态）** | **缘由（维护者 2026-11-07）**：当前插件是「写死」的，不能简单地增减/替换。现状：插件需手工放进 `plugins/`，没有安装/卸载/升级入口；单文件插件拿不到自己的 `_conf_schema.json`（schema 路径取 `entry_path.parent`，单文件时落在 `plugins/`）；个别插件与内置工具/框架强耦合（如 snitch 既被 `llm_tools` 注册又被插件系统加载，只能靠幂等兜底）；没有版本/来源/依赖元数据，无法从市场安装或替换。<br>**目标**：插件包化（安装到 `data/plugins/`，仓库内仅保留内置插件）+ 标准元数据（name/version/author/repo/deps/schema）+ 安装/卸载/升级/启用禁用 + 市场索引/检索，兼容或适配 AstrBot 插件格式与市场。 | **关键改造**：加载器支持目录/包/单文件与可配置 schema 路径；AstrBot 插件 API → mohobot API 适配层（事件/消息段/配置/LLM 工具/生命周期）；第三方依赖安装与隔离；第三方代码信任/权限边界；热重载与失败回滚。<br>**验收**：能用一个最小 AstrBot 兼容插件跑通「市场安装 → 面板配置 → 运行 → 升级 → 卸载」全链路；升级/卸载失败可回滚；不破坏现有内置插件、`plugins/meme_stealer` 等目录插件与 LLM 工具注册；面板能自动渲染其配置 schema。 | ⏳ 待设计（P2/架构演进，不阻塞当前发布） |
 
 > 备注：AstrBot 插件规范的参考形态为「`main.py` 入口类 + `metadata.yaml`/`_conf_schema.json` + 市场仓库索引」，具体字段与安装协议需在设计中对照核实，避免只做表面兼容。
-

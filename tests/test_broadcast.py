@@ -176,4 +176,3 @@ async def main() -> None:
     await test_fail_fallback()
     await test_confirm_keeps_pending_while_running()
     print("\nALL BROADCAST TESTS PASSED")
-
