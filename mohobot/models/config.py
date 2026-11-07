@@ -689,7 +689,7 @@ class GlobalConfig:
                 bitrate=int(tts_raw.get("bitrate", 128000)),
                 format=str(tts_raw.get("format", "mp3") or "mp3"),
                 tts_prompt_template=(
-                    str(tts_raw.get("tts_prompt_template", "") or "").strip()
+                    str(tts_raw.get("tts_prompt_template", "") or "")
                     or TTSConfig().tts_prompt_template
                 ),
                 cmd_max_chars=max(1, int(tts_raw.get("cmd_max_chars", 30))),

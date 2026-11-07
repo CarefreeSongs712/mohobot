@@ -36,6 +36,10 @@ _sync_lock = asyncio.Lock()
 class Plugin:
     """多来源歌曲库同步(定时 + 手动)。"""
 
+    # 多 bot 群里 /sync-songs 只由抽签选中的一只 bot 响应:
+    # 未声明时每只 bot 都会各回一条并各 spawn 一次全量同步(审查 P2)。
+    global_triggers = TRIGGERS
+
     info = {
         "commands": [
             {"name": "sync-songs", "desc": "同步歌曲知识库(管理员): new/fill/refresh/status/来源名"},

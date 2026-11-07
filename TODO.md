@@ -3,7 +3,8 @@
 项目待办清单。每一项都尽量链接到对应的 Issue / PR，并写明**如何验证已完成**。
 实现但尚未合入时保留条目并注明 PR；维护者合入后更新状态并记录在对应章节中。
 
-> 当前基线：2026-10-22，`main` = `a361736`（**冻结，不接收新改动**），`dev` 以 `git log -1 origin/dev` 为准（本节维护时 CI 四项通过）。
+> 当前基线：**2026-11-03**，`main` = `e990fa0`（#109 发布，已在生产运行），`dev` = `8e2d493`（领先 main 1 个修复提交，见 §5 待发），CI 四项通过。
+> （上一基线 2026-10-22 `a361736`；本轮过渡记录见 §2.10，开放待办统一移到 §5。）
 > 分支规则：功能/修复走「本地分支 → PR → `pr-review-report` 审查 → CI 绿 → 合并 `dev`」；**极为简单的文档/注释改动可由维护者授权后直接提交 `dev`**；**任何情况下不直接推 `main`**。
 > 交接状态、验收基线、本机环境与待决策项见 [docs/HANDOVER.md 第 0 节](docs/HANDOVER.md)。
 
@@ -47,7 +48,7 @@
 
 ## 2. 当前 PR 与分支状态
 
-> 当前 `origin/main` = `a361736`（**冻结**）；`origin/dev` 以 `git log -1 origin/dev` 为准（不硬编码，避免每次提交后失同步）。main 不再接收日常改动；发布时再单独决定 `dev → main`。
+> 本节下表为 2026-10-22 前的 PR 历史快照；`origin/main` 现为 `e990fa0`、`origin/dev` 以 `git log -1 origin/dev` 为准。10-24 之后合并记录见 §2.10，当前开放待办见 §5。main 仍不接收日常改动；发布走 `dev → main` release PR。
 
 | PR 编号 | 目标分支 | 简要内容 | 审查/合并状态 |
 |---|---|---|---|
@@ -86,9 +87,9 @@
 | `#9` 插件策略（回执/上限/生命周期） | P2 | **已关闭**：消费 `bot_config.enabled`、`group_decrease` 剔除抽签缓存、主动聊天热更新签名 + 封禁检查、表情包离线回执；qzone 单帖上限经核对已修 | `#70` |
 | `#8` review 面板缓存/计数/竞态 | P2 | **已关闭**：`#69`（热维护写入屏障 + auto 消息 ID 登记）+ `#71`（inode 缓存身份、半行 offset 边界、待审计数求交、前端会话代际） | `#69` `#71` |
 | `#6` meme 作用域过滤与图片来源边界 | enhancement | **已关闭**：列表按事件作用域过滤（P1 跨群泄漏）、`steal_meme` 仅允许当前/引用消息内图片、`source_type` 统一 `strip().lower()` | `#72` |
-| `#2` SQLite 旧库 WAL 迁移 | wontfix | 维护者此前表示暂缓，保持 wontfix | — |
+| `#2` SQLite 旧库 WAL 迁移 | ~~wontfix~~ | **✅ 已关闭（2026-11-01，`#105`）**：迁移改用 SQLite `backup()` API（含 WAL 已提交内容），quick_check + 行数校验 + fail-closed；SIGKILL 场景独立复核确认修复 | `#105` |
 
-> 截至 2026-10-22：开放 issue 仅剩 `#2`（wontfix），开放 PR 为 **0**；本轮 `#71`~`#75` 均已合并。
+> 截至 2026-11-03：开放 issue **0**，开放 PR **0**；`main`（生产）= `e990fa0`，`dev` = `8e2d493`。
 
 ### 2.3 本轮新增能力与基础设施
 
@@ -142,7 +143,7 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 
 - 移除已停用模型 `deepseek-flash` / `DeepSeek-V4-Flash` 在文档与示例配置中的残留（README、TODO、`config/global.example.yaml` 的 `chat_model` / `models` / `emotion.burst_model`）；
 - **修复示例配置既有缩进 bug**：`news:` 顶格插在 `llm:` 块中间，导致其后 `emotion_*` 与 `models` 被 YAML 吸进 `news`（照抄模板会静默失效）。已把 `news:` 移到 `llm:` 之后，`GlobalConfig.load(example)` 验证 `llm.models/emotion_model` 与 `news.*` 均正确。
-- **待决策（未改代码）**：`mohobot/models/config.py` 的默认值仍含 `DeepSeek-V4-Flash`（`chat_model`、`models` 列表、`emotion.burst_model`）。改默认值属行为变更，需维护者确认后单独 PR + 回归。
+- **待决策（未改代码）**：默认值清理 **部分完成** —— `chat_model` 默认已是 `deepseek-chat`；但 `emotion.burst_model` 默认仍为 `DeepSeek-V4-Flash`（`models` 列表也含旧名）。改默认值属行为变更，仍需维护者确认后单独 PR + 回归。
 
 **遗留（P3，不阻断移交）**：`_provider_specs` 对缺字段测试替身的容错；ImageCache 按图共享描述导致 per-bot vision 仅首识别生效；`snitch` 内置注册与插件加载共用同一文件（现幂等，行为等价）。
 
@@ -169,6 +170,28 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
 | **CI legacy runner** | PR 阶段只跑 pytest（超集）+ 并发专项；`tests/_run_all.py` 只在 `push main` 时作为发布保险运行（`ci.yml` 加 `if` 条件，PR 省 ~100s） | ✅ 本 PR |
 
 
+
+### 2.10 过渡记录（2026-10-24 ~ 11-03，基线 a361736 → e990fa0/8e2d493）
+
+> 上轮记录止于 2026-10-23（§2.7~§2.9）。本段以提交时序补记期间合并内容；详细单 PR 审查见 `.venv/prep/reviews/pr*/INDEPENDENT.md`。
+
+| 时段/PR | 内容 | 备注 |
+|---|---|---|
+| `#71`~`#82` 及本机收尾（10-24 前） | review 工具链、审查修复、面板等（详见 git log） | 已录于历史记录 |
+| 10-24 `#83` 审查裁定 / `#85` N1~N6 修复 | review worker 判定增强与复审修复 | 已合并 |
+| 10-25 `#86`→`#90` OOC 三防系列 | 乱码/独白/英文漂移三防 + 语言约束 + 误伤面复核；**发布 `#91`（main→生产 `ooc-v2`）+ `#92` main→dev 回流** | 生产 10-25 起携三防 |
+| 10-25 `#93` observability | `[tool]/[inject]/[llm]/[reply]` 行为日志 + 日志换行修复（复审 5×P2 已修） | 已合并 |
+| 10-25 `#94` TTS 无标注概率朗读 | `tts.untagged_tts_prob`（默认 0.1；复审 2×P2 已修） | 已合并 |
+| 10-25→11-01 `#95` OOC 范围修正 | 只治理 LLM 输出 + 中文引导语混排误拦修复（复审 3×P2 已修，11-01） | 已合并 |
+| 10-30 `#96/#97/#98` 功能三件 | praise 点赞提示去重 / proactive `[SCHEDULE]` 自主排期 / 歌曲索引持久化缓存（启动不再同步重建） | 发布 `#99` |
+| 10-31 `#100` #99 复审修复 | 缓存指纹竞态/构建生命周期/排期边界/备份/设计文档 | 已合并 |
+| 10-31 `#101` 全仓审查修复包 | 分段 O(n²)→线性、归档解耦、图片上限、NaN 防护、转义、WS token 鉴权、`to_thread` 写库、括号配对、缓存观测 | 已合并 |
+| 10-30→11-01 `#102` 稳定前缀布局（实验） | `llm.stable_system_prefix`（默认 false），Pi 实验进行中 | 已合并（默认关闭） |
+| 11-01 `#104` issue #103 修复 | WS token 调用点 TypeError（P1）+ `/用量 7d` 月初越界（P2，当日金丝雀必红已转绿） | 已合并，Closes `#103` |
+| 11-01 `#105` issue #2 修复 | 旧库迁移改用 SQLite `backup()` API（SIGKILL WAL 场景独立复核）；Closes `#2` | 已合并 |
+| 11-01 `#106` 配置保存静默清空修复 | `saveGlobalConfig` 不再发送无渲染点的 `usage_excluded_models`；`68ffbd9` 直推 payload↔渲染点一致性回归测试 | 已合并 |
+| 11-02 `#108` 分段总量熔断 | `_MAX_SEGMENTS_PER_TURN=20`（生产事故 7161 段刷屏 2h）；流式尾部绕过于 `8e2d493` 补修（11-03 直推） | 已合并 |
+| 11-02 `#109` 发布 dev→main | 生产升 `e990fa0`，部署健康（0 error）；另见 §5.1 待办（note/补 tag、#108 修复待发布） | 已合并部署 |
 
 ## 3. 分支模型与规范
 
@@ -206,4 +229,36 @@ PR #74 已全部修复并合入 `dev`（`9bfc27b`）：新增 `tests/test_provid
         .venv/bin/python main.py
     ```
     根治方向：启动器/测试引导里净化这两类变量（未实施，属 P3）。
-  - **既有 Ruff 债务（未清理）**：`mohobot/message_handler.py` 的 `extract_plain_text` F401、`mohobot/llm_service.py` 的 `MessageSegment` F401 与 `since` F841、`mohobot/bot_manager.py` 的 3 条 `websockets` F821、`plugins/relationship/relationship_core/request/model.py` 的 `field` F401 —— 均为基线既有，按「最小改动面」原则未在本轮清理。
+  - **既有 Ruff 债务（2026-11-03 复核：仍在，共 7 条）**：`mohobot/bot_manager.py:31/36` 的 `websockets` F821 类型注解 2 条 + `:383` 1 条、`mohobot/llm_service.py:25` `MessageSegment` F401、`mohobot/llm_service.py:1047` `since` F841、`mohobot/message_handler.py:1198` `extract_plain_text` F401、`plugins/relationship/relationship_core/request/model.py:10` `field` F401 —— `E9,F63,F7` 门禁不受影响，按「最小改动面」原则暂不清理。
+
+## 5. 当前待办（2026-11-03 基线）
+
+### 5.1 在途 / 待发（P1~P2）
+
+| # | 事项 | 说明 | 验证方式 | 状态 |
+|---|---|---|---|---|
+| 1 | **`8e2d493` 待发布** | #108 流式尾段熔断绕过修复已推 `dev`（CI 4/4），尚未发布到 `main`（生产 `e990fa0` 不含）。下次 `dev → main` release 必须带上 | 部署后查 `[segment-cap]` 触发行为与 `[reply]` 截断备注 | ⏳ |
+| 2 | **release note / tag 补记** | #109 发布说明漏列 #101/#102/#104/#105 与直推测试 `68ffbd9`；`release-2026-11-02` tag 已于 2026-11-07 补建（指向 `e990fa0`；注释中「生产回滚点 0217eb2」指上一稳定 main，沿用既有惯例） | tag 已建立，后续发布沿用同一惯例 | ✅ 2026-11-07 |
+| 3 | **#105 复审遗留 P3×3** | 行数校验/quick_check 无独立测试（变异存活）；未断言旧 `-wal/-shm` 备份；Windows 下测试可能红（打开句柄 `os.replace` 失败） | 补守卫测试/断言后变异应变红 | ⏳ P3 |
+| 4 | **#102 Pi A/B 缓存实验** | 测试服 `stable_system_prefix` 已是 `true`，缺 false 基线（先 A 后 B 或 B→A 均可，同会话 ≥40~60 次 chat/阶段）；判定标准已给 | `scripts/usage_hit_rate.py --by module` 两阶段差异 | ⏳ |
+| 5 | **`emotion.burst_model` 默认值决策** | 默认仍 `DeepSeek-V4-Flash`（`models` 列表同）——是否迁离属行为变更 | 单独 PR + 回归 | ⏳ 待决策 |
+
+### 5.2 可选优化（P3 / 按需）
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 1 | prompt 前缀缓存布局改造 | 设计文档 `.venv/prep/reports/cache-hit-rate-design.md`；生产 24h chat 命中 39%（deepseek-v4.1-flash）；#102 实验结论决定是否推进 |
+| 2 | 情感分析成本优化 | 频率（force_interval/cooldown）与模板精简；含「命中被 free 模型零上报」口径核对（24h 命中 0%） |
+| 3 | 安全加固（按需） | 登录锁/IP 限流/PBKDF2/安全响应头；审计报告在 `.venv/prep/security-audit-login-2026-10-22.md` |
+| 4 | 可观测性 | `/healthz` `/readyz`、LLM 成功率/延迟、provider 失败统计 |
+| 5 | 真实验收 | RAG embedding 实调、B站采集器风控观察、`inject_window_days` 过滤验证、真实 bad-case 库（REQ-6/7 剩余） |
+| 6 | 环境工程 | 代理变量启动净化（P3，本机仍需 `env -u` 绕过）；Ruff 存量 F401/F841/F821 ×7；#383 `websockets` 类型注解 |
+| 7 | ImageCache per-bot vision | 缓存按图共享描述导致 per-bot vision 仅首识别生效（既有 P3，需单独排期） |
+
+### 5.3 架构演进（待设计）
+
+| # | 事项 | 现状与目标 | 关键改造 / 验收 | 状态 |
+|---|---|---|---|---|
+| 1 | **插件可更换 + 适配 AstrBot 插件市场（类似生态）** | **缘由（维护者 2026-11-07）**：当前插件是「写死」的，不能简单地增减/替换。现状：插件需手工放进 `plugins/`，没有安装/卸载/升级入口；单文件插件拿不到自己的 `_conf_schema.json`（schema 路径取 `entry_path.parent`，单文件时落在 `plugins/`）；个别插件与内置工具/框架强耦合（如 snitch 既被 `llm_tools` 注册又被插件系统加载，只能靠幂等兜底）；没有版本/来源/依赖元数据，无法从市场安装或替换。<br>**目标**：插件包化（安装到 `data/plugins/`，仓库内仅保留内置插件）+ 标准元数据（name/version/author/repo/deps/schema）+ 安装/卸载/升级/启用禁用 + 市场索引/检索，兼容或适配 AstrBot 插件格式与市场。 | **关键改造**：加载器支持目录/包/单文件与可配置 schema 路径；AstrBot 插件 API → mohobot API 适配层（事件/消息段/配置/LLM 工具/生命周期）；第三方依赖安装与隔离；第三方代码信任/权限边界；热重载与失败回滚。<br>**验收**：能用一个最小 AstrBot 兼容插件跑通「市场安装 → 面板配置 → 运行 → 升级 → 卸载」全链路；升级/卸载失败可回滚；不破坏现有内置插件、`plugins/meme_stealer` 等目录插件与 LLM 工具注册；面板能自动渲染其配置 schema。 | ⏳ 待设计（P2/架构演进，不阻塞当前发布） |
+
+> 备注：AstrBot 插件规范的参考形态为「`main.py` 入口类 + `metadata.yaml`/`_conf_schema.json` + 市场仓库索引」，具体字段与安装协议需在设计中对照核实，避免只做表面兼容。

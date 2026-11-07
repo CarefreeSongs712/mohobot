@@ -188,9 +188,11 @@ class Plugin:
             return (True, "⏰ 待确认的广播已过期, 请重新 /广播预览。")
 
         content = pending["content"]
-        self._pending = None
         if self._running:
+            # 保留 pending: 运行中确认不得静默丢弃新的预览内容,
+            # 广播结束后用户可直接重试 /广播确认(复审 P3)。
             return (True, "⚠️ 已有广播任务在进行中, 请稍后再试。")
+        self._pending = None
         self._running = True
 
         # 后台执行广播, 完成后汇报到发起会话

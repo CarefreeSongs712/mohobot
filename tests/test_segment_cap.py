@@ -164,3 +164,43 @@ async def test_proactive_reply_inherits_cap():
     assert len(sent) == 20, f"主动消息同样只应发送 20 段, 实际 {len(sent)}"
     lines = [m[:-1] if m.endswith("\n") else m for m in msgs]
     assert any("[segment-cap]" in m for m in lines), lines
+
+
+async def test_stream_reply_caps_trailing_buffer_at_default_cap():
+    """回归: 恰好发满 20 段后, 流末剩余的无标点尾部不得绕过熔断再发第 21 段。"""
+    text = _flood_text(20) + "尾部无标点文本"
+    sent: list[str] = []
+    handler = _make_handler(sent, chunks=_stream_chunks(text, piece=5))
+    msgs, sid = _capture_logs()
+    try:
+        result = await handler._stream_llm_reply("bot", None, [], {},
+                                                 reply_options={"bot_config": None})
+    finally:
+        logger.remove(sid)
+
+    assert len(sent) == 20, f"默认上限 20, 尾段不得绕过, 实际发送 {len(sent)} 段: {sent[-2:]}"
+    assert result == text, "熔断只作用于发送端, 回传全文不变"
+    lines = [m[:-1] if m.endswith("\n") else m for m in msgs]
+    assert any("[segment-cap]" in m for m in lines), lines
+    reply_line = next(m for m in lines if "[reply]" in m)
+    assert "(segment cap: -1)" in reply_line, reply_line
+
+
+async def test_stream_reply_caps_trailing_buffer_at_small_cap():
+    """小上限场景: 2 个完整段 + 无标点尾部 → 只发 2 段, 尾部计入截断数。"""
+    sent: list[str] = []
+    text = _flood_text(2) + "尾部缓冲文字"
+    handler = _make_handler(sent, cap=2, chunks=_stream_chunks(text, piece=5))
+    msgs, sid = _capture_logs()
+    try:
+        result = await handler._stream_llm_reply("bot", None, [], {},
+                                                 reply_options={"bot_config": None})
+    finally:
+        logger.remove(sid)
+
+    assert len(sent) == 2, sent
+    assert result == text
+    lines = [m[:-1] if m.endswith("\n") else m for m in msgs]
+    assert any("[segment-cap]" in m for m in lines), lines
+    reply_line = next(m for m in lines if "[reply]" in m)
+    assert "(segment cap: -1)" in reply_line, reply_line

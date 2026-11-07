@@ -171,9 +171,6 @@ class Plugin:
             try:
                 chat_type, chat_id = self._chat_of(event)
                 await self._ws_server.send_image(bot_id, chat_type, chat_id, card_path)
-                import os
-                os.remove(card_path)
-                return (True, None)
             except Exception as e:
                 logger.warning(f"发送 B 站信息卡片失败, 降级为文本: {e}")
                 try:
@@ -181,6 +178,13 @@ class Plugin:
                     os.remove(card_path)
                 except OSError:
                     pass
+            else:
+                import os
+                try:
+                    os.remove(card_path)
+                except OSError:
+                    pass
+                return (True, None)
 
         lines = [
             f"🎬 标题: {info.get('title', '')}",
