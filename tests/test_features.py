@@ -80,16 +80,41 @@ async def test_get_nickname() -> None:
 
 
 async def test_status_image_render() -> None:
-    from plugins.status import _render_status_image, _clean_status_text
+    from mohobot.utils.status_card import (
+        aggregate_cores, format_duration, render_status_card,
+    )
 
-    text = "📦 框架状态:\n  Bot ID: bot_001\n⚙️ 配置信息:\n  LLM: DeepSeek"
-    lines = _clean_status_text(text)
-    assert not any("📦" in l or "⚙️" in l for l in lines)
-    path = _render_status_image(text)
+    assert format_duration(432000) == "5天"
+    assert format_duration(40000) == "11时6分"
+    values, aggregated = aggregate_cores([10.0] * 40)
+    assert aggregated and len(values) == 8, ">32 核应合并为 8 组"
+
+    data = {
+        "bot_id": "bot_001",
+        "nickname": "测试",
+        "now": "2026-11-07 21:59",
+        "runtime_secs": 432000,
+        "plugin_runtime_secs": 432007,
+        "system_uptime_secs": 867694,
+        "cpu": {"count": 8, "average": 43.0, "cores": [23, 41, 67, 12, 88, 5, 34, 76]},
+        "memory": {
+            "total": 8 * 1024**3, "used": 4 * 1024**3,
+            "cache": int(1.7 * 1024**3), "free": int(2.3 * 1024**3),
+            "percent": 71.0, "app_percent": 50.0,
+            "swap_total": 2 * 1024**3, "swap_used": 0, "swap_percent": 0.0,
+        },
+        "disks": [{"mount": "/", "used": 40 * 1024**3,
+                   "total": 58 * 1024**3, "percent": 69.0}],
+        "bots": [{"bot_id": "bot_001", "nickname": "测试", "online_secs": 40000}],
+        "contacts": {"admins": ["3831097597"], "group": "398870315",
+                     "url": "https://7121099.xyz/"},
+    }
+    path = render_status_card(data)
     assert path is not None and Path(path).exists()
     from PIL import Image
     img = Image.open(path)
-    assert img.size[0] == 600
+    assert img.size[0] == 820
+    assert img.size[1] > 400
     img.close()
     Path(path).unlink()
     print("[3] status 深色卡片渲染 OK")

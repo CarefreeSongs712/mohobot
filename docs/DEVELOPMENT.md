@@ -569,7 +569,8 @@ self._daily_task = self._task_supervisor.create_task(
 | `global_triggers: set/list/tuple` | **只控制群内多 bot 去重**，不注册命令。精确匹配或「命令 + 空格 + 参数」。 |
 | `no_prefix_triggers: set` | 无需 `/` 前缀的精确整词触发（在 `dispatch_observed` 内处理）。若同时也在 `global_triggers`，群内同样去重。 |
 | `bind_bots: list[str]` | 限定只在指定 `bot_id` 上派发（插件仍加载、`on_tick` 仍跑）。 |
-| `info: dict` | `/help` 与面板的描述元数据，如 `{"commands":[{"name","desc","admin"}]}`。类 docstring 自动成为 `description`。 |
+| `info: dict` | `/help` 与面板的描述元数据，如 `{"commands":[{"name","desc","usage","aliases","admin"}]}`。`usage` 单独一行显示，`aliases` 渲染为「别名：/a /b」，`admin` 显示徽标；描述里的 `(管理员)` 也会被识别并剥离。类 docstring 自动成为 `description`。 |
+| `help_category` | 可选，`/help` 分类：`内置/会话/情感/封禁/工具/娱乐/管理`；不声明时按内置映射表兜底（未知插件归「工具」）。 |
 | `interval_sec` | 配合 `on_tick`。 |
 
 **群内多 bot 去重机制**：`message_handler._should_defer_global_command` 收集内置 `{"/help","/tts"}` + 所有插件的 `global_triggers` + 前缀集 `("/ban","/pass","/dec-")`，命中后调 `BotManager.pick_bot_for_group(group_id, message_id)` 抽签 —— 抽签结果按 `(群号, message_id)` 缓存 60 秒，所以同一条消息触发的多个 bot 协程得到**同一个**结果，不会出现都回或都不回。
@@ -577,6 +578,8 @@ self._daily_task = self._task_supervisor.create_task(
 **@ 定向优先于抽签**：消息里只要 @ 了具体 bot（`at` 段的 `qq` 不是 `all`），就只由被 @ 的 bot 执行指令；@ 多只则多只都执行；未被 @ 的 bot 静默。此时不抽签、不合并回复。未 @ 任何 bot 时才走上面的抽签。`qq=0`（未绑定）的 bot 不会被 `@0` 命中。
 
 实现位置：`BotManager.bot_ids_for_qqs()`（QQ→bot_id，只认已绑定且在线的）、`extract_at_targets()`（CQ/数组两种格式解析）、`MessageHandler._mention_restricts_command()`。
+
+**`/help` 与 `/status` 卡片**：`/help` 由 `command_handler._build_help_sections` 按固定分类聚会，`_build_help_pages` 处理权限折叠与每页 30 条拆分；渲染在 `mohobot/utils/image_card.py`，按字体实际宽度换行/截断，不在命令或括号中间硬切。`/status` 是目录插件 `plugins/status/`，数据采集在 `main.py`，排版在 `mohobot/utils/status_card.py`。两者共用 `mohobot/utils/contact_info.py` 解析联系方式；`/help` 通过 `plugin_system.get_plugin_config("status")` 读取同一份配置，插件未加载时回退默认值。修改卡片布局时优先调渲染模块并补 `tests/test_status_help_redesign.py` 的边界断言。
 
 ### 6.4 注入 API
 
