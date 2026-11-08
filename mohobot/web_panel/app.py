@@ -536,6 +536,13 @@ class WebPanel:
                     str(m).strip() for m in (data["usage_excluded_models"] or [])
                     if str(m).strip()
                 ]
+            if "snitch_admin_group" in data:
+                try:
+                    cfg.snitch_admin_group = int(data["snitch_admin_group"] or 0)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400, detail="snitch_admin_group 必须是整数"
+                    ) from exc
             for key in ("context_summary_enabled", "context_trim_at_rounds",
                         "context_trim_remove_rounds",
                         "context_summary_age_hours",

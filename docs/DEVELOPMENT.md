@@ -450,18 +450,21 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | 顶层段 | 关键字段与默认 |
 |---|---|
 | `admins: list[int]` | 全局管理员 QQ（封禁系统与插件共用；回退旧 `ban.admins`） |
-| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`；`outbound_enqueue_timeout` **已废弃**——队列满时 `submit()` 立即抛 `OutboundQueueFullError`，该值不再影响行为（字段保留仅为兼容旧配置） |
-| `llm` | chat/vision/emotion 三组 model+base_url+api_key+温度+max_tokens；`models: list[str]` 供 WebUI 下拉 |
+| `server` | `host="0.0.0.0"`, `port=8060`, `max_size=10MB`, `outbound_interval=0.5`, `outbound_maxsize=100`, `access_token=""`（反向 WS 鉴权, 空=不校验）；`outbound_enqueue_timeout` **已废弃**——队列满时 `submit()` 立即抛 `OutboundQueueFullError`，该值不再影响行为（字段保留仅为兼容旧配置） |
+| `llm` | chat/vision/emotion 三组 model+base_url+api_key+温度+max_tokens；多提供商 `providers/chat_provider/vision_provider/emotion_provider`（WebUI"多提供商"页, `PUT /api/providers`）；`summarize_*/vision_prompt/vision_max_tokens/vision_temperature`；`stable_system_prefix=false`（实验开关, 前缀缓存）；`models: list[str]` 供 WebUI 下拉 |
 | `web_panel` | `enabled/host/port=9090/username/password_hash` |
 | `interceptor` | `keyword_file="./data/keywords.json"` |
 | `reply` | `stream/segment_reply/segment_min_len=12/segment_max_len=60/segment_delay_min=0.2/segment_delay_max=0.5/reply_quote/strip_english_fillers=true/ooc_guard_enabled=true` |
 | `database` | `enabled/folder="./data/database"/file="luotianyi.db"`（示例 yaml 写 `mohobot.db`） |
-| `anysearch` | `enabled/api_key/base_url/timeout=30` |
+| `anysearch` | `enabled/api_key/base_url/timeout=30`（**故意不给 WebUI 编辑**，与 server/database 同类） |
 | `ban` | `enabled` |
-| `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*` |
-| `tts` | `enabled=False/base_url/api_key/model/voice_id/speed/vol/pitch/sample_rate/bitrate/format/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120/untagged_tts_prob=0.1` |
+| `news` | `enabled/db_path/inject_enabled/inject_limit/inject_window_days/inject_header/default_ttl_days/tool_enabled/collector_enabled/collector_uids/collector_interval_seconds/collector_max_items_per_uid/collector_ttl_days`（采集器只在本文件配置） |
+| `knowledge` | `enabled/embedding_model/embedding_api_key/embedding_base_url/rerank_model/rerank_api_key/rerank_base_url/top_k/top_n/chunk_size/...`（WebUI 有"知识库"页，路径/api_key 只读保护） |
+| `persona_ab` | `enabled/sample_probability/cooldown_seconds/pending_timeout/...`（WebUI"人设评估"页，bot 白名单等） |
+| `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*/analysis_timeout_sec/keyword_threshold/queue_*/burst_*(burst_model 默认 DeepSeek-V4-Flash, 示例 yaml 留空=不启用 burst)` |
+| `tts` | `enabled=False/backend="http"/base_url/api_key/convert_to_mp3=true/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120/untagged_tts_prob=0.1/model/voice_id/speed/vol/pitch/sample_rate=32000/bitrate=128000/format="mp3"` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
-| 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply` |
+| 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply`, `usage_excluded_models`, `llm_excluded_groups`, `external_service_groups`, `snitch_admin_group` |
 
 OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删除冷门文字系统乱码、丢弃内心独白段、整条回复级判定英文漂移(中文回复中的英文报错/代码/URL 引用放行, 用户明确要求外语/翻译时豁免); `strip_english_fillers` 清理句首英文填充词。命中记 `[ooc-guard]` 日志。LLM 语言约束(始终简体中文, 翻译请求放宽)由 `_persona_with_language` 拼在人设之后、环境信息之前。
 
@@ -501,7 +504,7 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 - **嵌套段字段**（如 `reply.stream`）：跳过第 5 步 —— `PUT /api/config` 对 `reply/ban/emotion/tts/interceptor/web_panel` 走通用 `hasattr` 循环。
 - **`llm.*`**：不经 `/api/config`，走独立端点 `PUT /api/models`。
 - **per-bot 字段**：改 `BotConfig` 的 dataclass / `load` / `to_dict`，页面在 `loadBotConfig()` / `saveBotConfig()`。配置写入经 `PersonaService.update_bot_config`，`persona_id` 需要有效预设，身份及旧内联 `persona` 不允许通过通用表单修改。
-- **`server` / `database` / `log_dir` / `data_dir` / `plugins_dir`**：故意不给 WebUI 编辑（服务端路径），`GET /api/config` 会 `pop("server")`。
+- **`server` / `database` / `log_dir` / `data_dir` / `plugins_dir` / `anysearch`**：故意不给 WebUI 编辑（服务端路径/密钥），`GET /api/config` 会 `pop("server")`。
 
 ### 5.3 环境变量
 

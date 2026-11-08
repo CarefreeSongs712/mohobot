@@ -21,6 +21,9 @@ from loguru import logger
 class Plugin:
     """Anysearch 实时联网搜索: 通用搜索 / 正文提取 / 批量搜索。"""
 
+    # 多 bot 群里 /搜索 只由抽签选中的一只 bot 响应(每只都会调一次付费 API)
+    global_triggers = {"/搜索", "/search"}
+
     info = {
         "commands": [
             {"name": "搜索", "desc": "实时联网搜索: /搜索 关键词; /搜索 extract URL; /搜索 batch 词1,词2"},
@@ -50,14 +53,22 @@ class Plugin:
                     text += seg.get("data", {}).get("text", "")
             text = text.strip()
 
-        if not (text.startswith("/搜索") or text.startswith("/search")):
+        # 命令边界必须与框架 global_triggers 匹配规则一致(精确触发词或
+        # 触发词+空格): 否则 "/搜索foo" 不会被框架判为全局指令去重,
+        # 多 bot 群会各自调用一次付费 API(PR #110 复审 P2)。
+        cmd = ""
+        for candidate in ("/搜索", "/search"):
+            if text == candidate or text.startswith(candidate + " "):
+                cmd = candidate
+                break
+        if not cmd:
             return (False, None)
 
         client = self._anysearch_client
         if client is None:
             return (True, "实时搜索未配置 — 请在 config/global.yaml 的 anysearch.api_key 填入 API Key 后重启。")
 
-        query = text[len("/搜索"):].strip() if text.startswith("/搜索") else text[len("/search"):].strip()
+        query = text[len(cmd):].strip()
         if not query:
             return (True, self._usage_text())
 

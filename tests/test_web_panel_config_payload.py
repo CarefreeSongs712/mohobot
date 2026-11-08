@@ -103,6 +103,28 @@ def test_save_global_config_payload_keys_have_render_points() -> None:
         )
 
 
+def test_snitch_admin_group_is_sent_and_rendered() -> None:
+    """snitch_admin_group 后端已支持保存，前端必须同时发送并渲染。
+
+    防止两种回退：删掉 UI 但保留发送（每次保存静默写 0），
+    或后端支持但前端漏发（WebUI 改不动该配置）。
+    """
+    html = _HTML_PATH.read_text(encoding="utf-8")
+    payload = _extract_save_global_payload(html)
+    leaves = _payload_leaf_keys(payload)
+
+    assert "snitch_admin_group" in leaves, (
+        "saveGlobalConfig payload 缺少 snitch_admin_group，"
+        "面板修改告状管理群号不会保存"
+    )
+    assert "cfg-snitch_admin_group" in _rendered_cfg_ids(html), (
+        "index.html 缺少 cfg-snitch_admin_group 渲染点，"
+        "保存时会因 getElementById 返回 null 而抛错/写入 0"
+    )
+
+
 if __name__ == "__main__":
     test_save_global_config_payload_keys_have_render_points()
+    test_snitch_admin_group_is_sent_and_rendered()
     print("[CFG1] 全局配置 payload 键均有渲染点 OK")
+    print("[CFG2] snitch_admin_group 发送与渲染点 OK")

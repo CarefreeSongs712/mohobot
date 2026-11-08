@@ -1207,26 +1207,6 @@ class MessageHandler:
 
     # ── 群聊最近消息(内存缓冲, 回复时临时注入) ─────────────────
 
-    async def _song_annotation_for_event(self, event: MessageEvent) -> str:
-        """识别消息中的歌曲并返回【歌曲信息】注解段(无命中返回 "")。
-
-        供 LLMService 注入。
-        消息原文(含图片描述)做识别; 库为空/失败 → 空串, 正常走 LLM。
-        """
-        if self._song_matcher is None:
-            return ""
-        try:
-            text = (extract_plain_text(event.message) or "").strip()
-            if not text:
-                return ""
-            match = self._song_matcher.match(text)
-            if match is None:
-                return ""
-            return match.build_annotation()
-        except Exception as e:
-            logger.debug(f"歌曲识别失败: {e}")
-            return ""
-
     async def _note_group_recent(self, bot_id: str, event: GroupMessageEvent) -> None:
         """把一条群消息记入最近消息缓冲(仅内存, 满 N 条淘汰最旧)。
 
@@ -1499,6 +1479,20 @@ class MessageHandler:
         sent_counter = [0]   # 实际发出的段数; 尝试数由 attempted 单独累计
         attempted = 0
         cap_dropped = 0      # 达到分段熔断上限后被截断、未尝试发送的段数
+        cap_warned = False   # 首次熔断告警每回合只打一次
+
+        def _drop_for_cap() -> None:
+            """已满分段上限: 累计截断数并首次告警; 调用方随后不得发送该段。"""
+            nonlocal cap_dropped, cap_warned
+            if not cap_warned:
+                self._warn_segment_cap(bot_id, event)
+                cap_warned = True
+            cap_dropped += 1
+
+        def _cap_note() -> str:
+            """[reply] 日志的截断备注(在全部发送/丢弃决策之后调用)。"""
+            return f" (segment cap: -{cap_dropped})" if cap_dropped else ""
+
         diagnostic: LLMDiagnostic | None = None
         # Issue #57: 模型可能把"检查约束/编写回复/字数检查"写成无标签正文。
         # 这类块只出现在回复开头且被分段逻辑拆成多气泡直发用户, 因此在流式阶段
@@ -1518,10 +1512,13 @@ class MessageHandler:
                 # 先冲刷此前缓冲的正文, 诊断在最后单独发出。
                 diagnostic = chunk
                 if buffer.strip():
-                    attempted += 1
-                    first_sent = await self._send_segment(
-                        bot_id, event, buffer, first_sent,
-                        collected=display_parts, sent_counter=sent_counter)
+                    if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                        _drop_for_cap()
+                    else:
+                        attempted += 1
+                        first_sent = await self._send_segment(
+                            bot_id, event, buffer, first_sent,
+                            collected=display_parts, sent_counter=sent_counter)
                     buffer = ""
                 continue
             if chunk:
@@ -1550,9 +1547,7 @@ class MessageHandler:
             for seg in flushed["segments"]:
                 if attempted >= self._MAX_SEGMENTS_PER_TURN:
                     # 熔断: 流必须继续消费完, 但剩余分段不再发送
-                    if cap_dropped == 0:
-                        self._warn_segment_cap(bot_id, event)
-                    cap_dropped += 1
+                    _drop_for_cap()
                     continue
                 attempted += 1
                 first_sent = await self._send_segment(
@@ -1560,26 +1555,32 @@ class MessageHandler:
                     collected=display_parts, sent_counter=sent_counter)
 
             if is_final and buffer:
-                # Stream ended with text left in the buffer — always flush it
-                attempted += 1
-                first_sent = await self._send_segment(
-                    bot_id, event, buffer, first_sent,
-                    collected=display_parts, sent_counter=sent_counter)
+                # Stream ended with text left in the buffer — 正常情况必须冲刷,
+                # 但仍受单回合分段熔断约束(不能绕过 attempted 上限)。
+                if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                    _drop_for_cap()
+                else:
+                    attempted += 1
+                    first_sent = await self._send_segment(
+                        bot_id, event, buffer, first_sent,
+                        collected=display_parts, sent_counter=sent_counter)
                 buffer = ""
 
         # 流结束: 冲刷被扣留的尾部(半截标签等), 提交 TTS 合成(未开启时 no-op)
         rest, tts_text = artifact_filter.finish()
         full_reply += rest
-        cap_note = f" (segment cap: -{cap_dropped})" if cap_dropped else ""
         if reasoning_suppress:
             # 整条清洗后单条发出; 自查内容不能进 TTS
             from mohobot.utils.reply_filter import strip_unwrapped_reasoning
             cleaned = strip_unwrapped_reasoning(full_reply).strip()
             if cleaned:
-                attempted += 1
-                first_sent = await self._send_segment(
-                    bot_id, event, cleaned, first_sent,
-                    collected=display_parts, sent_counter=sent_counter)
+                if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                    _drop_for_cap()
+                else:
+                    attempted += 1
+                    first_sent = await self._send_segment(
+                        bot_id, event, cleaned, first_sent,
+                        collected=display_parts, sent_counter=sent_counter)
             # 清洗后正文若被 OOC 整段丢弃(first_sent 仍为 False), 标注 TTS
             # 也不能念; 但纯 <tts>(cleaned 为空)仍按原行为只发语音。
             if first_sent or not cleaned:
@@ -1596,17 +1597,20 @@ class MessageHandler:
                 self._log_reply(
                     bot_id, event, segments=sent_counter[0],
                     text=f"{cleaned}\n{diagnostic}" if cleaned else str(diagnostic),
-                    note=f" (diagnostic){cap_note}", attempted=attempted)
+                    note=f" (diagnostic){_cap_note()}", attempted=attempted)
                 return diagnostic
             self._log_reply(
                 bot_id, event, segments=sent_counter[0], text=cleaned,
-                note=cap_note, attempted=attempted)
+                note=_cap_note(), attempted=attempted)
             return cleaned
         if rest.strip():
-            attempted += 1
-            first_sent = await self._send_segment(
-                bot_id, event, rest, first_sent,
-                collected=display_parts, sent_counter=sent_counter)
+            if attempted >= self._MAX_SEGMENTS_PER_TURN:
+                _drop_for_cap()
+            else:
+                attempted += 1
+                first_sent = await self._send_segment(
+                    bot_id, event, rest, first_sent,
+                    collected=display_parts, sent_counter=sent_counter)
         if diagnostic is not None:
             # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
             # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
@@ -1617,7 +1621,7 @@ class MessageHandler:
             self._log_reply(
                 bot_id, event, segments=sent_counter[0],
                 text=f"{full_reply}\n{diagnostic}" if full_reply else str(diagnostic),
-                note=f" (diagnostic){cap_note}", attempted=attempted)
+                note=f" (diagnostic){_cap_note()}", attempted=attempted)
             return diagnostic
         # 所有展示段都被逐段丢弃(first_sent 保持 False)时用户什么都没看到,
         # 标注/无标注朗读都不能念; 纯 <tts>(full_reply 为空)保留只发语音。
@@ -1629,7 +1633,7 @@ class MessageHandler:
         # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
         self._log_reply(
             bot_id, event, segments=sent_counter[0], text=full_reply,
-            note=cap_note, attempted=attempted)
+            note=_cap_note(), attempted=attempted)
 
         logger.debug(
             f"Streamed reply done: {sent_counter[0]} segment(s), "
