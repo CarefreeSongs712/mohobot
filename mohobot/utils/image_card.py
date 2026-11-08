@@ -233,7 +233,7 @@ def render_help_card(
         return None
 
     contact = resolve_contacts(contacts)
-    admin_text = "管理员 " + (", ".join(contact["admins"]) if contact["admins"] else "未配置")
+    admin_text = "联系管理员 " + (", ".join(contact["admins"]) if contact["admins"] else "未配置")
     info_lines: list[tuple[str, tuple[int, int, int]]] = []
     if contact["group"]:
         info_lines.append((f"交流群 {contact['group']}", accent))

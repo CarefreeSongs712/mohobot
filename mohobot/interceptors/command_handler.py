@@ -644,7 +644,7 @@ class CommandHandler(Interceptor):
 
     def _help_text(
         self, bot_id: str | None = None, category: str = "",
-        is_admin: bool = True,
+        is_admin: bool = False,
     ) -> str:
         """文本版帮助(图片渲染失败/无法发送时的降级)。
 

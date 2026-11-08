@@ -216,9 +216,18 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     mem = data.get("memory") or {}
     disks = data.get("disks") or []
     main_disk = disks[0] if disks else {}
+    # 内存告警看「不可用」而非「应用+缓存」: available 含可回收缓存,
+    # 用整体占用率会把大页缓存误报成内存吃紧。
+    mem_level_pct = float(mem.get("percent") or 0)
+    level_total = float(mem.get("total") or 0)
+    level_available = float(mem.get("available") or 0)
+    if level_total > 0 and level_available > 0:
+        mem_level_pct = max(
+            0.0, min(100.0, (level_total - level_available) / level_total * 100.0),
+        )
     metrics = [
         float(cpu.get("average") or 0),
-        float(mem.get("percent") or 0),
+        mem_level_pct,
         float(main_disk.get("percent") or 0),
     ]
     available_metrics = [m for m in metrics if m > 0]
@@ -300,11 +309,12 @@ def render_status_card(data: dict[str, Any]) -> str | None:
         if mem.get("app_percent") is not None
         else ((mem_app / mem_total * 100.0) if mem_total else 0.0)
     )
-    draw.text(
-        (x, y),
-        f"内存  {_fmt_gb(mem_used_total)} / {_fmt_gb(mem_total)}  ({mem_pct:.0f}%)",
-        font=section_font, fill=FG,
-    )
+    mem_available = float(mem.get("available") or 0)
+    mem_label = f"内存  {_fmt_gb(mem_used_total)} / {_fmt_gb(mem_total)}  ({mem_pct:.0f}%)"
+    if mem_available:
+        # available 含可回收缓存, 单列展示, 不参与堆叠条加法。
+        mem_label += f" · 可用 {_fmt_gb(mem_available)}"
+    draw.text((x, y), mem_label, font=section_font, fill=FG)
     y += 26
     bar_w = CARD_W - 2 * PAD
     bar_h = 26
@@ -321,7 +331,7 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     legend_items = [
         ("应用", mem_app, usage_color(mem_app_pct)),
         ("缓存", mem_cache, CACHE),
-        ("可用", mem_free, TRACK),
+        ("空闲", mem_free, TRACK),
     ]
     lx = x
     for label, value, color in legend_items:
@@ -421,7 +431,7 @@ def render_status_card(data: dict[str, Any]) -> str | None:
 
     contacts = data.get("contacts") or {}
     admins = contacts.get("admins") or []
-    admin_text = "管理员 " + (", ".join(str(a) for a in admins) if admins else "未配置")
+    admin_text = "联系管理员 " + (", ".join(str(a) for a in admins) if admins else "未配置")
     for line in _wrap(admin_text, small_font, bar_w):
         draw.text((x, y), line, font=small_font, fill=DIM)
         y += 20

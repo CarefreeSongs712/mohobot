@@ -62,7 +62,10 @@ def test_contacts_resolution() -> None:
         "admins": ["9"], "group": "8", "url": "https://x.test/",
     })
     assert resolved == {"admins": ["9"], "group": "8", "url": "https://x.test/"}
-    print("[1] 联系方式解析 OK")
+    # 面板/手工配置可能写成单个 int, 不能因迭代失败拖垮 /help
+    assert resolve_contacts({"admin_qqs": 123})["admins"] == ["123"]
+    assert resolve_contacts({"admin_qqs": 123.0})["admins"] == ["123.0"]
+    print("[1] 联系方式解析(含标量配置) OK")
 
 
 def test_status_bot_list_and_fallback() -> None:
@@ -115,7 +118,7 @@ async def test_status_without_psutil() -> None:
         assert data["contacts"]["admins"] == ["90001"]
         assert data["contacts"]["group"] == "123"
         text = status_main._text_report(data)
-        assert "管理员: 90001" in text
+        assert "联系管理员: 90001" in text
         assert "交流群: 123" in text
     finally:
         status_main.HAS_PSUTIL = old
@@ -228,13 +231,14 @@ async def test_help_category_route_and_multipage() -> None:
 GB = 1024 ** 3
 
 
-def test_memory_conservation_psutil_7_and_5() -> None:
-    """psutil 7.x used 含 cache; 5.x 不含。两条路径都必须三分量守恒。"""
+def test_memory_conservation_free_based() -> None:
+    """用 free/buffers/cached 做版本无关分解: 应用 + 缓存 + 空闲 == 总量。"""
     import plugins.status.main as status_main
 
     class VM:
-        def __init__(self, total, available, used, buffers, cached):
+        def __init__(self, total, free, available, used, buffers, cached):
             self.total = total
+            self.free = free
             self.available = available
             self.used = used
             self.buffers = buffers
@@ -259,30 +263,98 @@ def test_memory_conservation_psutil_7_and_5() -> None:
     old = status_main.HAS_PSUTIL
     status_main.HAS_PSUTIL = True
     try:
-        # 7.x: used=80, cache=40 → app=40, available=20
-        vm7 = VM(100 * GB, 20 * GB, 80 * GB, 5 * GB, 35 * GB)
-        with patch.object(status_main, "psutil", FakePsutil((7, 0, 0), vm7)):
-            data7 = status_main._read_memory()
-        assert data7["used"] == 40 * GB
-        assert data7["cache"] == 40 * GB
-        assert data7["free"] == 20 * GB
-        assert data7["used"] + data7["cache"] + data7["free"] == 100 * GB
-        assert round(data7["percent"]) == 80
-        assert round(data7["app_percent"]) == 40
+        # 7.2 真实形态: available 远大于 free; 不能把 available 当加法分量。
+        total = 155 * GB // 10
+        free = 1256 * GB // 100
+        available = 1427 * GB // 100
+        cache = 194 * GB // 100
+        vm72 = VM(total, free, available, 123 * GB // 100, 0, cache)
+        with patch.object(status_main, "psutil", FakePsutil((7, 2, 2), vm72)):
+            data72 = status_main._read_memory()
+        assert data72["used"] == total - free - cache
+        assert data72["cache"] == cache
+        assert data72["free"] == free
+        assert data72["available"] == available
+        assert data72["used"] + data72["cache"] + data72["free"] == total
+        assert abs(data72["percent"] - (total - free) / total * 100) < 0.01
 
-        # 5.x: used=50 不含 cache=40; 可用用 free=10 避免与缓存重复
-        vm5 = VM(100 * GB, 60 * GB, 50 * GB, 5 * GB, 35 * GB)
-        with patch.object(status_main, "psutil", FakePsutil((5, 9, 0), vm5)):
-            data5 = status_main._read_memory()
-        assert data5["used"] == 50 * GB
-        assert data5["cache"] == 40 * GB
-        assert data5["free"] == 10 * GB
-        assert data5["used"] + data5["cache"] + data5["free"] == 100 * GB
-        assert round(data5["percent"]) == 90
-        assert round(data5["app_percent"]) == 50
+        # 7.0/5.9 旧形态: used 不含 cache, free=10, cache=40 → app=50
+        vm_old = VM(100 * GB, 10 * GB, 60 * GB, 50 * GB, 5 * GB, 35 * GB)
+        with patch.object(status_main, "psutil", FakePsutil((5, 9, 0), vm_old)):
+            data_old = status_main._read_memory()
+        assert data_old["used"] == 50 * GB
+        assert data_old["cache"] == 40 * GB
+        assert data_old["free"] == 10 * GB
+        assert data_old["used"] + data_old["cache"] + data_old["free"] == 100 * GB
+        assert round(data_old["percent"]) == 90
+        assert round(data_old["app_percent"]) == 50
+
+        # 异常/不一致数据: cache 超出剩余空间时截断, 仍严格守恒
+        vm_bad = VM(100 * GB, 90 * GB, 95 * GB, 5 * GB, 5 * GB, 35 * GB)
+        with patch.object(status_main, "psutil", FakePsutil((7, 2, 2), vm_bad)):
+            data_bad = status_main._read_memory()
+        assert data_bad["cache"] == 10 * GB
+        assert data_bad["used"] == 0
+        assert data_bad["used"] + data_bad["cache"] + data_bad["free"] == 100 * GB
     finally:
         status_main.HAS_PSUTIL = old
-    print("[8] 内存三分量守恒(psutil 7.x/5.x) OK")
+    print("[8] 内存三分量守恒(free 口径) OK")
+
+
+def test_cpu_and_disk_readers() -> None:
+    import os
+    from types import SimpleNamespace
+    import plugins.status.main as status_main
+
+    class FakePsutil:
+        version_info = (7, 2, 2)
+
+        def cpu_percent(self, interval=None, percpu=False):
+            return [10.0, 20.0, 30.0]
+
+        def cpu_count(self, logical=True):
+            return 3
+
+        def disk_usage(self, mount):
+            used = 30 * GB if mount.endswith("data") else 60 * GB
+            return SimpleNamespace(total=100 * GB, used=used, percent=60.0)
+
+        def disk_partitions(self, all=False):
+            main = status_main._main_disk_mount()
+            return [
+                SimpleNamespace(mountpoint=main, fstype="ext4"),
+                SimpleNamespace(mountpoint=main, fstype="ext4"),  # 重复主盘
+                SimpleNamespace(mountpoint=os.path.join(main, "data"), fstype="ext4"),
+            ]
+
+    old = status_main.HAS_PSUTIL
+    status_main.HAS_PSUTIL = True
+    try:
+        with patch.object(status_main, "psutil", FakePsutil()):
+            cpu = status_main._read_cpu()
+            disks = status_main._read_disks()
+        assert cpu["count"] == 3
+        assert cpu["average"] == 20.0
+        assert cpu["cores"] == [10.0, 20.0, 30.0]
+        assert len(disks) == 2, "重复主盘应去重"
+        assert disks[0]["mount"] == os.path.abspath(status_main._main_disk_mount())
+        assert disks[1]["mount"].endswith("data")
+    finally:
+        status_main.HAS_PSUTIL = old
+
+    # Windows: "/" 与系统盘符应视为同一卷(复审 N2)
+    if os.name == "nt":
+        class WinPsutil(FakePsutil):
+            def disk_partitions(self, all=False):
+                return [
+                    SimpleNamespace(mountpoint="/", fstype="NTFS"),
+                    SimpleNamespace(mountpoint=os.path.abspath(os.sep), fstype="NTFS"),
+                ]
+
+        with patch.object(status_main, "psutil", WinPsutil()):
+            disks = status_main._read_disks()
+        assert len(disks) == 1, "Windows 主盘不应重复显示 / 与 C:\\"
+    print("[9] CPU/磁盘读取与主盘去重 OK")
 
 
 async def test_status_render_and_send_fallbacks() -> None:
@@ -336,8 +408,8 @@ async def test_status_render_and_send_fallbacks() -> None:
 
 def test_help_text_admin_filter() -> None:
     ch = CommandHandler(None, None, None)
-    full = ch._help_text()
-    limited = ch._help_text(is_admin=False)
+    full = ch._help_text(is_admin=True)
+    limited = ch._help_text()
     assert "/persona" in full
     assert "/persona" not in limited
     assert "管理员指令已折叠" in limited
@@ -420,7 +492,8 @@ async def main() -> None:
     test_help_pagination_and_category_filter()
     test_help_desc_parsing()
     await test_help_category_route_and_multipage()
-    test_memory_conservation_psutil_7_and_5()
+    test_memory_conservation_free_based()
+    test_cpu_and_disk_readers()
     await test_status_render_and_send_fallbacks()
     test_help_text_admin_filter()
     await test_help_multipage_send_failure_no_duplicate()

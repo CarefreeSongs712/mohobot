@@ -134,7 +134,7 @@ class PersonaCommandTests(unittest.IsolatedAsyncioTestCase):
         entry = next(cmd for section in self.handler._build_help_sections()
                      for cmd in section["commands"] if cmd["name"] == "persona")
         self.assertTrue(entry["admin"])
-        text = self.handler._help_text()
+        text = self.handler._help_text(is_admin=True)
         self.assertIn("[管理员]", text)
         self.assertIn("/persona get <bot_id> <QQ> <session_id>", text)
 

@@ -2,8 +2,8 @@
   "admin_qqs": {
     "type": "list",
     "default": [],
-    "description": "状态卡管理员 QQ",
-    "hint": "逗号分隔多个；留空则使用全局 admins"
+    "description": "状态卡展示的联系管理员 QQ",
+    "hint": "仅用于卡片展示；命令权限仍由全局 admins 决定。留空则展示全局 admins"
   },
   "community_group": {
     "type": "string",

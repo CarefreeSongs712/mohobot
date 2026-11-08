@@ -100,6 +100,7 @@ async def test_status_image_render() -> None:
         "memory": {
             "total": 8 * 1024**3, "used": 4 * 1024**3,
             "cache": int(1.7 * 1024**3), "free": int(2.3 * 1024**3),
+            "available": int(6.0 * 1024**3),
             "percent": 71.0, "app_percent": 50.0,
             "swap_total": 2 * 1024**3, "swap_used": 0, "swap_percent": 0.0,
         },

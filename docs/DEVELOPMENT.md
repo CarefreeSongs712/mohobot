@@ -579,7 +579,7 @@ self._daily_task = self._task_supervisor.create_task(
 
 实现位置：`BotManager.bot_ids_for_qqs()`（QQ→bot_id，只认已绑定且在线的）、`extract_at_targets()`（CQ/数组两种格式解析）、`MessageHandler._mention_restricts_command()`。
 
-**`/help` 与 `/status` 卡片**：`/help` 由 `command_handler._build_help_sections` 按固定分类聚会，`_build_help_pages` 处理权限折叠与每页 30 条拆分；渲染在 `mohobot/utils/image_card.py`，按字体实际宽度换行/截断，不在命令或括号中间硬切。`/status` 是目录插件 `plugins/status/`，数据采集在 `main.py`，排版在 `mohobot/utils/status_card.py`。两者共用 `mohobot/utils/contact_info.py` 解析联系方式；`/help` 通过 `plugin_system.get_plugin_config("status")` 读取同一份配置，插件未加载时回退默认值。修改卡片布局时优先调渲染模块并补 `tests/test_status_help_redesign.py` 的边界断言。
+**`/help` 与 `/status` 卡片**：`/help` 由 `command_handler._build_help_sections` 按固定分类聚会，`_build_help_pages` 处理权限折叠与每页 30 条拆分；渲染在 `mohobot/utils/image_card.py`，按字体实际宽度换行/截断，不在命令或括号中间硬切。`/status` 是目录插件 `plugins/status/`，数据采集在 `main.py`，排版在 `mohobot/utils/status_card.py`。两者共用 `mohobot/utils/contact_info.py` 解析联系方式；`/help` 通过 `plugin_system.get_plugin_config("status")` 读取同一份配置，插件未加载时回退默认值。`status.admin_qqs` 只用于卡片展示「联系管理员」，命令权限始终由全局 `admins` 决定；`community_group`/`help_url` 由两卡共用。`/status` 内存条用 `free/buffers/cached` 做版本无关分解（应用 + 缓存 + 空闲 == 总量），`available` 单列展示，不参与堆叠加法。修改卡片布局时优先调渲染模块并补 `tests/test_status_help_redesign.py` 的边界断言。
 
 ### 6.4 注入 API
 

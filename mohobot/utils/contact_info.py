@@ -1,7 +1,8 @@
 """状态卡与帮助卡共用的联系方式解析。
 
 数据来源: status 插件配置(data/plugins_config/status.json)。
-- admin_qqs: 管理员 QQ 列表; 留空时回退全局 admins
+- admin_qqs: 卡片展示的联系管理员 QQ; 留空时回退全局 admins
+  （仅展示用，命令权限仍由全局 admins 决定）
 - community_group: 交流群号
 - help_url: 使用须知链接(/help 与 /status 共用)
 """
@@ -31,8 +32,15 @@ def resolve_contacts(
     if raw_admins in (None, "", []):
         raw_admins = list(fallback_admins or [])
     if isinstance(raw_admins, str):
-        raw_admins = [part.strip() for part in raw_admins.split(",")]
-    admins = [str(a).strip() for a in (raw_admins or []) if str(a).strip()]
+        parts = [part.strip() for part in raw_admins.split(",")]
+    elif isinstance(raw_admins, (list, tuple, set)):
+        parts = list(raw_admins)
+    elif isinstance(raw_admins, dict):
+        parts = []
+    else:
+        # 面板/手工配置可能写成单个 int/float; 不能直接迭代, 否则 /help 崩溃。
+        parts = [raw_admins]
+    admins = [str(a).strip() for a in parts if str(a).strip()]
 
     group = str(
         cfg.get("community_group") or cfg.get("group") or DEFAULT_COMMUNITY_GROUP

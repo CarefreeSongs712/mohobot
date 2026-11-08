@@ -215,12 +215,15 @@ def _read_cpu() -> dict[str, Any]:
 
 
 def _read_memory() -> dict[str, Any]:
-    """读取内存并保证「应用 + 缓存 + 可用 == 总量」。
+    """读取内存并保证「应用 + 缓存 + 空闲 == 总量」。
 
-    psutil 7.x 的 Linux `used` 已经是 `total - available`（包含 cache），
-    而 5.x 的 `used` 不含 cache；只看 `used + cache` 会得到 0 可用。
-    这里按版本 + 关系判定 used 是否包含 cache，并在两种语义下都保证三分量守恒。
-    `used` 字段表示「应用」占用（不含缓存），`percent` 是含缓存的整体占用率。
+    不依赖 psutil 版本对 `used` 的定义（5.x 不含 cache，7.1+ 改为
+    total - available），改用最稳定的原始字段分解：
+        cache = buffers + cached
+        free  = vm.free
+        app   = total - free - cache
+    三段天然守恒，并与 `free -m` 口径一致。`available` 单独返回，
+    只作展示，不参与堆叠条加法（它包含可回收缓存，与 cache 会重复计数）。
     """
     if not HAS_PSUTIL:
         return {}
@@ -228,35 +231,14 @@ def _read_memory() -> dict[str, Any]:
         vm = psutil.virtual_memory()
         total = max(int(getattr(vm, "total", 0) or 0), 0)
         available = min(max(int(getattr(vm, "available", 0) or 0), 0), total)
-        raw_used = min(max(int(getattr(vm, "used", 0) or 0), 0), total)
+        free = min(max(int(getattr(vm, "free", 0) or 0), 0), total)
         cache = max(
             int(getattr(vm, "buffers", 0) or 0) + int(getattr(vm, "cached", 0) or 0),
             0,
         )
-        cache = min(cache, total)
-
-        version = tuple(getattr(psutil, "version_info", (0, 0, 0)) or ())
-        # 7.x 统一改为 total - available；关系判定兜住未带版本信息的替身。
-        used_includes_cache = version >= (7, 0, 0) or (raw_used + cache > total)
-        if used_includes_cache:
-            app = max(raw_used - cache, 0)
-            free = available
-        else:
-            # 5.x: used 不含 cache；available 含可回收缓存，若同时展示 cache
-            # 会重复计数，因此旧语义下「可用」用 free（总量 - 应用 - 缓存）。
-            app = raw_used
-            free = max(total - app - cache, 0)
-
-        # 守恒兜底: 极端/异常数据下优先保留 available, 再压缩 cache/app。
-        overflow = app + cache + free - total
-        if overflow > 0:
-            cache = max(cache - overflow, 0)
-            overflow = app + cache + free - total
-            if overflow > 0:
-                app = max(app - overflow, 0)
-                overflow = app + cache + free - total
-                if overflow > 0:
-                    free = max(free - overflow, 0)
+        # 先保证 free + cache <= total, 再反推 app, 三段严格守恒。
+        cache = min(cache, max(total - free, 0))
+        app = max(total - free - cache, 0)
 
         used_total = app + cache
         percent = (used_total / total * 100.0) if total else 0.0
@@ -266,6 +248,7 @@ def _read_memory() -> dict[str, Any]:
             "used": app,
             "cache": cache,
             "free": free,
+            "available": available,
             "percent": percent,
             "app_percent": app_percent,
             "swap_total": 0,
@@ -295,16 +278,27 @@ _DISK_SKIP_FS = {
 }
 
 
+def _main_disk_mount() -> str:
+    """主盘: Linux 固定 /; Windows 用系统盘符(避免 / 与 C:\\ 被当成两个卷)。"""
+    if os.name == "nt":
+        return os.path.abspath(os.sep)
+    return "/" if os.path.exists("/") else os.path.abspath(os.sep)
+
+
 def _read_disks() -> list[dict[str, Any]]:
     """主盘固定 /(Windows 为系统盘), 其它物理挂载点按发现顺序追加。"""
     if not HAS_PSUTIL:
         return []
-    main_mount = "/" if os.path.exists("/") else os.path.abspath(os.sep)
+    main_mount = _main_disk_mount()
     disks: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     def _add(mount: str) -> None:
-        key = os.path.normcase(os.path.normpath(mount))
+        if not mount:
+            return
+        display = os.path.abspath(mount)
+        # abspath 把 Windows 的 "/" 与 "C:\\" 归一为同一盘符, 去重键一致。
+        key = os.path.normcase(display)
         if key in seen:
             return
         try:
@@ -313,7 +307,7 @@ def _read_disks() -> list[dict[str, Any]]:
             return
         seen.add(key)
         disks.append({
-            "mount": mount,
+            "mount": display,
             "total": int(usage.total),
             "used": int(usage.used),
             "percent": float(usage.percent),
@@ -356,7 +350,11 @@ def _text_report(data: dict[str, Any]) -> str:
         lines.append(
             f"内存: 应用 {_fmt_gb(mem.get('used'))} / 总量 {_fmt_gb(mem.get('total'))} "
             f"({int(mem.get('percent') or 0)}%) · 缓存 {_fmt_gb(mem.get('cache'))} "
-            f"· 可用 {_fmt_gb(mem.get('free'))}"
+            f"· 空闲 {_fmt_gb(mem.get('free'))}"
+            + (
+                f" · 可用 {_fmt_gb(mem.get('available'))}"
+                if mem.get("available") else ""
+            )
             + (
                 f" · Swap {_fmt_gb(mem.get('swap_used'))}/{_fmt_gb(mem.get('swap_total'))}"
                 if mem.get("swap_total") else " · Swap 未启用"
@@ -381,7 +379,7 @@ def _text_report(data: dict[str, Any]) -> str:
             f"在线 {_fmt_duration(bot.get('online_secs'))}"
         )
     admins = ", ".join(contacts.get("admins") or []) or "未配置"
-    lines.append(f"管理员: {admins}")
+    lines.append(f"联系管理员: {admins}")
     lines.append(f"交流群: {contacts.get('group')} · 使用须知: {contacts.get('url')}")
     return "\n".join(lines)
 

@@ -248,8 +248,8 @@ def test_help_bot_binding_and_admin_metadata():
     section = next(s for s in ch._build_help_sections("bot_001") if s["title"] == "工具 · bound")
     assert {c["name"]: c["admin"] for c in section["commands"]} == {"公开": False, "管理": True}
     assert all(s["title"] != "工具 · bound" for s in ch._build_help_sections("bot_002"))
-    assert "/管理" in ch._help_text("bot_001")
-    assert "/管理" not in ch._help_text("bot_002")
+    assert "/管理" in ch._help_text("bot_001", is_admin=True)
+    assert "/管理" not in ch._help_text("bot_002", is_admin=True)
 
 
 def test_help_card_layout():
