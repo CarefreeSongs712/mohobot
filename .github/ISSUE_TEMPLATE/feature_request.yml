@@ -34,7 +34,7 @@ body:
     id: boundary
     attributes:
       label: 影响边界（可选）
-      description: 涉及哪些模块/入口，哪些明确不在本次范围；是否有权限、并发、兼容性或数据迁移影响。
+      description: 涉及哪些模块/入口，哪些明确不在本次范围；是否有权限、多 Bot 去重、并发、兼容性或数据迁移影响。
     validations:
       required: false
   - type: textarea
