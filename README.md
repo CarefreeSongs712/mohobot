@@ -123,14 +123,14 @@ logs/                         # 运行日志（不入库）
 
 ## 参与贡献
 
-欢迎功能、修复、测试与文档 PR：流程、提交前检查与文档职责见[贡献指南](CONTRIBUTING.md)，硬性约束见[开发守则](AGENTS.md)。代码定位从[代码地图](docs/CODE-MAP.md)开始；插件用法与配置见[插件速查](docs/PLUGINS.md)。
+欢迎功能、修复、测试与文档 PR：流程、提交前检查与文档职责见[贡献指南](CONTRIBUTING.md)，硬性约束见[开发守则](AGENTS.md)，社区行为规范见[行为准则](CODE_OF_CONDUCT.md)。代码定位从[代码地图](docs/CODE-MAP.md)开始；插件用法与配置见[插件速查](docs/PLUGINS.md)。
 
 ## 安全提示
 
 - 不要将 API Key、Cookies、密码哈希、`config/global.yaml`、`data/`、`logs/` 提交到仓库或贴进 issue/PR。
 - 管理面板与审核面板默认只监听回环地址，首次部署必须显式配置密码；不要把面板直接暴露到不受信任网络，需要远程访问时使用 HTTPS 反向代理、VPN 或白名单。
 - 反向 WS 面向不可信网络时应配置 `server.access_token` 并限制来源；部署前按[部署指南](docs/DEPLOYMENT.md)的检查单核实实际服务与权限。
-- 发现安全问题请通过维护者私下渠道报告，不要在公开 issue 中贴出可利用细节与真实凭据。
+- 发现安全问题请按[安全策略](SECURITY.md)通过私密渠道报告，不要在公开 issue 中贴出可利用细节与真实凭据。
 
 ## 更新日志
 

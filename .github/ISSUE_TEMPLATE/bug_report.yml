@@ -1,0 +1,77 @@
+name: Bug 报告
+description: 报告可复现的缺陷（不要提交密钥、Cookie、真实用户数据或未脱敏日志）
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先搜索现有 issue/PR，并确认问题可在最新 `main` 或 `dev` 上复现。
+        **安全漏洞请勿在此公开**，改走 [SECURITY.md](https://github.com/CarefreeSongs712/mohobot/blob/dev/SECURITY.md) 的私密渠道。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 一句话说明现象；如有报错请贴关键日志（先脱敏）。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 给出最小可复现步骤，包括所需配置（不要贴真实 Key）与消息样例。
+      placeholder: |
+        1. ...
+        2. ...
+        3. 实际结果 / 期望结果
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: 版本 / 提交
+      description: 输出 `git rev-parse --short HEAD` 与分支名。
+      placeholder: "例如 dev @ 6284172"
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 运行环境
+      multiple: true
+      options:
+        - 本地开发（venv 直接运行）
+        - systemd 部署
+        - 其他
+    validations:
+      required: false
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      placeholder: "3.12.x"
+    validations:
+      required: false
+  - type: input
+    id: onebot
+    attributes:
+      label: OneBot 实现
+      placeholder: "NapCat / LLOneBot / Lagrange / 其他（注明版本）"
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 是否同时出现于干净配置、是否只在特定插件启用时出现、相关日志片段等。请删除凭据与个人数据。
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已脱敏日志与配置，未包含 API Key、Cookie、QQ 号等真实数据
+          required: true
+        - label: 我已搜索现有 issue/PR，未发现重复
+          required: true

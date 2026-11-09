@@ -8,11 +8,13 @@
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 代码结构、扩展步骤、测试与 CI 口径 |
 | [docs/CODE-MAP.md](docs/CODE-MAP.md) | 快速定位模块与修改入口 |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | 插件命令与配置入口 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 社区行为准则与举报方式 |
+| [SECURITY.md](SECURITY.md) | 漏洞的私密报告渠道（不要公开披露细节） |
 
 ## 分支与 PR
 
 1. 从最新 `origin/dev` 建分支：`feat/<topic>`、`bugfix/<topic>` 或 `docs/<topic>`。
-2. 改动只提交到该分支，通过 PR 合入 `dev`；`main` 只接受维护者的 release PR。
+2. 改动只提交到该分支，通过 PR 合入 `dev`；`main` 只接受维护者的 release PR。提交 PR 时按 `.github/PULL_REQUEST_TEMPLATE.md` 填写验证与检查项。
 3. PR 描述写清：改了什么、为什么、如何验证；涉及数据/配置/脚本时说明影响面与回滚方式。
 4. 涉及运行时行为的改动，按 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 补回归测试；纯文档改动请在验证中注明"未运行测试"。
 
