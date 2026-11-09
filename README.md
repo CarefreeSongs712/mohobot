@@ -8,6 +8,7 @@ Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人
 |---|---|
 | [开发守则](AGENTS.md) | 数据边界、生命周期、扩展、安全与授权约束 |
 | [开发指南](docs/DEVELOPMENT.md) | 当前代码结构、配置/插件/LLM 工具开发、测试与 CI |
+| [插件速查](docs/PLUGINS.md) | 各内置插件的命令与配置入口 |
 | [部署指南](docs/DEPLOYMENT.md) | 通用新环境部署模板及发布前检查；不包含任何特定生产实例信息 |
 | [待办清单](TODO.md) | 当前记录的未完成事项与简要历史决策；实时 PR/CI 状态以 GitHub 为准 |
 | [接手说明](docs/HANDOVER.md) | 接手步骤与文档索引，不记录环境实例状态 |
@@ -52,16 +53,44 @@ Web 面板默认监听回环地址的 `9090` 端口，登录密码必须显式�
 
 ## 常用指令
 
-以下为少量内置入口；插件指令和权限以 `/help` 输出及各插件文档为准。
+以下为少量内置入口；插件指令和权限以 `/help` 输出及[插件速查](docs/PLUGINS.md)为准。
 
 | 指令 | 说明 |
 |---|---|
 | `/help [分类]` | 查看可用指令；管理员指令按权限折叠 |
 | `/status` | 查看运行状态 |
 | `/sess list`、`/sess new <名称>`、`/sess switch <ID>`、`/sess del <ID>` | 管理当前私聊会话 |
+| `/persona …`【管理员】 | 管理私聊专属人设，见下文「私聊专属人设与人设评估」 |
 | `/forget <数量>`、`/clear` | 删除近期上下文或清空当前上下文 |
+| `/查看聊天 <QQ号|群号> [条数]`、`/发送消息 <QQ号|群号> <内容>`【管理员】 | 查看/代发消息（chat_manager 插件） |
+| `/点歌 <关键词>`（别名 `/music` `/听歌` `/网易云`） | 网易云点歌，回复数字选歌 |
 | `ping` | 不区分大小写、无需斜杠，回复 `PONG` |
 | `/tts <文本>` | 按 TTS 配置合成语音；需要启用 TTS 服务 |
+
+## 私聊专属人设与人设评估
+
+- 人设预设统一在 `data/personas/` 管理（可备份/恢复）；Bot 用配置选择默认人设，正文仅作请求级提示、不写入上下文。
+- 私聊可为 `bot_id + 用户QQ + session_id` 设专属人设；解析顺序**私聊 session 专属 → bot 默认 → 系统默认**。`/persona list|sessions|set|get|clear`（管理员）不创建也不切换会话，目标需已存在；删除 session 会同步移除专属引用，清空消息则保留。
+- **匿名人设评估（`/ab`，默认关闭，仅指定 bot 的私聊）**：命中后生成「基准/测试」两版并双栏图卡展示，投票/切换不改变历史。`/ab A|B|平局|都不好|跳过` 投票；`/ab vote <id> <选项>` 补投；`/ab switch <id> A|B` 切回原会话（需 generation 与人设 hash 未变）。统计表示单轮同历史偏好；数据存 `data/persona_ab/`，独立 JSON 导出，聊天备份不含该数据且首版不支持恢复导入；重启保留 pending/冷却，中断不自动重发。
+
+## Web 面板主要板块
+
+数据总览 ｜ 配置文件（全局 + 每 Bot）｜ 模型配置（含多提供商）｜ TTS 语音 ｜ 插件管理（schema 表单，保存热生效）｜ 对话数据 ｜ 实时日志（SSE）｜ 系统设置（改密/进程内重启）｜ 数据管理（备份/恢复/清理）｜ 封禁管理 ｜ 情感管理。密码与 API Key 行为见上文及[部署指南](docs/DEPLOYMENT.md)。
+
+## 数据与目录速览
+
+```
+data/
+├── bots/{bot_id}/            # Bot 配置
+├── history/group/            # 群聊合并归档（message_id+跨账号指纹去重）
+├── history/{bot_id}/private/ # 私聊归档（按 bot 隔离）
+├── contexts/{bot_id}/        # 工作上下文（可读写）
+├── database/                 # SQLite 对话库
+└── cache/                    # 图片缓存 / 歌曲索引等
+logs/                         # 运行日志（不入库）
+```
+
+原始归档是只读回溯/审核材料，不作 LLM 实时输入；数据层细节见 [DEVELOPMENT §4](docs/DEVELOPMENT.md)。
 
 ## 技术与状态
 
