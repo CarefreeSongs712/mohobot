@@ -1,5 +1,9 @@
 # Mohobot
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/CarefreeSongs712/mohobot/actions/workflows/ci.yml/badge.svg)](https://github.com/CarefreeSongs712/mohobot/actions/workflows/ci.yml)
+
 Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人框架，通过 OpenAI 兼容接口驱动对话，并提供插件、Web 管理面板与独立数据存储。
 
 ## 文档导航
@@ -8,7 +12,9 @@ Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人
 |---|---|
 | [开发守则](AGENTS.md) | 数据边界、生命周期、扩展、安全与授权约束 |
 | [开发指南](docs/DEVELOPMENT.md) | 当前代码结构、配置/插件/LLM 工具开发、测试与 CI |
+| [代码地图](docs/CODE-MAP.md) | 模块定位、关键调用链与修改入口 |
 | [插件速查](docs/PLUGINS.md) | 各内置插件的命令与配置入口 |
+| [贡献指南](CONTRIBUTING.md) | 分支/PR 流程与提交前检查 |
 | [部署指南](docs/DEPLOYMENT.md) | 通用新环境部署模板及发布前检查；不包含任何特定生产实例信息 |
 | [待办清单](TODO.md) | 当前记录的未完成事项与简要历史决策；实时 PR/CI 状态以 GitHub 为准 |
 | [接手说明](docs/HANDOVER.md) | 接手步骤与文档索引，不记录环境实例状态 |
@@ -24,6 +30,23 @@ Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人
 - **知识与插件**：虚拟歌手 RAG 知识库、歌曲识别与多来源同步；插件系统提供消息钩子、配置 schema 和 LLM 工具注册。
 - **管理与审核**：FastAPI Web 面板；可选的独立审核面板读取消息归档。
 - **其他功能**：封禁、情感系统、TTS、人设管理与单轮匿名人设评估等功能按配置启用。详细功能、命令与插件状态见对应插件文档及代码配置。
+
+## 项目结构
+
+```text
+mohobot/
+├─ main.py             # 装配入口：创建/注入/启动/热同步/优雅关闭
+├─ mohobot/            # 框架核心（消息主链、LLM、上下文、插件系统、面板…）
+├─ plugins/            # 内置插件（命令见 docs/PLUGINS.md）
+├─ review/             # 独立审核面板（只读 history）
+├─ scripts/            # 迁移/同步/维护脚本（多数需停机或授权）
+├─ tests/              # pytest、fake OneBot、runner 与冒烟测试
+├─ config/             # global.example.yaml 模板；本地 global.yaml 不入库
+├─ deploy/             # 新环境 systemd 模板
+└─ docs/               # 开发/部署/代码地图/插件/历史审计
+```
+
+模块级定位见[代码地图](docs/CODE-MAP.md)。
 
 ## 安装与最小启动
 
@@ -97,6 +120,21 @@ logs/                         # 运行日志（不入库）
 主要依赖包括 Python 3.12+、asyncio、websockets、FastAPI、SQLAlchemy/SQLite、OpenAI SDK、Pillow。部分功能有可选依赖，例如关系图渲染使用 Playwright；详见 [`requirements.txt`](requirements.txt) 与插件文档。
 
 项目持续演进，配置、命令与接口可能变化。提交 PR 前按[开发指南](docs/DEVELOPMENT.md)运行与改动相关的测试；PR 的通过状态以对应 GitHub Actions 运行为准。
+
+## 参与贡献
+
+欢迎功能、修复、测试与文档 PR：流程、提交前检查与文档职责见[贡献指南](CONTRIBUTING.md)，硬性约束见[开发守则](AGENTS.md)。代码定位从[代码地图](docs/CODE-MAP.md)开始；插件用法与配置见[插件速查](docs/PLUGINS.md)。
+
+## 安全提示
+
+- 不要将 API Key、Cookies、密码哈希、`config/global.yaml`、`data/`、`logs/` 提交到仓库或贴进 issue/PR。
+- 管理面板与审核面板默认只监听回环地址，首次部署必须显式配置密码；不要把面板直接暴露到不受信任网络，需要远程访问时使用 HTTPS 反向代理、VPN 或白名单。
+- 反向 WS 面向不可信网络时应配置 `server.access_token` 并限制来源；部署前按[部署指南](docs/DEPLOYMENT.md)的检查单核实实际服务与权限。
+- 发现安全问题请通过维护者私下渠道报告，不要在公开 issue 中贴出可利用细节与真实凭据。
+
+## 更新日志
+
+版本发布说明与合并记录见 GitHub [Releases](https://github.com/CarefreeSongs712/mohobot/releases) 与 `main` 的提交历史；未完成事项与决策记录见[待办清单](TODO.md)。本 README 不维护逐版本流水，避免与发布线脱节。
 
 ## 许可证
 

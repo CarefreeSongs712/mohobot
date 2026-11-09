@@ -4,7 +4,7 @@
 
 ## 1. 开始工作前
 
-1. 阅读 [README.md](README.md)、[DEVELOPMENT.md](docs/DEVELOPMENT.md) 和 [HANDOVER.md](docs/HANDOVER.md)；需要部署时另读 [DEPLOYMENT.md](docs/DEPLOYMENT.md)。修改相关模块前查 [历史审查报告](docs/AUDIT-2026-10-12.md)，再按当前代码复核其发现是否仍适用。
+1. 阅读 [README.md](README.md)、[DEVELOPMENT.md](docs/DEVELOPMENT.md) 和 [HANDOVER.md](docs/HANDOVER.md)；定位代码用 [CODE-MAP.md](docs/CODE-MAP.md)；需要部署时另读 [DEPLOYMENT.md](docs/DEPLOYMENT.md)。修改相关模块前查 [历史审查报告](docs/AUDIT-2026-10-12.md)，再按当前代码复核其发现是否仍适用。
 2. 修改某个子目录前检查局部说明。表情包插件额外遵循 [CLAUDE.md](plugins/meme_stealer/CLAUDE.md)；主动聊天参阅其 [README.md](plugins/proactive_chat/README.md)。
 3. 确认项目根目录、分支、提交和 `git status`。保留用户已有改动；不自动 reset、clean、删除未跟踪文件或覆盖配置。
 4. 文档与实现不符时先核查实际调用链，报告差异；历史部署快照不能当作当前环境事实。

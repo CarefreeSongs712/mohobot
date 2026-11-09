@@ -9,6 +9,9 @@
 | [README](../README.md) | 项目定位、能力概览、安装入口和常用命令 | 使用者与初次接触者 |
 | [AGENTS](../AGENTS.md) | 数据、并发、生命周期、扩展、验证、安全与授权的稳定约束 | 所有代码任务 |
 | [DEVELOPMENT](DEVELOPMENT.md) | 当前代码结构、扩展契约、配置、测试与 CI 开发说明 | 代码贡献者 |
+| [CODE-MAP](CODE-MAP.md) | 模块定位、关键调用链与修改入口（不复制签名/配置/测试结果） | 定位代码时 |
+| [PLUGINS](PLUGINS.md) | 内置插件命令与配置入口 | 使用者与插件维护者 |
+| [CONTRIBUTING](../CONTRIBUTING.md) | 分支/PR 流程与提交前检查 | 代码贡献者 |
 | [DEPLOYMENT](DEPLOYMENT.md) | 新环境部署模板、网络边界和发布前检查 | 经授权的部署操作 |
 | [TODO](../TODO.md) | 有明确状态和验证方式的未完成项目，以及简要决策记录 | 维护者规划 |
 | [历史缺陷审计](AUDIT-2026-10-12.md) | 绑定 `main/b63ad48`、日期为 2026-10-12 的历史发现与复现 | 仅供追溯，不代表当前缺陷清单 |
@@ -18,7 +21,7 @@
 
 ## 2. 接手步骤
 
-1. 阅读本文件、[AGENTS](../AGENTS.md)、[README](../README.md) 与 [DEVELOPMENT](DEVELOPMENT.md)；如涉及部署，再读 [DEPLOYMENT](DEPLOYMENT.md)。
+1. 阅读本文件、[AGENTS](../AGENTS.md)、[README](../README.md) 与 [DEVELOPMENT](DEVELOPMENT.md)；定位代码用 [CODE-MAP](CODE-MAP.md)；如涉及部署，再读 [DEPLOYMENT](DEPLOYMENT.md)。
 2. 在仓库根目录检查 `git status`、当前分支、HEAD、目标分支及其远端引用；按需检查开放 PR/issue 和对应 CI 运行。不能从旧文档推断这些状态。
 3. 追踪相关调用链和测试。配置示例描述的是默认/模板值，不等于任一运行环境的实际配置；历史审计问题需对当前代码重新验证。
 4. 保留现有配置与数据。未经授权不连接生产、不启动真实机器人、不执行迁移/同步/清理、不提交或部署。
