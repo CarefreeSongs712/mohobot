@@ -22,6 +22,22 @@ body:
     validations:
       required: true
   - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准（可选）
+      description: 用「触发条件 → 输入 → 期望输出」描述可验证的行为；跨模块功能建议按 docs/SPEC-TEMPLATE.md 写 spec。
+      placeholder: |
+        1. 收到 … 时，输入 …，应输出 …
+    validations:
+      required: false
+  - type: textarea
+    id: boundary
+    attributes:
+      label: 影响边界（可选）
+      description: 涉及哪些模块/入口，哪些明确不在本次范围；是否有权限、并发、兼容性或数据迁移影响。
+    validations:
+      required: false
+  - type: textarea
     id: alternatives
     attributes:
       label: 备选方案 / 不做的理由

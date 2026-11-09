@@ -34,6 +34,20 @@ body:
       placeholder: "例如 dev @ 6284172"
     validations:
       required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 正确的行为应该是什么？如果涉及不变量（如"history 只追加"、"群聊只写合并归档"），请指出被违反的那条。
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响范围
+      description: 影响哪些功能/入口；是否涉及数据丢失、越权、跨用户/跨群、仅特定配置或插件；是否可稳定复现。
+    validations:
+      required: false
   - type: dropdown
     id: deploy
     attributes:

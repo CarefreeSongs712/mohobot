@@ -14,7 +14,8 @@ Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人
 | [开发指南](docs/DEVELOPMENT.md) | 当前代码结构、配置/插件/LLM 工具开发、测试与 CI |
 | [代码地图](docs/CODE-MAP.md) | 模块定位、关键调用链与修改入口 |
 | [插件速查](docs/PLUGINS.md) | 各内置插件的命令与配置入口 |
-| [贡献指南](CONTRIBUTING.md) | 分支/PR 流程与提交前检查 |
+| [贡献指南](CONTRIBUTING.md) | 分支/PR 流程、Bug 修复流程与提交前检查 |
+| [规格模板](docs/SPEC-TEMPLATE.md) | 跨模块功能/行为变更的 spec 模板 |
 | [部署指南](docs/DEPLOYMENT.md) | 通用新环境部署模板及发布前检查；不包含任何特定生产实例信息 |
 | [待办清单](TODO.md) | 当前记录的未完成事项与简要历史决策；实时 PR/CI 状态以 GitHub 为准 |
 | [接手说明](docs/HANDOVER.md) | 接手步骤与文档索引，不记录环境实例状态 |
