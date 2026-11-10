@@ -138,16 +138,16 @@ async def test_help_image():
             ]
     ch._plugin_system = FakePlugins()
 
-    # 分组验证
+    # 固定分类顺序 + 插件名作为组标题
     sections = ch._build_help_sections()
     titles = [s["title"] for s in sections]
-    assert "系统" in titles and "封禁管理 (管理员)" in titles
-    assert "插件 · divination" in titles and "插件 · relationship" in titles
-    rel = next(s for s in sections if s["title"] == "插件 · relationship")
+    assert "内置" in titles and "会话" in titles and "封禁" in titles
+    assert "娱乐 · divination" in titles and "管理 · relationship" in titles
+    rel = next(s for s in sections if s["title"] == "管理 · relationship")
     rel_cmds = {c["name"]: c for c in rel["commands"]}
     assert rel_cmds["群列表"]["admin"] is True, "admin 字段应标注"
     assert rel_cmds["同意"]["admin"] is False
-    ban_sec = next(s for s in sections if s["title"] == "封禁管理 (管理员)")
+    ban_sec = next(s for s in sections if s["title"] == "封禁")
     # 除查询类(banlist/ban-help 所有人可用)外均标管理员
     assert all(c["admin"] for c in ban_sec["commands"] if c["name"] not in ("banlist", "ban-help"))
 
@@ -245,11 +245,11 @@ def test_help_bot_binding_and_admin_metadata():
         ]},
     }])
     ch = CommandHandler(None, None, None, plugin_system=plugins)
-    section = next(s for s in ch._build_help_sections("bot_001") if s["title"] == "插件 · bound")
+    section = next(s for s in ch._build_help_sections("bot_001") if s["title"] == "工具 · bound")
     assert {c["name"]: c["admin"] for c in section["commands"]} == {"公开": False, "管理": True}
-    assert all(s["title"] != "插件 · bound" for s in ch._build_help_sections("bot_002"))
-    assert "/管理" in ch._help_text("bot_001")
-    assert "/管理" not in ch._help_text("bot_002")
+    assert all(s["title"] != "工具 · bound" for s in ch._build_help_sections("bot_002"))
+    assert "/管理" in ch._help_text("bot_001", is_admin=True)
+    assert "/管理" not in ch._help_text("bot_002", is_admin=True)
 
 
 def test_help_card_layout():
@@ -258,42 +258,37 @@ def test_help_card_layout():
     from mohobot.utils import image_card
 
     # 字体及绘制参数受控, 不依赖中文字体安装; 同时实际生成 PNG 验证边界。
-    fonts = {size: ImageFont.load_default(size=size) for size in (14, 17, 18, 22, 30)}
+    fonts = {size: ImageFont.load_default(size=size) for size in (12, 14, 17, 22)}
     original_text = ImageDraw.ImageDraw.text
     heights = []
-    for links in (image_card.HELP_LINKS_TEXT, image_card.HELP_LINKS_TEXT + " extra" * 70):
+    for url in ("https://7121099.xyz/", "https://7121099.xyz/" + "x" * 500):
         sections = [
             {"title": f"Section {i}", "commands": [
-                {"name": f"cmd{i}_{j}", "desc": "description", "admin": j == 0}
+                {
+                    "name": f"cmd{i}_{j}", "desc": "description", "admin": j == 0,
+                    "usage": "用法示例" if j == 1 else "",
+                    "aliases": ["alias"] if j == 2 else [],
+                }
                 for j in range(5)
             ]} for i in range(40)
         ]
+        contacts = {"admins": ["3831097597"], "group": "398870315", "url": url}
         with patch.object(image_card, "find_cjk_font", return_value="mock-font"), \
                 patch.object(ImageFont, "truetype", side_effect=lambda path, size: fonts[size]), \
-                patch.object(image_card, "HELP_LINKS_TEXT", links), \
                 patch.object(ImageDraw.ImageDraw, "text", autospec=True, side_effect=original_text) as draw_text:
-            path = image_card.render_help_card(sections)
+            path = image_card.render_help_card(sections, contacts=contacts)
         assert path is not None
         try:
             with Image.open(path) as image:
                 width, height = image.size
             heights.append(height)
             calls = draw_text.call_args_list
-            group_call = next(call for call in calls if call.args[2] == image_card.HELP_GROUP_TEXT)
-            assert group_call.kwargs["font"].size == 30
-            link_calls = [call for call in calls if call.kwargs["font"].size == 18]
-            assert "".join(call.args[2] for call in link_calls) == links.replace("\n", "")
-            if links == image_card.HELP_LINKS_TEXT:
-                assert [call.args[2] for call in link_calls] == links.splitlines()
             section_calls = [call for call in calls if call.kwargs["font"].size == 17]
             command_calls = [call for call in calls if call.args[2].startswith("/cmd")]
+            assert len(section_calls) == 40
             assert len(command_calls) == 200
             assert all(call.kwargs["font"].size == 14 for call in command_calls)
             assert command_calls[1].args[1][0] == 460, "两列命令宽度应保持不变"
-            assert section_calls[0].args[1][1] > max(
-                call.args[1][1] + call.kwargs["font"].getbbox(call.args[2])[3]
-                for call in link_calls
-            )
             for call in calls:
                 x, y = call.args[1]
                 left, top, right, bottom = call.kwargs["font"].getbbox(call.args[2])
@@ -301,7 +296,7 @@ def test_help_card_layout():
                 assert 0 <= y + top < y + bottom <= height, call.args[2]
         finally:
             Path(path).unlink()
-    assert heights[1] > heights[0], "信息区换行时必须增加总高度而非挤压命令"
+    assert heights[1] > heights[0], "须知链接换行时必须增加总高度而非挤压命令"
 
 
 def test_help_card_without_font():

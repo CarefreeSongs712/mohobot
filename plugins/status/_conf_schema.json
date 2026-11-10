@@ -1,0 +1,20 @@
+{
+  "admin_qqs": {
+    "type": "list",
+    "default": [],
+    "description": "状态卡展示的联系管理员 QQ",
+    "hint": "仅用于卡片展示；命令权限仍由全局 admins 决定。留空则展示全局 admins"
+  },
+  "community_group": {
+    "type": "string",
+    "default": "398870315",
+    "description": "交流群号",
+    "hint": "显示在 /status 与 /help 卡片底部"
+  },
+  "help_url": {
+    "type": "string",
+    "default": "https://7121099.xyz/",
+    "description": "使用须知链接",
+    "hint": "/status 与 /help 共用"
+  }
+}

@@ -43,7 +43,12 @@ class Plugin:
 
     info = {
         "commands": [
-            {"name": "用量", "desc": "用量 [7d|会话 [今日|7d|30d]] — token 消耗统计, 支持按会话(管理员)"},
+            {
+                "name": "用量",
+                "desc": "token 消耗统计",
+                "usage": "/用量 [7d] | /用量 会话 [今日|7d|30d]",
+                "admin": True,
+            },
         ],
     }
 

@@ -26,7 +26,11 @@ class Plugin:
 
     info = {
         "commands": [
-            {"name": "搜索", "desc": "实时联网搜索: /搜索 关键词; /搜索 extract URL; /搜索 batch 词1,词2"},
+            {
+                "name": "搜索",
+                "desc": "实时联网搜索",
+                "usage": "/搜索 <关键词> | /搜索 extract <URL> | /搜索 batch <词1,词2>",
+            },
         ],
     }
 

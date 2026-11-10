@@ -142,19 +142,61 @@ def render_info_card(title: str, fields: list[tuple[str, str]], accent: tuple = 
     return tmp_path
 
 
-HELP_GROUP_TEXT = "交流群 398870315"
-HELP_LINKS_TEXT = (
-    "介绍 / 使用须知  https://7121099.xyz/\n"
-    "管理员 3831097597"
-)
-HELP_INFO_TEXT = f"{HELP_GROUP_TEXT}\n{HELP_LINKS_TEXT}"
+def _fit_text(text: str, font, max_width: float) -> str:
+    """按字体实际宽度截断并以 … 结尾。"""
+    if max_width <= 0:
+        return ""
+    if font.getlength(text) <= max_width:
+        return text
+    while text and font.getlength(text + "…") > max_width:
+        text = text[:-1]
+    return (text + "…") if text else ""
 
 
-def render_help_card(sections: list[dict]) -> str | None:
+def _wrap_text(text: str, font, max_width: float) -> list[str]:
+    """按字体实际宽度逐字符换行。"""
+    if not text:
+        return []
+    lines: list[str] = []
+    line = ""
+    for ch in text:
+        if line and font.getlength(line + ch) > max_width:
+            lines.append(line)
+            line = ""
+        line += ch
+    if line:
+        lines.append(line)
+    return lines
+
+
+def _normalize_aliases(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        items = [p.strip() for p in value.replace("，", ",").split(",")]
+    else:
+        items = [str(p).strip() for p in value]
+    return [item if item.startswith("/") else f"/{item}" for item in items if item]
+
+
+def render_help_card(
+    sections: list[dict],
+    *,
+    page: int = 1,
+    pages: int = 1,
+    total_commands: int | None = None,
+    available_commands: int | None = None,
+    hidden_admin: int = 0,
+    contacts: dict | None = None,
+) -> str | None:
     """把命令分组渲染成深色帮助卡片 PNG, 返回临时文件路径; 失败返回 None。
 
-    sections: [{"title": str, "commands": [{"name", "desc", "admin"}]}]
-    每个分组标题横贯整行, 组内命令条目按两列排布。
+    sections: [{"title", "commands": [{"name", "desc", "usage", "aliases", "admin"}]}]
+    命令按两列排布, 每条占「命令行 + 用法/别名行」; 描述按字体实际宽度截断,
+    不会在命令或括号中间硬切。管理员命令使用独立徽标。
+
+    page/pages: 分页信息(只影响标题); total/available: 顶部统计;
+    hidden_admin: 普通用户被折叠的管理员命令数; contacts: resolve_contacts 结果。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -165,121 +207,171 @@ def render_help_card(sections: list[dict]) -> str | None:
     if font_path is None:
         return None
 
+    from mohobot.utils.contact_info import resolve_contacts
+
     bg = (30, 34, 43)          # #1e222b 卡片底色
     fg = (214, 219, 228)       # 正文
     dim = (148, 155, 168)      # 次要文字
     accent = (102, 204, 255)   # 标题/强调 #66CCFF
+    admin_color = (244, 164, 96)
 
     width = 880
     pad_x, pad_y = 30, 26
-    col_gap = 40               # 两列之间的间距
-    title_h = 46               # 卡片大标题区高度
-    section_gap = 14           # 分组之间的间距
-    line_h = 26
+    col_gap = 40
+    col_width = (width - pad_x * 2 - col_gap) // 2
+    body_line_h = 23
+    detail_line_h = 20
+    item_gap = 7
+    section_gap = 18
 
     try:
         title_font = ImageFont.truetype(font_path, 22)
         section_font = ImageFont.truetype(font_path, 17)
         body_font = ImageFont.truetype(font_path, 14)
-        group_font = ImageFont.truetype(font_path, 30)
-        link_font = ImageFont.truetype(font_path, 18)
+        small_font = ImageFont.truetype(font_path, 12)
     except Exception:
         return None
 
-    # 标题下的全宽信息区: 按实际字体度量换行, 不截断群号/网址。
-    info_width = width - pad_x * 2
-    info_rows = []
-    info_h = 0
-    for text, font, color in [
-        (HELP_GROUP_TEXT, group_font, accent),
-        *((line, link_font, fg) for line in HELP_LINKS_TEXT.splitlines()),
-    ]:
-        lines = []
-        line = ""
-        for char in text:
-            if line and font.getlength(line + char) > info_width:
-                lines.append(line)
-                line = ""
-            line += char
-        lines.append(line)
-        for line in lines:
-            left, top, right, bottom = font.getbbox(line)
-            info_rows.append((line, font, color, info_h, left, top))
-            info_h += bottom - top + 12
-    info_h += section_gap
+    contact = resolve_contacts(contacts)
+    admin_text = "联系管理员 " + (", ".join(contact["admins"]) if contact["admins"] else "未配置")
+    info_lines: list[tuple[str, tuple[int, int, int]]] = []
+    if contact["group"]:
+        info_lines.append((f"交流群 {contact['group']}", accent))
+    info_lines.append((admin_text, dim))
+    if contact["url"]:
+        info_lines.append((f"使用须知 {contact['url']}", dim))
 
-    # ── 预计算每个分组的渲染行数(两列, 每行最多 2 条) ──
-    col_width = (width - pad_x * 2 - col_gap) // 2
+    # 预计算每个命令的渲染信息, 用于算高度与绘制。
+    prepared: list[dict] = []
     for sec in sections:
-        cmds = sec["commands"]
+        cmds = [c for c in (sec.get("commands") or []) if c.get("name")]
         if not cmds:
             continue
-        # 每条命令生成 (命令前缀文本, 描述文本) 并按列宽截断
-        rows: list[tuple[str, str]] = []
+        items = []
         for c in cmds:
-            label = f"/{c['name']}"
-            if c.get("admin"):
-                label += " [管理员]"
-            desc = (c.get("desc") or "").strip()
-            rows.append((label, desc))
-        # 计算每条命令的实际渲染文本(截断到列宽)
-        rendered: list[tuple[str, str]] = []
-        for label, desc in rows:
-            if desc:
-                line = f"{label} — {desc}"
-            else:
-                line = label
-            # 截断: 超过列宽则去尾加 …
-            while True:
-                w = None
-                try:
-                    w = body_font.getlength(line)
-                except AttributeError:
-                    w = body_font.getsize(line)[0]
-                if w <= col_width or len(line) <= 3:
-                    break
-                line = line[:-1]
-            if w > col_width:
-                line = line.rstrip()[:-1] + "…"
-            rendered.append(line)
-        sec["_rows"] = [rendered[i:i + 2] for i in range(0, len(rendered), 2)]
-        sec["_row_count"] = len(sec["_rows"])
+            name = str(c.get("name") or "").strip()
+            if not name.startswith("/"):
+                name = f"/{name}"
+            desc = str(c.get("desc") or "").strip()
+            usage = str(c.get("usage") or "").strip()
+            aliases = _normalize_aliases(c.get("aliases"))
+            detail_lines = []
+            if usage:
+                detail_lines.append(f"用法：{usage}")
+            if aliases:
+                # 别名独立一行, 不与用法挤在同一条 detail 里。
+                detail_lines.append("别名：" + " ".join(aliases))
+            items.append({
+                "name": name,
+                "desc": desc,
+                "detail_lines": detail_lines,
+                "admin": bool(c.get("admin")),
+                "h": body_line_h + len(detail_lines) * detail_line_h + item_gap,
+            })
+        prepared.append({"title": str(sec.get("title") or ""), "items": items})
 
-    # ── 计算卡片总高度 ──
-    height = pad_y * 2 + title_h + 6 + info_h
-    for sec in sections:
-        if not sec.get("_row_count"):
+    total = total_commands if total_commands is not None else sum(
+        len(p["items"]) for p in prepared
+    )
+    available = available_commands if available_commands is not None else total
+
+    # 先按实际内容计算高度, 再建画布, 避免固定高度导致内容被裁掉。
+    info_render_lines = [
+        (line, color)
+        for text, color in info_lines
+        for line in _wrap_text(text, small_font, width - pad_x * 2)
+    ]
+    hidden_note_lines: list[str] = []
+    if hidden_admin > 0:
+        hidden_note_lines = _wrap_text(
+            f"管理员指令已折叠：另有 {hidden_admin} 条（管理员可见）",
+            small_font, width - pad_x * 2,
+        )
+    header_h = pad_y + 32 + 24 + 19 * len(info_render_lines) + 8
+    body_h = 0
+    for sec in prepared:
+        items = sec["items"]
+        if not items:
             continue
-        height += section_font.getbbox("H")[3] + 10 + line_h * sec["_row_count"] + section_gap
-    height += 10
-
-    img = Image.new("RGB", (width, height), bg)
+        body_h += 32
+        for i in range(0, len(items), 2):
+            body_h += max(item["h"] for item in items[i:i + 2])
+        body_h += section_gap - item_gap
+    canvas_h = max(180, header_h + body_h + 19 * len(hidden_note_lines) + pad_y)
+    img = Image.new("RGB", (width, canvas_h), bg)
     draw = ImageDraw.Draw(img)
 
-    # ── 大标题(纯文字, PIL 无法渲染 emoji) ──
-    draw.text((pad_x, pad_y), "指令帮助", font=title_font, fill=fg)
-    draw.text((pad_x + 300, pad_y + 28), "Mohobot 可用指令一览", font=body_font, fill=dim)
-    draw.rectangle([pad_x, pad_y + title_h - 10, pad_x + 180, pad_y + title_h - 6], fill=accent)
+    y = pad_y
+    draw.text((pad_x, y), "指令帮助", font=title_font, fill=fg)
+    if pages > 1:
+        page_text = f"{page}/{pages}"
+        draw.text(
+            (width - pad_x - body_font.getlength(page_text), y + 2),
+            page_text, font=body_font, fill=dim,
+        )
+    y += 32
 
-    y = pad_y + title_h + 6
-    for text, font, color, offset, left, top in info_rows:
-        draw.text((pad_x - left, y + offset - top), text, font=font, fill=color)
-    y += info_h
-    for sec in sections:
-        rows = sec.get("_rows") or []
-        if not rows:
+    count_text = f"共 {total} 条"
+    if available != total:
+        count_text += f" · 你可用 {available} 条"
+    draw.text((pad_x, y), count_text, font=small_font, fill=dim)
+    y += 24
+
+    for line, color in info_render_lines:
+        draw.text((pad_x, y), line, font=small_font, fill=color)
+        y += 19
+    y += 8
+
+    for sec in prepared:
+        items = sec["items"]
+        if not items:
             continue
-        # 分组标题 + 下划线
         draw.text((pad_x, y), sec["title"], font=section_font, fill=accent)
-        draw.rectangle([pad_x, y + section_font.getbbox("H")[3] + 2,
-                        pad_x + 140, y + section_font.getbbox("H")[3] + 4], fill=(60, 70, 90))
-        y += section_font.getbbox("H")[3] + 10
-        for row in rows:
-            for i, text in enumerate(row):
-                x = pad_x + i * (col_width + col_gap)
-                draw.text((x, y), text, font=body_font, fill=fg)
-            y += line_h
-        y += section_gap
+        draw.rectangle((pad_x, y + 24, pad_x + 140, y + 26), fill=(60, 70, 90))
+        y += 32
+
+        # 两列成对排布, 行高取两列较大者。
+        for i in range(0, len(items), 2):
+            pair = items[i:i + 2]
+            row_h = max(item["h"] for item in pair)
+            for col, item in enumerate(pair):
+                cx = pad_x + col * (col_width + col_gap)
+                name = _fit_text(item["name"], body_font, col_width * 0.45)
+                name_w = body_font.getlength(name)
+                pill_w = int(small_font.getlength("管理员")) + 14 if item["admin"] else 0
+                desc_max = col_width - name_w - 10 - (pill_w + 8 if pill_w else 0)
+                desc = _fit_text(item["desc"], body_font, desc_max) if item["desc"] else ""
+                draw.text((cx, y), name, font=body_font, fill=accent)
+                if desc:
+                    draw.text((cx + name_w + 10, y), desc, font=body_font, fill=fg)
+                if item["admin"]:
+                    pill_x = cx + col_width - pill_w
+                    try:
+                        draw.rounded_rectangle(
+                            (pill_x, y + 1, pill_x + pill_w, y + 19),
+                            radius=9, fill=admin_color,
+                        )
+                    except AttributeError:
+                        draw.rectangle(
+                            (pill_x, y + 1, pill_x + pill_w, y + 19), fill=admin_color,
+                        )
+                    draw.text(
+                        (pill_x + 7, y + 2), "管理员",
+                        font=small_font, fill=(45, 32, 16),
+                    )
+                for line_index, detail_line in enumerate(item["detail_lines"]):
+                    detail = _fit_text(detail_line, small_font, col_width)
+                    draw.text(
+                        (cx, y + body_line_h + line_index * detail_line_h),
+                        detail, font=small_font, fill=dim,
+                    )
+            y += row_h
+
+        y += section_gap - item_gap
+
+    for line in hidden_note_lines:
+        draw.text((pad_x, y), line, font=small_font, fill=admin_color)
+        y += 19
 
     fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="mohobot_help_")
     os.close(fd)
