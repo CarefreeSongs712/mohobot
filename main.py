@@ -58,6 +58,7 @@ class MohobotApplication:
         self._knowledge_service: Any | None = None
         self._news_service: Any | None = None
         self._news_collector: Any | None = None
+        self._offline_watchdog: Any | None = None
         # 历史归档维护屏障(issue #8): Web 面板热清理/恢复 history 时冻结写入
         from mohobot.services.history_barrier import HistoryBarrier
         self._history_barrier = HistoryBarrier()
@@ -489,6 +490,23 @@ class MohobotApplication:
             self._context_sweep_loop(), name="context-sweep", owner="context-sweep"
         )
 
+        # 11.5 Bot 离线监控: 已配置 bot 连续离线超过 5 分钟时, 用在线 bot 往
+        # 管理群(snitch_admin_group, 默认 1070473353)发一次聚合告警。
+        # 群号每轮从 self._config 读取: WebUI 修改 snitch_admin_group 后热生效;
+        # 配置为 0/负数时本轮跳过(任务保留, 改回正数即恢复告警)。
+        from mohobot.services.bot_watchdog import BotOfflineWatcher
+
+        self._offline_watchdog = BotOfflineWatcher(
+            self._bot_manager,
+            self._ws_server,
+            group_id=lambda: getattr(self._config, "snitch_admin_group", 0) or 0,
+        )
+        self._task_supervisor.create_task(
+            self._offline_watchdog.run(),
+            name="bot-offline-watch",
+            owner="bot-offline-watch",
+        )
+
         self._running = True
         logger.info(
             f"Mohobot v{__version__} is running! "
@@ -720,6 +738,10 @@ class MohobotApplication:
 
         # 停止上下文周期时间压缩任务
         await self._task_supervisor.cancel_owner("context-sweep")
+
+        # 停止 bot 离线监控任务
+        await self._task_supervisor.cancel_owner("bot-offline-watch")
+        self._offline_watchdog = None
 
         # 情感系统: 取消周期落盘任务并 flush 数据
         if self._emotion_manager:
