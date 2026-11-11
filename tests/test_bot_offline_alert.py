@@ -143,3 +143,72 @@ async def test_sender_never_uses_offline_bot() -> None:
     alerted = await w.check_once(now=1305.0)
     assert alerted == ["bot_002"]
     assert ws.sent[0][0] in {"bot_003", "bot_005"}
+
+
+async def test_group_id_hot_reload_from_provider() -> None:
+    """管理群是 WebUI 可热改字段：每轮读取 provider，而不是启动时固定。"""
+    mgr = FakeBotManager([FakeCfg("bot_002", 222), FakeCfg("bot_001", 111)], online={"bot_001"})
+    ws = FakeWS()
+    current = {"group": 0}
+    w = BotOfflineWatcher(
+        mgr, ws, group_id=lambda: current["group"], threshold_sec=300
+    )
+
+    assert await w.check_once(now=1000.0) == []
+    # 群号为 0：跳过发送（不标记已告警）
+    assert await w.check_once(now=1301.0) == []
+    assert ws.sent == []
+
+    # 热改为有效群号：下一轮补发
+    current["group"] = 1070473353
+    assert await w.check_once(now=1310.0) == ["bot_002"]
+    assert ws.sent[0][1] == "1070473353"
+
+
+async def test_aggregates_multiple_offline_into_one_message() -> None:
+    mgr = FakeBotManager(
+        [FakeCfg("bot_001", 111), FakeCfg("bot_002", 222), FakeCfg("bot_004", 444)],
+        online={"bot_001"},
+    )
+    ws = FakeWS()
+    w = _watcher(mgr, ws)
+
+    await w.check_once(now=1000.0)
+    alerted = await w.check_once(now=1305.0)
+    assert alerted == ["bot_002", "bot_004"]
+    assert len(ws.sent) == 1
+    message = ws.sent[0][2]
+    assert "bot_002" in message and "bot_004" in message
+    assert message.count("已离线") == 2
+
+
+async def test_send_failure_retries_next_round() -> None:
+    class _FailingWS(FakeWS):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        async def send_group_msg(self, bot_id: str, group_id: str, message: str) -> None:
+            if self.fail:
+                raise RuntimeError("send failed")
+            await super().send_group_msg(bot_id, group_id, message)
+
+    mgr = FakeBotManager([FakeCfg("bot_001", 111), FakeCfg("bot_002", 222)], online={"bot_001"})
+    ws = _FailingWS()
+    w = _watcher(mgr, ws)
+
+    await w.check_once(now=1000.0)
+    # 发送失败：本轮不算已告警，下一轮继续尝试
+    assert await w.check_once(now=1305.0) == []
+    ws.fail = False
+    assert await w.check_once(now=1310.0) == ["bot_002"]
+    assert len(ws.sent) == 1
+
+
+async def test_config_read_error_is_contained() -> None:
+    class _BrokenMgr(FakeBotManager):
+        def list_bot_configs(self):
+            raise RuntimeError("config unreadable")
+
+    w = BotOfflineWatcher(_BrokenMgr([], set()), FakeWS(), group_id=1070473353, threshold_sec=300)
+    assert await w.check_once(now=1000.0) == []

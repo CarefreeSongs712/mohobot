@@ -23,14 +23,20 @@ class BotOfflineWatcher:
         bot_manager: Any,
         ws_server: Any,
         *,
-        group_id: int | str,
+        group_id: int | str | Callable[[], int | str],
         threshold_sec: float = 300.0,
         interval_sec: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._bot_manager = bot_manager
         self._ws_server = ws_server
-        self._group_id = int(group_id)
+        # 群号支持传入可调用对象: 管理群是 WebUI 可热改字段, 每轮重新读取,
+        # 避免启动时固定导致修改配置后不生效。
+        if callable(group_id):
+            self._group_provider: Callable[[], int | str] = group_id
+        else:
+            fixed_group = group_id
+            self._group_provider = lambda: fixed_group
         self._threshold = max(1.0, float(threshold_sec))
         self._interval = max(5.0, float(interval_sec))
         self._clock = clock
@@ -38,6 +44,12 @@ class BotOfflineWatcher:
         self._offline_since: dict[str, float] = {}
         # 已就本轮离线发过告警的 bot_id；恢复在线时清除
         self._alerted: set[str] = set()
+
+    def _current_group(self) -> int:
+        try:
+            return int(self._group_provider())
+        except (TypeError, ValueError):
+            return 0
 
     # ── 在线判定 ─────────────────────────────────────────
 
@@ -64,6 +76,7 @@ class BotOfflineWatcher:
     async def check_once(self, now: float | None = None) -> list[str]:
         """执行一轮检查，返回本轮成功发出告警的 bot_id 列表。"""
         now = self._clock() if now is None else float(now)
+        group_id = self._current_group()
         try:
             configured = [
                 cfg
@@ -93,6 +106,11 @@ class BotOfflineWatcher:
         if not offline:
             return []
 
+        # 群号 <= 0 视为关闭告警：继续维护离线计时（重新开启后立即补发），
+        # 但不发送、不标记已告警。
+        if group_id <= 0:
+            return []
+
         offline_ids = {str(cfg.bot_id) for cfg, _ in offline}
         sender = self._pick_sender(offline_ids)
         if sender is None:
@@ -114,14 +132,14 @@ class BotOfflineWatcher:
         message = "\n".join(lines)
 
         try:
-            await self._ws_server.send_group_msg(sender, str(self._group_id), message)
+            await self._ws_server.send_group_msg(sender, str(group_id), message)
         except Exception as exc:
             logger.warning(f"发送离线告警失败（sender={sender}）: {exc}")
             return []
 
         self._alerted.update(offline_ids)
         logger.warning(
-            f"已通过 {sender} 向群 {self._group_id} 发送离线告警: {sorted(offline_ids)}"
+            f"已通过 {sender} 向群 {group_id} 发送离线告警: {sorted(offline_ids)}"
         )
         return sorted(offline_ids)
 
@@ -129,7 +147,7 @@ class BotOfflineWatcher:
         """后台循环：每 interval_sec 检查一次，直到被 TaskSupervisor 取消。"""
         logger.info(
             f"Bot 离线监控已启动（阈值 {int(self._threshold)}s，"
-            f"检查间隔 {int(self._interval)}s，告警群 {self._group_id}）"
+            f"检查间隔 {int(self._interval)}s，告警群每轮从配置读取）"
         )
         while True:
             try:

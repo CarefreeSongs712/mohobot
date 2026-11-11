@@ -492,20 +492,20 @@ class MohobotApplication:
 
         # 11.5 Bot 离线监控: 已配置 bot 连续离线超过 5 分钟时, 用在线 bot 往
         # 管理群(snitch_admin_group, 默认 1070473353)发一次聚合告警。
-        self._offline_watchdog = None
-        if int(getattr(self._config, "snitch_admin_group", 0) or 0) > 0:
-            from mohobot.services.bot_watchdog import BotOfflineWatcher
+        # 群号每轮从 self._config 读取: WebUI 修改 snitch_admin_group 后热生效;
+        # 配置为 0/负数时本轮跳过(任务保留, 改回正数即恢复告警)。
+        from mohobot.services.bot_watchdog import BotOfflineWatcher
 
-            self._offline_watchdog = BotOfflineWatcher(
-                self._bot_manager,
-                self._ws_server,
-                group_id=self._config.snitch_admin_group,
-            )
-            self._task_supervisor.create_task(
-                self._offline_watchdog.run(),
-                name="bot-offline-watch",
-                owner="bot-offline-watch",
-            )
+        self._offline_watchdog = BotOfflineWatcher(
+            self._bot_manager,
+            self._ws_server,
+            group_id=lambda: getattr(self._config, "snitch_admin_group", 0) or 0,
+        )
+        self._task_supervisor.create_task(
+            self._offline_watchdog.run(),
+            name="bot-offline-watch",
+            owner="bot-offline-watch",
+        )
 
         self._running = True
         logger.info(
