@@ -1,14 +1,15 @@
 # 歌曲索引：持久化缓存 + 按需重建 + 后台构建
 
-> 状态：**已实现**（PR #98，2026-10-30；首次部署仍需全量构建一次）
-> 基线代码：`dac2e782`（本地仓库与线上 `/opt/mohobot` 一致）
+> 状态：**历史实施记录**（PR #98，2026-10-30；首次部署当时仍需全量构建一次）
+> 基线代码：`dac2e782`（历史代码基点；不表示当前部署一致）
 > 编写日期：2026-10-30
+> 本文混合了实施前方案、当时生产快照和验收记录；生产路径、数据量、耗时、容量与备份数字均为 2026-10-30 历史观测，不代表当前生产状态。实施状态以当前源码为准。
 
 ---
 
-## 1. 背景与目标
+## 1. 背景与目标（实施前背景）
 
-mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲歌词 6-gram 倒排索引，导致启动要 2～3 分钟（最坏一次 6.5 分钟），期间 8081/9090 不监听、10 个 bot 全部掉线。
+实施前，mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲歌词 6-gram 倒排索引，导致当时启动耗时较长、服务监听和 bot 重连延后。以上是设计稿记录的历史问题，不是当前代码路径或当前性能观测；当前实现状态以本文开头所述源码为准。
 
 目标：
 
@@ -19,9 +20,9 @@ mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲�
 
 ---
 
-## 2. 现状与实测数据
+## 2. 实施前核对与历史实测数据
 
-### 2.1 代码路径
+### 2.1 代码路径（2026-10-30 实施前核对；仅作历史背景）
 
 | 位置 | 作用 |
 |---|---|
@@ -37,14 +38,13 @@ mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲�
 | `mohobot/music_knowledge/pool.py` | `ensure_init()` / `get_session()`，全局 SQLAlchemy 会话池 |
 | `config/global.yaml` L158-168 | `music_knowledge.song_database` 配置 |
 
-### 2.2 生产库数据
+### 2.2 生产库数据（2026-10-30 历史快照；非当前状态）
 
-- 路径：`/opt/mohobot/data/song_knowledge/knowledge_db.db`（WAL 模式，主库 97MB）
-- 规模：**16,157 首**；归一化歌词 **6,851,010 字**；6-gram 去重后 **5,431,740 个 gram key**
-- 主库 mtime：2026-10-19（之后未变）；`song_sync` 插件当前**禁用**
-- 备份：p0/p1 会备份 `data/`，但**排除 `data/cache`**（见服务器备份脚本），缓存必须放在 `data/cache/` 下
+- 当时检查的是部署数据目录下的歌曲知识库 SQLite 文件（WAL 模式）；具体路径、容量、歌曲数、歌词字数及 gram 数值均不在本文保留。
+- 主库时间戳和当时 `song_sync` 插件的启用状态属于该次部署快照，不作为当前状态基准。
+- 当时备份配置排除缓存目录；当前备份范围需按实际部署配置核实。
 
-### 2.3 实测耗时（同一台 8C/8G 生产机）
+### 2.3 实测耗时（2026-10-30 历史环境观测；不可作为当前性能或容量基准）
 
 | 阶段 | 耗时 |
 |---|---|
@@ -58,7 +58,7 @@ mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲�
 | 10 个 bot 重连 | 约 2s |
 | 峰值内存（单独构建进程） | 约 1.0GB RSS |
 
-### 2.4 为什么朴素持久化不划算（已实测，务必看）
+### 2.4 为什么朴素持久化不划算（2026-10-30 历史实验记录）
 
 | 方式 | 写入 | 读回 | 体积 |
 |---|---|---|---|
@@ -70,7 +70,7 @@ mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲�
 
 ---
 
-## 3. 方案总览
+## 3. 方案总览（实施前设计）
 
 ```
 启动
@@ -85,7 +85,7 @@ mohobot 每次启动会在 `SongInfoMatcher.__init__` 里**同步重建**歌曲�
 
 ---
 
-## 4. 详细设计
+## 4. 详细设计（实施前方案；行为以当前源码为准）
 
 ### 4.1 指纹（失效判据）
 
@@ -191,21 +191,16 @@ def is_ready(self) -> bool
 - 构建产出完整 `Snapshot`，**在 `self._lock` 内原子替换** `self._snapshot`，旧对象由引用计数释放，读路径不需要额外加锁。
 - 构建成功后**先写缓存**再替换（下次启动直接命中）。
 
-线程 vs 子进程（**重要**）：
+线程 vs 子进程（实施前的历史方案比较）：
 
-| 方式 | 优点 | 缺点 |
-|---|---|---|
-| `threading.Thread`（默认，按需求） | 简单，能直接访问对象 | 纯 Python CPU 循环抢 **GIL**，构建的 1～2 分钟内事件循环被按 5ms 切片，bot 会明显变卡 |
-| 子进程（推荐用于 cache miss） | 不抢 GIL，主循环无感 | 要序列化结果回传（直接写缓存文件最省事） |
+以下为实施前的方案比较，保留作历史决策记录，不是实现说明：
 
-建议实现：
+| 方式 | 当时评估 |
+|---|---|
+| `threading.Thread` | 可直接访问对象；纯 Python CPU 构建仍受 GIL 影响主事件循环。 |
+| 子进程 | 避免占用主进程 GIL；通过缓存文件交付结果。 |
 
-- 默认 `build.mode: thread`，满足"后台线程"的要求；构建期间：
-  - `gc.disable()`（实测省约 60s）；
-  - 每处理 N 首（`yield_every`，默认 500）`time.sleep(0)` 让出一次；
-  - 日志打进度（每 10%）。
-- 同时预留 `build.mode: subprocess`：子进程构建并写 `<fp>.bin`，主进程线程只负责检测文件并加载。
-- 生产上建议最终切 subprocess；缓存命中时两种模式都无感。
+当前源码已实现 `thread`、`subprocess`、`sync` 三种模式；应用入口默认 `thread`。线程构建使用 `gc_control=True`，构建期间暂时关闭并在结束后恢复循环 GC；同时按 `yield_every` 调用 `time.sleep(0)` 让出执行，并通过进度回调记录进度。子进程模式也可用，失败时回退线程构建。此处只描述当前源码行为；本文其余性能数字和实施前建议仍是历史记录，不作当前性能保证或部署建议。
 
 ### 4.6 同步集成
 
@@ -216,11 +211,11 @@ matcher.request_rebuild(reason="song_sync")   # 不再同步 reload_index()
 ```
 
 - 同步本身在 worker 线程写库，写完后 `-wal` mtime 变化，下一次启动自然失效。
-- 当前插件是禁用状态，但必须一起改，避免以后开启后卡主循环。
+- 实施前记录称当时插件处于禁用状态；这不是当前启用状态。当前 `_reload_matcher()` 会优先调用 `request_rebuild(reason="song_sync")`，兼容旧对象时才回退到 `reload_index()`。
 
 ---
 
-## 5. 代码改动清单
+## 5. 实施前代码改动清单（历史记录，非当前待办）
 
 | 文件 | 改动 |
 |---|---|
@@ -256,17 +251,17 @@ music_knowledge:
 
 ---
 
-## 6. 边界情况与风险
+## 6. 实施前边界情况与风险（历史方案，部署前需按当前实现复核）
 
-1. **GIL**：thread 模式下构建期间 bot 会变卡；必须做 `gc.disable` + 主动让出，且日志标注。若不能接受，切 subprocess。
-2. **峰值内存**：重建时新旧快照短暂共存，峰值约 1.5～2GB。生产机可用内存约 3.5GB，且 swap 已用 1～2GB；要避免与 p1 备份（每天 02:30 UTC）同时进行。
+1. **GIL/GC（实施前风险与当前实现）**：纯 Python thread 构建受 GIL 影响；当前源码会在构建期间用 `gc_control` 暂停循环 GC，并按 `yield_every` 让出执行。影响程度取决于数据、主机与配置；当时提出的性能结论不能替代当前环境实测。若需隔离 CPU 负载，可评估 `subprocess` 模式。
+2. **峰值内存**：当时估算新旧快照短暂共存会增加内存压力；具体主机可用内存、swap、峰值和备份时间均为部署环境数据，需在获准环境重新核验。
 3. **WAL 指纹**：只比对主库会漏掉同步写入；必须纳入 `-wal`。
 4. **缓存损坏**：截断/校验失败 → 删除该文件并走重建，不能抛异常。
 5. **多进程**：审核面板是独立进程但不使用 matcher；仍建议用 `.lock` 防止两个 mohobot 同时写缓存。
 6. **格式/算法变更**：改序列化或归一化规则时递增 `INDEX_FORMAT_VERSION` / `NORMALIZE_VERSION`，否则旧缓存会把错误结果带进来。
 7. **测试隔离**：`tests/` 用临时目录建库，缓存目录默认也要落到 tmp，不能污染仓库/生产。
-8. **备份**：缓存必须位于 `data/cache/song_index`（备份已排除 `data/cache`）。放别处会让 p0 每 3 小时多传 ~150MB。
-9. **首次部署**：上线后第一次启动仍是全量构建（无缓存），属预期；之后启动才变快。
+8. **备份**：当时建议将缓存放在 `data/cache/song_index`，以匹配当时的备份排除规则；当前备份范围与传输量需重新核验。
+9. **首次部署**：首次部署时无缓存可能触发全量构建；具体部署状态须按当前缓存检查。
 
 ---
 
@@ -278,7 +273,7 @@ music_knowledge:
 
 ---
 
-## 8. 测试计划
+## 8. 实施前测试计划（历史记录；非当前验证结果）
 
 新增 `tests/test_song_index_cache.py`：
 
@@ -290,58 +285,62 @@ music_knowledge:
 6. **格式版本**：写一个旧 `INDEX_FORMAT_VERSION` 的文件 → 判 miss。
 7. **兼容性**：`index_cache.enabled=false` 时行为与改动前一致。
 
-现有测试 `tests/test_song_knowledge.py`、`tests/test_song_sync.py` 必须全绿（构造参数保持向后兼容）。
+实施前计划要求 `tests/test_song_knowledge.py`、`tests/test_song_sync.py` 通过；本文不提供这些测试在当前基点的执行结果。
 
 ---
 
-## 9. 验收标准
+## 9. 验收标准（2026-10-30 实施前目标记录）
 
-在生产机（16,157 首）上：
+以下为当时拟定的验收表，不表示这些检查在当前环境已执行或仍满足；生产数据规模和资源指标应在获准的隔离/部署环境重新测量。
 
-- [ ] 有缓存冷启动：`SongInfoMatcher` 初始化 **≤ 10s**，`systemctl restart mohobot` 总耗时 **≤ 40s**（当前约 3 分钟）。
+- [ ] 有缓存冷启动：`SongInfoMatcher` 初始化目标 **≤ 10s**，服务重启总耗时目标 **≤ 40s**（当时对比的旧启动耗时仅作历史参考）。
 - [ ] 无缓存首次启动：WS/面板在 **40s 内**起来，索引后台完成；期间 bot 可正常聊天，歌曲识别暂时为空。
 - [ ] 缓存命中时 `match()` 抽样 200 条消息，结果与改动前**完全一致**。
 - [ ] 缓存文件位于 `data/cache/song_index/`，p0 包体积无增长（约 67M 量级不变）。
-- [ ] 常驻 RSS 不高于当前（当前 matcher 约 1GB；紧凑格式应更低）。
+- [ ] 常驻 RSS 不高于实施前基线（基线数值为当时观测，当前需重新测量；紧凑格式预期更低）。
 - [ ] 启动/重建期间无 >1s 的事件循环阻塞日志（thread 模式下用 `yield_every` 观察）。
 - [ ] `song_sync` 手动触发一次后：不阻塞主循环，完成后索引自动更新。
 
 ---
 
-## 10. 回滚
+## 10. 实施时的回滚设想（历史记录；执行前须按当前配置与部署规范核验）
 
 - 配置回退：`music_knowledge.index_cache.enabled: false` + `build.mode: sync`，行为等同当前版本。
 - 缓存目录可直接删除（`rm -rf data/cache/song_index`），无副作用。
-- 代码回滚到 `dac2e782` 即可。
+- 当时方案记录的代码回退基点为 `dac2e782`；当前回退须按实际发布历史与部署规范确认。
 
 ---
 
-## 11. 实测基准参考（实现时复现）
+## 11. 实测基准参考（2026-10-30 历史记录；仅供理解当时测量方法）
+
+以下示例曾指向特定部署目录。复用时应在获准的隔离环境替换为本地仓库根目录、虚拟环境与自制数据库，不要据此访问生产：
 
 ```bash
-cd /opt/mohobot
+cd <仓库根目录>
 # 1) 构建耗时
-time /opt/mohobot/.venv/bin/python -c "
+time .venv/bin/python -c "
 import sqlite3; from mohobot.music_knowledge.fuzzy import LyricGramIndex
 rows=sqlite3.connect('data/song_knowledge/knowledge_db.db').execute('select uuid,name,lyrics from songs')
 g=LyricGramIndex(); g.build(rows.fetchall()); print(len(g._postings))
 "
 # 2) 缓存加载耗时（实现后）
-time /opt/mohobot/.venv/bin/python -c "
+time .venv/bin/python -c "
 from mohobot.music_knowledge.index_cache import load_cache
 load_cache('data/cache/song_index', '<fingerprint>')
 "
-# 3) 启动总耗时
-systemctl restart mohobot && journalctl -u mohobot -f   # 观察 'starting up' 到 'is running'
+# 3) 部署启动耗时：仅在获得授权、按部署规范完成预检后操作
+# 不要从此历史示例直接重启服务。
 ```
 
 参考基线：导入 24s / 歌名索引 2s / 歌词归一化 12s / 6-gram 构建 102s(GC off)～150s(GC on) / 其余 5s / bot 重连 2s。
 
 ---
 
-## 12. 给实现 agent 的执行顺序
+## 12. 实施前执行顺序（历史记录）
 
-1. 在本地仓库（`C:\Users\Liyuan\Desktop\develop\mohobot`，基线 `dac2e782`）建分支。
+以下是实施前的工作清单，仅保留为历史决策依据，不是当前待办。路径已泛化；基线 SHA 仅作历史参考。
+
+1. 在本地仓库根目录（基线 `dac2e782`）建分支。
 2. 先写 `index_cache.py` + 单元测试，用**小库**跑通 round-trip 与指纹逻辑。
 3. 改 `fuzzy.py` 的紧凑序列化，benchmark 方案 A/B 的加载耗时，选定一个。
 4. 改 `matcher.py` 为非阻塞 + 快照原子替换，修 `_find_by_lyrics`。

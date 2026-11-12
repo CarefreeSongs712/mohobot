@@ -75,24 +75,24 @@ python main.py
 
 | 分支 | 用途 | 说明 |
 |---|---|---|
-| `main` | 发布分支 | 唯一发布线；只接受走完 PR、审查与 CI 的合并，生产按此分支拉取 |
-| `dev` | 集成分支 | 汇聚多个已审查 PR 做联调与 CI 预验收，再经 PR 进入 `main` |
-| `feat/<topic>` | 功能分支 | 例如 `feat/ctx-restore`；走 PR 进入 `dev` 或 `main` |
-| `bugfix/<topic>` | 缺陷修复分支 | 例如 `bugfix/outbound-cancel`；同样走 PR |
-| `gh-pages` | 静态站点分支 | 仅 GitHub Pages 产物；无 Pages 产物时不创建 |
+| `main` | 发布分支 | 唯一发布线；只接受走完 PR、审查与 CI 的合并 |
+| `dev` | 集成分支 | 汇聚经审查的功能/修复 PR，并作为常规开发 PR 的目标分支 |
+| `feat/<topic>` | 功能分支 | 例如 `feat/ctx-restore`；通过 PR 进入 `dev` |
+| `bugfix/<topic>` | 缺陷修复分支 | 例如 `bugfix/outbound-cancel`；通过 PR 进入 `dev` |
+| `docs/<topic>` | 文档分支 | 文档校准或整理，通过 PR 进入 `dev` |
 
 约定要点：
 
-- 任何改动都走 **分支 → PR → 审查 → 合并**，即使有 push 权限也不直接推 `main`。
+- 常规功能、修复和文档改动走 **分支 → PR → 审查 → CI → 合并 `dev`**；发布改动再由维护者通过 release PR 合入 `main`。不直接推 `main`。
 - 分支名不使用前导 `/`：写 `feat/login` 而不是 `/feat/login`。
 - Git **不允许** 同一仓库同时存在 `feat` 与 `feat/<topic>`（`refs/heads/feat` 与 `refs/heads/feat/*` 冲突）；因此 `feat`、`bugfix` 采用前缀形式。若团队决定使用字面 `feat` / `bugfix` 分支，必须先把现存 `feat/*`、`bugfix/*` 改名。
 - 默认分支与分支保护属于仓库设置，不能通过文件 PR 修改；需要时由仓库管理员在维护窗口调整。
 
 ### 发布与部署约定
 
-- **以 `main` 分支发布。** 改动走分支 → PR → 审查 → 合并；即使有 push 权限也不直接推 `main`。生产只拉取已审查合入的版本。
-- 生产环境统一通过 `git pull --ff-only origin main` 获取更新；禁止日常无备份 reset/force 操作。
-- 生产由 systemd 服务管理，不要在服务运行时另起 screen / nohup 进程；更新后使用对应的 systemd unit 重启，不要用面板内的进程内重启代替版本发布。完整说明见 `README.md` 与外部部署规范。
+- 代码先经常规 PR 流程合入 `dev`；发布到 `main` 需独立 release PR 与维护者授权。不直接推送 `main`。
+- 部署时只更新经审查合入 `main` 的提交；在经授权且核实的安装目录执行 fast-forward 更新，遇到分叉或本地修改立即停止，不做无备份 reset/force 操作。
+- systemd 是仓库提供的新安装模板；实际部署可能使用其他服务管理方式。不要在服务运行时另起 screen/nohup/手工进程；代码更新后需重启实际管理的进程，面板进程内重启不能加载新 Python 代码。通用检查单见 [`docs/DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 ### 回归测试
 
@@ -102,7 +102,7 @@ python main.py
 python -m pytest -q tests --ignore=tests/test_concurrency.py  # 逐用例；pytest.ini 自动 await async 测试
 python -m pytest -q -n auto --dist loadfile tests --ignore=tests/test_concurrency.py  # 并行(~4-5x 快)；loadfile 让同文件用例同 worker，规避顺序/模块状态依赖
 python -m pytest -q -n auto tests/test_<你的模块>.py  # 改一个模块时只跑相关用例(秒级)
-python tests/_run_all.py          # 全量，从仓库根执行（CI 仅在 push main 时跑）
+python tests/_run_all.py          # legacy runner；CI 仅在 push main 时额外运行；常规 PR pytest 及专项见下方 CI 表
 python tests/test_context_summary.py   # 单文件（多数测试自带 __main__）
 python tests/test_concurrency.py  # 被 _run_all 排除，必须单独跑
 python tests/_js_check.py         # WebUI JS 括号平衡检查（改 index.html 后跑）
@@ -140,20 +140,20 @@ python tests/mock_persona_ab_panel.py --port 19091  # 临时模拟 WebPanel，�
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` 在 PR、`push main` 和手工触发时执行。只读仓库权限，不使用生产密钥；PR 上同一分支的新运行会取消旧运行，发布分支的 push 不取消。
+`.github/workflows/ci.yml` 在 PR、`push main` / `push dev` 和手工触发时执行。只读仓库权限，不使用生产密钥；仅 PR 上同一分支的新运行会取消旧运行。pytest、插件重载、并发专项随 workflow 执行；legacy `tests/_run_all.py` 仅在 `push main` 时额外运行。
 
 | job | 范围 | 是否阻塞 PR |
 |---|---|---|
-| Tests (Python 3.12) | compileall、逐用例 pytest、根 runner、独立并发专项 | 是 |
+| Tests (Python 3.12) | compileall、逐用例 pytest（排除并发文件）、插件热重载专项、并发专项；legacy runner 仅在 `push main` 运行 | 是 |
 | Syntax and control-flow checks | 全仓 Ruff `E9,F63,F7` | 是 |
 | Meme plugin regression | 插件自己的 pytest 和现有 lint 规则 | 是 |
 | Ruff debt report | Ruff `E4,E7,E9,F`（忽略 `E402`）的既有告警，写入 step summary 并上传 artifact | 否（job 保持绿色，见下） |
 
-三个阻塞 job 是 PR 的合并信号；它们失败就是真的失败。所有测试进程都带 `timeout` 与 `faulthandler_timeout`，卡住的用例会先打出线程栈再由超时终止（退出码 124），不会静默挂到 job 超时。
+阻塞 job 是 PR 的合并信号；它们失败就是真的失败。pytest 进程带 `timeout` 与 `faulthandler_timeout`；其他步骤分别使用 workflow 中配置的命令/超时。
 
-`Ruff debt report` 是**信息性**的：仓库仍有既存告警（当前 159 条，全部来自本 PR 之前的代码），ruff 在这些告警上必然返回非零。若把它当门禁，每个 PR 都会显示一个红色检查，却无法区分"新引入的问题"和"历史债务"。因此它只报告、不判红，条目数写进 step summary，完整清单在该运行的 `ruff-debt-report` artifact 里。清理完债务后再把它升级为阻塞检查——不能靠隐藏告警来变绿。
+`Ruff debt report` 是**信息性**的：它报告较宽规则集（忽略 `E402`）下的 lint 结果，但不阻塞 PR；报告写入 step summary，并作为 `ruff-debt-report` artifact 上传。具体条目数随代码变化，应查看对应 Actions 运行，不在此固定数字。阻塞门禁仍是上表列出的 `E9,F63,F7` 规则。
 
-**Python 兼容性策略：只支持 3.12+。** 不再提供 3.10/3.11 的兼容 job（原 `compat.yml` 已删除）。此前 3.10/3.11 上套件停滞的根因是 `asyncio.wait_for()` 吞掉调用方取消（issue #25，已由 #28 修复）；修复后 3.10 实测也能通过（614 passed），但项目不承诺旧版本支持，避免维护两份运行时行为。
+**Python 兼容性策略：只支持 3.12+。** 当前 CI 使用 Python 3.12；仓库未承诺 3.10/3.11 兼容。过去版本的兼容测试记录仅适用于当时提交，不代表当前支持范围。
 
 仓库管理员还需设置分支保护并选择上面三个阻塞检查，workflow 本身不会修改保护设置。
 
@@ -168,7 +168,7 @@ meme 插件应在独立目录执行，避免与根测试命名空间混用：
 
 插件 UMAP 用例和历史 schema 用例会在可选包或原始 Git 对象缺失时明确报告 skip。
 
-**测试前置修复：** PR #22 将四个 qzone 会话用例改为真正的 async 函数；PR #23 将合并回复的过时占位断言改为当前已确定行为。CI 分支包含这两项，不屏蔽失败用例。组合基线（Python 3.12）：pytest `594 passed`，根 runner `66 passed, 0 failed`。
+测试数量会随代码与收集规则变化；不把未绑定具体提交的历史计数当作当前基线。当前应以本分支实际运行结果及 workflow 定义为准。
 
 runner 机制（`tests/_run_all.py`）：
 
@@ -313,7 +313,7 @@ interceptors = [ban_filter, plugin_system, command_handler, keyword_filter]
 
 - **合并转发**：群聊纯文本回复 ≥ `_forward_min_len`（600 字）自动改合并转发，每块 1000 字（`_forward_chunk_chars`），失败回退普通发送。
 - **工具结果泄漏防御**：`_sanitize_tool_leak` —— 整条以 `[工具` 开头则丢弃；含 `"\n[工具调用: "` 则截断。
-- **私聊自动回复过滤**（`ignore_auto_reply`，默认开）：`_handle_message` 最开头（拦截器链/插件观察钩子之前）对私聊消息判定，命中即静默丢弃（归档保留）。判定规则写死：① 文本以 `[自动回复]` 开头；② 同一 (bot_id, user_id) 连续 3 条相同文本且相邻间隔 < 5 分钟（内存 `_repeat_state`，超窗/换文本重置）。QQ 自动回复无统一结构化标记（有的带前缀、有的是 QQ 预设纯文案如"我在线的，马上回消息"），生产实测见 `docs/DEVELOPMENT.md` 本节备注。
+- **私聊自动回复过滤**（`ignore_auto_reply`，默认开启）：消息先归档，再于主处理链前检查；命中后静默忽略，不进入插件/命令/LLM 处理。当前规则包括 `[自动回复]` 前缀及同一 bot/用户短时间内重复相同文本；具体阈值以 `mohobot/message_handler.py` 中的常量与测试为准。
 - **戳一戳**：`notice_type=notify, sub_type=poke` 且 target 是本 bot → 从 `touch_replies` 随机取一条回复。优先级：bot 私有 > 全局 > 内置 `DEFAULT_TOUCH_REPLIES`。
 - **request 事件**：交给插件 `on_request`；插件不接管则**静默不处理**（不自动同意好友/入群）。
 - **上下文写的 role 是 `"QQ号-昵称"`**（`_speaker_role`），LLM 靠这个知道「谁说的」；`LLMService._build_messages` 把非 `user`/`assistant`/`system`/`summary` 的角色转成 `user` 并加 `[role]: ` 前缀。
@@ -353,7 +353,7 @@ data/contexts/{bot_id}/
 context 文件是**扁平 JSON 数组**，元素形如：
 
 ```json
-{"role": "3831097597-墨染荷韵", "content": "你好", "timestamp": 1730000000}
+{"role": "100000001-样例用户", "content": "你好", "timestamp": 1730000000}
 {"role": "assistant", "content": "你好呀", "timestamp": 1730000001}
 {"role": "summary",   "content": "【总结块】…", "timestamp": 1730000002}
 ```
@@ -392,7 +392,7 @@ speaker_id  speaker_nickname  meta_data
 ```
 
 - `character_id` = `bot_id`；群聊行 `user_id` = **群号**，真实发言人放在 `speaker_id`/`speaker_nickname`。
-- 唯一生产写入点：`message_handler._persist_legacy_turn`，每完成一轮写 **2 行**（`source="user"` / `"agent"`）。
+- 唯一应用写入点：`message_handler._persist_legacy_turn`，每完成一轮写 **2 行**（`source="user"` / `"agent"`）。
 - 连接参数：WAL + `synchronous=NORMAL` + `busy_timeout=15000`。
 
 **加一列的固定套路**（增量迁移，不重建表）：
@@ -461,7 +461,7 @@ connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_conversations_new_col 
 | `news` | `enabled/db_path/inject_enabled/inject_limit/inject_window_days/inject_header/default_ttl_days/tool_enabled/collector_enabled/collector_uids/collector_interval_seconds/collector_max_items_per_uid/collector_ttl_days`（采集器只在本文件配置） |
 | `knowledge` | `enabled/embedding_model/embedding_api_key/embedding_base_url/rerank_model/rerank_api_key/rerank_base_url/top_k/top_n/chunk_size/...`（WebUI 有"知识库"页，路径/api_key 只读保护） |
 | `persona_ab` | `enabled/sample_probability/cooldown_seconds/pending_timeout/...`（WebUI"人设评估"页，bot 白名单等） |
-| `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*/analysis_timeout_sec/keyword_threshold/queue_*/burst_*(burst_model 默认 DeepSeek-V4-Flash, 示例 yaml 留空=不启用 burst)` |
+| `emotion` | `enabled=False/smart_update/force_update_interval=10/significance_threshold=5/favour_*/intimacy_*/analysis_timeout_sec/keyword_threshold=3/analysis_round_cooldown=2/min_interval_sec=180/max_concurrent=4/queue_*/burst_*(burst_model 默认 DeepSeek-V4-Flash, 示例 yaml 留空=不启用 burst)` |
 | `tts` | `enabled=False/backend="http"/base_url/api_key/convert_to_mp3=true/queue_maxsize=16/timeout/tts_prompt_template/cmd_max_chars=30/cmd_cooldown=120/untagged_tts_prob=0.1/model/voice_id/speed/vol/pitch/sample_rate=32000/bitrate=128000/format="mp3"` |
 | `music_knowledge: dict` | 无类型字典，不经 WebUI |
 | 顶层标量 | `touch_replies`, `log_dir`, `data_dir`, `plugins_dir`, `context_summary_*` 系列, `group_recent_msgs_count`, `ignore_auto_reply`, `usage_excluded_models`, `llm_excluded_groups`, `external_service_groups`, `snitch_admin_group` |
@@ -516,7 +516,8 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 | `MOHOBOT_LLM_API_KEY` | 回退 `llm.chat_api_key` |
 | `MOHOBOT_VISION_API_KEY` | 回退 `llm.vision_api_key`（再回退 chat key） |
 | `MOHOBOT_EMOTION_API_KEY` | 回退 `llm.emotion_api_key` |
-| `MOHOBOT_MINIMAX_API_KEY` | 回退 `tts.api_key`（注意不是 `MOHOBOT_TTS_API_KEY`） |
+| `MOHOBOT_TTS_API_KEY` | HTTP TTS 后端回退 `tts.api_key` |
+| `MOHOBOT_MINIMAX_API_KEY` | MiniMax TTS 后端回退 `tts.api_key` |
 | `MOHOBOT_WEB_PASSWORD` | **仅**在 `password_hash` 为空时初始化，随后哈希落盘 |
 | `MOHOBOT_TEST_CONFIG` | 测试用 |
 
@@ -772,9 +773,9 @@ class Plugin:
 
 ### 7.1 客户端与模型
 
-构造三个 `AsyncOpenAI`：chat / vision / emotion。key 回退链是 `yaml → env → chat key`；vision 与 emotion 若与 chat key 相同则**复用 chat client**。
+chat / vision / emotion 各自解析 API key 与 base URL；key 回退链是 `yaml → env → chat key`。client 按 `(api_key, base_url)` identity 复用，因此只有 key 和端点都相同才共用实例。
 
-`chat_model` 可被 `BotConfig.chat_model_override` 覆盖。图片**不再**让主模型切 vision 模型：`_build_messages` 先调 vision 把图描述成文本注入，主模型只看到文本。
+`chat_model` 可被 `BotConfig.chat_model_override` 覆盖。图片识别由 `llm.vision_mode` 控制：`describe`（默认）先调用视觉模型转成文本；`direct` 将图片多模态内容直接发给主模型，失败可回退 `describe`。
 
 `max_tokens` 会被 `min(cfg, 131072)` 夹紧（过大的值在某些网关返回空流）。
 
@@ -785,7 +786,7 @@ class Plugin:
 | 工具 | 状态 |
 |---|---|
 | `get_current_time` | 正常（UTC+8 格式化） |
-| `get_group_member_info` | **永远是错误桩**，却仍向模型广告 |
+| `get_group_member_info` | 保留兼容执行分支，但从提供给模型的 schema 中过滤，不会广告 |
 | `anysearch_search` | 正常；未配 key 时从 schema 列表里**移除** |
 
 插件工具经 `mohobot/services/llm_tools.py` 的**进程内 `registry`** 注册：
@@ -806,7 +807,7 @@ registry.register(LLMTool(
 
 `_current_tools_schemas()` 每次调用重读 registry（热重载插件工具可见）。
 
-✅ **执行路由（现状）**：`_execute_tool` 先匹配内置工具，然后 `registry.contains(func_name)` 命中即 `await registry.execute(...)` —— **任意已注册工具名都可执行，没有前缀限制**（本节旧版"仅 `song_` 前缀"的描述已过时；`registry.unregister()` 仅供服务降级/重启时摘除自有工具，插件路径不使用）。
+**执行路由**：`_execute_tool` 优先匹配内置工具，其后对任意名称查询 `registry` 并执行；任意注册工具名都可用，不限 `song_` 前缀。内置保留名优先；registry 可用于注册/注销模块工具。
 
 工具循环上限 4 轮（`max_tool_rounds`），最后一轮不再提供工具以逼出文本；若仍空则非流式重试一次。
 
@@ -835,7 +836,7 @@ registry.register(LLMTool(
 - `chars` 是 TTS 计费字符（此时 token 字段全 0）。
 - 缓存命中：优先 OpenAI `prompt_tokens_details.cached_tokens`，否则 DeepSeek `prompt_cache_hit_tokens`。
 - **没有金额成本模型**，只有 token / 字符计数。
-- 聚合接口：`get_session_usage_stats`（按会话）、`get_user_usage_stats`（按用户）、`get_module_usage_stats`（按 bot×module）、`get_usage_stats`（全局）。区间语法 `today|7d|30d|Nd|Nh`（`\d{1,4}[dh]`）。整个 JSONL 全量解析 + 60 秒 TTL 缓存。
+- 聚合接口：`get_session_usage_stats`（按会话）、`get_user_usage_stats`（按用户）、`get_module_usage_stats`（按 bot×module）、`get_usage_stats`（全局）。区间语法 `today|7d|30d|Nd|Nh`（`\d{1,4}[dh]`）。JSONL 读取按文件 offset 增量解析新增行；文件截断时重置并重读。聚合结果短缓存 15 秒。
 
 ### 7.5 总结压缩接口
 
@@ -896,20 +897,14 @@ await supervisor.shutdown()
 - 每轮 `schedule_turn` 起一个 `emotion-turn` 任务（fire-and-forget），`SmartUpdateManager.should_update` 决定是否真的调 LLM（情绪跨度 ≥8 / 关键词强度 / 陈旧 / 强制间隔 / 久别 7 天）。
 - 命令：`好感度` `关系阶段` `好感排行 [N]` `负好感排行 [N]`；管理员 `设置好感/设置亲密/设置态度/重置好感/查看好感/情感重置`。
 - 注入：`build_context_block` 作为临时 `system` 块（不落盘）。LLM 分析失败降级为 `_smart_fallback`。
-- `emotion.enabled` **启动时读取，改后需重启**（与 TTS 保存即热生效不同）。
+- 情感配置保存后会同步到已装配的 `EmotionManager`：`enabled`、`min_interval_sec`、`analysis_round_cooldown` 等新配置值即时读取；但若启动时 `emotion.enabled=false` 导致 manager 未装配，之后开启不会创建实例，需重启/重新装配。`max_concurrent` 对应的信号量容量构造时固定，修改需重启。
 
-### 8.4 TTS `services/minimax_tts.py`
+### 8.4 TTS `services/tts.py`
 
-- MiniMax `t2a_v2` 同步合成。两条通路：LLM 自标 `<tts>` 句自动朗读、`/tts <文本>` 指令。
-- 无标注概率朗读：回复没有任何 `<tts>` 标注时，按 `tts.untagged_tts_prob`（0~1，0=关闭）整条朗读。**仅队列未满时抽样**；有标注的回复不受影响；NaN/Inf 视为关闭（`random() >= nan` 恒为 False，会让概率变成 100%）。
-- fallback 文案 = **实际逐段发出的展示文本**（填充词清理/OOC 丢弃之后），不是过滤前全文，段之间用换行保留边界（空串拼接会让英文分段粘成 `worldHow`）。共 5 个 fallback 调用点：流式分段、非流式分段、无标签自查降级、单条发送、主动消息；另有 2 处正确省略 fallback（纯 `<tts>` 主动消息无展示文本、单条回复整条被 OOC 丢弃）。
-- 被动回复没有发出任何展示段时（整条英文漂移、全部段被 OOC 丢弃、自查降级后正文被丢弃）不提交 TTS：用户什么都没看到，标注与无标注朗读都不念（主动消息的纯 `<tts>` 无展示文本仍按原逻辑朗读）。
-- 全局 FIFO 单飞行队列（`queue_maxsize` 默认 16），**队列满丢最新**。
-- `<tts>` 标签剥离在 `message_handler` + `utils/tts_marker.py`：`TTSMarkerFilter` 会**扣留**半个标签防止跨 chunk 撕裂；标注句超长截到第一个句末标点、多标注取第一个、忘写闭标签容错。
-- 音色：全局 `tts.voice_id`，per-bot `BotConfig.tts_voice_id` 覆盖（提交任务时就解析好）。
-- 失败降级：LLM 来源静默（文本已发）；指令来源回错误提示。
-- 面板保存后除 `queue_maxsize` 外全部热生效（`sync_config`）。
-- **升级提示**：`untagged_tts_prob` 默认 0.1，已启用 TTS 的 bot 升级后无需额外配置即按 10% 概率朗读无标注回复；不需要该行为时显式设为 0。
+- 默认后端为自建 HTTP（`POST {base_url}/tts`，Bearer 鉴权，返回 WAV；可用 ffmpeg 转 MP3），MiniMax `t2a_v2` 是可选的兼容后端。`TTSConfig.enabled` 默认 `false`；服务只在启用且有 `base_url` 时于启动装配，Bot 还需启用 `tts_enabled`。
+- 两条通路：LLM 回复标注自动朗读、`/tts <文本>` 指令。无标注时按 `tts.untagged_tts_prob`（默认 0.1，0=关闭）概率朗读展示文本；标注朗读文本会合并**全部**标注，按出现顺序以换行分隔。
+- 全局 FIFO 单飞行队列（`queue_maxsize` 默认 16），**队列满丢最新**。面板保存后除队列容量外配置即时热同步，包含 enabled 与后端切换；队列容量构造时固定，需重启。
+- `http` 后端密钥回退 `MOHOBOT_TTS_API_KEY`，MiniMax 后端回退 `MOHOBOT_MINIMAX_API_KEY`；两者共用 `tts.api_key` 配置字段。失败时 LLM 来源静默（文本已发），指令来源返回错误提示。
 
 ### 8.5 封禁 `ban/`
 
@@ -929,9 +924,9 @@ await supervisor.shutdown()
 - **多来源同步**（`sources/` + `merge.py` + `sync.py`）：
   - `vcpedia`：包装现有 Anubis PoW 客户端与 wikitext 解析（洛天依曲最全）。
   - `vocawiki`：MediaWiki API + wikitext（Songbox/LyricsKai/Introduction），接口最稳；中文覆盖薄（洛天依 59、乐正绫 3、言和 7），但可补 BV 号与词曲编。
-  - `moegirl`：桌面 UA 403，必须移动 UA；API 只剩 `extracts/opensearch`，分类与歌词靠 HTML；`?from=` 翻页（robots 禁 `pagefrom`）；实测 5s 间隔 0 次 403、1s/3s 约 25%，默认 `interval=4.5` 单并发。
+  - `moegirl`：适配器按当前接口实现解析分类与歌词，并使用来源配置的 UA 和请求间隔；外部站点接口与限流策略可能变化，具体行为以适配器和当前响应为准。
   - 字段优先级：歌词/演唱/歌名 `vcpedia > vocawiki > moegirl`；词曲编混调/PV/曲绘/简介/年份 `moegirl > vocawiki > vcpedia`。非空值不被空值覆盖；来源冲突写入 `song_sources`，不静默丢弃。
-  - 身份对齐：BV 号 > 归一化名 + 演唱集合/年份/P主 打分；**同名但演唱集合完全不相交视为不同歌曲**（本地库有 50 组这类同名字），版本名（中文版/翻唱/remix）不同不合并。
+  - 身份对齐：BV 号优先，其次按归一化名、演唱集合、年份与 P 主等元数据打分；同名但演唱信息冲突时避免直接合并。具体判据见 `mohobot/music_knowledge/merge.py`，不要依赖一次性数据规模统计。
   - 模式：`new_only`（只抓新歌）/ `fill_missing`（默认，补残缺字段）/ `full_refresh`（全量重抓）。断点写在 `sync_state`，进程重启可续跑；单来源连续失败达 `max_fail` 熔断，不影响其它来源。
   - 入口：`/sync-songs [new|fill|refresh|status|来源名]`（管理员，支持定时）、`python scripts/sync_songs.py [--status]`。定时由 `song_sync` 插件 `on_tick` 驱动，开关在 `music_knowledge.sync.enabled`。
   - 库为 **WAL + busy_timeout=10s**，同步写库时匹配器仍可读；同步与匹配器共用 `pool.py` 的 engine，不再开第二套连接池。
@@ -939,7 +934,7 @@ await supervisor.shutdown()
   - 歌词 6-gram 倒排按**紧凑扁平格式**落盘（`data/cache/song_index/<指纹>.bin`，默认 `keep=2`）：头部 magic/version/header_json + body 的 doc_uuid/doc_name/归一化歌词/原始歌词/`doc_len`/`grams_blob`/`gram_off`/`post_ptr`/`post_doc`，body sha256 校验、临时文件 + `os.replace` 原子写入、`.lock` 防多进程并发写。原始歌词单独存一份，保证 `_find_by_lyrics` 的精确子串行为与直接构建一致（该路径只去空白、不去标点）。
   - 指纹 = 主库与 `-wal` 的 `mtime_ns/size` + 格式/归一化/gram/`fuzzy` 版本（sha256 前 16 位）。只改 `-wal` 也会失效；改序列化或归一化规则必须递增 `INDEX_FORMAT_VERSION` / `NORMALIZE_VERSION`。
   - 启动时命中缓存 → 同步加载并安装快照；未命中 → **立即返回**，后台线程构建。未就绪期间 `match()` 返回 `None`（歌曲识别降级为空），`_find_by_lyrics()` **不会**触发同步重建。构建完成后先写缓存、再在锁内原子替换快照；旧快照仍可被在途查询安全读取。
-  - 线程模式构建期间 `gc.disable()`、每 `build.yield_every`（默认 500）首 `time.sleep(0)` 让出并每 10% 打进度日志；`build.mode=subprocess` 时子进程建索引并写缓存、主进程等待后加载（失败自动回退线程构建）。`build.mode=sync` 或 `index_cache.enabled=false` 完全回退旧的同步构建。`song_sync` 插件同步完成后只调用 `request_rebuild(reason="song_sync")`，不再同步 reload。
+  - `build.mode` 支持 `thread`、`subprocess`、`sync`；应用装配显式传入配置时默认使用 `thread`，未传 build 配置的兼容调用退回 `sync`。后台线程构建通过 `gc_control` 暂停/恢复循环 GC，按 `build.yield_every`（默认 500）让出执行并以进度回调记录构建进度；子进程模式写缓存后由主进程加载，失败时回退线程构建。关闭缓存或选择同步模式会走同步构建路径。`song_sync` 完成后调用 `request_rebuild(reason="song_sync")`。
   - 加载紧凑索引时按小样本 benchmark 在两种等价的倒排布局间选择：`dict[str, memoryview]`（查询 O(1)、加载要逐 gram 插入）或有序 `grams_blob` + 二分（加载近零成本、内存更低）。选择结果与耗时见 `LyricGramIndex.last_load_stats` / 启动日志。
   - 配置：`music_knowledge.index_cache {enabled, dir, keep}` 与 `music_knowledge.build {mode, yield_every}`；缓存默认 `./data/cache/song_index`（备份默认跳过该子目录，恢复时保留现有缓存），整目录删除等同强制重建。
   - 一致性/生命周期：读行前后各取一次 DB 指纹，不一致不写缓存（避免旧行配新指纹被长期命中）；后台构建线程支持 `close()` 取消并在 `shutdown()` 调用，失败自动退避重试一次；匹配缓存只接受当前快照的结果。
@@ -1005,8 +1000,8 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 半独立：**独立进程、独立端口（默认 9091）、独立配置（`review/config.yaml`）、独立数据库（`review/data/review.db`）**。
 
 - 主进程 `main.py:_maybe_start_review_panel()` 负责拉起：缺 `config.yaml` / `enabled: false` / 端口已被监听 → 跳过；否则以 detached `Popen` 起 `review/main.py`，日志写 `review/panel.log`。
-- **生命周期注意**：手工停主进程时 review 会继续运行；但现有生产若通过 systemd（如 `KillMode=control-group` 的 unit）停止或重启，同 cgroup 下的 review 子进程也会一并停止，再随新主进程重新拉起。验证时需一并检查 9091 是否恢复。
-- **数据源：`data/history` 消息事件流（唯一来源）**。history 只增不删，条目身份 = **message_id**（`mid:<id>`；无 id 时退回内容指纹 `hash:...`），审核结论永不因上下文压缩而失联（旧 contexts 指纹方案已废弃 —— 框架的 AI 总结压缩曾使生产上 97.5% 的已审条目失联）。
+- **生命周期注意**：审核面板作为子进程启动。主进程退出后子进程是否继续运行取决于平台和进程管理器；部署或重启时应按实际进程管理方式检查它是否退出及重新启动。
+- **数据源：`data/history` 消息事件流（唯一来源）**。history 只增不删，条目身份 = **message_id**（`mid:<id>`；无 id 时退回内容指纹 `hash:...`），审核结论永不因上下文压缩而失联（旧 contexts 指纹方案已废弃；审核身份基于归档事件的 message_id 或内容指纹）。
 - **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 某只 bot（`at` 段 qq == 该 bot 的 self_id）或引用某只 bot 发言（`reply` 段 id ∈ 该 bot 已归档发言 mid 集合）的消息；私聊全部审（按 bot 独立会话）。
 - **群聊单文件会话**：群聊归档本身已合并存储（`history/group/{群号}.jsonl`，见 §4.6），session_key 仍固定 `"_merged/group/{群号}"`（兼容 review.db 既有结论）。bot 发言按行内 `bot_id` 归属（旧数据无该字段时按 self_id 反查 bots 配置）；用户消息命中 @/引用 时归属到对应 bot（同时命中多只取 bot_id 排序最前者）。按 bot 的 mid 集合（`bot_mids_by_bot`）与 self_id（文件内 message_sent 行自带 ∪ bots 配置）做过滤。用户消息无 id 时按 time+uid+text 兜底去重；bot 发言不做内容级去重。
 - `WSServer` 出站层把 bot 发送的消息以 `post_type: "message_sent"` 追加进同一个 history JSONL（`ws_server._write_archive_line`，echo 超时用 `local:` id 兜底；发送明确失败不归档；`base64://` 大字段净化为占位）。
@@ -1016,51 +1011,27 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - 多用户支持，改密码时**按行替换 `config.yaml` 的 `password_hash:` 行以保留注释**（`_write_user_password`，结构不符时兜底整体重写、注释会丢）。
 - **登录防爆破**：登录处理全局串行化（`asyncio.Lock`）+ 每次尝试固定 0.5s 硬延迟（耗时恒定防计时侧信道）。
 
-**历史生产切换（旧 contexts 指纹 → history message_id，历史升级记录）**：
+### 审核身份迁移（历史兼容说明）
 
-> 这是旧版本升级历史记录，不是日常部署步骤。常规发布参见 `README.md` 的“现有生产环境与发布流程”及 `远程部署操作规范.txt`。
+> 这是旧版本升级时的历史记录，不是日常部署步骤。执行迁移前应阅读脚本当前说明、获取备份并按 [DEPLOYMENT.md](DEPLOYMENT.md) 的授权与预检边界操作；不可从此记录推断任何现存部署需要迁移。
 
-1. 备份并清空旧审核库（旧指纹基于 contexts 条目，切到 message_id 后无法映射，按约定全部作废；如需留证据先从面板导出 CSV）：
-   ```bash
-   cd review/data && stamp=$(date +%Y%m%d-%H%M%S) \
-     && for f in review.db review.db-wal review.db-shm; do [ -f "$f" ] && mv "$f" "$f.bak-$stamp"; done
-   ```
-2. `git pull` 后重启 mohobot（WSServer 归档逻辑与 review 面板都需要新代码；生产使用对应 systemd 服务）。
-3. 重启前的 bot 历史发言没有 `message_sent` 归档，用户引用它们的旧消息不会被识别为「引用 bot」；新发言即时生效。
-
-⚠️ 历史生产曾发生 `review/hash_password.py` 未提交修改卡住 pull 的情况；部署前必须确认工作区干净，发现未提交修改时暂停报告，不要自动还原或提交。日常同步必须采用 `git pull --ff-only origin main`，分叉时先备份再单独处理。
+早期版本曾基于 contexts 内容识别审核记录；当前审核身份以归档事件的 `message_id` 为主，无 ID 时使用内容指纹。旧版本切换可能影响既有审核标记以及对旧引用的识别。本文不提供清库或迁移命令；处理已有数据前，应核对当前迁移脚本、备份策略和目标版本行为，并取得单独授权。
 
 ---
 
 ## 10. 已知坑与不一致（改动前必读）
 
-**真实 bug / 设计缺陷**
+**已核实的开发约束**
 
-1. **`_execute_tool` 只路由 `song_` 前缀**（`llm_service.py:1213-1218`）：非 `song_` 的插件工具会被广告给模型但执行返回 `未知工具`；且该分支**重复两次**，第二段是死代码。加工具必须改这里（见 7.2）。
-2. **`get_group_member_info` 是永久错误桩**（`llm_service.py:1222-1224`），却仍在工具列表里，模型会浪费一轮调用。
-3. **`on_config_update` 若写成 `async def` 则完全不执行**（同步调用不 await）。
-4. **单文件插件无法拥有自己的 `_conf_schema.json`**（schema 路径取 `entry_path.parent` = `plugins/`）。
-5. **`config.log_dir` 是死配置**：`main.py:547` 硬编码 `setup_logger(log_dir="./logs")`，配了没用。
-6. **`json_write` 非原子**（就地截断，非 temp+rename），崩溃可能留半截文件。
-7. ~~`hmac.compare_digest(token, token)` 自我比较空操作~~ 已移除（2026-10 审查修复包）。
-8. **旧 `_HARDCODED_PERSONAS` 与特殊用户强制覆盖已删除**：运行人设统一解析私聊 session、bot 和系统默认，不再存在源码中不可配置的特殊待遇。
-9. **`plugins/feed/` 是空目录残留**（只有 `__pycache__`），加载器静默跳过。
+1. **插件配置更新钩子必须同步**：`on_config_update` 若写成 `async def`，框架同步调用不会 await。
+2. **单文件插件不能拥有独立 `_conf_schema.json`**：schema 路径取 `entry_path.parent`，单文件插件因此共用 `plugins/_conf_schema.json`；需要独立配置时用目录插件。
+3. **`json_write` 非崩溃原子写**：就地截断而非 temp+rename，写入中崩溃可能留下半截文件；同文件读改写使用 `json_update`。
+4. **已删除的历史机制**：旧 `_HARDCODED_PERSONAS` 特殊用户覆盖不再存在；群聊 history 双写也已移除，只写合并布局（见 §4.6）。
+5. **不把历史快照当作当前环境**：配置模板与源码 dataclass 默认可能不同，开发/运行时先看实际配置与加载逻辑，不据此记录当前部署值。
+6. **开发测试使用隔离数据**：`data/` 与 `logs/` 不入库，测试应使用临时目录，避免污染本地数据。
+7. **主面板 JS 检查**：`tests/_js_check.py` 只作辅助；改内联脚本时提取后运行 `node --check`，不能以辅助脚本零退出码作为语法通过证明。
 
-**文档与代码漂移**
-
-10. **默认值不一致**：`server.port` dataclass 默认 `8060` vs 示例 yaml `8081`；`database.file` 默认 `luotianyi.db` vs 示例 `mohobot.db`。**以 `config/global.yaml` 为准**，dataclass 默认只在没写 yaml 时生效。
-11. **`config/global.example.yaml` 落后**：缺 `context_summary_enabled` / `context_trim_at_rounds` / `context_trim_remove_rounds` / `group_recent_msgs_count` / `tts.*` 整段。
-12. **`app.py` docstring 说「7 板块」，实际 11 个**。
-
-**会咬人的机制**
-
-13. **`GlobalConfig.save()` 会丢注释**：PyYAML `yaml.dump` 重新生成，`global.example.yaml` 的注释在第一次 WebUI 保存后就没了。只有审核面板改密码那处做了保注释的按行替换。
-14. **加顶层标量配置必须改 `PUT /api/config` 的白名单元组**，否则面板保存静默丢弃该字段（嵌套段不需要）。
-15. **`save()` 和 `to_dict()` 是两份重复字典**，加字段两处都要改，漏一处会出现「存了但读不到」。
-16. **情感 `min_interval_sec` / `analysis_round_cooldown` 门控已被 revert**（`bfacefb`、`5c7c534`）：现在 `EmotionConfig` 没有这两个字段，`smart.py` 是**宽松版**（`"好"` 在正向关键词里、bot 回复关键词 +1、阈值 `intensity >= 2`）。别按旧文档去改这两个字段。
-17. **改 `MessageHandler` 时注意临时 `system` 块**（群聊最近消息 / 环境感知 / 情感 / 引用消息）**绝不能写回 context 文件**，否则会污染压缩与轮数统计。
-18. **`data/` 与 `logs/` 完全不入库**，本地跑测试/开发会污染工作区数据；测试必须用 `tempfile`。
-19. **`tests/_js_check.py` 自带词法误报且不拦人**：对当前 `index.html` 报 MISMATCH/UNCLOSED（对某处正则/字符串误判），且无论结果如何**退出码恒为 0**。改前端后请用 `node --check`（提取 `<script>` 内容）验证真实语法。
+源码与配置会持续演进；本节仅保留稳定约束，具体行为以相应实现为准。
 
 ---
 
@@ -1082,8 +1053,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 ### 加一个 LLM 工具
 1. 在插件里 `registry.register(LLMTool(tool_schema(...), handler))`。
 2. 确保模块启动时被 import（`mohobot/services/llm_tools.py:load_plugin_tools()` 的 import 列表）。
-3. **改 `llm_service._execute_tool`** 让非 `song_` 前缀也能路由到 registry。
-4. handler 返回 `str` 或可 JSON 序列化的对象；异常会被 registry 转成 `{"error": ...}`。
+3. handler 返回 `str` 或可 JSON 序列化的对象；异常会被 registry 转成 `{"error": ...}`。
 
 ### 加 `conversations` 表字段
 见 §4.4 的两步迁移套路。
@@ -1111,12 +1081,7 @@ await ws.send_group_forward_msg(bot_id, group_id, nodes)
 
 ## 12. 提交前检查
 
-```bash
-python tests/_run_all.py            # 必须 41/41（或你的新基线）
-python tests/test_concurrency.py    # 动了并发/合并回复/抽签时要跑
-python tests/_js_check.py           # 动了 web_panel/static/index.html 要跑
-python tests/smoke_startup.py       # 动了 main.py 装配要跑
-```
+从仓库根目录使用项目 Python 环境运行与改动相关的测试。完整官方命令及各入口覆盖边界见上文「回归测试」和 `.github/workflows/ci.yml`；不要把历史通过数量当作当前基线。提交前按当前 CI 运行完成全部适用门禁，并检查实际退出码和未覆盖项。
 
 另外自重这些：
 

@@ -96,7 +96,7 @@ API clients may include `Accept`, `Authorization`, `User-Agent`, or `X-API-Key` 
 5. Existing formal or pending hashes are linked to the source without creating a second copy.
 6. A successful sync marks seen source items current. Previously known items missing from the new catalog remain in the library and become `stale` in provenance.
 
-Imported metadata includes description, visible text, tags, scenes, emotions, source URL, original filename, dimensions, format, license, and attribution. Enabling the plugin's content filtration always forces review for external imports.
+Imported metadata includes description, visible text, tags, scenes, emotions, source URL, original filename, dimensions, format, license, and attribution. External imports do not run the chat-image VLM review pipeline. Review is controlled separately per import (or by `external_source_default_review`, which defaults to `false`); when enabled, new images go to Pending Review until an administrator approves them.
 
 The import panel has an optional character assignment. Leave it unchecked to keep the series unassigned, choose an existing character key to apply it to every imported image, or enter a new key and allow the importer to create that character in the plugin configuration. The assignment is retained for Pending Review items and for later source synchronization.
 

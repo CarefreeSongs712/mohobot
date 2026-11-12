@@ -1,21 +1,21 @@
 # Mohobot 接手与开发守则
 
-适用于整个仓库。由现有项目文档与代码整理；不授权未经审查直接推送发布分支、远程部署或业务数据变更。核对基点：`main@51b4389`。
+适用于整个仓库。由现有项目文档与代码整理；不授权未经审查直接推送发布分支、远程部署或业务数据变更。文档不替代对当前代码、分支、CI 与运行环境的核实。
 
 ## 1. 开始工作前
 
-1. 阅读 [README.md](README.md)、[DEVELOPMENT.md](docs/DEVELOPMENT.md) 和 [HANDOVER.md](docs/HANDOVER.md)；先了解开发指南的「已知坑与不一致」。修改相关模块前查 [审查报告](docs/AUDIT-2026-10-12.md) 是否已有已知缺陷与方案。
+1. 阅读 [README.md](README.md)、[DEVELOPMENT.md](docs/DEVELOPMENT.md) 和 [HANDOVER.md](docs/HANDOVER.md)；定位代码用 [CODE-MAP.md](docs/CODE-MAP.md)；需要部署时另读 [DEPLOYMENT.md](docs/DEPLOYMENT.md)。修改相关模块前查 [历史审查报告](docs/AUDIT-2026-10-12.md)，再按当前代码复核其发现是否仍适用。
 2. 修改某个子目录前检查局部说明。表情包插件额外遵循 [CLAUDE.md](plugins/meme_stealer/CLAUDE.md)；主动聊天参阅其 [README.md](plugins/proactive_chat/README.md)。
 3. 确认项目根目录、分支、提交和 `git status`。保留用户已有改动；不自动 reset、clean、删除未跟踪文件或覆盖配置。
 4. 文档与实现不符时先核查实际调用链，报告差异；历史部署快照不能当作当前环境事实。
 5. 接手整理默认不启动真实机器人，不访问生产，不使用真实密钥执行测试，不运行同步、迁移、清理脚本。
-6. 本地测试使用项目 `.venv`（系统 Python 缺依赖）；可复现的隔离基线见 [HANDOVER.md](docs/HANDOVER.md) 第 6 节。
+6. 本地验证优先使用项目虚拟环境；测试命令、覆盖边界和 CI 门禁见 [DEVELOPMENT.md](docs/DEVELOPMENT.md) 与 `.github/workflows/ci.yml`。
 
 ## 2. 数据与并发底线
 
 - **history 是追加式原始归档**，不能改成 LLM 实时记忆；review 对 Mohobot 数据只读。
 - **contexts 是可变工作记忆**，完成的对话轮次另写 SQLite。三者不得相互替代。
-- 群聊 history 跨 bot 合并、按 message_id 去重，**只写合并布局** `history/group/{群号}.jsonl`；旧 per-bot 布局已停止写入（review 读侧仅兼容存量），不得重新引入双写。私聊 history 与 contexts 按 bot 隔离。
+- 群聊 history 跨 bot 合并、用 `message_id` 和跨账号稳定指纹去重，**只写合并布局** `history/group/{群号}.jsonl`；旧 per-bot 布局已停止写入（review 读侧仅兼容存量），不得重新引入双写。私聊 history 与 contexts 按 bot 隔离。
 - 群聊最近消息、感知、情感、歌曲注解、人设等请求级输入不能直接写回上下文。引用内容沿现有文本渲染规则保存，不落原始 system 块或消息段 repr/base64。
 - 人设解析顺序：私聊 session 专属 → bot 默认 → 系统默认；群聊用 bot 默认。生成捕获会话 ID、generation、人设与 bot 配置快照。
 - 旧会话已删除或替换导致 `append_context` 返回 False 时，停止后续 DB/情感回写；不能把在途回复写入新活动会话。
@@ -57,12 +57,12 @@
 .venv/bin/python -m compileall -q main.py mohobot plugins review scripts tests
 ```
 
-工作区若含业务 `config/`、`data/`，优先用 [HANDOVER.md](docs/HANDOVER.md) 第 6 节的快照脚本，部分测试会探测或写入相对路径 `./data`。
+工作区若含业务配置或运行数据，先确认相关测试是否可能写入相对路径 `./data`；优先使用临时目录或隔离副本，保留现有配置和数据。
 
 - 根测试主入口是自研 [_run_all.py](tests/_run_all.py)，按文件计数、导入错误可能中断全轮；不是统一 pytest 项目。它只发现模块顶层 test_*，不自动运行 unittest 类或 main，零用例文件也会记 PASS；封禁/消息主链修改要单独执行 `python tests/test_ban_pipeline.py`，不能把文件 PASS 当作覆盖证明。
 - 修改主面板 JS 时提取内联脚本并执行 `node --check`；[_js_check.py](tests/_js_check.py) 仅辅助，不能用其零退出码证明语法正确。语法检查也不能替代页面行为验收。
 - 表情包插件有独立 pytest/ruff 测试，按其局部文档在插件目录运行；根 runner 不覆盖该套测试。
-- 如实报告执行命令、退出码、失败原因及未覆盖项。缺依赖不是通过，历史 41/45 文件基线不是当前实测。
+- 如实报告执行命令、退出码、失败原因及未覆盖项。缺依赖不是通过；任何带日期的历史测试数字都不能替代当前实测。
 - 完成前检查 diff、文档链接与工作区状态；说明改了什么、验证了什么、剩余风险。不得为了「绿色」跳过测试或更改业务逻辑。
 
 ## 6. 安全、发布与许可
@@ -70,6 +70,6 @@
 - 不提交 API Key、密码、Cookies、本地配置、运行数据或日志；不在交接材料里复制真实秘密。
 - WebUI 无默认密码，首次按文档初始化；默认本机访问，不直接公网裸露。主面板的密钥掩码不代表插件配置也会掩码。
 - **只以 main 发布**。提交、推送、SSH、重启生产、数据库同步及数据恢复都要有对应明确授权。
-- 生产按 [README.md](README.md) 的流程只读预检后 `git pull --ff-only origin main`；遇脏工作区/分叉/服务不符立即暂停，不能自动强推/reset。
+- 生产操作按 [DEPLOYMENT.md](docs/DEPLOYMENT.md) 的通用检查单执行，并先取得授权、核实实际服务与工作区；遇脏工作区/分叉/服务不符立即暂停，不能自动强推/reset。
 - 管理已核实的 systemd unit；不另起 screen/nohup/手工主进程，不影响其他项目。验收新 MainPID、端口与本次启动日志，review 是否随 unit 重启取决于 cgroup。
 - 核心为 [MIT](LICENSE)，表情包与主动聊天插件各有 [AGPL-3.0](plugins/meme_stealer/LICENSE)、[AGPL-3.0](plugins/proactive_chat/LICENSE) 许可，其他移植模块保留上游声明；不能把全部插件统一当 MIT。
