@@ -8,10 +8,11 @@
       "now": "2026-11-07 21:59",
       "runtime_secs": 432000, "plugin_runtime_secs": 432007,
       "system_uptime_secs": 867694,
-      "cpu": {"count": 8, "average": 43.0, "cores": [23, 41, ...]},
+      "cpu": {"count": 8, "average": 43.0, "cores": [23, 41, ...],
+              "steal": 0.0},
       "memory": {"total": ..., "used": ..., "cache": ..., "free": ...,
-                 "percent": 71.0, "swap_total": ..., "swap_used": ...,
-                 "swap_percent": 20.0},
+                 "percent": 71.0, "available": ..., "available_percent": 74.0,
+                 "swap_total": ..., "swap_used": ..., "swap_percent": 20.0},
       "disks": [{"mount": "/", "used": ..., "total": ..., "percent": 76.0}],
       "bots": [{"bot_id": "bot_001", "nickname": "昵称", "online_secs": 40000}],
       "contacts": {"admins": ["3831097597"], "group": "398870315",
@@ -144,6 +145,41 @@ def _fit(text: str, font, max_width: float) -> str:
     return (text + ellipsis) if text else ""
 
 
+def format_cpu_label(cpu: dict[str, Any]) -> str:
+    """CPU 标题行: 平均占用不含 steal; steal 单独展示(宿主机抢占, 非本机负载)。"""
+    cores, aggregated = aggregate_cores(cpu.get("cores") or [])
+    core_count = int(cpu.get("count") or len(cores))
+    avg = float(cpu.get("average") or 0.0)
+    if aggregated:
+        label = f"CPU  {core_count} 核（合并 {len(cores)} 组） · 平均 {avg:.0f}%"
+    else:
+        label = f"CPU  {core_count} 逻辑核 · 平均 {avg:.0f}%"
+    steal = float(cpu.get("steal") or 0.0)
+    if steal >= 1.0:
+        label += f" · steal {steal:.0f}%"
+    return label
+
+
+def format_memory_label(mem: dict[str, Any]) -> str:
+    """内存标题行: 用 available 口径算已用率, 避免 page cache 虚高。"""
+    total = float(mem.get("total") or 0)
+    available = float(mem.get("available") or 0)
+    if total <= 0:
+        return "内存  —"
+    if available > 0:
+        used = max(0.0, total - available)
+        available_pct = mem.get("available_percent")
+        pct = float(available_pct) if available_pct is not None else used / total * 100.0
+    else:
+        used = float(mem.get("used") or 0) + float(mem.get("cache") or 0)
+        pct = float(mem.get("percent") or 0)
+    pct = max(0.0, min(100.0, pct))
+    label = f"内存  {_fmt_gb(used)} / {_fmt_gb(total)}  ({pct:.0f}%)"
+    if available > 0:
+        label += f" · 可用 {_fmt_gb(available)}"
+    return label
+
+
 def _wrap(text: str, font, max_width: float) -> list[str]:
     """按字体实际宽度换行(逐字符, 适合中英混排)。"""
     if not text:
@@ -260,14 +296,8 @@ def render_status_card(data: dict[str, Any]) -> str | None:
 
     # ── CPU ──
     y += 38
-    cores, aggregated = aggregate_cores(cpu.get("cores"))
-    avg = float(cpu.get("average") or 0)
-    core_count = int(cpu.get("count") or len(cores))
-    if aggregated:
-        cpu_label = f"CPU  {core_count} 核（合并 {len(cores)} 组） · 平均 {avg:.0f}%"
-    else:
-        cpu_label = f"CPU  {core_count} 逻辑核 · 平均 {avg:.0f}%"
-    draw.text((x, y), cpu_label, font=section_font, fill=FG)
+    cores, _ = aggregate_cores(cpu.get("cores"))
+    draw.text((x, y), format_cpu_label(cpu), font=section_font, fill=FG)
     y += 28
 
     for row_start in range(0, len(cores), CPU_PER_ROW):
@@ -302,19 +332,12 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     mem_app = float(mem.get("used") or 0)
     mem_cache = float(mem.get("cache") or 0)
     mem_free = float(mem.get("free") or max(mem_total - mem_app - mem_cache, 0))
-    mem_used_total = mem_app + mem_cache
-    mem_pct = float(mem.get("percent") or 0)
     mem_app_pct = float(
         mem.get("app_percent")
         if mem.get("app_percent") is not None
         else ((mem_app / mem_total * 100.0) if mem_total else 0.0)
     )
-    mem_available = float(mem.get("available") or 0)
-    mem_label = f"内存  {_fmt_gb(mem_used_total)} / {_fmt_gb(mem_total)}  ({mem_pct:.0f}%)"
-    if mem_available:
-        # available 含可回收缓存, 单列展示, 不参与堆叠条加法。
-        mem_label += f" · 可用 {_fmt_gb(mem_available)}"
-    draw.text((x, y), mem_label, font=section_font, fill=FG)
+    draw.text((x, y), format_memory_label(mem), font=section_font, fill=FG)
     y += 26
     bar_w = CARD_W - 2 * PAD
     bar_h = 26
