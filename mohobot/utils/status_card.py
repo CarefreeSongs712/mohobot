@@ -160,6 +160,35 @@ def format_cpu_label(cpu: dict[str, Any]) -> str:
     return label
 
 
+def level_percent(data: dict[str, Any]) -> float:
+    """告警等级取 max(CPU 真实平均, 内存 available 口径, 主盘占用)。
+
+    注意: CPU 平均已剔除 steal, 内存用不可回收部分, 避免宿主机抢占/页缓存
+    把卡片打成"告警"。
+    """
+    cpu = data.get("cpu") or {}
+    mem = data.get("memory") or {}
+    disks = data.get("disks") or []
+    main_disk = disks[0] if disks else {}
+
+    mem_pct = mem.get("available_percent")
+    if mem_pct is None:
+        total = float(mem.get("total") or 0)
+        available = float(mem.get("available") or 0)
+        if total > 0 and available > 0:
+            mem_pct = (total - available) / total * 100.0
+        else:
+            mem_pct = float(mem.get("percent") or 0)
+
+    metrics = [
+        float(cpu.get("average") or 0),
+        float(mem_pct or 0),
+        float(main_disk.get("percent") or 0),
+    ]
+    available_metrics = [m for m in metrics if m > 0]
+    return max(available_metrics) if available_metrics else 0.0
+
+
 def format_memory_label(mem: dict[str, Any]) -> str:
     """内存标题行: 用 available 口径算已用率, 避免 page cache 虚高。"""
     total = float(mem.get("total") or 0)
@@ -174,7 +203,7 @@ def format_memory_label(mem: dict[str, Any]) -> str:
         used = float(mem.get("used") or 0) + float(mem.get("cache") or 0)
         pct = float(mem.get("percent") or 0)
     pct = max(0.0, min(100.0, pct))
-    label = f"内存  {_fmt_gb(used)} / {_fmt_gb(total)}  ({pct:.0f}%)"
+    label = f"内存  已用 {_fmt_gb(used)} / {_fmt_gb(total)}  ({pct:.0f}%)"
     if available > 0:
         label += f" · 可用 {_fmt_gb(available)}"
     return label
@@ -252,22 +281,7 @@ def render_status_card(data: dict[str, Any]) -> str | None:
     mem = data.get("memory") or {}
     disks = data.get("disks") or []
     main_disk = disks[0] if disks else {}
-    # 内存告警看「不可用」而非「应用+缓存」: available 含可回收缓存,
-    # 用整体占用率会把大页缓存误报成内存吃紧。
-    mem_level_pct = float(mem.get("percent") or 0)
-    level_total = float(mem.get("total") or 0)
-    level_available = float(mem.get("available") or 0)
-    if level_total > 0 and level_available > 0:
-        mem_level_pct = max(
-            0.0, min(100.0, (level_total - level_available) / level_total * 100.0),
-        )
-    metrics = [
-        float(cpu.get("average") or 0),
-        mem_level_pct,
-        float(main_disk.get("percent") or 0),
-    ]
-    available_metrics = [m for m in metrics if m > 0]
-    level_pct = max(available_metrics) if available_metrics else 0.0
+    level_pct = level_percent(data)
     level_text, level_color = _level_meta(level_pct)
 
     pill_text = level_text
@@ -361,6 +375,8 @@ def render_status_card(data: dict[str, Any]) -> str | None:
         _chip(draw, lx, y, color)
         lx += 16
         text = f"{label} {_fmt_gb(value)}"
+        if label == "缓存":
+            text += "（可回收）"
         draw.text((lx, y), text, font=small_font, fill=DIM)
         lx += int(small_font.getlength(text)) + 20
 

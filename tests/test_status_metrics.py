@@ -161,7 +161,6 @@ def test_framework_runtime_prefers_process_start() -> None:
 
 
 def test_status_card_renders_with_steal_and_available() -> None:
-    import tempfile
     from pathlib import Path
 
     from mohobot.utils.status_card import render_status_card
@@ -191,3 +190,71 @@ def test_status_card_renders_with_steal_and_available() -> None:
         assert tmp.exists() and tmp.stat().st_size > 0
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def test_cpu_sample_window_is_locked_to_1s() -> None:
+    seen: list[float | None] = []
+
+    class FakePsutil:
+        def cpu_times_percent(self, interval=None, percpu=False):
+            seen.append(interval)
+            return [SimpleNamespace(idle=80.0, iowait=0.0, steal=0.0)]
+
+        def cpu_count(self, logical=True):
+            return 1
+
+    old = status_main.HAS_PSUTIL
+    status_main.HAS_PSUTIL = True
+    try:
+        with patch.object(status_main, "psutil", FakePsutil()):
+            status_main._read_cpu()
+    finally:
+        status_main.HAS_PSUTIL = old
+    assert status_main.CPU_SAMPLE_SECS == 1.0
+    assert seen == [1.0]
+
+
+def test_text_report_uses_available_and_steal() -> None:
+    data = {
+        "bot_id": "bot_001", "nickname": "测试", "now": "t",
+        "runtime_secs": 100, "plugin_runtime_secs": 100,
+        "system_uptime_secs": 100,
+        "cpu": {"count": 8, "average": 12.0, "cores": [10.0] * 8, "steal": 31.0},
+        "memory": {
+            "total": 8 * GB, "used": int(5.4 * GB), "cache": 2 * GB,
+            "free": int(0.3 * GB), "available": 2 * GB,
+            "percent": 95.0, "available_percent": 75.0, "swap_total": 0,
+        },
+        "disks": [{"mount": "/", "used": 47 * GB, "total": 58 * GB, "percent": 81.0}],
+        "bots": [], "contacts": {},
+    }
+    text = status_main._text_report(data)
+    assert "steal 31%" in text
+    assert "75%" in text and "95%" not in text
+    assert "已用" in text and "可用 2.0GB" in text
+
+
+def test_alert_level_ignores_steal_and_page_cache() -> None:
+    from mohobot.utils.status_card import level_percent
+
+    data = {
+        "cpu": {"average": 12.0, "steal": 90.0},
+        "memory": {
+            "total": 8 * GB, "available": 2 * GB,
+            "percent": 95.0, "available_percent": 75.0,
+        },
+        "disks": [{"percent": 81.0}],
+    }
+    # steal/cache 再高也不该触发"告警"；磁盘 81% 才是最高项
+    assert level_percent(data) == 81.0
+
+    high_cpu = dict(data)
+    high_cpu["cpu"] = {"average": 91.0, "steal": 0.0}
+    assert level_percent(high_cpu) == 91.0
+
+
+def test_memory_label_boundaries() -> None:
+    assert format_memory_label({"total": 0}) == "内存  —"
+    # available 缺失时回退 percent(app+cache) 口径
+    legacy = {"total": 8 * GB, "used": 5 * GB, "cache": 2 * GB, "percent": 87.5}
+    assert "88%" in format_memory_label(legacy)
