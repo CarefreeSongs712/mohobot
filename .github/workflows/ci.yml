@@ -13,15 +13,15 @@ permissions:
   contents: read
 
 concurrency:
-  # PR 上保留「新推送取消旧运行」以省资源；但 push 到发布分支不能取消，
+  # PR 和 dev 直推都取消旧运行以省资源；但 push 到发布分支 main 不能取消，
   # 否则连续合并两次会让前一个提交的门禁被 cancel，留下未验证的提交（显示为红叉）。
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 jobs:
   tests:
     name: Tests (Python 3.12)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       PYTHONUTF8: "1"
@@ -46,6 +46,10 @@ jobs:
       # 显式执行，保证插件热重载回归在 CI 真正被覆盖（约 0.1s）。
       - name: Run plugin hot-reload regression
         run: timeout --kill-after=30s 2m python tests/test_plugin_reload.py
+      # smoke_startup 是脚本不是 pytest 用例，pytest 收集不到；显式执行以覆盖
+      # main.py 装配/生命周期（mock 服务、无真实 sockets）。
+      - name: Run startup/shutdown smoke test
+        run: timeout --kill-after=30s 3m python tests/smoke_startup.py
       # legacy runner 覆盖是 pytest 的子集（且对 unittest 类/协程有假绿），
       # 仅在发布线 push main 时作为额外保险运行，PR 阶段省 ~100s。
       - name: Run legacy regression runner (main push only)
@@ -56,7 +60,7 @@ jobs:
 
   syntax:
     name: Syntax and control-flow checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -68,9 +72,55 @@ jobs:
       - run: python -m pip install ruff==0.17.0
       - run: python -m ruff check --isolated --select E9,F63,F7 main.py mohobot plugins review scripts tests
 
+  # 只检查本次改动新增/修改的 Python 文件: 存量 Ruff 债务不阻塞, 但新代码
+  # 不能继续引入 E4/E7/E9/F 类问题。全量债务仍由 lint-report 汇总。
+  lint-changed:
+    name: Lint changed Python files (new code)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # 需要 base commit 才能计算 diff
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff==0.17.0
+      - name: Lint changed Python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "没有可用的 base commit（workflow_dispatch 等），跳过改动文件 lint。"
+            exit 0
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "base commit ${BASE_SHA} 不在本地历史中，无法计算 diff。" >&2
+            exit 1
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "${BASE_SHA}...HEAD" -- '*.py')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "本次没有 Python 文件改动。"
+            exit 0
+          fi
+          printf '检查 %d 个改动文件:\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          python -m ruff check --isolated --select E4,E7,E9,F --ignore E402 "${files[@]}"
+      - name: Check whitespace errors in diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            exit 0
+          fi
+          git diff --check "${BASE_SHA}...HEAD"
+
   meme-plugin:
     name: Meme plugin regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +149,7 @@ jobs:
   # three jobs above; tighten this one into a gate only after the debt is cleared.
   lint-report:
     name: Ruff debt report (informational)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
