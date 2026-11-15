@@ -142,7 +142,7 @@ class Plugin:
             "bot_id": bot_id,
             "nickname": self_nickname,
             "now": now,
-            "runtime_secs": time.time() - self._start_time,
+            "runtime_secs": _framework_runtime_secs(self._start_time),
             "plugin_runtime_secs": time.time() - self._start_time,
             "system_uptime_secs": 0.0,
             "cpu": {},
@@ -191,14 +191,47 @@ class Plugin:
 
 # ── 数据读取(模块级, 便于测试) ──────────────────────────────
 
+# CPU 采样窗口: 0.35s 太短, 会被调度抖动/宿主机 steal 尖峰放大成全核 100%。
+CPU_SAMPLE_SECS = 1.0
+
+
+def _cpu_times_to_usage(times) -> tuple[list[float], list[float]]:
+    """把 cpu_times_percent 列表转成 (每核真实占用, 每核 steal)。
+
+    真实占用 = 100 - idle - iowait - steal: 宿主机 steal 与 I/O 等待
+    不是本进程/本机业务消耗, 单独展示, 不混进 CPU 使用率。
+    """
+    cores: list[float] = []
+    steals: list[float] = []
+    for t in times:
+        idle = float(getattr(t, "idle", 0.0) or 0.0)
+        iowait = float(getattr(t, "iowait", 0.0) or 0.0)
+        steal = float(getattr(t, "steal", 0.0) or 0.0)
+        cores.append(max(0.0, min(100.0, 100.0 - idle - iowait - steal)))
+        steals.append(max(0.0, min(100.0, steal)))
+    return cores, steals
+
+
 def _read_cpu() -> dict[str, Any]:
     if not HAS_PSUTIL:
         return {}
+    cores: list[float] = []
+    steals: list[float] = []
+    # 优先 cpu_times_percent: 可拿到 steal/iowait, 且能把 steal 从占用率中剔除。
     try:
-        cores = psutil.cpu_percent(interval=0.35, percpu=True) or []
-    except Exception as e:
-        logger.debug(f"读取 CPU 失败: {e}")
-        cores = []
+        times = psutil.cpu_times_percent(interval=CPU_SAMPLE_SECS, percpu=True) or []
+    except Exception:
+        times = []
+    if times:
+        cores, steals = _cpu_times_to_usage(times)
+    if not cores:
+        # 兼容没有 cpu_times_percent 的平台/旧 psutil: 退化为 cpu_percent。
+        try:
+            cores = [float(c) for c in (psutil.cpu_percent(interval=0.35, percpu=True) or [])]
+        except Exception as e:
+            logger.debug(f"读取 CPU 失败: {e}")
+            cores = []
+        steals = [0.0] * len(cores)
     if not cores:
         try:
             overall = float(psutil.cpu_percent(interval=0.2))
@@ -206,12 +239,25 @@ def _read_cpu() -> dict[str, Any]:
             overall = 0.0
         count = psutil.cpu_count() or 0
         cores = [overall] * count if count else []
+        steals = [0.0] * len(cores)
     average = sum(cores) / len(cores) if cores else 0.0
+    steal_average = sum(steals) / len(steals) if steals else 0.0
     return {
         "count": psutil.cpu_count(logical=True) or len(cores),
         "average": average,
         "cores": [float(c) for c in cores],
+        "steal": steal_average,
     }
+
+
+def _framework_runtime_secs(fallback_start: float) -> float:
+    """框架运行时长: 优先用进程启动时间(插件热重载不会重置), 取不到退回插件实例时间。"""
+    if HAS_PSUTIL:
+        try:
+            return max(0.0, time.time() - float(psutil.Process().create_time()))
+        except Exception:
+            pass
+    return max(0.0, time.time() - float(fallback_start))
 
 
 def _read_memory() -> dict[str, Any]:
@@ -224,6 +270,9 @@ def _read_memory() -> dict[str, Any]:
         app   = total - free - cache
     三段天然守恒，并与 `free -m` 口径一致。`available` 单独返回，
     只作展示，不参与堆叠条加法（它包含可回收缓存，与 cache 会重复计数）。
+
+    `percent` 仍是 (app+cache)/total（堆叠条口径）；`available_percent` 是
+    (total-available)/total，供卡片标题与告警使用，避免 page cache 虚高。
     """
     if not HAS_PSUTIL:
         return {}
@@ -243,6 +292,11 @@ def _read_memory() -> dict[str, Any]:
         used_total = app + cache
         percent = (used_total / total * 100.0) if total else 0.0
         app_percent = (app / total * 100.0) if total else 0.0
+        # 展示/告警用 available 口径: page cache 可回收, 不应算作已用。
+        available_percent = (
+            max(0.0, min(100.0, (total - available) / total * 100.0))
+            if total and available else percent
+        )
         data = {
             "total": total,
             "used": app,
@@ -250,6 +304,7 @@ def _read_memory() -> dict[str, Any]:
             "free": free,
             "available": available,
             "percent": percent,
+            "available_percent": available_percent,
             "app_percent": app_percent,
             "swap_total": 0,
             "swap_used": 0,
@@ -345,15 +400,30 @@ def _text_report(data: dict[str, Any]) -> str:
     ]
     if cpu:
         cores = "/".join(f"{int(c)}%" for c in (cpu.get("cores") or []))
-        lines.append(f"CPU: {int(cpu.get('average') or 0)}% ({cpu.get('count')} 核: {cores})")
+        line = f"CPU: {int(cpu.get('average') or 0)}% ({cpu.get('count')} 核: {cores})"
+        if float(cpu.get("steal") or 0) >= 1.0:
+            line += f" · steal {int(cpu.get('steal') or 0)}%"
+        lines.append(line)
     if mem:
+        mem_total = float(mem.get("total") or 0)
+        mem_available = float(mem.get("available") or 0)
+        mem_app = float(mem.get("used") or 0)
+        mem_cache = float(mem.get("cache") or 0)
+        if mem_available > 0:
+            used_display = max(0.0, mem_total - mem_available)
+            mem_pct = mem.get("available_percent")
+            if mem_pct is None:
+                mem_pct = (used_display / mem_total * 100.0) if mem_total else 0.0
+        else:
+            used_display = mem_app + mem_cache
+            mem_pct = mem.get("percent") or 0
         lines.append(
-            f"内存: 应用 {_fmt_gb(mem.get('used'))} / 总量 {_fmt_gb(mem.get('total'))} "
-            f"({int(mem.get('percent') or 0)}%) · 缓存 {_fmt_gb(mem.get('cache'))} "
-            f"· 空闲 {_fmt_gb(mem.get('free'))}"
+            f"内存: 已用 {_fmt_gb(used_display)} / 总量 {_fmt_gb(mem_total)} "
+            f"({int(mem_pct or 0)}%) · 应用 {_fmt_gb(mem_app)} "
+            f"· 缓存 {_fmt_gb(mem_cache)}"
             + (
-                f" · 可用 {_fmt_gb(mem.get('available'))}"
-                if mem.get("available") else ""
+                f" · 可用 {_fmt_gb(mem_available)}"
+                if mem_available else ""
             )
             + (
                 f" · Swap {_fmt_gb(mem.get('swap_used'))}/{_fmt_gb(mem.get('swap_total'))}"
