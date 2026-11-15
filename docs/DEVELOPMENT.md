@@ -313,7 +313,7 @@ interceptors = [ban_filter, plugin_system, command_handler, keyword_filter]
 
 - **合并转发**：群聊纯文本回复 ≥ `_forward_min_len`（600 字）自动改合并转发，每块 1000 字（`_forward_chunk_chars`），失败回退普通发送。
 - **工具结果泄漏防御**：`_sanitize_tool_leak` —— 整条以 `[工具` 开头则丢弃；含 `"\n[工具调用: "` 则截断。
-- **私聊自动回复过滤**（`ignore_auto_reply`，默认开启）：消息先归档，再于主处理链前检查；命中后静默忽略，不进入插件/命令/LLM 处理。当前规则包括 `[自动回复]` 前缀及同一 bot/用户短时间内重复相同文本；具体阈值以 `mohobot/message_handler.py` 中的常量与测试为准。
+- **私聊自动回复过滤**（`ignore_auto_reply`，默认开启）：消息先归档，再于主处理链前检查；命中后静默忽略，不进入插件/命令/LLM 处理。当前规则包括 `[自动回复]` 前缀及同一 bot/用户连续 **3 条**相同文本（**300 秒**窗口）；常量见 `mohobot/message_handler.py:_AUTO_REPLY_REPEAT_LIMIT/_AUTO_REPLY_REPEAT_WINDOW`，回归见 `tests/test_auto_reply.py`，用户侧说明见 [ADMIN §3](ADMIN.md#3-私聊自动回复过滤)。
 - **戳一戳**：`notice_type=notify, sub_type=poke` 且 target 是本 bot → 从 `touch_replies` 随机取一条回复。优先级：bot 私有 > 全局 > 内置 `DEFAULT_TOUCH_REPLIES`。
 - **request 事件**：交给插件 `on_request`；插件不接管则**静默不处理**（不自动同意好友/入群）。
 - **上下文写的 role 是 `"QQ号-昵称"`**（`_speaker_role`），LLM 靠这个知道「谁说的」；`LLMService._build_messages` 把非 `user`/`assistant`/`system`/`summary` 的角色转成 `user` 并加 `[role]: ` 前缀。

@@ -36,7 +36,7 @@
 
 ## 举报与处理
 
-如遇滥用、骚扰或其他不可接受的行为，请通过维护者 GitHub 主页所列的私密联系方式报告；**不要**在公开 issue 中披露当事人隐私或敏感细节。
+如遇滥用、骚扰或其他不可接受的行为，请使用仓库 **Security → Report a vulnerability** 私密报告（GitHub Private vulnerability reporting，仅维护者与报告者可见）；若该入口不可用，请通过维护者 GitHub 主页所列的私密联系方式联系。**不要**在公开 issue 或群聊中披露当事人隐私或敏感细节。
 
 维护者将：
 

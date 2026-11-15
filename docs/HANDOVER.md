@@ -11,6 +11,7 @@
 | [DEVELOPMENT](DEVELOPMENT.md) | 当前代码结构、扩展契约、配置、测试与 CI 开发说明 | 代码贡献者 |
 | [CODE-MAP](CODE-MAP.md) | 模块定位、关键调用链与修改入口（不复制签名/配置/测试结果） | 定位代码时 |
 | [PLUGINS](PLUGINS.md) | 内置插件命令与配置入口 | 使用者与插件维护者 |
+| [ADMIN](ADMIN.md) | 配置、管理员权限、用户可感知行为与备份边界 | 使用者与管理员 |
 | [CONTRIBUTING](../CONTRIBUTING.md) | 分支/PR、Bug 修复流程与提交前检查 | 代码贡献者 |
 | [SPEC-TEMPLATE](SPEC-TEMPLATE.md) | 跨模块功能/行为变更的规格模板（验收标准/模块/接口） | 功能设计时 |
 | [DEPLOYMENT](DEPLOYMENT.md) | 新环境部署模板、网络边界和发布前检查 | 经授权的部署操作 |

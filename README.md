@@ -14,6 +14,7 @@ Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人
 | [开发指南](docs/DEVELOPMENT.md) | 当前代码结构、配置/插件/LLM 工具开发、测试与 CI |
 | [代码地图](docs/CODE-MAP.md) | 模块定位、关键调用链与修改入口 |
 | [插件速查](docs/PLUGINS.md) | 各内置插件的命令与配置入口 |
+| [配置与管理员](docs/ADMIN.md) | 配置入口、管理员权限、用户可感知行为与备份边界 |
 | [贡献指南](CONTRIBUTING.md) | 分支/PR 流程、Bug 修复流程与提交前检查 |
 | [规格模板](docs/SPEC-TEMPLATE.md) | 跨模块功能/行为变更的 spec 模板 |
 | [部署指南](docs/DEPLOYMENT.md) | 通用新环境部署模板及发布前检查；不包含任何特定生产实例信息 |
@@ -67,7 +68,7 @@ cp config/global.example.yaml config/global.yaml
 .venv/bin/python main.py
 ```
 
-配置示例的 OneBot 服务端口为 `8081`，连接地址格式为 `ws://<主机>:<端口>/ws`。新连接不会自动分配 Bot：在 Web 面板创建 Bot 并绑定 QQ 后，才会处理该连接的消息。端口、鉴权和 systemd 部署见[部署指南](docs/DEPLOYMENT.md)。
+配置示例的 OneBot 服务端口为 `8081`，连接地址格式为 `ws://<主机>:<端口>/ws`。新连接不会自动分配 Bot：在 Web 面板创建 Bot 并绑定 QQ 后，才会处理该连接的消息。端口、鉴权和 systemd 部署见[部署指南](docs/DEPLOYMENT.md)；完整配置字段与管理员操作见[配置与管理员参考](docs/ADMIN.md)。
 
 ## Web 面板与审核
 
@@ -81,8 +82,8 @@ Web 面板默认监听回环地址的 `9090` 端口，登录密码必须显式�
 
 | 指令 | 说明 |
 |---|---|
-| `/help [分类]` | 显示可用指令（PIL 图片）：固定分类顺序、管理员徽标、普通用户折叠管理员指令、别名单独一行、超 30 条自动拆页；分类 `内置 会话 情感 封禁 工具 娱乐 管理`；失败降级文本 |
-| `/status` | 状态卡片（图片）：CPU 每核方块、内存/缓存/空闲堆叠条（可用单列）、Swap、主磁盘占用、Bot 昵称与在线时长、联系管理员（仅展示）/交流群/使用须知 |
+| `/help [分类]` | 显示可用指令（图片卡片；按权限折叠管理员指令，超 30 条自动拆页） |
+| `/status` | 查看框架与系统状态卡片（CPU、内存、Swap、磁盘、Bot 在线时长） |
 | `/sess list`、`/sess new <名称>`、`/sess switch <ID>`、`/sess del <ID>` | 管理当前私聊会话 |
 | `/persona …`【管理员】 | 管理私聊专属人设，见下文「私聊专属人设与人设评估」 |
 | `/forget <数量>`、`/clear` | 删除近期上下文或清空当前上下文 |
@@ -114,7 +115,7 @@ data/
 logs/                         # 运行日志（不入库）
 ```
 
-原始归档是只读回溯/审核材料，不作 LLM 实时输入；数据层细节见 [DEVELOPMENT §4](docs/DEVELOPMENT.md)。
+原始归档是只读回溯/审核材料，不作 LLM 实时输入；数据层细节见 [DEVELOPMENT §4](docs/DEVELOPMENT.md)，备份/恢复边界见[配置与管理员参考 §4](docs/ADMIN.md#4-数据备份与恢复边界)。
 
 ## 技术与状态
 

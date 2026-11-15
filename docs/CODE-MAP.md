@@ -74,13 +74,6 @@ mohobot/
 - 验证入口：常用 pytest、runner 覆盖边界、并发/封禁/插件重载/冒烟专项，以及 CI 实际门禁清单，见 [DEVELOPMENT §1](DEVELOPMENT.md#1-开发环境与日常循环) 与 [§12 提交前检查](DEVELOPMENT.md#12-提交前检查)。
 - 生产相关：不要按本文件或开发环境推断线上状态；部署与发布按 [DEPLOYMENT](DEPLOYMENT.md) 取得授权后核实。
 
-## 7. 需要保留的设计约束（摘要）
+## 7. 设计约束
 
-以下不是实现细节，而是修改时必须保持的边界；完整表述见 [AGENTS §2–§4](../AGENTS.md)：
-
-- `startup()` 与 `run_forever()` 必须同一 event loop；
-- history 追加不可变、contexts 可变、SQLite 另存完成轮次，三者不可互相替代；
-- 群聊只写合并归档，不恢复 per-bot 双写；
-- 人设/会话锁序 persona → maintenance → chat → file；
-- 后台任务统一注册 `TaskSupervisor`（name/owner）；
-- 面板内重启只是进程内重装配，不能替代代码发布后的进程重启。
+修改前必须读 [AGENTS §2–§4](../AGENTS.md) 与 [DEVELOPMENT §10](DEVELOPMENT.md)；本文件只负责定位，不重复列出不变量。

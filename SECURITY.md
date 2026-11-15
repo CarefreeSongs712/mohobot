@@ -8,12 +8,9 @@
 
 ## 报告方式
 
-**不要在公开 issue 或 PR 中披露漏洞细节、利用步骤或真实凭据。** 请通过以下私密渠道报告：
+**不要在公开 issue、PR 或群聊中披露漏洞细节、利用步骤或真实凭据。** 请使用仓库 **Security → Report a vulnerability** 提交私有报告（GitHub Private vulnerability reporting；报告与讨论仅维护者与报告者可见）。
 
-1. 通过维护者 GitHub 主页公开的私密联系方式（如 GitHub 私信或项目群）直接联系；或
-2. 若维护者已启用仓库的 GitHub Private vulnerability reporting，使用仓库 **Security → Report a vulnerability** 提交。
-
-> 说明：截至本文档编写时，仓库的 GitHub 私密漏洞报告功能尚未启用；若无法使用，请优先采用第 1 种方式。启用后本文档会同步更新。
+> 若 Security 页没有该入口，说明仓库尚未启用 Private vulnerability reporting；此时请通过维护者 GitHub 账号主页所列的**非公开**联系方式联系，并说明希望建立私密渠道。不要使用公开群聊或公开 issue。
 
 ## 报告内容建议
 
