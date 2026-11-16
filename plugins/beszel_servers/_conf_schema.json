@@ -1,0 +1,31 @@
+{
+  "base_url": {
+    "type": "string",
+    "default": "http://127.0.0.1:8090",
+    "description": "Beszel Hub 地址",
+    "hint": "插件所在机器可访问的 hub 地址，例如 http://127.0.0.1:8090"
+  },
+  "email": {
+    "type": "string",
+    "default": "",
+    "description": "Beszel 账号邮箱",
+    "hint": "使用 PocketBase 的用户登录接口读取 systems 集合"
+  },
+  "password": {
+    "type": "string",
+    "default": "",
+    "description": "Beszel 账号密码",
+    "hint": "明文保存在 data/plugins_config/；主面板不会掩码插件配置，注意文件权限"
+  },
+  "timeout_secs": {
+    "type": "int",
+    "default": 8,
+    "description": "请求超时（秒）"
+  },
+  "max_systems": {
+    "type": "int",
+    "default": 12,
+    "description": "卡片最多展示的服务器数量",
+    "hint": "超出部分只显示剩余台数"
+  }
+}
