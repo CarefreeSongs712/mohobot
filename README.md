@@ -6,9 +6,9 @@
 
 Mohobot 是基于 Python asyncio 与 OneBot v11 反向 WebSocket 的多机器人框架：一个进程接入多个 QQ 机器人，通过 OpenAI 兼容接口驱动对话，并提供插件、Web 管理面板与独立数据存储。
 
-> ⚠️ **开发阶段**：本项目目前处于积极开发中，API、数据格式与功能均可能发生破坏性变更，请谨慎用于生产环境。
+> ⚠️ **开发阶段**：项目正在积极开发中，API、数据格式与功能均可能发生破坏性变更，请谨慎用于生产环境。
 >
-> 本项目绝大部分代码为 vibecoding，且没有经过人工详细审查；极大可能存在 AI slop，请谨慎使用。
+> 项目的大部分代码由 AI 辅助生成，尚未经过完整的人工审查，可能存在质量缺陷或不成熟的实现，请谨慎使用。
 
 发布记录见 GitHub [Releases](https://github.com/CarefreeSongs712/mohobot/releases)。
 
