@@ -33,7 +33,7 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 | `main.py` | 装配容器 `MohobotApplication`：创建并互连所有组件 |
 | `mohobot/ws_server.py` | 反向 WS 服务端 + 出站队列 |
 | `mohobot/bot_manager.py` | Bot 实例生命周期、QQ 绑定、群内 bot 感知 |
-| `mohobot/message_handler.py` | **消息处理管线（核心，1596 行）** |
+| `mohobot/message_handler.py` | **消息处理管线（核心）** |
 | `mohobot/context_manager.py` | 会话上下文读写 + AI 总结压缩 |
 | `mohobot/llm_service.py` | LLM 流式/工具/视觉/用量 |
 | `mohobot/interceptors/` | 拦截器链：封禁、插件、内置命令、关键词 |
@@ -1030,6 +1030,9 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 5. **不把历史快照当作当前环境**：配置模板与源码 dataclass 默认可能不同，开发/运行时先看实际配置与加载逻辑，不据此记录当前部署值。
 6. **开发测试使用隔离数据**：`data/` 与 `logs/` 不入库，测试应使用临时目录，避免污染本地数据。
 7. **主面板 JS 检查**：`tests/_js_check.py` 只作辅助；改内联脚本时提取后运行 `node --check`，不能以辅助脚本零退出码作为语法通过证明。
+8. **`config.log_dir` 不生效**：`main.py` 固定以 `./logs` 初始化日志，改配置不会移动日志目录；需要别的路径时改装配代码。
+9. **`GlobalConfig.save()` 会重写配置并丢失注释**：保存走 `yaml.dump`，手写的注释与字段顺序不会保留；手改 `global.yaml` 后若经面板保存，内容会变成纯序列化输出。
+10. **`plugins/feed/` 是已移除插件的空目录**：只存在于工作区、不入库，可直接删除。
 
 源码与配置会持续演进；本节仅保留稳定约束，具体行为以相应实现为准。
 

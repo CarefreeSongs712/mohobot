@@ -74,7 +74,7 @@ cp config/global.example.yaml config/global.yaml
 
 Web 面板默认监听回环地址的 `9090` 端口，登录密码必须显式配置；不要将管理面板直接暴露到不受信任的网络。更多访问与部署安全要求见[部署指南](docs/DEPLOYMENT.md)。
 
-审核面板为可选组件，需提供 `review/config.yaml` 并启用后由应用拉起；示例配置监听回环地址的 `9091` 端口。审核面板使用独立数据库，并只读访问 Mohobot 的消息归档。模板见 [`review/config.example.yaml`](review/config.example.yaml)。
+审核面板为可选组件：存在 `review/config.yaml` 且未显式设置 `enabled: false` 时，应用会拉起独立进程；示例配置监听回环地址的 `9091` 端口。审核面板使用独立数据库，并只读访问 Mohobot 的消息归档。模板见 [`review/config.example.yaml`](review/config.example.yaml)。
 
 ## 常用指令
 
@@ -107,11 +107,22 @@ Web 面板默认监听回环地址的 `9090` 端口，登录密码必须显式�
 ```
 data/
 ├── bots/{bot_id}/            # Bot 配置
-├── history/group/            # 群聊合并归档（message_id+跨账号指纹去重）
+├── history/group/            # 群聊合并归档（message_id + 跨账号指纹去重）
 ├── history/{bot_id}/private/ # 私聊归档（按 bot 隔离）
 ├── contexts/{bot_id}/        # 工作上下文（可读写）
 ├── database/                 # SQLite 对话库
-└── cache/                    # 图片缓存 / 歌曲索引等
+├── personas/                 # 人设预设库（全局共享）
+├── persona_ab/               # 私聊匿名人设 A/B 数据（启用时）
+├── ban/                      # 全局封禁名单
+├── cache/                    # 图片缓存、歌曲索引等派生数据
+├── song_knowledge/           # 虚拟歌手知识库源文件
+├── knowledge_db/             # RAG 知识库条目与索引
+├── stats/                    # LLM 用量统计
+├── emotion/                  # 情感与关系数据（启用时）
+├── fonts/                    # 图卡字体（可选）
+├── plugins_config/           # 插件配置
+├── plugins_data/             # 插件私有数据
+└── plugins_state.json        # 插件启用状态
 logs/                         # 运行日志（不入库）
 ```
 
