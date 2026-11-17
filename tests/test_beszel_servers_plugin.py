@@ -1,9 +1,15 @@
+import asyncio
+import base64
 import importlib.util
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import httpx
 
 from mohobot.models.onebot import PrivateMessageEvent, Sender
 
@@ -115,3 +121,226 @@ async def test_on_message_ignores_other_text():
     handled, reply = await plugin.on_message("bot_001", _private_event("看看服务器"), {})
     assert handled is False
     assert reply is None
+
+
+
+def _jwt(label: str, exp: float | None = None) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp if exp is not None else time.time() + 3600, "sub": label}).encode()
+    ).decode().rstrip("=")
+    return "e30." + payload + ".sig"
+
+
+def _configure(plugin, **overrides):
+    config = {
+        "base_url": "https://hub.test",
+        "email": "admin@example.test",
+        "password": "test-password",
+        "timeout_secs": 8,
+        "max_systems": 12,
+    }
+    config.update(overrides)
+    plugin.on_config_update(config)
+
+
+async def _with_mock_client(plugin, handler, base_url="https://hub.test"):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plugin._clients[(base_url, 8.0)] = client
+    return client
+
+
+def test_snapshot_isolated_from_mutable_config():
+    plugin = plugin_mod.Plugin()
+    _configure(plugin)
+    first = plugin._snapshot()
+    plugin.on_config_update({"base_url": "https://new.test", "email": "new@example.test",
+                             "password": "new-password", "timeout_secs": 8, "max_systems": 12})
+    second = plugin._snapshot()
+    assert first.base_url == "https://hub.test" and first.email == "admin@example.test"
+    assert first.generation != second.generation
+    assert second.base_url == "https://new.test" and second.email == "new@example.test"
+
+
+async def test_login_and_token_cache():
+    calls = []
+    token = _jwt("cached")
+
+    def handler(request):
+        calls.append((request.method, request.headers.get("Authorization")))
+        if request.method == "POST":
+            return httpx.Response(200, json={"token": token})
+        return httpx.Response(200, json={"items": [{"name": "host", "status": "up"}]})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = await _with_mock_client(plugin, handler)
+        try:
+            assert (await plugin._fetch_systems())[0]["name"] == "host"
+            await plugin._fetch_systems()
+        finally:
+            await client.aclose()
+        assert [c[0] for c in calls] == ["POST", "GET", "GET"]
+        assert calls[1][1] == calls[2][1] == token
+
+    await scenario()
+
+
+async def test_401_relogin_retries_once_and_updates_token():
+    calls = []
+    tokens = iter([_jwt("old"), _jwt("new")])
+
+    def handler(request):
+        calls.append((request.method, request.headers.get("Authorization")))
+        if request.method == "POST":
+            return httpx.Response(200, json={"token": next(tokens)})
+        if len([c for c in calls if c[0] == "GET"]) == 1:
+            return httpx.Response(401, json={"message": "expired"})
+        return httpx.Response(200, json={"items": [{"name": "host", "status": "up"}]})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = await _with_mock_client(plugin, handler)
+        try:
+            systems = await plugin._fetch_systems()
+            assert systems[0]["name"] == "host"
+        finally:
+            await client.aclose()
+        assert [c[0] for c in calls] == ["POST", "GET", "POST", "GET"]
+        assert calls[2][1] != calls[1][1]
+        assert plugin._token_generation == plugin._config_generation
+
+    await scenario()
+
+
+async def test_config_change_while_login_in_flight_never_crosses_hub():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requests = []
+
+    class OldHub(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            requests.append(("old", request.method, request.headers.get("Authorization")))
+            if request.method == "POST":
+                started.set()
+                await release.wait()
+                return httpx.Response(200, json={"token": _jwt("old")})
+            return httpx.Response(200, json={"items": []})
+
+    class NewHub(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            requests.append(("new", request.method, request.headers.get("Authorization")))
+            if request.method == "POST":
+                return httpx.Response(200, json={"token": _jwt("new")})
+            return httpx.Response(200, json={"items": []})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        old_client = httpx.AsyncClient(transport=OldHub())
+        new_client = httpx.AsyncClient(transport=NewHub())
+        plugin._clients[("https://hub.test", 8.0)] = old_client
+        plugin._clients[("https://new.test", 8.0)] = new_client
+        task = asyncio.create_task(plugin._fetch_systems())
+        await started.wait()
+        plugin.on_config_update({
+            "base_url": "https://new.test", "email": "new@example.test",
+            "password": "new-password", "timeout_secs": 8, "max_systems": 12,
+        })
+        release.set()
+        try:
+            await asyncio.wait_for(task, timeout=5)  # old snapshot may finish on old hub
+            await plugin._fetch_systems()            # but next request must be new-hub + new token
+        finally:
+            await old_client.aclose()
+            await new_client.aclose()
+        new_gets = [auth for hub, method, auth in requests if hub == "new" and method == "GET"]
+        assert new_gets, requests
+        old_token = "e30." + _jwt("old").split(".")[1] + ".sig"
+        assert all(auth and auth != old_token for auth in new_gets), requests
+        assert plugin._token_generation == plugin._config_generation
+
+    await scenario()
+
+
+async def test_403_retries_once():
+    count = {"get": 0}
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"token": _jwt("token")})
+        count["get"] += 1
+        if count["get"] == 1:
+            return httpx.Response(403, json={"message": "forbidden"})
+        return httpx.Response(200, json={"items": [{"name": "host", "status": "up"}]})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = await _with_mock_client(plugin, handler)
+        try:
+            assert (await plugin._fetch_systems())[0]["name"] == "host"
+        finally:
+            await client.aclose()
+
+    await scenario()
+
+
+async def test_auth_failure_is_friendly():
+    def handler(request):
+        return httpx.Response(400, json={"message": "Failed to authenticate."})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = await _with_mock_client(plugin, handler)
+        try:
+            try:
+                await plugin._fetch_systems()
+            except plugin_mod.BeszelAuthError as exc:
+                assert plugin_mod._friendly_error(exc) == "登录失败（邮箱或密码错误）"
+            else:
+                raise AssertionError("expected BeszelAuthError")
+        finally:
+            await client.aclose()
+
+    await scenario()
+
+
+async def test_timeout_is_friendly():
+    def handler(request):
+        raise httpx.ReadTimeout("test timeout", request=request)
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = await _with_mock_client(plugin, handler)
+        try:
+            try:
+                await plugin._fetch_systems()
+            except httpx.ReadTimeout as exc:
+                assert plugin_mod._friendly_error(exc) == "连接超时"
+            else:
+                raise AssertionError("expected timeout")
+        finally:
+            await client.aclose()
+
+    await scenario()
+
+
+async def test_on_shutdown_closes_clients():
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        client = httpx.AsyncClient()
+        plugin._clients[("https://hub.test", 8.0)] = client
+        await plugin.on_shutdown()
+        assert plugin._clients == {}
+        assert client.is_closed
+
+    await scenario()
+
+
+def test_bad_jwt_does_not_crash():
+    assert plugin_mod._jwt_exp("not-a-jwt") == 0.0
+    assert plugin_mod._jwt_exp("a.b.c") == 0.0

@@ -7,7 +7,7 @@
 | 插件 | 位置 | 功能 | 有独立文档 |
 |---|---|---|---|
 | status | `plugins/status/` | `/status` 状态卡 | 否（配置 `admin_qqs`/`community_group`/`help_url`，见 `_conf_schema.json`） |
-| beszel_servers | `plugins/beszel_servers/` | `/servers`、`/服务器` 查看 Beszel 全部服务器状态 | 否（配置 Hub 地址与账号，见下） |
+| beszel_servers | `plugins/beszel_servers/` | `/servers`、`/服务器` 查看 Beszel 全部服务器状态 | [README](../plugins/beszel_servers/README.md) |
 | praise | `plugins/praise.py` | `赞我`/`zanwo` 点赞 | 否 |
 | divination | `plugins/divination.py` | `/占卜` | 否 |
 | perception | `plugins/perception/` | 日历/节日感知注入 | 否 |
@@ -32,11 +32,12 @@
 
 ## 🖥️ Beszel 服务器状态插件（beszel_servers）
 
-`/servers` 与 `/服务器` 读取 Beszel Hub 的 `systems` 集合，生成与 `/status` 同风格的图卡：状态点、CPU/内存/磁盘占用、负载、运行时长与 agent 版本；图卡渲染失败时降级为文字。群内无需 @，按 `global_triggers` 多 bot 去重。
+`/servers` 与 `/服务器` 读取 Beszel Hub 的 `systems` 集合，生成与 `/status` 同风格的图卡；群内无需 @，按 `global_triggers` 多 bot 去重，全体用户可用。
+
+配置、认证、故障排查与安全边界见插件文档：[`plugins/beszel_servers/README.md`](../plugins/beszel_servers/README.md)。
 
 - **配置**：`base_url`（默认 `http://127.0.0.1:8090`）、`email`、`password`（明文保存在 `data/plugins_config/`）、`timeout_secs`、`max_systems`（默认 12，超出只提示剩余台数）。
-- **认证**：调用 Hub 的用户登录接口换取 token，按 JWT 过期时间缓存，401 时重新登录。
-- **权限**：全体用户。
+- **认证**：调用 Hub 的用户登录接口换取 token，按 JWT 过期时间缓存，401/403 时重新登录一次；配置切换使用独立快照，旧 token 不跨 Hub。
 
 ## 🗂️ 聊天记录管理插件（chat_manager）
 

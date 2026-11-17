@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import os
 import tempfile
@@ -46,6 +47,26 @@ _RECORDS_PATH = "/api/collections/systems/records"
 _AUTH_PATH = "/api/collections/users/auth-with-password"
 
 
+class _ConfigSnapshot:
+    """One request's immutable Hub credentials and endpoint generation."""
+
+    __slots__ = ("base_url", "email", "password", "timeout_secs", "generation")
+
+    def __init__(
+        self,
+        base_url: str,
+        email: str,
+        password: str,
+        timeout_secs: float,
+        generation: int,
+    ) -> None:
+        self.base_url = base_url
+        self.email = email
+        self.password = password
+        self.timeout_secs = timeout_secs
+        self.generation = generation
+
+
 class Plugin:
     global_triggers = {"/servers", "/服务器"}
     help_category = "工具"
@@ -68,21 +89,27 @@ class Plugin:
 
     def __init__(self) -> None:
         self.plugin_config: dict[str, Any] = dict(_DEFAULT_CONFIG)
-        self._client: httpx.AsyncClient | None = None
-        self._client_base = ""
-        self._client_timeout = 0.0
+        self._clients: dict[tuple[str, float], httpx.AsyncClient] = {}
+        self._client_lock = asyncio.Lock()
         self._token = ""
         self._token_exp = 0.0
-        self._auth_lock: asyncio.Lock | None = None
+        self._token_generation = -1
+        self._config_generation = 0
+        self._auth_lock = asyncio.Lock()
 
     def on_config_update(self, config: dict[str, Any]) -> None:
+        # Do not close an in-flight old client here: an existing request must
+        # finish against its own immutable snapshot. New requests get a new
+        # generation and therefore cannot reuse the old token.
         self.plugin_config = dict(config or {})
+        self._config_generation += 1
         self._token = ""
         self._token_exp = 0.0
+        self._token_generation = -1
 
     async def on_shutdown(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
+        clients, self._clients = self._clients, {}
+        for client in clients.values():
             try:
                 await client.aclose()
             except Exception as e:  # noqa: BLE001 - 关闭失败不影响退出
@@ -115,7 +142,7 @@ class Plugin:
         if ws is not None and chat_type and chat_id:
             image_path = None
             try:
-                image_path = render_card(view)
+                image_path = await asyncio.to_thread(render_card, view)
                 if image_path:
                     await ws.send_image(bot_id, chat_type, chat_id, image_path)
                     return True, None
@@ -129,76 +156,80 @@ class Plugin:
                         pass
         return True, build_text(view)
 
+    def _snapshot(self) -> _ConfigSnapshot:
+        config = self.plugin_config
+        try:
+            timeout = max(1.0, float(config.get("timeout_secs") or 8))
+        except (TypeError, ValueError):
+            timeout = 8.0
+        return _ConfigSnapshot(
+            base_url=str(config.get("base_url") or "").strip().rstrip("/"),
+            email=str(config.get("email") or "").strip(),
+            password=str(config.get("password") or ""),
+            timeout_secs=timeout,
+            generation=self._config_generation,
+        )
+
     async def _fetch_systems(self) -> list[dict[str, Any]]:
-        client = await self._ensure_client()
-        token = await self._ensure_token(client)
-        base = self._base_url()
+        snapshot = self._snapshot()
+        client = await self._ensure_client(snapshot)
+        token = await self._ensure_token(client, snapshot)
         params = {"perPage": "200", "sort": "name", "skipTotal": "1"}
-        url = f"{base}{_RECORDS_PATH}"
-        headers = {"Authorization": token}
-        resp = await client.get(url, params=params, headers=headers)
+        url = f"{snapshot.base_url}{_RECORDS_PATH}"
+        resp = await client.get(url, params=params, headers={"Authorization": token})
         if resp.status_code in (401, 403):
-            self._token = ""
-            token = await self._ensure_token(client)
+            token = await self._ensure_token(client, snapshot, force=True)
             resp = await client.get(url, params=params, headers={"Authorization": token})
         resp.raise_for_status()
         data = resp.json()
         items = data.get("items") if isinstance(data, dict) else None
         return [item for item in (items or []) if isinstance(item, dict)]
 
-    def _base_url(self) -> str:
-        return str(self.plugin_config.get("base_url") or "").strip().rstrip("/")
+    async def _ensure_client(self, snapshot: _ConfigSnapshot) -> httpx.AsyncClient:
+        key = (snapshot.base_url, snapshot.timeout_secs)
+        async with self._client_lock:
+            client = self._clients.get(key)
+            if client is None:
+                client = httpx.AsyncClient(timeout=snapshot.timeout_secs)
+                self._clients[key] = client
+            return client
 
-    async def _ensure_client(self) -> httpx.AsyncClient:
-        if self._auth_lock is None:
-            self._auth_lock = asyncio.Lock()
-        base = self._base_url()
-        timeout = max(1.0, float(self.plugin_config.get("timeout_secs") or 8))
+    async def _ensure_token(
+        self, client: httpx.AsyncClient, snapshot: _ConfigSnapshot, *, force: bool = False
+    ) -> str:
         if (
-            self._client is not None
-            and self._client_base == base
-            and self._client_timeout == timeout
+            not force
+            and self._token
+            and self._token_generation == snapshot.generation
+            and time.time() < self._token_exp - 60
         ):
-            return self._client
-        if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:  # noqa: BLE001 - 重建客户端时忽略旧连接错误
-                pass
-            self._client = None
-            self._token = ""
-        self._client = httpx.AsyncClient(timeout=timeout)
-        self._client_base = base
-        self._client_timeout = timeout
-        return self._client
-
-    async def _ensure_token(self, client: httpx.AsyncClient) -> str:
-        if self._token and time.time() < self._token_exp - 60:
             return self._token
-        if self._auth_lock is None:
-            self._auth_lock = asyncio.Lock()
         async with self._auth_lock:
-            if self._token and time.time() < self._token_exp - 60:
-                return self._token
-            await self._login(client)
-            return self._token
+            if not force and self._token and self._token_generation == snapshot.generation:
+                # Another concurrent request already refreshed for the same
+                # generation: reuse it even if its JWT exp is unknown/zero.
+                if self._token_exp <= 0 or time.time() < self._token_exp - 60:
+                    return self._token
+            return await self._login(client, snapshot)
 
-    async def _login(self, client: httpx.AsyncClient) -> None:
-        base = self._base_url()
-        payload = {
-            "identity": str(self.plugin_config.get("email") or "").strip(),
-            "password": str(self.plugin_config.get("password") or ""),
-        }
-        resp = await client.post(f"{base}{_AUTH_PATH}", json=payload)
+    async def _login(self, client: httpx.AsyncClient, snapshot: _ConfigSnapshot) -> str:
+        payload = {"identity": snapshot.email, "password": snapshot.password}
+        resp = await client.post(f"{snapshot.base_url}{_AUTH_PATH}", json=payload)
         if resp.status_code >= 400:
             raise BeszelAuthError(_response_message(resp))
         data = resp.json()
         token = str(data.get("token") or "")
         if not token:
             raise BeszelAuthError("登录响应缺少 token")
-        self._token = token
         exp = _jwt_exp(token)
-        self._token_exp = exp if exp > 0 else time.time() + 3600
+        # Only publish to the shared cache when the configuration is still the
+        # same. The in-flight request may still use its local return value, but
+        # a later request cannot reuse an old-generation token.
+        if self._config_generation == snapshot.generation:
+            self._token = token
+            self._token_exp = exp if exp > 0 else time.time() + 3600
+            self._token_generation = snapshot.generation
+        return token
 
 
 def _extract_text(event: Any) -> str:
@@ -228,7 +259,7 @@ def _jwt_exp(token: str) -> float:
         padded = payload + "=" * (-len(payload) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded))
         return float(data.get("exp") or 0)
-    except (IndexError, ValueError, TypeError):
+    except (IndexError, ValueError, TypeError, binascii.Error):
         return 0.0
 
 
