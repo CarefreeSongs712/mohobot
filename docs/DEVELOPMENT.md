@@ -480,7 +480,7 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 
 人设选项接口 `/api/personas/options` 只深拷贝已发布内存快照，无文件 I/O、无引用扫描、无服务锁等待；详情和编辑存在性检查使用 `get_persona()`。管理列表引用统计缓存 30 秒，首次通过一个线程批量只读扫描索引，不经会升级索引的 ContextManager getter。CRUD、bot 更新、绑定和 Web 会话删除/恢复/清理使缓存失效；删除和恢复校验必须 `force=True` 重扫，不能把缓存零计数当作删除授权。线程扫描取消时等待工作线程完成后释放维护屏障。管理页面复用一次列表返回值刷新下拉，并显示持久加载/错误/重试状态。
 
-新增 `/persona` 为全局管理员命令，明确指定 `bot_id 用户QQ session_id`；支持 `list/sessions/set/get/clear`，群多 bot 去重，不隐式创建或切换目标会话。面板「人设管理」CRUD 和 bot 下拉共用服务；对话详情只读显示实际人设来源。所有引用在下一轮读取最新正文，在途请求不被编辑改变。具体用法见 README「人设预设与私聊专属人设」。
+新增 `/persona` 为全局管理员命令，明确指定 `bot_id 用户QQ session_id`；支持 `list/sessions/set/get/clear`，群多 bot 去重，不隐式创建或切换目标会话。面板「人设管理」CRUD 和 bot 下拉共用服务；对话详情只读显示实际人设来源。所有引用在下一轮读取最新正文，在途请求不被编辑改变。具体用法见 `mohobot/interceptors/command_handler.py` 的 `_PERSONA_USAGE` 与 `/help` 输出。
 
 **bot_id 与 QQ 分离**：`bot_id` 是自动编号内部标识（`bot_001`…，`next_bot_id` 取最大号 +1，零填充 3 位）；`qq=0` 表示未绑定；**QQ 唯一绑定**（`bind_qq` 会先从其他 bot 解绑）。新 QQ 连进来默认不分配 bot，需在面板创建/绑定。
 
