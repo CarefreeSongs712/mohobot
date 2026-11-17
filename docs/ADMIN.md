@@ -31,6 +31,19 @@
 
 ## 2. 管理员与权限
 
+内置命令不依赖插件，完整列表以 `/help` 输出为准：
+
+| 命令 | 说明 |
+|---|---|
+| `/help [分类]` | 显示可用指令（图片卡片，按权限折叠管理员指令，超 30 条自动拆页） |
+| `/sess list`、`/sess new <名称>`、`/sess switch <ID>`、`/sess del <ID>` | 管理当前私聊会话 |
+| `/forget <数量>`、`/clear` | 删除近期上下文或清空当前会话 |
+| `/hist` | 打印当前会话内容（调试） |
+| `/tts <文本>` | 按 TTS 配置合成语音，需启用 TTS 服务 |
+| `ping` | 无需斜杠，回复 `PONG` |
+
+插件命令 `/status` 查看主程序所在机器，`/servers`（别名 `/服务器`）查看 Beszel 账号可见的服务器；后者需先在插件设置中配置 Hub 与账号。用法与配置见[插件速查](PLUGINS.md)中的 Beszel 服务器状态章节。
+
 - 权限统一由全局 `admins` 决定；插件可额外配置审批员（如 relationship 的审批流）。
 - 常见管理员命令（完整列表以 `/help` 的“管理”分类与 [PLUGINS](PLUGINS.md) 为准）：`/persona …`、`/查看聊天`、`/发送消息`、`/发说说`、`/删说说`、`/重置QQCookies`、`/群列表`、`/好友列表`、`/退群`、`/删好友`、`/加审批员`、`/减审批员`、`/重置记录` 等。
 - 面板登录独立于 QQ 管理员身份；不要把管理员面板暴露到不可信网络。
@@ -46,7 +59,7 @@
 
 ## 4. 数据、备份与恢复边界
 
-数据目录结构见 [README](../README.md#数据与目录速览)；分层语义（history 追加归档 / contexts 工作记忆 / SQLite 完成轮次）见 [DEVELOPMENT §4](DEVELOPMENT.md)。
+数据目录结构与分层语义（history 追加归档 / contexts 工作记忆 / SQLite 完成轮次）见 [DEVELOPMENT §4](DEVELOPMENT.md)。
 
 备份/恢复时需要注意：
 
@@ -59,6 +72,7 @@
 
 ## 5. 面板与网络边界
 
+- Web 面板板块：数据总览、配置文件（全局 + 每 Bot）、模型配置（含多提供商）、TTS 语音、插件管理、对话数据、实时日志（SSE）、系统设置、数据管理、封禁管理、情感管理。
 - 管理与审核面板默认只监听回环地址，必须显式配置密码；远程访问使用 HTTPS 反向代理、VPN 或白名单。
 - 反向 WS 面向不可信网络时应配置 `server.access_token` 并限制来源；`access_token`、面板密码、API Key 不要写入仓库或聊天记录。
 - 漏洞报告方式见 [SECURITY](../SECURITY.md)；部署与 systemd 模板见 [DEPLOYMENT](DEPLOYMENT.md)。

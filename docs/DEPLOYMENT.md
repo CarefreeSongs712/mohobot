@@ -62,7 +62,7 @@ sudo systemctl enable --now mohobot
 
 ## 数据备份与恢复
 
-- 数据目录与分层语义见 [README](../README.md#数据与目录速览) 与 [DEVELOPMENT §4](DEVELOPMENT.md)；备份边界见 [配置与管理员参考 §4](ADMIN.md#4-数据备份与恢复边界)。
+- 数据目录与分层语义见 [DEVELOPMENT §4](DEVELOPMENT.md)；备份边界见 [配置与管理员参考 §4](ADMIN.md#4-数据备份与恢复边界)。
 - 对运行中的实例，优先使用已验证的备份工具/脚本；直接复制 `data/` 前应确认一致性（history 追加写入、contexts/SQLite 正在更新）。
 - **备份与恢复是独立操作**：先读脚本、停机（如需要）、做已验证备份，并取得明确授权；不要在未确认路径与范围时执行迁移、清理或恢复。
 - 群聊归档为跨 bot 合并布局，按 bot 过滤不会拆分群数据；`data/persona_ab/` 与审核数据库需要单独备份。
