@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import json
+import math
 import os
 import re
 import tempfile
@@ -95,7 +96,6 @@ class Plugin:
         self._active_client_key: tuple[str, float] | None = None
         self._client_lock = asyncio.Lock()
         self._closing = False
-        self._max_clients = 4
         self._token = ""
         self._token_exp = 0.0
         self._token_generation = -1
@@ -104,8 +104,8 @@ class Plugin:
 
     def on_config_update(self, config: dict[str, Any]) -> None:
         # Keep in-flight old clients alive; new requests use a new generation
-        # and can never reuse the old token. Idle old clients are retired in
-        # the background so repeated configuration changes do not leak pools.
+        # and can never reuse the old token. Idle old clients are retired on
+        # the next request release (or shutdown) so pools do not grow.
         self.plugin_config = dict(config or {})
         self._config_generation += 1
         self._token = ""
@@ -153,7 +153,7 @@ class Plugin:
         if not systems:
             return True, "Beszel 里还没有已接入的服务器"
 
-        limit = max(1, int(self.plugin_config.get("max_systems") or 12))
+        limit = min(50, max(1, int(self.plugin_config.get("max_systems") or 12)))
         view = build_view(systems, limit)
         chat_type, chat_id = _event_chat(event)
         ws = self._ws_server
@@ -238,21 +238,6 @@ class Plugin:
                     continue
                 self._clients.pop(other, None)
                 self._client_refs.pop(other, None)
-                to_close.append(client)
-        for client in to_close:
-            try:
-                await client.aclose()
-            except Exception as e:  # noqa: BLE001 - 退役连接关闭失败只记日志
-                logger.warning(f"beszel_servers 关闭退役 HTTP 客户端失败: {e}")
-
-    async def _close_idle_clients(self) -> None:
-        to_close: list[httpx.AsyncClient] = []
-        async with self._client_lock:
-            for key, client in list(self._clients.items()):
-                if key == self._active_client_key or self._client_refs.get(key, 0) > 0:
-                    continue
-                self._clients.pop(key, None)
-                self._client_refs.pop(key, None)
                 to_close.append(client)
         for client in to_close:
             try:
@@ -406,7 +391,8 @@ def _as_float(value: Any) -> float | None:
     try:
         if value is None or isinstance(value, bool):
             return None
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
@@ -438,18 +424,19 @@ def build_view(systems: list[dict[str, Any]], limit: int) -> dict[str, Any]:
             latest = updated
         status = str(item.get("status") or "unknown")
         label, color = _STATUS_META.get(status, (status or "未知", DIM))
+        online = status == "up"
         rows.append(
             {
                 "name": str(item.get("name") or item.get("id") or "未命名"),
                 "status": status,
                 "status_label": label,
                 "status_color": color,
-                "cpu": _as_float(info.get("cpu")),
-                "mem": _as_float(info.get("mp")),
-                "disk": _as_float(info.get("dp")),
-                "load": [_as_float(v) for v in load[:3]],
-                "uptime": _as_float(info.get("u")),
-                "version": str(info.get("v") or ""),
+                "cpu": _as_float(info.get("cpu")) if online else None,
+                "mem": _as_float(info.get("mp")) if online else None,
+                "disk": _as_float(info.get("dp")) if online else None,
+                "load": [_as_float(v) for v in load[:3]] if online else [],
+                "uptime": _as_float(info.get("u")) if online else None,
+                "version": str(info.get("v") or "") if online else "",
                 "updated": updated,
             }
         )
@@ -457,7 +444,7 @@ def build_view(systems: list[dict[str, Any]], limit: int) -> dict[str, Any]:
         "rows": rows,
         "total": len(systems),
         "hidden": max(0, len(systems) - len(rows)),
-        "updated_text": latest.strftime("%H:%M:%S") if latest else "",
+        "updated_text": latest.strftime("%m-%d %H:%M") if latest else "",
     }
 
 

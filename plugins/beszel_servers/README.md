@@ -31,8 +31,8 @@
 ## 认证与配置切换
 
 - 使用 Hub 的 PocketBase 用户登录接口 `POST /api/collections/users/auth-with-password` 换取 token；
-- token 按 JWT 过期时间缓存；查询返回 401/403 时清缓存并只重试一次；
-- 每次查询固定一份配置快照（Hub、账号、超时）。**修改配置后，新查询才使用新快照**；已在途的旧查询只用旧快照完成，不会把旧账号 token 发往新 Hub；查询结束后退役的旧 client 会被关闭；
+- token 按 JWT 过期时间缓存；查询返回 401/403 时清缓存并只重试一次；同一次配置内并发 401/403 只刷新一次 token；
+- 每次查询固定一份配置快照（Hub、账号、超时）。**修改配置后，新查询才使用新快照**；已在途的旧查询只用旧快照完成，不会把旧账号 token 发往新 Hub；退役 client 在下次请求结束或 shutdown 时关闭；
 - 同一配置 generation 内的并发 401/403 只刷新一次 token；401/403 连续失败不会无限重试。
 - 登录/查询超时、认证失败都会转换成文字提示，不抛出到消息主链。
 
@@ -58,3 +58,10 @@
 ```bash
 .venv/bin/python -m pytest -q tests/test_beszel_servers_plugin.py
 ```
+
+## 已知限制
+
+- 只读取 Hub 的第一页 200 条 systems，超过部分不展示；`max_systems` 上限为 50。
+- 非有限指标（NaN/Infinity）显示为 `--`；离线实例不展示最后一次上报的 CPU/内存/磁盘值。
+- 更新时间显示为 `MM-DD HH:MM`（UTC+8），不显示年份。
+- 退役 HTTP 客户端在请求 release 或 shutdown 时关闭；配置切换后若不再有查询，旧 client 会保留到 shutdown。

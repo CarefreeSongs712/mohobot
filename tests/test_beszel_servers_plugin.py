@@ -62,7 +62,7 @@ def test_build_view_sorts_and_trims():
     assert view["rows"][0]["status_label"] == "运行中"
     assert view["rows"][1]["status_label"] == "离线"
     assert view["rows"][1]["cpu"] is None
-    assert view["updated_text"] == "23:36:33"
+    assert view["updated_text"] == "11-16 23:36"
 
 
 def test_parse_updated_utc8():
@@ -84,7 +84,7 @@ def test_build_text_reports():
     assert "A  运行中  CPU 42%" in text
     assert "B  离线" in text
     assert "另有 1 台未显示" in text
-    assert "数据更新 23:36:33（UTC+8）" in text
+    assert "数据更新 11-16 23:36（UTC+8）" in text
 
 
 def test_render_card():
@@ -250,8 +250,11 @@ async def test_config_change_while_login_in_flight_never_crosses_hub():
             "password": "new-password", "timeout_secs": 8, "max_systems": 12,
         })
         release.set()
+        new_client = None
         try:
             await asyncio.wait_for(task, timeout=5)  # old snapshot may finish on old hub
+            # The old generation's login result must never be published.
+            assert plugin._token == "" and plugin._token_generation == -1
             # New client is created on demand, like production: the old
             # snapshot's completion must not affect the new hub's client.
             new_client = httpx.AsyncClient(transport=NewHub())
@@ -260,7 +263,8 @@ async def test_config_change_while_login_in_flight_never_crosses_hub():
             await plugin._fetch_systems()            # but next request must be new-hub + new token
         finally:
             await old_client.aclose()
-            await new_client.aclose()
+            if new_client is not None:
+                await new_client.aclose()
         new_gets = [auth for hub, method, auth in requests if hub == "new" and method == "GET"]
         assert new_gets, requests
         old_token = "e30." + _jwt("old").split(".")[1] + ".sig"
@@ -372,21 +376,43 @@ def test_base_url_validation():
     assert plugin._snapshot().base_url == "https://hub.test/base"
 
 
-async def test_client_pool_retires_idle_client():
-    plugin = plugin_mod.Plugin()
-    _configure(plugin, base_url="https://old.test")
-    old = httpx.AsyncClient(trust_env=False)
-    key = ("https://old.test", 8.0)
-    plugin._clients[key] = old
-    plugin._client_refs[key] = 0
-    plugin._active_client_key = key
-    plugin.on_config_update({
-        "base_url": "https://new.test", "email": "a@b.c", "password": "x",
-        "timeout_secs": 8, "max_systems": 12,
-    })
-    await plugin._close_idle_clients()
-    assert old.is_closed
-    assert key not in plugin._clients
+async def test_client_pool_retires_idle_after_config_switch():
+    def handler(items):
+        def _handler(request):
+            if request.method == "POST":
+                return httpx.Response(200, json={"token": _jwt("token")})
+            return httpx.Response(200, json={"items": items})
+        return _handler
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin, base_url="https://old.test")
+        old = httpx.AsyncClient(transport=httpx.MockTransport(handler([{"name": "old", "status": "up"}])), trust_env=False)
+        old_key = ("https://old.test", 8.0)
+        plugin._clients[old_key] = old
+        plugin._client_refs[old_key] = 0
+        plugin._active_client_key = old_key
+        # First request through the production path keeps old.test as active.
+        assert (await plugin._fetch_systems())[0]["name"] == "old"
+        # Switch config, then a new real fetch must retire the old client.
+        _configure(plugin, base_url="https://new.test")
+        new = httpx.AsyncClient(transport=httpx.MockTransport(handler([{"name": "new", "status": "up"}])), trust_env=False)
+        new_key = ("https://new.test", 8.0)
+        plugin._clients[new_key] = new
+        plugin._client_refs[new_key] = 0
+        try:
+            assert (await plugin._fetch_systems())[0]["name"] == "new"
+            # Retirement must happen on the production release path, before
+            # shutdown, not only when the plugin is torn down.
+            assert old.is_closed, "old client should be retired by release"
+            assert old_key not in plugin._clients
+            assert new_key in plugin._clients
+        finally:
+            await plugin.on_shutdown()
+        assert new.is_closed
+        assert plugin._clients == {}
+
+    await scenario()
 
 
 async def test_shutdown_blocks_new_clients():
@@ -442,3 +468,55 @@ def test_safe_error_text_redacts_userinfo():
     assert "user" not in text and "pass" not in text
     generic = plugin_mod._safe_error_text(RuntimeError("failed https://user:pass@hub.test/x"))
     assert "pass" not in generic
+
+
+
+def test_non_finite_metrics_are_ignored():
+    systems = [
+        {"name": "nan", "status": "up",
+         "info": {"cpu": float("nan"), "mp": float("inf"), "dp": 12,
+                  "la": [float("nan"), 0.5], "u": float("inf")}},
+    ]
+    row = plugin_mod.build_view(systems, 12)["rows"][0]
+    assert row["cpu"] is None and row["mem"] is None
+    assert row["disk"] == 12
+    assert row["uptime"] is None
+    assert row["load"][0] is None and row["load"][1] == 0.5
+
+
+async def test_real_http_chain():
+    from aiohttp import web
+
+    old_env = {}
+    for key in list(os.environ):
+        if key.upper() in {"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}:
+            old_env[key] = os.environ.pop(key)
+
+    token = _jwt("real")
+
+    async def login(_request):
+        return web.json_response({"token": token})
+
+    async def records(request):
+        if request.headers.get("Authorization") != token:
+            return web.json_response({"message": "unauthorized"}, status=401)
+        return web.json_response({"items": [{"name": "real-host", "status": "up",
+                                            "info": {"cpu": 3, "mp": 4, "dp": 5}}]})
+
+    app = web.Application()
+    app.router.add_post("/api/collections/users/auth-with-password", login)
+    app.router.add_get("/api/collections/systems/records", records)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    plugin = plugin_mod.Plugin()
+    _configure(plugin, base_url=f"http://127.0.0.1:{port}")
+    try:
+        systems = await plugin._fetch_systems()
+        assert systems and systems[0]["name"] == "real-host"
+    finally:
+        await plugin.on_shutdown()
+        await runner.cleanup()
+        os.environ.update(old_env)
