@@ -36,7 +36,7 @@
 
 配置、认证、故障排查与安全边界见插件文档：[`plugins/beszel_servers/README.md`](../plugins/beszel_servers/README.md)。
 
-- **配置**：`base_url`（默认 `http://127.0.0.1:8090`）、`email`、`password`（明文保存在 `data/plugins_config/`）、`timeout_secs`、`max_systems`（默认 12，超出只提示剩余台数）。
+- **配置**：`base_url`（默认 `http://127.0.0.1:8090`）、`email`、`password`（明文保存在 `data/plugins_config/`）、`timeout_secs`、`max_systems`（默认 12，上限 50，超出只提示剩余台数）。
 - **认证**：调用 Hub 的用户登录接口换取 token，按 JWT 过期时间缓存，401/403 时重新登录一次；配置切换使用独立快照，旧 token 不跨 Hub。
 
 ## 🗂️ 聊天记录管理插件（chat_manager）

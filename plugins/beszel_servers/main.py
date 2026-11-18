@@ -436,7 +436,7 @@ def build_view(systems: list[dict[str, Any]], limit: int) -> dict[str, Any]:
                 "disk": _as_float(info.get("dp")) if online else None,
                 "load": [_as_float(v) for v in load[:3]] if online else [],
                 "uptime": _as_float(info.get("u")) if online else None,
-                "version": str(info.get("v") or "") if online else "",
+                "version": str(info.get("v") or ""),
                 "updated": updated,
             }
         )

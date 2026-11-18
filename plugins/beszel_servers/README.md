@@ -18,7 +18,7 @@
 | `email` | 空 | Beszel 登录邮箱 |
 | `password` | 空 | Beszel 密码；**明文保存在 `data/plugins_config/beszel_servers.json`**，主面板不会掩码插件配置；建议手动把该文件权限设为 `600`，插件保存配置不会自动改权限 |
 | `timeout_secs` | `8` | 单次请求超时（秒），最小 1 |
-| `max_systems` | `12` | 卡片最多展示的服务器数；超出只提示剩余台数 |
+| `max_systems` | `12` | 卡片最多展示的服务器数，上限 50；超出只提示剩余台数 |
 
 三项凭据未填齐时命令返回“Beszel 未配置”，不会发起请求。保存配置即时热生效。
 
@@ -62,6 +62,6 @@
 ## 已知限制
 
 - 只读取 Hub 的第一页 200 条 systems，超过部分不展示；`max_systems` 上限为 50。
-- 非有限指标（NaN/Infinity）显示为 `--`；离线实例不展示最后一次上报的 CPU/内存/磁盘值。
+- 非有限指标（NaN/Infinity）显示为 `--`；离线实例不展示最后一次上报的 CPU/内存/磁盘等资源指标，但保留 agent 版本。
 - 更新时间显示为 `MM-DD HH:MM`（UTC+8），不显示年份。
 - 退役 HTTP 客户端在请求 release 或 shutdown 时关闭；配置切换后若不再有查询，旧 client 会保留到 shutdown。

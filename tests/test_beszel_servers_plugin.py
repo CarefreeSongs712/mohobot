@@ -342,7 +342,7 @@ async def test_timeout_is_friendly():
 async def test_on_shutdown_closes_clients():
     async def scenario():
         plugin = plugin_mod.Plugin()
-        client = httpx.AsyncClient()
+        client = httpx.AsyncClient(trust_env=False)
         plugin._clients[("https://hub.test", 8.0)] = client
         await plugin.on_shutdown()
         assert plugin._clients == {}
@@ -516,6 +516,72 @@ async def test_real_http_chain():
     try:
         systems = await plugin._fetch_systems()
         assert systems and systems[0]["name"] == "real-host"
+    finally:
+        await plugin.on_shutdown()
+        await runner.cleanup()
+        os.environ.update(old_env)
+
+
+
+def test_offline_rows_clear_metrics_but_keep_version():
+    systems = [
+        {"name": "down", "status": "down",
+         "info": {"cpu": 42, "mp": 55, "dp": 61, "la": [1.0], "u": 7200, "v": "0.21.1"}},
+    ]
+    row = plugin_mod.build_view(systems, 12)["rows"][0]
+    assert row["status"] == "down"
+    assert row["cpu"] is None and row["mem"] is None and row["disk"] is None
+    assert row["load"] == [] and row["uptime"] is None
+    assert row["version"] == "0.21.1"
+    text = plugin_mod.build_text(plugin_mod.build_view(systems, 12))
+    assert "down  离线" in text
+
+
+
+async def test_max_systems_is_capped_at_50(monkeypatch):
+    plugin = plugin_mod.Plugin()
+    _configure(plugin, max_systems=999)
+    systems = [{"name": f"host-{i:03d}", "status": "up", "info": {"cpu": 1}} for i in range(60)]
+
+    async def fake_fetch(_snapshot=None):
+        return systems
+
+    monkeypatch.setattr(plugin, "_fetch_systems", fake_fetch)
+    handled, reply = await plugin.on_message("bot_001", _private_event("/servers"), {})
+    assert handled is True
+    assert reply is not None
+    assert "另有 10 台未显示" in reply
+
+
+async def test_real_http_chain_registers_client():
+    from aiohttp import web
+
+    old_env = {}
+    for key in list(os.environ):
+        if key.upper() in {"ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}:
+            old_env[key] = os.environ.pop(key)
+    token = _jwt("real-reg")
+    async def login(_request):
+        return web.json_response({"token": token})
+    async def records(request):
+        if request.headers.get("Authorization") != token:
+            return web.json_response({"message": "unauthorized"}, status=401)
+        return web.json_response({"items": [{"name": "real-host", "status": "up", "info": {"cpu": 1}}]})
+    app = web.Application()
+    app.router.add_post("/api/collections/users/auth-with-password", login)
+    app.router.add_get("/api/collections/systems/records", records)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    plugin = plugin_mod.Plugin()
+    _configure(plugin, base_url=f"http://127.0.0.1:{port}")
+    try:
+        systems = await plugin._fetch_systems()
+        assert systems and systems[0]["name"] == "real-host"
+        # Mutating away the client registration in _acquire_client must fail here.
+        assert plugin._clients and all(not c.is_closed for c in plugin._clients.values())
     finally:
         await plugin.on_shutdown()
         await runner.cleanup()
