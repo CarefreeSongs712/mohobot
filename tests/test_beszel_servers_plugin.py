@@ -538,7 +538,7 @@ def test_offline_rows_clear_metrics_but_keep_version():
 
 
 
-async def test_max_systems_is_capped_at_50(monkeypatch):
+async def test_max_systems_is_capped_at_50():
     plugin = plugin_mod.Plugin()
     _configure(plugin, max_systems=999)
     systems = [{"name": f"host-{i:03d}", "status": "up", "info": {"cpu": 1}} for i in range(60)]
@@ -546,8 +546,12 @@ async def test_max_systems_is_capped_at_50(monkeypatch):
     async def fake_fetch(_snapshot=None):
         return systems
 
-    monkeypatch.setattr(plugin, "_fetch_systems", fake_fetch)
-    handled, reply = await plugin.on_message("bot_001", _private_event("/servers"), {})
+    original = plugin._fetch_systems
+    plugin._fetch_systems = fake_fetch
+    try:
+        handled, reply = await plugin.on_message("bot_001", _private_event("/servers"), {})
+    finally:
+        plugin._fetch_systems = original
     assert handled is True
     assert reply is not None
     assert "另有 10 台未显示" in reply
