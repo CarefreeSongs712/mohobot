@@ -42,7 +42,12 @@
 | `/tts <文本>` | 按 TTS 配置合成语音，需启用 TTS 服务 |
 | `ping` | 无需斜杠，回复 `PONG` |
 
-插件命令 `/status` 查看主程序所在机器，`/servers`（别名 `/服务器`）查看 Beszel 账号可见的服务器；后者需先在插件设置中配置 Hub 与账号。用法与配置见[插件速查](PLUGINS.md)中的 Beszel 服务器状态章节。
+插件命令 `/status` 查看主程序所在机器，`/servers`（别名 `/服务器`）查看 Beszel 账号可见的服务器；后者需先在插件设置中配置 Hub 与账号。用法与配置见 [Beszel 插件文档](../plugins/beszel_servers/README.md)。
+
+管理员操作示例：
+
+- 人设预设：`/persona list` 查看；`/persona sessions bot_001 123456` 列出该用户已有会话；`/persona set bot_001 123456 <session_id> persona_002` 绑定私聊会话人设；`/persona get|clear ...` 查询或清除。只接受**已存在**的会话，不隐式创建或切换。
+- 匿名人设评估（默认关闭）：开启后私聊命中会发双栏卡片，按 `/ab A|B|平局|都不好|跳过` 投票（投票不切换人设）；`/ab switch <id> A|B` 按记录 ID 切回对应人设，历史保留。仅对配置允许的 bot 私聊生效。
 
 - 权限统一由全局 `admins` 决定；插件可额外配置审批员（如 relationship 的审批流）。
 - 常见管理员命令（完整列表以 `/help` 的“管理”分类与 [PLUGINS](PLUGINS.md) 为准）：`/persona …`、`/查看聊天`、`/发送消息`、`/发说说`、`/删说说`、`/重置QQCookies`、`/群列表`、`/好友列表`、`/退群`、`/删好友`、`/加审批员`、`/减审批员`、`/重置记录` 等。
