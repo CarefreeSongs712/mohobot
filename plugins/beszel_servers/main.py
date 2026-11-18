@@ -5,6 +5,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -90,7 +91,11 @@ class Plugin:
     def __init__(self) -> None:
         self.plugin_config: dict[str, Any] = dict(_DEFAULT_CONFIG)
         self._clients: dict[tuple[str, float], httpx.AsyncClient] = {}
+        self._client_refs: dict[tuple[str, float], int] = {}
+        self._active_client_key: tuple[str, float] | None = None
         self._client_lock = asyncio.Lock()
+        self._closing = False
+        self._max_clients = 4
         self._token = ""
         self._token_exp = 0.0
         self._token_generation = -1
@@ -98,18 +103,26 @@ class Plugin:
         self._auth_lock = asyncio.Lock()
 
     def on_config_update(self, config: dict[str, Any]) -> None:
-        # Do not close an in-flight old client here: an existing request must
-        # finish against its own immutable snapshot. New requests get a new
-        # generation and therefore cannot reuse the old token.
+        # Keep in-flight old clients alive; new requests use a new generation
+        # and can never reuse the old token. Idle old clients are retired in
+        # the background so repeated configuration changes do not leak pools.
         self.plugin_config = dict(config or {})
         self._config_generation += 1
         self._token = ""
         self._token_exp = 0.0
         self._token_generation = -1
+        self._active_client_key = None
 
     async def on_shutdown(self) -> None:
-        clients, self._clients = self._clients, {}
-        for client in clients.values():
+        # Set the barrier before touching the pool: a query racing shutdown
+        # must not create a client after the swap.
+        async with self._client_lock:
+            self._closing = True
+            clients = list(self._clients.values())
+            self._clients.clear()
+            self._client_refs.clear()
+            self._active_client_key = None
+        for client in clients:
             try:
                 await client.aclose()
             except Exception as e:  # noqa: BLE001 - 关闭失败不影响退出
@@ -127,9 +140,14 @@ class Plugin:
             return True, "Beszel 未配置：请在插件设置里填写 Hub 地址、邮箱与密码"
 
         try:
-            systems = await self._fetch_systems()
+            snapshot = self._snapshot()
+        except BeszelConfigError as e:
+            return True, f"Beszel 配置错误：{e}"
+
+        try:
+            systems = await self._fetch_systems(snapshot)
         except Exception as e:  # noqa: BLE001 - 对外返回可读错误
-            logger.warning(f"beszel_servers 查询失败: {e}")
+            logger.warning(f"beszel_servers 查询失败: {_safe_error_text(e)}")
             return True, f"Beszel 查询失败：{_friendly_error(e)}"
 
         if not systems:
@@ -163,39 +181,92 @@ class Plugin:
         except (TypeError, ValueError):
             timeout = 8.0
         return _ConfigSnapshot(
-            base_url=str(config.get("base_url") or "").strip().rstrip("/"),
+            base_url=_normalize_base_url(str(config.get("base_url") or "")),
             email=str(config.get("email") or "").strip(),
             password=str(config.get("password") or ""),
             timeout_secs=timeout,
             generation=self._config_generation,
         )
 
-    async def _fetch_systems(self) -> list[dict[str, Any]]:
-        snapshot = self._snapshot()
-        client = await self._ensure_client(snapshot)
-        token = await self._ensure_token(client, snapshot)
-        params = {"perPage": "200", "sort": "name", "skipTotal": "1"}
-        url = f"{snapshot.base_url}{_RECORDS_PATH}"
-        resp = await client.get(url, params=params, headers={"Authorization": token})
-        if resp.status_code in (401, 403):
-            token = await self._ensure_token(client, snapshot, force=True)
+    async def _fetch_systems(self, snapshot: _ConfigSnapshot | None = None) -> list[dict[str, Any]]:
+        snapshot = snapshot or self._snapshot()
+        key, client = await self._acquire_client(snapshot)
+        try:
+            token = await self._ensure_token(client, snapshot)
+            params = {"perPage": "200", "sort": "name", "skipTotal": "1"}
+            url = f"{snapshot.base_url}{_RECORDS_PATH}"
             resp = await client.get(url, params=params, headers={"Authorization": token})
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items") if isinstance(data, dict) else None
-        return [item for item in (items or []) if isinstance(item, dict)]
+            if resp.status_code in (401, 403):
+                # Pass the stale token so concurrent 401/403 responses share
+                # one refresh instead of each logging in again.
+                token = await self._ensure_token(
+                    client, snapshot, force=True, stale_token=token
+                )
+                resp = await client.get(url, params=params, headers={"Authorization": token})
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items") if isinstance(data, dict) else None
+            return [item for item in (items or []) if isinstance(item, dict)]
+        finally:
+            await self._release_client(key)
 
-    async def _ensure_client(self, snapshot: _ConfigSnapshot) -> httpx.AsyncClient:
+    async def _acquire_client(
+        self, snapshot: _ConfigSnapshot
+    ) -> tuple[tuple[str, float], httpx.AsyncClient]:
         key = (snapshot.base_url, snapshot.timeout_secs)
         async with self._client_lock:
+            if self._closing:
+                raise BeszelUnavailableError("插件正在关闭")
             client = self._clients.get(key)
             if client is None:
                 client = httpx.AsyncClient(timeout=snapshot.timeout_secs)
                 self._clients[key] = client
-            return client
+                self._client_refs[key] = 0
+            self._client_refs[key] = self._client_refs.get(key, 0) + 1
+            self._active_client_key = key
+            return key, client
+
+    async def _release_client(self, key: tuple[str, float]) -> None:
+        to_close: list[httpx.AsyncClient] = []
+        async with self._client_lock:
+            refs = max(0, self._client_refs.get(key, 0) - 1)
+            self._client_refs[key] = refs
+            # Retire every idle client except the active one; this also
+            # bounds the pool after repeated (base_url, timeout) changes.
+            for other, client in list(self._clients.items()):
+                if other == self._active_client_key or self._client_refs.get(other, 0) > 0:
+                    continue
+                self._clients.pop(other, None)
+                self._client_refs.pop(other, None)
+                to_close.append(client)
+        for client in to_close:
+            try:
+                await client.aclose()
+            except Exception as e:  # noqa: BLE001 - 退役连接关闭失败只记日志
+                logger.warning(f"beszel_servers 关闭退役 HTTP 客户端失败: {e}")
+
+    async def _close_idle_clients(self) -> None:
+        to_close: list[httpx.AsyncClient] = []
+        async with self._client_lock:
+            for key, client in list(self._clients.items()):
+                if key == self._active_client_key or self._client_refs.get(key, 0) > 0:
+                    continue
+                self._clients.pop(key, None)
+                self._client_refs.pop(key, None)
+                to_close.append(client)
+        for client in to_close:
+            try:
+                await client.aclose()
+            except Exception as e:  # noqa: BLE001 - 退役连接关闭失败只记日志
+                logger.warning(f"beszel_servers 关闭退役 HTTP 客户端失败: {e}")
 
     async def _ensure_token(
-        self, client: httpx.AsyncClient, snapshot: _ConfigSnapshot, *, force: bool = False
+        self,
+        client: httpx.AsyncClient,
+        snapshot: _ConfigSnapshot,
+        *,
+        force: bool = False,
+        stale_token: str | None = None,
     ) -> str:
         if (
             not force
@@ -210,6 +281,16 @@ class Plugin:
                 # generation: reuse it even if its JWT exp is unknown/zero.
                 if self._token_exp <= 0 or time.time() < self._token_exp - 60:
                     return self._token
+            if (
+                force
+                and stale_token is not None
+                and self._token
+                and self._token_generation == snapshot.generation
+                and self._token != stale_token
+                and (self._token_exp <= 0 or time.time() < self._token_exp - 60)
+            ):
+                # A concurrent 401/403 already refreshed for this generation.
+                return self._token
             return await self._login(client, snapshot)
 
     async def _login(self, client: httpx.AsyncClient, snapshot: _ConfigSnapshot) -> str:
@@ -230,6 +311,34 @@ class Plugin:
             self._token_exp = exp if exp > 0 else time.time() + 3600
             self._token_generation = snapshot.generation
         return token
+
+
+def _normalize_base_url(raw: str) -> str:
+    """Validate and normalize the Hub base URL; reject credential/query injection."""
+    text = str(raw or "").strip()
+    if not text:
+        raise BeszelConfigError("Hub 地址为空")
+    try:
+        url = httpx.URL(text)
+    except Exception as e:  # noqa: BLE001 - 非法 URL 统一转为可读配置错误
+        raise BeszelConfigError("Hub 地址格式无效") from e
+    if url.scheme not in ("http", "https") or not url.host:
+        raise BeszelConfigError("Hub 地址必须是 http(s)://主机[:端口]")
+    if url.username or url.password:
+        raise BeszelConfigError("Hub 地址不能包含用户名或密码")
+    if url.query or url.fragment:
+        raise BeszelConfigError("Hub 地址不能包含查询串或片段")
+    path = url.path.rstrip("/")
+    return str(httpx.URL(scheme=url.scheme, host=url.host, port=url.port, path=path))
+
+
+def _safe_error_text(error: Exception) -> str:
+    """Log/display error without leaking URL userinfo or full request URLs."""
+    if isinstance(error, httpx.HTTPStatusError):
+        url = error.request.url
+        return f"HTTP {error.response.status_code} from {url.scheme}://{url.host}"
+    text = _friendly_error(error)
+    return re.sub(r"(https?://)[^/\s@]+@", r"\1***@", text)
 
 
 def _extract_text(event: Any) -> str:
@@ -278,6 +387,10 @@ def _response_message(resp: httpx.Response) -> str:
 
 
 def _friendly_error(error: Exception) -> str:
+    if isinstance(error, BeszelConfigError):
+        return str(error)
+    if isinstance(error, BeszelUnavailableError):
+        return str(error)
     if isinstance(error, BeszelAuthError):
         return f"登录失败（{error}）"
     if isinstance(error, httpx.TimeoutException):
@@ -499,4 +612,12 @@ def _fit(text: str, draw: Any, font: Any, max_width: float) -> str:
 
 
 class BeszelAuthError(RuntimeError):
+    pass
+
+
+class BeszelConfigError(RuntimeError):
+    pass
+
+
+class BeszelUnavailableError(RuntimeError):
     pass

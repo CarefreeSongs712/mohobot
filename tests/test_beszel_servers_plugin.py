@@ -144,8 +144,11 @@ def _configure(plugin, **overrides):
 
 
 async def _with_mock_client(plugin, handler, base_url="https://hub.test"):
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    plugin._clients[(base_url, 8.0)] = client
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
+    key = (base_url, 8.0)
+    plugin._clients[key] = client
+    plugin._client_refs[key] = 0
+    plugin._active_client_key = key
     return client
 
 
@@ -239,9 +242,7 @@ async def test_config_change_while_login_in_flight_never_crosses_hub():
         plugin = plugin_mod.Plugin()
         _configure(plugin)
         old_client = httpx.AsyncClient(transport=OldHub())
-        new_client = httpx.AsyncClient(transport=NewHub())
         plugin._clients[("https://hub.test", 8.0)] = old_client
-        plugin._clients[("https://new.test", 8.0)] = new_client
         task = asyncio.create_task(plugin._fetch_systems())
         await started.wait()
         plugin.on_config_update({
@@ -251,6 +252,11 @@ async def test_config_change_while_login_in_flight_never_crosses_hub():
         release.set()
         try:
             await asyncio.wait_for(task, timeout=5)  # old snapshot may finish on old hub
+            # New client is created on demand, like production: the old
+            # snapshot's completion must not affect the new hub's client.
+            new_client = httpx.AsyncClient(transport=NewHub())
+            plugin._clients[("https://new.test", 8.0)] = new_client
+            plugin._client_refs[("https://new.test", 8.0)] = 0
             await plugin._fetch_systems()            # but next request must be new-hub + new token
         finally:
             await old_client.aclose()
@@ -344,3 +350,95 @@ async def test_on_shutdown_closes_clients():
 def test_bad_jwt_does_not_crash():
     assert plugin_mod._jwt_exp("not-a-jwt") == 0.0
     assert plugin_mod._jwt_exp("a.b.c") == 0.0
+
+
+
+def test_base_url_validation():
+    plugin = plugin_mod.Plugin()
+    for bad in (
+        "ftp://hub.test",
+        "https://user:pass@hub.test",
+        "https://hub.test/?x=1",
+        "https://hub.test/#frag",
+    ):
+        _configure(plugin, base_url=bad)
+        try:
+            plugin._snapshot()
+        except plugin_mod.BeszelConfigError:
+            pass
+        else:
+            raise AssertionError(f"expected rejected base_url: {bad}")
+    _configure(plugin, base_url="https://hub.test/base/")
+    assert plugin._snapshot().base_url == "https://hub.test/base"
+
+
+async def test_client_pool_retires_idle_client():
+    plugin = plugin_mod.Plugin()
+    _configure(plugin, base_url="https://old.test")
+    old = httpx.AsyncClient(trust_env=False)
+    key = ("https://old.test", 8.0)
+    plugin._clients[key] = old
+    plugin._client_refs[key] = 0
+    plugin._active_client_key = key
+    plugin.on_config_update({
+        "base_url": "https://new.test", "email": "a@b.c", "password": "x",
+        "timeout_secs": 8, "max_systems": 12,
+    })
+    await plugin._close_idle_clients()
+    assert old.is_closed
+    assert key not in plugin._clients
+
+
+async def test_shutdown_blocks_new_clients():
+    plugin = plugin_mod.Plugin()
+    _configure(plugin)
+    await plugin.on_shutdown()
+    try:
+        await plugin._acquire_client(plugin._snapshot())
+    except plugin_mod.BeszelUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected BeszelUnavailableError after shutdown")
+
+
+async def test_concurrent_401_refresh_single_flight():
+    state = {"post": 0}
+    old_token = _jwt("old")
+    new_token = _jwt("new")
+
+    class Handler(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.method == "POST":
+                state["post"] += 1
+                token = old_token if state["post"] == 1 else new_token
+                return httpx.Response(200, json={"token": token})
+            if request.headers.get("Authorization") == old_token:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json={"items": [{"name": "host", "status": "up"}]})
+
+    async def scenario():
+        plugin = plugin_mod.Plugin()
+        _configure(plugin)
+        client = httpx.AsyncClient(transport=Handler(), trust_env=False)
+        key = ("https://hub.test", 8.0)
+        plugin._clients[key] = client
+        plugin._client_refs[key] = 0
+        plugin._active_client_key = key
+        try:
+            results = await asyncio.gather(*(plugin._fetch_systems() for _ in range(12)))
+        finally:
+            await client.aclose()
+        assert all(r and r[0]["name"] == "host" for r in results)
+        assert state["post"] == 2, state
+
+    await scenario()
+
+
+def test_safe_error_text_redacts_userinfo():
+    request = httpx.Request("GET", "https://user:pass@hub.test/api/x")
+    response = httpx.Response(403, request=request)
+    error = httpx.HTTPStatusError("403", request=request, response=response)
+    text = plugin_mod._safe_error_text(error)
+    assert "user" not in text and "pass" not in text
+    generic = plugin_mod._safe_error_text(RuntimeError("failed https://user:pass@hub.test/x"))
+    assert "pass" not in generic
