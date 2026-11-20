@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞报告
+    url: https://github.com/CarefreeSongs712/mohobot/blob/dev/SECURITY.md
+    about: 请勿在公开 issue 中披露漏洞细节，按安全策略私密报告。
+  - name: 开发指南与贡献流程
+    url: https://github.com/CarefreeSongs712/mohobot/blob/dev/CONTRIBUTING.md
+    about: 分支/PR 流程、提交前检查与文档职责。

@@ -1,15 +1,15 @@
 # 日志格式 Bug：所有记录缺少换行，挤成一行
 
-> 状态：**已修复**（PR #93，2026-10-30；一行级改动，需重启 mohobot 生效）
-> 基线代码：`dac2e782`
+> 状态：**历史记录：已修复**（PR #93，2026-10-30；当时的一行级改动，需重启 mohobot 生效）
+> 基线代码：`dac2e782`（历史）
 > 发现日期：2026-10-30
-> 影响面：仅日志可读性/可分析性，不影响业务功能、轮转和磁盘占用
+> 影响面：仅日志可读性/可分析性，不影响业务功能、轮转和磁盘占用；下述路径与测量仅描述当时案例，不代表当前环境。
 
 ---
 
 ## 1. 现象
 
-`/opt/mohobot/logs/mohobot_YYYY-MM-DD.log` 里所有日志记录**首尾相连**，没有换行：
+`<日志目录>/mohobot_YYYY-MM-DD.log` 里所有日志记录**首尾相连**，没有换行：
 
 ```
 ...text='早...'2026-10-30 15:42:11.387 | DEBUG    | mohobot.message_handler:_handle_message:653 | Skipping...
@@ -92,8 +92,9 @@ def _file_format(record: dict) -> str:
 # 1) 部署后重启
 systemctl restart mohobot
 
-# 2) 等 30 秒，取当天文件
-f=/opt/mohobot/logs/mohobot_$(date -u +%F).log
+# 2) 等 30 秒，取当天文件（在已授权的目标环境中设置实际日志目录）
+LOG_DIR="<日志目录>"
+f="$LOG_DIR/mohobot_$(date -u +%F).log"
 
 # 3) 物理行数应接近记录数（多行消息/回栈会略多）
 wc -l < "$f"
@@ -125,9 +126,9 @@ journalctl -u mohobot -n 20 --no-pager
 
 以下问题已确认存在，但与这个格式 bug 无关，不要混在同一个改动里：
 
-- Docker `json-file` 日志无上限（当前 375MB，两个容器 84MB/53MB）：建议在 `/etc/docker/daemon.json` 配 `max-size` / `max-file`，需重启 docker。
-- `/root/QQBot/new-api/logs` 已累积 125MB，按启动生成新文件、不自动清理。
-- `/opt/mohobot/review/panel.log`（当前 1.3MB）没有 logrotate。
+- 某次历史检查记录 Docker `json-file` 日志未设上限，并测得当时总量约 375MB（两个容器分别约 84MB/53MB）；这些数值不代表当前状态。历史建议是在适用部署配置中设置 `max-size` / `max-file`，可能需要重启 Docker。
+- 某历史部署中的另一个应用日志目录曾累积约 125MB，按启动生成新文件且不自动清理；不代表当前状态。
+- 某历史部署的审核面板日志未配置 logrotate；路径与体积不作为当前环境信息。
 - 文件时间戳是 UTC+8、journal 是 UTC，排查时注意换算（不是 bug）。
 
 ---
