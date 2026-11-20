@@ -9,6 +9,7 @@ from mohobot.plugins.installer import (
     install_from_directory,
     safe_extract_zip,
     uninstall_plugin,
+    upgrade_from_archive,
     sha256_file,
 )
 
@@ -98,3 +99,48 @@ def test_uninstall_moves_to_recycle_bin(tmp_path: Path) -> None:
     assert not (plugins / "demo").exists()
     assert target.is_dir()
     assert not (config / "demo.json").exists()
+
+
+def test_upgrade_replaces_existing_plugin(tmp_path: Path) -> None:
+    source = tmp_path / "source" / "demo"
+    _write_plugin(source)
+    install_from_directory(source, tmp_path / "plugins")
+
+    updated = tmp_path / "updated" / "demo"
+    _write_plugin(updated)
+    (updated / "main.py").write_text(
+        "class Plugin:\n    value = 2\n",
+        encoding="utf-8",
+    )
+    archive = tmp_path / "demo-v2.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        for path in updated.rglob("*"):
+            if path.is_file():
+                handle.write(path, "demo-main/" + path.relative_to(updated).as_posix())
+
+    manifest, destination = upgrade_from_archive(archive, tmp_path / "plugins", "demo")
+    assert manifest.name == "demo"
+    assert "value = 2" in (destination / "main.py").read_text(encoding="utf-8")
+
+
+def test_installed_archive_is_loaded_by_plugin_system(tmp_path: Path) -> None:
+    import asyncio
+
+    from mohobot.interceptors.plugin_system import PluginSystem
+
+    archive = _zip_plugin(tmp_path, name="demo")
+    install_from_archive(archive, tmp_path / "installed")
+
+    async def run() -> None:
+        system = PluginSystem(
+            plugins_dir=str(tmp_path / "builtin"),
+            data_dir=str(tmp_path / "data"),
+            installed_dir=str(tmp_path / "installed"),
+        )
+        assert await system.load_plugins() == 1
+        meta = system.list_plugins()[0]
+        assert meta["source"] == "installed"
+        assert meta["loaded"] is True
+        await system.shutdown_plugins()
+
+    asyncio.run(run())

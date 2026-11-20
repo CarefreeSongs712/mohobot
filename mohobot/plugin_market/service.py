@@ -19,6 +19,7 @@ from mohobot.plugins.installer import (
     InstallError,
     download_file,
     install_from_archive,
+    upgrade_from_archive,
     verify_sha256,
     with_proxy,
 )
@@ -28,7 +29,7 @@ from mohobot.plugins.market import (
     entry_download_url,
     parse_market_index,
 )
-from mohobot.plugins.sources import save_source
+from mohobot.plugins.sources import load_sources, save_source
 
 MAX_INDEX_BYTES = 5 * 1024 * 1024
 
@@ -151,3 +152,35 @@ class MarketService:
         if entry is None:
             raise InstallError(f"插件不存在: {plugin_id}")
         return await self.install_from_entry(entry, source_id=source_id)
+
+
+    async def update(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
+        if not self._sources:
+            await self.refresh()
+        entry = self.find(plugin_id)
+        if entry is None:
+            raise InstallError(f"插件不存在: {plugin_id}")
+        records = await load_sources(self.data_dir)
+        record = records.get(entry.name)
+        if not record or record.get("install_method") != "market":
+            raise InstallError("该插件不是通过插件市场安装，无法更新")
+        url = with_proxy(entry_download_url(entry), self.proxy) if self.proxy else entry_download_url(entry)
+        with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
+            archive = Path(temp) / "plugin.zip"
+            await asyncio.to_thread(download_file, url, archive)
+            if entry.sha256:
+                await asyncio.to_thread(verify_sha256, archive, entry.sha256)
+            manifest, destination = await asyncio.to_thread(
+                upgrade_from_archive, archive, self.plugins_dir, entry.name
+            )
+        record = dict(record)
+        record.update(
+            {
+                "version": entry.version,
+                "sha256": entry.sha256,
+                "installed_at": time.time(),
+                "registry_id": source_id,
+            }
+        )
+        await save_source(self.data_dir, manifest.name, record)
+        return manifest.name, destination

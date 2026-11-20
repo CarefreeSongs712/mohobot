@@ -34,8 +34,8 @@ def _payload(name: str) -> dict:
     }
 
 
-def _archive(tmp_path: Path, name: str) -> Path:
-    source = tmp_path / "src" / name
+def _archive(tmp_path: Path, name: str, version: str = "1.0.0") -> Path:
+    source = tmp_path / f"src-{version}" / name
     source.mkdir(parents=True)
     (source / "main.py").write_text(
         "class Plugin:\n"
@@ -46,14 +46,14 @@ def _archive(tmp_path: Path, name: str) -> Path:
         f"name: {name}\n"
         "author: CarefreeSongs712\n"
         "display_name: 演示\n"
-        "version: 1.0.0\n"
+        f"version: {version}\n"
         "description: demo\n"
         f"repo: https://github.com/CarefreeSongs712/mohobot-plugin-{name}\n"
         "license: MIT\n"
         "api_version: 1\n",
         encoding="utf-8",
     )
-    archive = tmp_path / f"{name}.zip"
+    archive = tmp_path / f"{name}-{version}.zip"
     with zipfile.ZipFile(archive, "w") as handle:
         for path in source.rglob("*"):
             if path.is_file():
@@ -111,5 +111,41 @@ def test_install_from_entry_records_source(tmp_path: Path) -> None:
         records = await load_sources(tmp_path / "data")
         assert records["demo"]["install_method"] == "market"
         assert records["demo"]["plugin_id"] == "CarefreeSongs712/demo"
+
+    asyncio.run(run())
+
+
+def test_update_market_plugin(tmp_path: Path) -> None:
+    async def run() -> None:
+        archive_v1 = _archive(tmp_path, "demo")
+        payload = {
+            "$meta": {"schema_version": 1, "name": "index"},
+            "plugins": {"CarefreeSongs712/demo": _entry("demo", archive_v1)},
+        }
+        service = MarketService(
+            tmp_path / "data",
+            tmp_path / "plugins",
+            fetcher=lambda url: payload,
+        )
+        await service.refresh()
+        entry = service.find("CarefreeSongs712/demo")
+        assert entry is not None
+        with patch(
+            "mohobot.plugin_market.service.download_file",
+            lambda url, dest: shutil.copy(archive_v1, dest),
+        ):
+            await service.install_from_entry(entry)
+
+        archive_v2 = _archive(tmp_path, "demo", version="2.0.0")
+        payload["plugins"]["CarefreeSongs712/demo"] = _entry("demo", archive_v2)
+        payload["plugins"]["CarefreeSongs712/demo"]["version"] = "2.0.0"
+        await service.refresh()
+        with patch(
+            "mohobot.plugin_market.service.download_file",
+            lambda url, dest: shutil.copy(archive_v2, dest),
+        ):
+            name, destination = await service.update("CarefreeSongs712/demo")
+        assert name == "demo"
+        assert "2.0.0" in (destination / "metadata.yaml").read_text(encoding="utf-8")
 
     asyncio.run(run())

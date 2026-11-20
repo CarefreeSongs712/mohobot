@@ -222,3 +222,42 @@ def uninstall_plugin(
         ):
             shutil.rmtree(candidate, ignore_errors=True)
     return target
+
+
+def upgrade_from_archive(
+    archive: Path,
+    plugins_dir: Path,
+    expected_name: str,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[PluginManifest, Path]:
+    archive = Path(archive)
+    if expected_sha256:
+        verify_sha256(archive, expected_sha256)
+    plugins_dir = Path(plugins_dir)
+    destination = plugins_dir / expected_name
+    if not destination.is_dir():
+        raise InstallError(f"插件未安装: {expected_name}")
+    with tempfile.TemporaryDirectory(prefix=".plugin-upgrade-", dir=plugins_dir) as temp:
+        temp_path = Path(temp)
+        extracted = temp_path / "extract"
+        safe_extract_zip(archive, extracted)
+        root = find_plugin_root(extracted)
+        manifest = parse_manifest(find_manifest(root) or (root / "metadata.yaml"))
+        if manifest.name != expected_name:
+            raise InstallError(
+                f"更新包名称 {manifest.name} 与已安装插件 {expected_name} 不一致"
+            )
+        backup = temp_path / "backup"
+        shutil.copytree(destination, backup)
+        shutil.rmtree(destination)
+        try:
+            shutil.move(str(root), str(destination))
+            installed = parse_manifest(destination / "metadata.yaml")
+            if installed.name != expected_name:
+                raise InstallError("更新后清单名称不一致")
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            shutil.move(str(backup), str(destination))
+            raise
+    return manifest, destination

@@ -1300,6 +1300,28 @@ class WebPanel:
             )
             return {"status": "ok", "name": name, "path": str(destination), "count": count}
 
+        @app.post("/api/plugins/market/update")
+        async def update_market_plugin(request: Request, body: PluginMarketInstallRequest):
+            await _require_auth(request)
+            if not self._plugin_market or not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件市场未启用")
+            try:
+                name, destination = await self._plugin_market.update(
+                    body.plugin_id, source_id=body.source_id
+                )
+                count = await self._plugin_system.reload_plugins()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._audit.write(
+                actor="admin",
+                action="plugin_market_update",
+                target=name,
+                success=True,
+                details={"plugin_id": body.plugin_id},
+                remote=request.client.host if request.client else "",
+            )
+            return {"status": "ok", "name": name, "path": str(destination), "count": count}
+
         @app.post("/api/plugins/{name}/reload")
         async def reload_one_plugin(name: str, request: Request):
             await _require_auth(request)

@@ -36,6 +36,9 @@ class _FakeMarket:
     async def install(self, plugin_id: str, *, source_id: str = "official"):
         return "demo", Path("demo")
 
+    async def update(self, plugin_id: str, *, source_id: str = "official"):
+        return "demo", Path("demo")
+
 
 class _FakePluginSystem:
     installed_dir = Path("plugins")
@@ -81,6 +84,17 @@ def test_market_install_endpoint(tmp_path: Path) -> None:
     client, headers = _client(tmp_path)
     response = client.post(
         "/api/plugins/market/install",
+        headers=headers,
+        json={"plugin_id": "CarefreeSongs712/demo"},
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "demo"
+
+
+def test_market_update_endpoint(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    response = client.post(
+        "/api/plugins/market/update",
         headers=headers,
         json={"plugin_id": "CarefreeSongs712/demo"},
     )
