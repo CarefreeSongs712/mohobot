@@ -139,6 +139,7 @@ class MarketService:
                 "plugin_id": entry.plugin_id,
                 "repo": entry.repo,
                 "download_url": entry.download_url,
+                "sha256": entry.sha256,
                 "version": entry.version,
                 "installed_at": time.time(),
             },
