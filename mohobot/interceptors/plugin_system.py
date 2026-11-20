@@ -42,9 +42,17 @@ PLUGIN_API_VERSION = 1
 class PluginSystem(Interceptor):
     """Loads and manages plugins from a designated directory."""
 
-    def __init__(self, plugins_dir: str = "./plugins", data_dir: str = "./data"):
+    def __init__(
+        self,
+        plugins_dir: str = "./plugins",
+        data_dir: str = "./data",
+        installed_dir: str | None = None,
+    ):
         self._plugins_dir = Path(plugins_dir)
         self._data_dir = Path(data_dir)
+        self._installed_dir = (
+            Path(installed_dir) if installed_dir else self._data_dir / "plugins"
+        )
         self._plugins: list[dict[str, Any]] = []  # Plugin metadata + instance
         # {plugin_name: {"enabled": bool, "file": str, "loaded": bool, "info": {...}}}
         self._state_file = self._data_dir / "plugins_state.json"
@@ -153,6 +161,7 @@ class PluginSystem(Interceptor):
         plugin_name: str,
         entry_dir: str,
         state: dict[str, Any],
+        source: str = "builtin",
     ) -> dict[str, Any]:
         manifest: PluginManifest | None = None
         manifest_path = find_manifest(entry_path.parent)
@@ -167,10 +176,13 @@ class PluginSystem(Interceptor):
                 raise ManifestError(
                     f"插件 API 版本 {manifest.api_version} 与宿主 {self._plugin_api_version} 不兼容"
                 )
+        elif source == "installed":
+            raise ManifestError("已安装插件缺少 metadata.yaml")
 
+        root = self._installed_dir if source == "installed" else self._plugins_dir
         meta: dict[str, Any] = {
             "name": plugin_name,
-            "file": str(entry_path.relative_to(self._plugins_dir)),
+            "file": entry_path.relative_to(root).as_posix(),
             "entry_dir": entry_dir,
             "enabled": state.get(plugin_name, {}).get("enabled", True),
             "loaded": False,
@@ -179,7 +191,7 @@ class PluginSystem(Interceptor):
             "config_schema": None,
             "config": None,
             "loaded_at": None,
-            "source": "builtin",
+            "source": source,
             "version": manifest.version if manifest else "",
             "author": manifest.author if manifest else "",
             "plugin_id": manifest.plugin_id if manifest else "",
@@ -256,45 +268,112 @@ class PluginSystem(Interceptor):
             logger.error(f"Failed to load plugin {entry_path.name}: {e}")
         return meta
 
-    def _iter_entries(self) -> list[tuple[Path, str, str]]:
-        entries: list[tuple[Path, str, str]] = []
-        if not self._plugins_dir.exists():
-            return entries
-        for entry in sorted(self._plugins_dir.iterdir()):
-            if (
-                entry.is_file()
-                and entry.suffix == ".py"
-                and not entry.name.startswith("_")
-                and entry.name != "__init__.py"
-            ):
-                entries.append((entry, entry.stem, ""))
-            elif (
-                entry.is_dir()
-                and not entry.name.startswith("_")
-                and entry.name != "__pycache__"
-                and (entry / "main.py").exists()
-            ):
-                entries.append((entry / "main.py", entry.name, str(entry)))
+    def _iter_entries(self) -> list[tuple[Path, str, str, str]]:
+        entries: list[tuple[Path, str, str, str]] = []
+        for root, source in (
+            (self._plugins_dir, "builtin"),
+            (self._installed_dir, "installed"),
+        ):
+            if not root.exists():
+                continue
+            for entry in sorted(root.iterdir()):
+                if (
+                    entry.is_file()
+                    and entry.suffix == ".py"
+                    and not entry.name.startswith("_")
+                    and entry.name != "__init__.py"
+                ):
+                    entries.append((entry, entry.stem, "", source))
+                elif (
+                    entry.is_dir()
+                    and not entry.name.startswith("_")
+                    and entry.name != "__pycache__"
+                    and (entry / "main.py").exists()
+                ):
+                    entries.append((entry / "main.py", entry.name, str(entry), source))
         return entries
+
+    def _error_meta(
+        self,
+        entry_path: Path,
+        plugin_name: str,
+        entry_dir: str,
+        source: str,
+        error: Exception | str,
+    ) -> dict[str, Any]:
+        root = self._installed_dir if source == "installed" else self._plugins_dir
+        return {
+            "name": plugin_name,
+            "file": entry_path.relative_to(root).as_posix(),
+            "entry_dir": entry_dir,
+            "enabled": False,
+            "loaded": False,
+            "error": str(error),
+            "info": {},
+            "config_schema": None,
+            "config": None,
+            "loaded_at": None,
+            "source": source,
+            "version": "",
+            "author": "",
+            "plugin_id": "",
+            "api_version": 0,
+            "manifest": None,
+            "module_name": self._module_name(plugin_name),
+        }
 
     async def _load_all_unlocked(self) -> int:
         await self.stop_tick_tasks_async()
         self._unload_all_plugins()
         self._plugins = []
-        if not self._plugins_dir.exists():
-            self._plugins_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created plugins directory: {self._plugins_dir}")
-            return 0
+        for directory in (self._plugins_dir, self._installed_dir):
+            if not directory.exists():
+                directory.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created plugins directory: {directory}")
 
         state = self._load_state()
-        plugins_path = str(self._plugins_dir.absolute())
-        if plugins_path not in sys.path:
-            sys.path.insert(0, plugins_path)
-            self._loaded_sys_paths.add(plugins_path)
+        from mohobot.plugins.sources import load_sources
+
+        sources = await load_sources(self._data_dir)
+        for directory in (self._plugins_dir, self._installed_dir):
+            plugins_path = str(directory.absolute())
+            if plugins_path not in sys.path:
+                sys.path.insert(0, plugins_path)
+                self._loaded_sys_paths.add(plugins_path)
 
         count = 0
-        for entry_path, plugin_name, entry_dir in self._iter_entries():
-            meta = self._load_one(entry_path, plugin_name, entry_dir, state)
+        seen: set[str] = set()
+        for entry_path, plugin_name, entry_dir, source in self._iter_entries():
+            if plugin_name in seen:
+                self._plugins.append(
+                    {
+                        "name": plugin_name,
+                        "file": str(entry_path.name),
+                        "entry_dir": entry_dir,
+                        "enabled": False,
+                        "loaded": False,
+                        "error": "插件名与已加载插件冲突",
+                        "info": {},
+                        "config_schema": None,
+                        "config": None,
+                        "loaded_at": None,
+                        "source": source,
+                        "version": "",
+                        "author": "",
+                        "plugin_id": "",
+                        "api_version": 0,
+                        "manifest": None,
+                        "module_name": self._module_name(plugin_name),
+                    }
+                )
+                logger.error(f"插件名冲突: {plugin_name} ({entry_path})")
+                continue
+            seen.add(plugin_name)
+            try:
+                meta = self._load_one(entry_path, plugin_name, entry_dir, state, source)
+            except Exception as e:
+                meta = self._error_meta(entry_path, plugin_name, entry_dir, source, e)
+                logger.error(f"Failed to load plugin {entry_path.name}: {e}")
             self._plugins.append(meta)
             if meta.get("loaded"):
                 count += 1
@@ -750,7 +829,13 @@ class PluginSystem(Interceptor):
             if entry is None:
                 self._plugins.pop(index)
                 return False
-            new_meta = self._load_one(entry[0], entry[1], entry[2], self._load_state())
+            try:
+                new_meta = self._load_one(
+                    entry[0], entry[1], entry[2], self._load_state(), entry[3]
+                )
+            except Exception as e:
+                new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
+                logger.error(f"Failed to reload plugin {entry[1]}: {e}")
             self._plugins[index] = new_meta
             if new_meta.get("loaded"):
                 self.apply_injections()

@@ -130,3 +130,84 @@ def test_manifest_parse_and_validation(tmp_path: Path) -> None:
     )
     with pytest.raises(ManifestError):
         parse_manifest(plugin_dir / "metadata.yaml")
+
+
+def test_installed_plugin_requires_manifest(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        installed = tmp_path / "data" / "plugins" / "extdemo"
+        _write(
+            installed / "main.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        await ps.load_plugins()
+        assert ps._plugins[0]["source"] == "installed"
+        assert ps._plugins[0]["loaded"] is False
+        assert "metadata" in ps._plugins[0]["error"]
+
+    asyncio.run(run())
+
+
+def test_installed_plugin_loads_with_manifest(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        installed = tmp_path / "data" / "plugins" / "extdemo"
+        _write(
+            installed / "main.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        _write(
+            installed / "metadata.yaml",
+            "name: extdemo\n"
+            "author: CarefreeSongs712\n"
+            "display_name: 外置演示\n"
+            "version: 1.0.0\n"
+            "description: installed plugin\n"
+            "repo: https://github.com/CarefreeSongs712/mohobot-plugin-extdemo\n"
+            "license: MIT\n"
+            "api_version: 1\n",
+        )
+        await ps.load_plugins()
+        meta = ps._plugins[0]
+        assert meta["source"] == "installed"
+        assert meta["loaded"] is True
+        assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
+        assert meta["file"] == "extdemo/main.py"
+
+    asyncio.run(run())
+
+
+def test_duplicate_plugin_name_is_rejected(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "alpha.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        installed = tmp_path / "data" / "plugins" / "alpha"
+        _write(
+            installed / "main.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        _write(
+            installed / "metadata.yaml",
+            "name: alpha\n"
+            "author: CarefreeSongs712\n"
+            "display_name: 冲突\n"
+            "version: 1.0.0\n"
+            "description: conflict\n"
+            "repo: https://github.com/CarefreeSongs712/mohobot-plugin-alpha\n"
+            "license: MIT\n"
+            "api_version: 1\n",
+        )
+        await ps.load_plugins()
+        loaded = [m for m in ps._plugins if m.get("loaded")]
+        assert [m["source"] for m in loaded] == ["builtin"]
+        conflicts = [m for m in ps._plugins if "冲突" in (m.get("error") or "")]
+        assert len(conflicts) == 1
+
+    asyncio.run(run())
