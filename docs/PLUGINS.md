@@ -7,21 +7,16 @@
 | 插件 | 位置 | 功能 | 有独立文档 |
 |---|---|---|---|
 | status | `plugins/status/` | `/status` 状态卡 | 否（配置 `admin_qqs`/`community_group`/`help_url`，见 `_conf_schema.json`） |
-| beszel_servers | `plugins/beszel_servers/` | `/servers`、`/服务器` 查看 Beszel 全部服务器状态 | [README](../plugins/beszel_servers/README.md) |
-| praise | `plugins/praise.py` | `赞我`/`zanwo` 点赞 | 否 |
-| divination | `plugins/divination.py` | `/占卜` | 否 |
 | perception | `plugins/perception/` | 日历/节日感知注入 | 否 |
-| welcome | `plugins/welcome.py` | 欢迎语 | 否 |
 | usage_stats | `plugins/usage_stats/` | `/用量` 统计 | 否 |
-| anysearch | `plugins/anysearch.py` | `/搜索` + LLM 搜索工具 | 否 |
 | song_sync | `plugins/song_sync/` | 歌曲库定时同步 | 否（详见 [DEVELOPMENT §8.6](DEVELOPMENT.md)） |
 | chat_manager | `plugins/chat_manager/` | 查看聊天记录 / 代发消息 | 否（见下） |
-| relationship | `plugins/relationship/` | 好友/群管理与审批流 | 否（见下） |
-| wifepicker | `plugins/wifepicker/` | 抽老婆互动 | 否（见下） |
-| neteasemusic | `plugins/neteasemusic/` | 网易云点歌 | 否（见下） |
-| qzone | `plugins/qzone/` | QQ 空间说说 | 否（见下） |
-| meme_stealer | `plugins/meme_stealer/` | 表情包偷取与管理 | [README](../plugins/meme_stealer/README.md) |
-| proactive_chat | `plugins/proactive_chat/` | 主动聊天 | [README](../plugins/proactive_chat/README.md) |
+| ctx_restore | `plugins/ctx_restore/` | 私聊合并转发恢复上下文 | 否 |
+| broadcast | `plugins/broadcast/` | 主动广播 | 否 |
+| song_tools | `plugins/song_tools.py` | 歌曲查询 LLM 工具 | 否 |
+| snitch | `plugins/snitch.py` | 内部举报/排查工具 | 否 |
+
+外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码只允许导入 `mohobot.api`。
 
 ## 插件系统与配置
 
