@@ -179,7 +179,7 @@ def test_installed_plugin_loads_with_manifest(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_duplicate_plugin_name_is_rejected(tmp_path: Path) -> None:
+def test_installed_plugin_overrides_bundled_name(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
         _write(
@@ -206,8 +206,7 @@ def test_duplicate_plugin_name_is_rejected(tmp_path: Path) -> None:
         )
         await ps.load_plugins()
         loaded = [m for m in ps._plugins if m.get("loaded")]
-        assert [m["source"] for m in loaded] == ["builtin"]
-        conflicts = [m for m in ps._plugins if "冲突" in (m.get("error") or "")]
-        assert len(conflicts) == 1
+        assert [m["source"] for m in loaded] == ["installed"]
+        assert len(ps._plugins) == 1
 
     asyncio.run(run())

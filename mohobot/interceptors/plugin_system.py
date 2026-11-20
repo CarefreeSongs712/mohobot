@@ -282,9 +282,10 @@ class PluginSystem(Interceptor):
 
     def _iter_entries(self) -> list[tuple[Path, str, str, str]]:
         entries: list[tuple[Path, str, str, str]] = []
+        installed_names: set[str] = set()
         for root, source in (
-            (self._plugins_dir, "builtin"),
             (self._installed_dir, "installed"),
+            (self._plugins_dir, "builtin"),
         ):
             if not root.exists():
                 continue
@@ -295,14 +296,22 @@ class PluginSystem(Interceptor):
                     and not entry.name.startswith("_")
                     and entry.name != "__init__.py"
                 ):
-                    entries.append((entry, entry.stem, "", source))
+                    name = entry.stem
+                    if source == "builtin" and name in installed_names:
+                        continue
+                    entries.append((entry, name, "", source))
                 elif (
                     entry.is_dir()
                     and not entry.name.startswith("_")
                     and entry.name != "__pycache__"
                     and (entry / "main.py").exists()
                 ):
-                    entries.append((entry / "main.py", entry.name, str(entry), source))
+                    name = entry.name
+                    if source == "builtin" and name in installed_names:
+                        continue
+                    if source == "installed":
+                        installed_names.add(name)
+                    entries.append((entry / "main.py", name, str(entry), source))
         return entries
 
     def _error_meta(
