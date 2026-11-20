@@ -130,12 +130,16 @@ class MarketService:
             manifest, destination = await asyncio.to_thread(
                 install_from_archive, archive, self.plugins_dir
             )
+        registry_url = next(
+            (source.url for source in self._sources if source.id == source_id), ""
+        )
         await save_source(
             self.data_dir,
             manifest.name,
             {
                 "install_method": "market",
                 "registry_id": source_id,
+                "registry_url": registry_url,
                 "plugin_id": entry.plugin_id,
                 "repo": entry.repo,
                 "download_url": entry.download_url,
