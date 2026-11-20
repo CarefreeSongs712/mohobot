@@ -86,6 +86,17 @@ class PluginToggleRequest(BaseModel):
     enabled: bool
 
 
+class PluginMarketInstallRequest(BaseModel):
+    plugin_id: str
+    source_id: str = "official"
+
+
+class PluginSourceRequest(BaseModel):
+    id: str
+    name: str
+    url: str
+
+
 class SessionCreateRequest(BaseModel):
     name: str = "新会话"
 
@@ -165,6 +176,7 @@ class WebPanel:
         persona_ab_service=None,
         news_service=None,
         history_barrier=None,
+        plugin_market=None,
     ):
         self._persona_ab = persona_ab_service
         self._news_service = news_service
@@ -201,6 +213,7 @@ class WebPanel:
         self._context_manager = context_manager
         self._llm_service = llm_service
         self._plugin_system = plugin_system
+        self._plugin_market = plugin_market
         self._ban_store = ban_store
         self._ban_filter = ban_filter
         self._restart_callback = restart_callback
@@ -1217,6 +1230,174 @@ class WebPanel:
             count = await self._plugin_system.reload_plugins()
             logger.info(f"Web panel: plugins hot-reloaded ({count} active)")
             return {"status": "ok", "count": count, "plugins": self._plugin_system.list_plugins()}
+
+        @app.get("/api/plugins/market")
+        async def list_market_plugins(request: Request, refresh: bool = False):
+            await _require_auth(request)
+            if not self._plugin_market:
+                raise HTTPException(status_code=404, detail="插件市场未启用")
+            if refresh or not self._plugin_market.sources:
+                await self._plugin_market.refresh()
+            entries = [
+                {
+                    "plugin_id": entry.plugin_id,
+                    "author": entry.author,
+                    "name": entry.name,
+                    "display_name": entry.display_name,
+                    "version": entry.version,
+                    "description": entry.description,
+                    "repo": entry.repo,
+                    "sha256": entry.sha256,
+                    "api_version": entry.api_version,
+                    "license": entry.license,
+                    "tags": list(entry.tags),
+                }
+                for entry in self._plugin_market.entries()
+            ]
+            return {
+                "sources": [
+                    {"id": source.id, "name": source.name, "url": source.url, "official": source.official}
+                    for source in self._plugin_market.sources
+                ],
+                "plugins": entries,
+            }
+
+        @app.post("/api/plugins/market/refresh")
+        async def refresh_market_plugins(request: Request):
+            await _require_auth(request)
+            if not self._plugin_market:
+                raise HTTPException(status_code=404, detail="插件市场未启用")
+            await self._plugin_market.refresh()
+            return {"status": "ok", "count": len(self._plugin_market.entries())}
+
+        @app.post("/api/plugins/market/install")
+        async def install_market_plugin(request: Request, body: PluginMarketInstallRequest):
+            await _require_auth(request)
+            if not self._plugin_market or not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件市场未启用")
+            try:
+                name, destination = await self._plugin_market.install(
+                    body.plugin_id, source_id=body.source_id
+                )
+                count = await self._plugin_system.reload_plugins()
+            except Exception as exc:
+                await self._audit.write(
+                    actor="admin",
+                    action="plugin_market_install",
+                    target=body.plugin_id,
+                    success=False,
+                    details={"error": str(exc)},
+                    remote=request.client.host if request.client else "",
+                )
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._audit.write(
+                actor="admin",
+                action="plugin_market_install",
+                target=name,
+                success=True,
+                details={"plugin_id": body.plugin_id, "source_id": body.source_id},
+                remote=request.client.host if request.client else "",
+            )
+            return {"status": "ok", "name": name, "path": str(destination), "count": count}
+
+        @app.post("/api/plugins/{name}/reload")
+        async def reload_one_plugin(name: str, request: Request):
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件系统未启用")
+            name = self._safe_id(name, "插件名")
+            ok = await self._plugin_system.reload_plugin(name)
+            return {"status": "ok" if ok else "failed", "name": name}
+
+        @app.delete("/api/plugins/{name}")
+        async def uninstall_plugin_route(
+            name: str,
+            request: Request,
+            delete_config: bool = False,
+            delete_data: bool = False,
+        ):
+            await _require_auth(request)
+            if not self._plugin_system:
+                raise HTTPException(status_code=404, detail="插件系统未启用")
+            name = self._safe_id(name, "插件名")
+            from mohobot.plugins.installer import InstallError, uninstall_plugin
+            from mohobot.plugins.sources import remove_source
+
+            try:
+                target = await asyncio.to_thread(
+                    uninstall_plugin,
+                    name,
+                    self._plugin_system.installed_dir,
+                    self._data_dir / "plugin_recycle",
+                    config_dir=self._data_dir / "plugins_config",
+                    data_dir=self._data_dir,
+                    delete_config=delete_config,
+                    delete_data=delete_data,
+                )
+                await remove_source(self._data_dir, name)
+                await self._plugin_system.reload_plugins()
+            except (InstallError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._audit.write(
+                actor="admin",
+                action="plugin_uninstall",
+                target=name,
+                success=True,
+                details={"recycle": str(target), "delete_config": delete_config, "delete_data": delete_data},
+                remote=request.client.host if request.client else "",
+            )
+            return {"status": "ok", "name": name, "recycle": str(target)}
+
+        @app.get("/api/plugin-sources")
+        async def list_plugin_sources(request: Request):
+            await _require_auth(request)
+            if not self._plugin_market:
+                raise HTTPException(status_code=404, detail="插件市场未启用")
+            if not self._plugin_market.sources:
+                await self._plugin_market.refresh()
+            return [
+                {"id": source.id, "name": source.name, "url": source.url, "official": source.official}
+                for source in self._plugin_market.sources
+            ]
+
+        @app.post("/api/plugin-sources")
+        async def add_plugin_source(request: Request, body: PluginSourceRequest):
+            await _require_auth(request)
+            from mohobot.plugin_market.sources import add_registry_source
+
+            try:
+                source = await add_registry_source(
+                    self._data_dir, id=body.id, name=body.name, url=body.url
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._audit.write(
+                actor="admin",
+                action="plugin_source_add",
+                target=source.id,
+                success=True,
+                details={"url": source.url},
+                remote=request.client.host if request.client else "",
+            )
+            return {"status": "ok", "source": {"id": source.id, "name": source.name, "url": source.url}}
+
+        @app.delete("/api/plugin-sources/{source_id}")
+        async def delete_plugin_source(source_id: str, request: Request):
+            await _require_auth(request)
+            from mohobot.plugin_market.sources import remove_registry_source
+
+            try:
+                await remove_registry_source(self._data_dir, source_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._audit.write(
+                actor="admin",
+                action="plugin_source_remove",
+                target=source_id,
+                success=True,
+                remote=request.client.host if request.client else "",
+            )
+            return {"status": "ok", "id": source_id}
 
         @app.get("/api/plugins/{name}/config")
         async def get_plugin_config(name: str, request: Request):

@@ -78,6 +78,18 @@ class PluginSystem(Interceptor):
         self._plugin_sys_paths: dict[str, str] = {}
         self._plugin_api_version = PLUGIN_API_VERSION
 
+    @property
+    def plugins_dir(self) -> Path:
+        return self._plugins_dir
+
+    @property
+    def installed_dir(self) -> Path:
+        return self._installed_dir
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
+
     def _lock(self) -> asyncio.Lock:
         if self._reload_lock is None:
             self._reload_lock = asyncio.Lock()
