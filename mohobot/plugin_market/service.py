@@ -115,16 +115,26 @@ class MarketService:
     def find(self, plugin_id: str) -> MarketEntry | None:
         return next((entry for entry in self.entries() if entry.plugin_id == plugin_id), None)
 
+    async def _download_entry(self, entry: MarketEntry, target: Path) -> None:
+        """下载插件归档; 代理失败时回退 GitHub 直连。"""
+        url = entry_download_url(entry)
+        proxy_url = with_proxy(url, self.proxy) if self.proxy else url
+        try:
+            await asyncio.to_thread(download_file, proxy_url, target)
+        except InstallError:
+            if not self.proxy:
+                raise
+            await asyncio.to_thread(download_file, url, target)
+
     async def install_from_entry(
         self,
         entry: MarketEntry,
         *,
         source_id: str = "official",
     ) -> tuple[str, Path]:
-        url = with_proxy(entry_download_url(entry), self.proxy) if self.proxy else entry_download_url(entry)
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
             archive = Path(temp) / "plugin.zip"
-            await asyncio.to_thread(download_file, url, archive)
+            await self._download_entry(entry, archive)
             if entry.sha256:
                 await asyncio.to_thread(verify_sha256, archive, entry.sha256)
             manifest, destination = await asyncio.to_thread(
@@ -169,10 +179,9 @@ class MarketService:
         record = records.get(entry.name)
         if not record or record.get("install_method") != "market":
             raise InstallError("该插件不是通过插件市场安装，无法更新")
-        url = with_proxy(entry_download_url(entry), self.proxy) if self.proxy else entry_download_url(entry)
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
             archive = Path(temp) / "plugin.zip"
-            await asyncio.to_thread(download_file, url, archive)
+            await self._download_entry(entry, archive)
             if entry.sha256:
                 await asyncio.to_thread(verify_sha256, archive, entry.sha256)
             manifest, destination = await asyncio.to_thread(
