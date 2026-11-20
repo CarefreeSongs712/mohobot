@@ -16,7 +16,7 @@
 | song_tools | `plugins/song_tools.py` | 歌曲查询 LLM 工具 | 否 |
 | snitch | `plugins/snitch.py` | 内部举报/排查工具 | 否 |
 
-外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码只允许导入 `mohobot.api`。
+主仓库 `plugins/` 暂保留外置插件的兼容副本用于回归测试；运行时若 `data/plugins/` 存在同名已安装版本，则优先使用已安装版本。外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码只允许导入 `mohobot.api`。
 
 ## 插件系统与配置
 
