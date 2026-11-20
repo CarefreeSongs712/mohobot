@@ -57,3 +57,6 @@ psutil>=5.9.0
 
 # Type hints
 pydantic>=2.0.0
+
+# PEP 440 version specifiers for plugin manifests
+packaging>=23.0
