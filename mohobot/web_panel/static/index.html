@@ -2316,6 +2316,7 @@ async function loadPlugins() {
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
           <button class="btn btn-sm secondary" onclick="reloadPlugin('${p.name}')">重载</button>
+          ${p.source_record?.install_method === 'market' ? `<button class="btn btn-sm secondary" onclick="updateMarketPlugin('${p.source_record.plugin_id}', '${p.name}')">更新</button>` : ''}
           ${p.source === 'installed' ? `<button class="btn btn-sm secondary" onclick="uninstallPlugin('${p.name}')">卸载</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">暂无插件</td></tr>';
@@ -2420,6 +2421,16 @@ async function removePluginSource(id) {
     showToast('插件源已删除');
     await loadMarket(true);
   } catch (e) { showToast('删除失败: ' + e.message, false); }
+}
+
+async function updateMarketPlugin(pluginId, name) {
+  if (!confirm(`更新 ${name}？`)) return;
+  showToast('正在检查并更新…');
+  try {
+    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId } });
+    showToast(`已更新 ${r.name}`);
+    await loadPlugins();
+  } catch (e) { showToast('更新失败: ' + e.message, false); }
 }
 
 async function reloadPlugin(name) {

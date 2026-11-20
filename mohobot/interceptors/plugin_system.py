@@ -395,6 +395,9 @@ class PluginSystem(Interceptor):
             except Exception as e:
                 meta = self._error_meta(entry_path, plugin_name, entry_dir, source, e)
                 logger.error(f"Failed to load plugin {entry_path.name}: {e}")
+            record = sources.get(meta["name"])
+            if record:
+                meta["source_record"] = record
             self._plugins.append(meta)
             if meta.get("loaded"):
                 count += 1
