@@ -41,7 +41,9 @@ class _FakeMarket:
     async def install(self, plugin_id: str, *, source_id: str = "official"):
         return "demo", Path("demo")
 
-    async def update(self, plugin_id: str, *, source_id: str = "official"):
+    async def update(self, plugin_id: str, *, source_id: str = "official", before_replace=None):
+        if before_replace is not None:
+            await before_replace("demo")
         return "demo", Path("demo")
 
 
@@ -50,6 +52,9 @@ class _FakePluginSystem:
 
     async def set_enabled(self, name: str, enabled: bool) -> bool:
         return name == "demo"
+
+    async def unload_plugin(self, name: str) -> bool:
+        return True
 
     async def reload_plugins(self) -> int:
         return 1

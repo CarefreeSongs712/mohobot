@@ -242,11 +242,25 @@ class MarketService:
             await remove_source(self.data_dir, name)
             return target
 
-    async def update(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
+    async def update(
+        self,
+        plugin_id: str,
+        *,
+        source_id: str = "official",
+        before_replace=None,
+    ) -> tuple[str, Path]:
         async with self._op_lock:
-            return await self._update_unlocked(plugin_id, source_id=source_id)
+            return await self._update_unlocked(
+                plugin_id, source_id=source_id, before_replace=before_replace
+            )
 
-    async def _update_unlocked(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
+    async def _update_unlocked(
+        self,
+        plugin_id: str,
+        *,
+        source_id: str = "official",
+        before_replace=None,
+    ) -> tuple[str, Path]:
         if not self._sources:
             await self.refresh()
         records = await load_sources(self.data_dir)
@@ -284,6 +298,8 @@ class MarketService:
             await self._download_entry(entry, archive)
             if entry.sha256:
                 await asyncio.to_thread(verify_sha256, archive, entry.sha256)
+            if before_replace is not None:
+                await before_replace(entry.name)
             manifest, destination = await asyncio.to_thread(
                 upgrade_from_archive, archive, self.plugins_dir, entry.name
             )

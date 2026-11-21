@@ -143,12 +143,20 @@ def test_update_market_plugin(tmp_path: Path) -> None:
         payload["plugins"]["CarefreeSongs712/demo"] = _entry("demo", archive_v2)
         payload["plugins"]["CarefreeSongs712/demo"]["version"] = "2.0.0"
         await service.refresh()
+        seen: list[str] = []
+
+        async def before_replace(name: str) -> None:
+            seen.append(name)
+
         with patch(
             "mohobot.plugin_market.service.download_file",
             lambda url, dest: shutil.copy(archive_v2, dest),
         ):
-            name, destination = await service.update("CarefreeSongs712/demo")
+            name, destination = await service.update(
+                "CarefreeSongs712/demo", before_replace=before_replace
+            )
         assert name == "demo"
+        assert seen == ["demo"]
         assert "2.0.0" in (destination / "metadata.yaml").read_text(encoding="utf-8")
 
     asyncio.run(run())

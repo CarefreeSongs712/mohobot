@@ -1308,11 +1308,20 @@ class WebPanel:
             if not self._plugin_market or not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
             try:
+                async def _unload_installed(plugin_name: str) -> None:
+                    await self._plugin_system.unload_plugin(plugin_name)
+
                 name, destination = await self._plugin_market.update(
-                    body.plugin_id, source_id=body.source_id
+                    body.plugin_id,
+                    source_id=body.source_id,
+                    before_replace=_unload_installed,
                 )
                 count = await self._plugin_system.reload_plugins()
             except Exception as exc:
+                try:
+                    await self._plugin_system.reload_plugins()
+                except Exception as reload_exc:
+                    logger.error(f"Plugin reload after failed update failed: {reload_exc}")
                 await self._audit.write(
                     actor="admin",
                     action="plugin_market_update",
