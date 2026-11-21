@@ -224,7 +224,7 @@ class PluginSystem(Interceptor):
         source: str = "builtin",
     ) -> dict[str, Any]:
         manifest: PluginManifest | None = None
-        manifest_path = find_manifest(entry_path.parent)
+        manifest_path = find_manifest(entry_path.parent) if entry_dir else None
         if manifest_path is not None:
             manifest = parse_manifest(manifest_path)
             plugin_name = manifest.name

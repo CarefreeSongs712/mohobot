@@ -399,6 +399,33 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_root_metadata_does_not_apply_to_single_file_plugin(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "metadata.yaml",
+            """name: root_manifest
+author: CarefreeSongs712
+version: 1.0.0
+description: root
+repo: https://github.com/CarefreeSongs712/root
+license: MIT
+api_version: 1
+""",
+        )
+        _write(
+            tmp_path / "plugins" / "single_probe.py",
+            """class Plugin:
+    async def on_message(self, bot_id, event, raw):
+        return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        assert [meta["name"] for meta in ps.list_plugins()] == ["single_probe"]
+
+    asyncio.run(run())
+
+
 def test_reload_waits_for_inflight_dispatch(tmp_path: Path) -> None:
     async def run() -> None:
         from types import SimpleNamespace
