@@ -370,6 +370,35 @@ def test_reload_respects_disabled_state(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_shutdown_created_tasks_are_cancelled(tmp_path: Path) -> None:
+    async def run() -> None:
+        from mohobot.services.task_supervisor import TaskSupervisor
+
+        ps = _plugin_system(tmp_path)
+        supervisor = TaskSupervisor()
+        ps.set_task_supervisor(supervisor)
+        _write(
+            tmp_path / "plugins" / "shutdown_task.py",
+            """import asyncio
+class Plugin:
+    _supervisor = None
+    @classmethod
+    def inject_task_supervisor(cls, supervisor): cls._supervisor = supervisor
+    async def on_shutdown(self):
+        self.task = self._supervisor.create_task(
+            asyncio.sleep(60), name='shutdown-task', owner='events')
+    async def on_message(self, bot_id, event, raw): return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        old = ps._plugins[0]["instance"]
+        assert await ps.reload_plugin("shutdown_task") is True
+        await asyncio.sleep(0)
+        assert old.task.cancelled()
+
+    asyncio.run(run())
+
+
 def test_module_name_collision_is_reported(tmp_path: Path) -> None:
     async def run() -> None:
         body = (

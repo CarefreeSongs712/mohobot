@@ -504,6 +504,8 @@ class PluginSystem(Interceptor):
         for meta in reversed(tuple(self._plugins)):
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+        if self._task_supervisor is not None:
+            await self._task_supervisor.cancel_owner_prefix("plugin:")
         self._unload_all_plugins()
 
     async def _reload_unlocked(self) -> int:
@@ -963,6 +965,8 @@ class PluginSystem(Interceptor):
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             self._unload_plugin(meta)
             self._plugins.remove(meta)
             return True
@@ -996,6 +1000,8 @@ class PluginSystem(Interceptor):
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             self._unload_plugin(meta)
             entry = next((item for item in self._iter_entries() if item[1] == name), None)
             if entry is None:
