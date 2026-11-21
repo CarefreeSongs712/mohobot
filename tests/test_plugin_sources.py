@@ -30,3 +30,14 @@ def test_source_records_merge_and_remove(tmp_path: Path) -> None:
         assert set(records) == {"beta"}
 
     asyncio.run(run())
+
+
+def test_registry_source_rejects_credentials() -> None:
+    from mohobot.plugin_market.sources import validate_source_url
+
+    try:
+        validate_source_url("https://user:pass@example.com/index.json")
+    except ValueError as exc:
+        assert "凭据" in str(exc)
+    else:
+        raise AssertionError("带凭据的来源 URL 未拒绝")

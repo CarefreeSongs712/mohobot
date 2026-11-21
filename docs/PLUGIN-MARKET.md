@@ -33,7 +33,7 @@
 
 - 官方源固定为 `https://raw.githubusercontent.com/CarefreeSongs712/mohobot-plugin-index/main/index.json`，只读。
 - 自定义源保存在 `data/plugin_registries.json`，可增删，禁止覆盖或删除官方源。
-- 索引请求优先走全局配置 `plugin_market_proxy` 指定的代理，默认 `https://v4.gh-proxy.org/`；设为空字符串即直连。代理只用于 raw、归档与 git，不用于 GitHub API。
+- 索引请求优先走全局配置 `plugin_market_proxy` 指定的代理，默认 `https://v4.gh-proxy.org/`；设为空字符串即直连。该值在进程启动时读取，修改后需重启生效。代理只用于 raw、归档与 git，不用于 GitHub API。
 - 索引缓存写入 `data/cache/plugin_market/`，远端失败时回退最近缓存。
 - 信任模型：代理是为网络可达性加入的便利通道，不是信任锚。当前索引没有签名或独立哈希校验；代理被劫持时可以同时篡改索引与归档。需要更强保证时，应改为直连 GitHub、对索引做签名，或把索引哈希固定在主仓库。
 

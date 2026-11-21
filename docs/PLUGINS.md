@@ -2,8 +2,8 @@
 
 本文件承接 README 的能力概览，记录各内置插件的命令与配置入口。命令细节以 `/help` 输出、各插件 `_conf_schema.json` 与源码为准；权限说明中的「管理员」均为全局 `admins`。
 
-
 插件开发与市场发布细节见 [PLUGIN-API.md](PLUGIN-API.md) 与 [PLUGIN-MARKET.md](PLUGIN-MARKET.md)。
+
 ## 插件一览
 
 | 插件 | 位置 | 功能 | 有独立文档 |
