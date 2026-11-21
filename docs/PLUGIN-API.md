@@ -63,6 +63,8 @@ logo: logo.png                # 可选
 
 `on_config_update(config)` 必须同步；`interval_sec` 必须是正数，配合 `on_tick` 使用。
 
+`on_startup`、`on_shutdown` 的异步执行上限为 30 秒；超时会被取消并记录错误，不会阻塞其它插件加载或关闭。
+
 ## 注入
 
 在插件类上声明以下 `@classmethod`，框架在加载和热重载后调用：
@@ -80,4 +82,6 @@ logo: logo.png                # 可选
 3. 移除插件加入的 `sys.path` 并清理 `__pycache__`；
 4. 重新导入、校验钩子、注入引用并启动周期任务。
 
-插件不得在导入阶段启动不可取消的后台任务；需要后台任务时使用注入的 `TaskSupervisor`，owner 使用 `plugins`。
+插件不得在导入阶段启动不可取消的后台任务；需要后台任务时使用注入的 `TaskSupervisor`。
+
+插件创建的任何任务都会被归一到 `plugin:{name}:{owner}`；不传 owner 时默认值为 `application`，实际归属为 `plugin:{name}:application`。插件重载和进程退出都会取消整个 `plugin:{name}` 命名空间下的任务，因此不要在插件任务之外依赖跨重载存活的后台协程。`cancel_owner`/`cancel_owner_prefix` 使用同一套映射。

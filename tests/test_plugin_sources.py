@@ -45,14 +45,19 @@ def test_registry_source_rejects_credentials() -> None:
         raise AssertionError("带凭据的来源 URL 未拒绝")
 
 
-def test_source_host_resolving_to_private_ip_is_rejected(monkeypatch) -> None:
+def test_source_host_resolving_to_private_ip_is_rejected() -> None:
     import socket
 
     from mohobot.plugin_market import sources
 
+    original = sources.socket.getaddrinfo
+
     def fake_getaddrinfo(host, port):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
 
-    monkeypatch.setattr(sources.socket, "getaddrinfo", fake_getaddrinfo)
-    with pytest.raises(ValueError):
-        sources.validate_source_url("https://plugins.example.test/index.json")
+    sources.socket.getaddrinfo = fake_getaddrinfo
+    try:
+        with pytest.raises(ValueError):
+            sources.validate_source_url("https://plugins.example.test/index.json")
+    finally:
+        sources.socket.getaddrinfo = original

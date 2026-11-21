@@ -328,6 +328,9 @@ def test_module_name_collision_is_reported(tmp_path: Path) -> None:
         errors = [m["error"] for m in ps._plugins if m.get("error")]
         assert any("模块名冲突" in e for e in errors)
         assert sum(1 for m in ps._plugins if m.get("loaded")) == 1
+        assert await ps.reload_plugin("foo_bar") is False
+        loaded = [m["name"] for m in ps._plugins if m.get("loaded")]
+        assert loaded == ["foo-bar"]
 
     asyncio.run(run())
 

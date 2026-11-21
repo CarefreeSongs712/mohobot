@@ -15,6 +15,10 @@ MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 INSTALL_PREFIX = ".plugin-install-"
 BACKUP_PREFIX = ".plugin-backup-"
+UPGRADE_PREFIX = ".plugin-upgrade-"
+STAGING_PREFIXES = (INSTALL_PREFIX, BACKUP_PREFIX, UPGRADE_PREFIX)
+# 正常安装应远小于 1 小时；超过该阈值的 staging 目录按崩溃残留清理。
+STAGING_MAX_AGE_SECONDS = 3600
 GITHUB_REPO_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 GH_PROXY = "https://v4.gh-proxy.org/"
 
@@ -243,7 +247,7 @@ def upgrade_from_archive(
     destination = plugins_dir / expected_name
     if not destination.is_dir():
         raise InstallError(f"插件未安装: {expected_name}")
-    with tempfile.TemporaryDirectory(prefix=".plugin-upgrade-", dir=plugins_dir) as temp:
+    with tempfile.TemporaryDirectory(prefix=UPGRADE_PREFIX, dir=plugins_dir) as temp:
         temp_path = Path(temp)
         extracted = temp_path / "extract"
         safe_extract_zip(archive, extracted)

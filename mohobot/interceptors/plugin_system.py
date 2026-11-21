@@ -33,6 +33,7 @@ from mohobot.models.onebot import (
     NoticeEvent,
 )
 from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.plugins.installer import STAGING_MAX_AGE_SECONDS, STAGING_PREFIXES
 from mohobot.plugins.manifest import (
     ManifestError,
     PluginManifest,
@@ -135,6 +136,16 @@ class PluginSystem(Interceptor):
     @staticmethod
     def _module_name(plugin_name: str) -> str:
         return "mohobot_plugin_" + re.sub(r"[^0-9A-Za-z_]", "_", plugin_name)
+
+    def _module_name_conflict(self, module_name: str, exclude_name: str | None = None) -> str | None:
+        for meta in self._plugins:
+            if not meta.get("loaded"):
+                continue
+            if exclude_name is not None and meta.get("name") == exclude_name:
+                continue
+            if meta.get("module_name") == module_name:
+                return str(meta.get("name") or "?")
+        return None
 
     @staticmethod
     def _is_under(path: str | Path, directory: str | Path) -> bool:
@@ -412,7 +423,6 @@ class PluginSystem(Interceptor):
         sources = await load_sources(self._data_dir)
         count = 0
         seen: set[str] = set()
-        module_names: dict[str, str] = {}
         for entry_path, plugin_name, entry_dir, source in self._iter_entries():
             if plugin_name in seen:
                 self._plugins.append(
@@ -440,7 +450,7 @@ class PluginSystem(Interceptor):
                 continue
             seen.add(plugin_name)
             module_name = self._module_name(plugin_name)
-            previous = module_names.get(module_name)
+            previous = self._module_name_conflict(module_name)
             if previous is not None:
                 logger.error(f"插件模块名冲突: {plugin_name} 与 {previous}")
                 meta = self._error_meta(
@@ -448,7 +458,6 @@ class PluginSystem(Interceptor):
                     ValueError(f"插件模块名冲突: {plugin_name} 与 {previous}"),
                 )
             else:
-                module_names[module_name] = plugin_name
                 try:
                     meta = self._load_one(entry_path, plugin_name, entry_dir, state, source)
                 except Exception as e:
@@ -471,13 +480,12 @@ class PluginSystem(Interceptor):
         return count
 
     def _cleanup_stale_staging(self) -> None:
-        cutoff = time.time() - 3600
-        prefixes = (".plugin-install-", ".plugin-backup-", ".plugin-upgrade-")
+        cutoff = time.time() - STAGING_MAX_AGE_SECONDS
         for root in (self._plugins_dir, self._installed_dir):
             if not root.exists():
                 continue
             for path in root.iterdir():
-                if not path.is_dir() or not path.name.startswith(prefixes):
+                if not path.is_dir() or not path.name.startswith(STAGING_PREFIXES):
                     continue
                 try:
                     if path.stat().st_mtime >= cutoff:
@@ -962,13 +970,22 @@ class PluginSystem(Interceptor):
             if entry is None:
                 self._plugins.pop(index)
                 return False
-            try:
-                new_meta = self._load_one(
-                    entry[0], entry[1], entry[2], self._load_state(), entry[3]
+            module_name = self._module_name(entry[1])
+            previous = self._module_name_conflict(module_name, exclude_name=entry[1])
+            if previous is not None:
+                logger.error(f"插件模块名冲突: {entry[1]} 与 {previous}")
+                new_meta = self._error_meta(
+                    entry[0], entry[1], entry[2], entry[3],
+                    ValueError(f"插件模块名冲突: {entry[1]} 与 {previous}"),
                 )
-            except Exception as e:
-                new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
-                logger.error(f"Failed to reload plugin {entry[1]}: {e}")
+            else:
+                try:
+                    new_meta = self._load_one(
+                        entry[0], entry[1], entry[2], self._load_state(), entry[3]
+                    )
+                except Exception as e:
+                    new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
+                    logger.error(f"Failed to reload plugin {entry[1]}: {e}")
             from mohobot.plugins.sources import load_sources
 
             sources = await load_sources(self._data_dir)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
@@ -111,7 +112,7 @@ async def load_registry_sources(data_dir: str | Path) -> list[RegistrySource]:
             source = RegistrySource(
                 id=source_id,
                 name=str(item["name"]),
-                url=validate_source_url(str(item["url"])),
+                url=await asyncio.to_thread(validate_source_url, str(item["url"])),
                 official=bool(item.get("official", False)),
             )
         except (KeyError, ValueError):
@@ -135,7 +136,8 @@ async def add_registry_source(
         raise ValueError("插件源 id 只能包含小写字母、数字、下划线和连字符")
     if id == DEFAULT_SOURCE_ID:
         raise ValueError("不能覆盖官方源")
-    source = RegistrySource(id=id, name=name, url=validate_source_url(url), official=False)
+    validated = await asyncio.to_thread(validate_source_url, url)
+    source = RegistrySource(id=id, name=name, url=validated, official=False)
     path = _source_file(data_dir)
 
     def merge(current):
