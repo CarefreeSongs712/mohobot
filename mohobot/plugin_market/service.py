@@ -95,6 +95,10 @@ class MarketService:
     def sources(self) -> list[RegistrySource]:
         return list(self._sources)
 
+    async def reload_sources(self) -> list[RegistrySource]:
+        self._sources = await load_registry_sources(self.data_dir)
+        return self.sources
+
     async def refresh(self) -> list[RegistrySource]:
         self._sources = await load_registry_sources(self.data_dir)
         for source in self._sources:

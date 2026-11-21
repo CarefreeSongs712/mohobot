@@ -13,6 +13,7 @@ class _FakeMarket:
         self.sources = [
             SimpleNamespace(id="official", name="官方", url="https://example.com/index.json", official=True)
         ]
+        self.reload_count = 0
         self._entry = SimpleNamespace(
             plugin_id="CarefreeSongs712/demo",
             author="CarefreeSongs712",
@@ -29,6 +30,10 @@ class _FakeMarket:
 
     async def refresh(self) -> None:
         return None
+
+    async def reload_sources(self):
+        self.reload_count += 1
+        return self.sources
 
     def entries(self):
         return [self._entry]
@@ -100,3 +105,22 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json()["name"] == "demo"
+
+
+def test_source_list_reloads_from_disk(tmp_path: Path) -> None:
+    market = _FakeMarket()
+    panel = WebPanel(
+        password_hash=WebPanel._hash_password("test-password"),
+        data_dir=str(tmp_path),
+        plugin_system=_FakePluginSystem(),
+        plugin_market=market,
+    )
+    client = TestClient(panel._app)
+    token = client.post(
+        "/api/login", json={"username": "admin", "password": "test-password"}
+    ).json()["token"]
+    response = client.get(
+        "/api/plugin-sources", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    assert market.reload_count == 1
