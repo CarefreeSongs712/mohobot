@@ -8,7 +8,6 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 from mohobot.plugins.manifest import PluginManifest, find_manifest, parse_manifest
 

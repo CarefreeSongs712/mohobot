@@ -28,7 +28,6 @@ from loguru import logger
 
 from mohobot.interceptors.base import Interceptor
 from mohobot.models.onebot import (
-    Event,
     MessageEvent,
     MetaEvent,
     NoticeEvent,
