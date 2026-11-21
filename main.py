@@ -334,7 +334,7 @@ class MohobotApplication:
         self._plugin_market = MarketService(
             data_dir_abs,
             str(data_dir_abs / "plugins"),
-            proxy="https://v4.gh-proxy.org/",
+            proxy=self._config.plugin_market_proxy,
         )
         self._plugin_system.set_task_supervisor(self._task_supervisor)
         self._plugin_system.set_song_matcher(self._song_matcher)

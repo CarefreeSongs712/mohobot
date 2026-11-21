@@ -2,6 +2,8 @@
 
 本文件承接 README 的能力概览，记录各内置插件的命令与配置入口。命令细节以 `/help` 输出、各插件 `_conf_schema.json` 与源码为准；权限说明中的「管理员」均为全局 `admins`。
 
+
+插件开发与市场发布细节见 [PLUGIN-API.md](PLUGIN-API.md) 与 [PLUGIN-MARKET.md](PLUGIN-MARKET.md)。
 ## 插件一览
 
 | 插件 | 位置 | 功能 | 有独立文档 |
@@ -16,7 +18,7 @@
 | song_tools | `plugins/song_tools.py` | 歌曲查询 LLM 工具 | 否 |
 | snitch | `plugins/snitch.py` | 内部举报/排查工具 | 否 |
 
-主仓库 `plugins/` 暂保留外置插件的兼容副本用于回归测试；运行时若 `data/plugins/` 存在同名已安装版本，则优先使用已安装版本。外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码只允许导入 `mohobot.api`。
+主仓库 `plugins/` 暂保留外置插件的兼容副本用于回归测试；运行时若 `data/plugins/` 存在同名已安装版本，则优先使用已安装版本。外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码应只导入 `mohobot.api`。
 
 ## 插件系统与配置
 

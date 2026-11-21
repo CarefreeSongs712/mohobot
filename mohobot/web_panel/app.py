@@ -1378,7 +1378,7 @@ class WebPanel:
                     )
                     await remove_source(self._data_dir, name)
                 await self._plugin_system.reload_plugins()
-            except (InstallError, ValueError) as exc:
+            except Exception as exc:
                 await self._audit.write(
                     actor="admin",
                     action="plugin_uninstall",
@@ -1391,7 +1391,8 @@ class WebPanel:
                     },
                     remote=request.client.host if request.client else "",
                 )
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                status = 400 if isinstance(exc, (InstallError, ValueError)) else 500
+                raise HTTPException(status_code=status, detail=str(exc)) from exc
             await self._audit.write(
                 actor="admin",
                 action="plugin_uninstall",

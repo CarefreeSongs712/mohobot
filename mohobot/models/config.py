@@ -474,6 +474,8 @@ class GlobalConfig:
     log_dir: str = "./logs"
     data_dir: str = "./data"
     plugins_dir: str = "./plugins"
+    # 插件市场下载代理; 留空表示直连 GitHub
+    plugin_market_proxy: str = "https://v4.gh-proxy.org/"
     # 上下文压缩: 满 trim_at_rounds 轮时, 用 AI 总结最早的 trim_remove_rounds 轮,
     # 总结作为新的块插入对话最前(旧内容直接裁剪)。enabled=False 时仅裁剪不总结。
     context_summary_enabled: bool = True
@@ -713,6 +715,9 @@ class GlobalConfig:
             log_dir=raw.get("log_dir", "./logs"),
             data_dir=raw.get("data_dir", "./data"),
             plugins_dir=raw.get("plugins_dir", "./plugins"),
+            plugin_market_proxy=str(
+                raw.get("plugin_market_proxy", "https://v4.gh-proxy.org/") or ""
+            ),
             context_summary_enabled=bool(raw.get("context_summary_enabled", True)),
             context_trim_at_rounds=int(raw.get("context_trim_at_rounds", 40)),
             context_trim_remove_rounds=int(raw.get("context_trim_remove_rounds", 15)),
@@ -891,6 +896,7 @@ class GlobalConfig:
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
+            "plugin_market_proxy": self.plugin_market_proxy,
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
@@ -1060,6 +1066,7 @@ class GlobalConfig:
             "log_dir": self.log_dir,
             "data_dir": self.data_dir,
             "plugins_dir": self.plugins_dir,
+            "plugin_market_proxy": self.plugin_market_proxy,
             "context_summary_enabled": self.context_summary_enabled,
             "context_trim_at_rounds": self.context_trim_at_rounds,
             "context_trim_remove_rounds": self.context_trim_remove_rounds,
