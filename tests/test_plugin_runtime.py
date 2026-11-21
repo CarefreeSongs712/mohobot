@@ -210,3 +210,18 @@ def test_installed_plugin_overrides_bundled_name(tmp_path: Path) -> None:
         assert len(ps._plugins) == 1
 
     asyncio.run(run())
+
+
+def test_staging_directories_are_not_loaded(tmp_path: Path) -> None:
+    async def run() -> None:
+        staging = tmp_path / "data" / "plugins" / ".plugin-install-deadbeef"
+        _write(
+            staging / "main.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        ps = _plugin_system(tmp_path)
+        await ps.load_plugins()
+        assert ps._plugins == []
+
+    asyncio.run(run())

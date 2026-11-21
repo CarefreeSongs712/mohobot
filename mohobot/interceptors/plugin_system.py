@@ -33,7 +33,14 @@ from mohobot.models.onebot import (
     MetaEvent,
     NoticeEvent,
 )
-from mohobot.plugins.manifest import ManifestError, PluginManifest, find_manifest, parse_manifest
+from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.plugins.manifest import (
+    ManifestError,
+    PluginManifest,
+    check_compatibility,
+    find_manifest,
+    parse_manifest,
+)
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
 PLUGIN_API_VERSION = 1
@@ -184,12 +191,17 @@ class PluginSystem(Interceptor):
                 raise ManifestError(
                     f"metadata entry={manifest.entry} 与入口 {entry_path.name} 不一致"
                 )
-            if manifest.api_version != self._plugin_api_version:
-                raise ManifestError(
-                    f"插件 API 版本 {manifest.api_version} 与宿主 {self._plugin_api_version} 不兼容"
-                )
+            check_compatibility(
+                manifest,
+                api_version=self._plugin_api_version,
+                mohobot_version=MOHOBOT_VERSION,
+            )
         elif source == "installed":
             raise ManifestError("已安装插件缺少 metadata.yaml")
+        if source == "installed" and manifest.name != entry_path.parent.name:
+            raise ManifestError(
+                f"metadata name={manifest.name} 与安装目录 {entry_path.parent.name} 不一致"
+            )
 
         root = self._installed_dir if source == "installed" else self._plugins_dir
         meta: dict[str, Any] = {
@@ -293,7 +305,7 @@ class PluginSystem(Interceptor):
                 if (
                     entry.is_file()
                     and entry.suffix == ".py"
-                    and not entry.name.startswith("_")
+                    and not entry.name.startswith(("_", "."))
                     and entry.name != "__init__.py"
                 ):
                     name = entry.stem
@@ -302,7 +314,7 @@ class PluginSystem(Interceptor):
                     entries.append((entry, name, "", source))
                 elif (
                     entry.is_dir()
-                    and not entry.name.startswith("_")
+                    and not entry.name.startswith(("_", "."))
                     and entry.name != "__pycache__"
                     and (entry / "main.py").exists()
                 ):
@@ -503,7 +515,12 @@ class PluginSystem(Interceptor):
             task = asyncio.create_task(_loop(), name=task_name)
         self._tick_tasks.append(task)
         self._tick_tasks_by_name[name] = task
-        task.add_done_callback(lambda _task: self._tick_tasks_by_name.pop(name, None))
+
+        def _forget(done: asyncio.Task) -> None:
+            if self._tick_tasks_by_name.get(name) is done:
+                self._tick_tasks_by_name.pop(name, None)
+
+        task.add_done_callback(_forget)
         logger.info(f"插件周期任务已启动: {name}")
 
     def stop_tick_tasks(self) -> None:
@@ -511,6 +528,7 @@ class PluginSystem(Interceptor):
         for task in self._tick_tasks:
             if not task.done():
                 task.cancel()
+        self._tick_tasks_by_name.clear()
 
     async def _stop_tick_for(self, name: str) -> None:
         task = self._tick_tasks_by_name.pop(name, None)
@@ -637,6 +655,8 @@ class PluginSystem(Interceptor):
     async def load_plugins(self) -> int:
         """扫描并加载插件; 与热重载共用同一把锁, 避免并发替换注册表。"""
         async with self._lock():
+            if self._plugins:
+                await self._shutdown_unlocked()
             return await self._load_all_unlocked()
 
     # ── 插件配置 (schema 驱动) ────────────────────────────────

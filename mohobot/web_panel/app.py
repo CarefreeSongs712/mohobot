@@ -1251,6 +1251,7 @@ class WebPanel:
                     "api_version": entry.api_version,
                     "license": entry.license,
                     "tags": list(entry.tags),
+                    "source_id": getattr(entry, "source_id", ""),
                 }
                 for entry in self._plugin_market.entries()
             ]
@@ -1311,6 +1312,14 @@ class WebPanel:
                 )
                 count = await self._plugin_system.reload_plugins()
             except Exception as exc:
+                await self._audit.write(
+                    actor="admin",
+                    action="plugin_market_update",
+                    target=body.plugin_id,
+                    success=False,
+                    details={"error": str(exc)},
+                    remote=request.client.host if request.client else "",
+                )
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             await self._audit.write(
                 actor="admin",
@@ -1329,7 +1338,9 @@ class WebPanel:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
             name = self._safe_id(name, "插件名")
             ok = await self._plugin_system.reload_plugin(name)
-            return {"status": "ok" if ok else "failed", "name": name}
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"插件 {name} 重载失败")
+            return {"status": "ok", "name": name}
 
         @app.delete("/api/plugins/{name}")
         async def uninstall_plugin_route(

@@ -2309,9 +2309,9 @@ async function loadPlugins() {
     const plugins = await apiJSON('/api/plugins');
     document.getElementById('plugins-table-body').innerHTML = plugins.map(p => `
       <tr>
-        <td><b>${p.name}</b><div class="small" style="color:var(--text-dim);font-size:11px">${p.file}</div></td>
+        <td><b>${escapeHtml(p.name)}</b><div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.file)}</div></td>
         <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
-        <td style="color:var(--text-dim)">${p.info?.description || p.error || '—'}</td>
+        <td style="color:var(--text-dim)">${escapeHtml(p.info?.description || p.error || '—')}</td>
         <td>
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
@@ -2375,18 +2375,18 @@ async function loadMarket(refresh = false) {
           <div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.author)} / ${escapeHtml(p.name)} · API ${p.api_version}</div></td>
         <td>${escapeHtml(p.version)}</td>
         <td style="color:var(--text-dim)">${escapeHtml(p.description)}</td>
-        <td><button class="btn btn-sm" onclick="installMarketPlugin('${escapeHtml(p.plugin_id)}')">安装</button></td>
+        <td><button class="btn btn-sm" onclick="installMarketPlugin('${escapeHtml(p.plugin_id)}', '${escapeHtml(p.source_id || 'official')}')">安装</button></td>
       </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">市场暂无插件</td></tr>';
   } catch (e) {
     body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--red)">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
-async function installMarketPlugin(pluginId) {
+async function installMarketPlugin(pluginId, sourceId) {
   if (!confirm(`安装 ${pluginId}？`)) return;
   showToast('正在下载并安装…');
   try {
-    const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId } });
+    const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId, source_id: sourceId || 'official' } });
     showToast(`已安装 ${r.name}`);
     await loadPlugins();
     switchPluginTab('installed');
@@ -2427,7 +2427,7 @@ async function updateMarketPlugin(pluginId, name) {
   if (!confirm(`更新 ${name}？`)) return;
   showToast('正在检查并更新…');
   try {
-    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId } });
+    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId, source_id: 'official' } });
     showToast(`已更新 ${r.name}`);
     await loadPlugins();
   } catch (e) { showToast('更新失败: ' + e.message, false); }

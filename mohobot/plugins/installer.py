@@ -98,7 +98,7 @@ def safe_extract_zip(zip_path: Path, destination: Path) -> None:
         for info in archive.infolist():
             name = info.filename.replace("\\", "/")
             pure = PurePosixPath(name)
-            if pure.is_absolute() or ".." in pure.parts:
+            if pure.is_absolute() or ".." in pure.parts or ":" in pure.parts[0]:
                 raise InstallError(f"压缩包包含非法路径: {info.filename}")
             if info.is_dir():
                 continue
@@ -232,6 +232,10 @@ def upgrade_from_archive(
     expected_sha256: str | None = None,
 ) -> tuple[PluginManifest, Path]:
     archive = Path(archive)
+    if not archive.is_file():
+        raise InstallError("压缩包不存在")
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise InstallError("压缩包超过大小限制")
     if expected_sha256:
         verify_sha256(archive, expected_sha256)
     plugins_dir = Path(plugins_dir)

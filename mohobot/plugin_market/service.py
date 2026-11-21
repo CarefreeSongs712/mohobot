@@ -4,13 +4,18 @@ import asyncio
 import hashlib
 import json
 import tempfile
+from dataclasses import replace
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
+from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.api import api_version as PLUGIN_API_VERSION
 from mohobot.plugin_market.sources import (
     RegistrySource,
     load_registry_sources,
@@ -32,6 +37,24 @@ from mohobot.plugins.market import (
 from mohobot.plugins.sources import load_sources, save_source
 
 MAX_INDEX_BYTES = 5 * 1024 * 1024
+
+
+def _check_entry_compatibility(entry: MarketEntry) -> None:
+    if entry.api_version != PLUGIN_API_VERSION:
+        raise InstallError(
+            f"插件要求 API {entry.api_version}, 当前支持 {PLUGIN_API_VERSION}"
+        )
+    if not entry.mohobot_version:
+        return
+    try:
+        spec = SpecifierSet(entry.mohobot_version)
+        current = Version(MOHOBOT_VERSION)
+    except (InvalidSpecifier, InvalidVersion) as exc:
+        raise InstallError(f"插件版本约束无效: {exc}") from exc
+    if current not in spec:
+        raise InstallError(
+            f"插件要求 mohobot {entry.mohobot_version}, 当前 {MOHOBOT_VERSION}"
+        )
 
 
 def _cache_path(data_dir: Path, url: str) -> Path:
@@ -98,10 +121,12 @@ class MarketService:
                         pass
         return self.sources
 
-    def entries(self) -> list[MarketEntry]:
+    def entries(self, source_id: str | None = None) -> list[MarketEntry]:
         seen: set[str] = set()
         result: list[MarketEntry] = []
         for source in self._sources:
+            if source_id is not None and source.id != source_id:
+                continue
             index = self._indexes.get(source.id)
             if index is None:
                 continue
@@ -109,11 +134,14 @@ class MarketService:
                 if entry.plugin_id in seen:
                     continue
                 seen.add(entry.plugin_id)
-                result.append(entry)
+                result.append(replace(entry, source_id=source.id))
         return result
 
-    def find(self, plugin_id: str) -> MarketEntry | None:
-        return next((entry for entry in self.entries() if entry.plugin_id == plugin_id), None)
+    def find(self, plugin_id: str, source_id: str | None = None) -> MarketEntry | None:
+        return next(
+            (entry for entry in self.entries(source_id) if entry.plugin_id == plugin_id),
+            None,
+        )
 
     async def _download_entry(self, entry: MarketEntry, target: Path) -> None:
         """下载插件归档; 代理失败时回退 GitHub 直连。"""
@@ -132,6 +160,8 @@ class MarketService:
         *,
         source_id: str = "official",
     ) -> tuple[str, Path]:
+        _check_entry_compatibility(entry)
+        source_id = entry.source_id or source_id
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
             archive = Path(temp) / "plugin.zip"
             await self._download_entry(entry, archive)
@@ -179,6 +209,11 @@ class MarketService:
         record = records.get(entry.name)
         if not record or record.get("install_method") != "market":
             raise InstallError("该插件不是通过插件市场安装，无法更新")
+        _check_entry_compatibility(entry)
+        source_id = str(record.get("registry_id") or source_id)
+        entry = self.find(plugin_id, source_id)
+        if entry is None:
+            raise InstallError(f"插件源中已找不到 {plugin_id}")
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
             archive = Path(temp) / "plugin.zip"
             await self._download_entry(entry, archive)

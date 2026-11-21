@@ -13,8 +13,11 @@ EXTERNAL_PLUGINS = {
     "meme_stealer": ("表情包小偷", "表情包收集、检索与发送", "AGPL-3.0", ["meme"]),
     "neteasemusic": ("网易云点歌", "网易云音乐搜索与点歌", "MIT", ["music"]),
     "proactive_chat": ("主动聊天", "私聊主动发起对话", "AGPL-3.0", ["chat"]),
+    "praise": ("点赞", "赞我指令自动点赞", "MIT", ["praise"]),
     "qzone": ("QQ 空间", "QQ 空间发布与浏览", "MIT", ["qzone"]),
+    "relationship": ("关系管理", "QQ 好友与群聊管理、入群/好友申请审批、通知处理", "AGPL-3.0", ["relationship", "admin", "approval"]),
     "six66": ("六六六", "群聊随机复读 6/66/666", "MIT", ["fun"]),
+    "welcome": ("欢迎", "新好友/新入群自动欢迎", "MIT", ["welcome"]),
     "wifepicker": ("抽老婆", "群聊抽老婆互动", "MIT", ["fun"]),
 }
 

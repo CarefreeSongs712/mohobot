@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -68,8 +69,11 @@ async def load_registry_sources(data_dir: str | Path) -> list[RegistrySource]:
         if not isinstance(item, dict):
             continue
         try:
+            source_id = str(item["id"])
+            if not re.fullmatch(r"[a-z0-9_-]{1,64}", source_id):
+                continue
             source = RegistrySource(
-                id=str(item["id"]),
+                id=source_id,
                 name=str(item["name"]),
                 url=validate_source_url(str(item["url"])),
                 official=bool(item.get("official", False)),
@@ -91,8 +95,8 @@ async def add_registry_source(
     name: str,
     url: str,
 ) -> RegistrySource:
-    if not id or "/" in id:
-        raise ValueError("插件源 id 非法")
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", id):
+        raise ValueError("插件源 id 只能包含小写字母、数字、下划线和连字符")
     if id == DEFAULT_SOURCE_ID:
         raise ValueError("不能覆盖官方源")
     source = RegistrySource(id=id, name=name, url=validate_source_url(url), official=False)
