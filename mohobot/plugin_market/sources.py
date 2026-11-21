@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -54,11 +55,38 @@ def validate_source_url(url: str) -> str:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
-    if address is not None and (
-        address.is_private or address.is_loopback or address.is_link_local or address.is_reserved
-    ):
-        raise ValueError("插件源不能指向内网地址")
+    if address is not None:
+        if _is_blocked_address(address):
+            raise ValueError("插件源不能指向内网地址")
+        return url
+    # 域名在请求时才会真正解析；这里预解析一次，降低 DNS 指向内网的风险。
+    # 解析失败不拒绝，避免离线环境把合法源误判；真正请求失败会走缓存回退。
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        infos = []
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if _is_blocked_address(resolved):
+            raise ValueError("插件源解析到内网地址")
     return url
+
+
+def _is_blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # 198.18.0.0/15 是基准测试保留段；部分本地 DNS/代理会用它承载公网域名。
+    if isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network("198.18.0.0/15"):
+        return False
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
 
 
 async def load_registry_sources(data_dir: str | Path) -> list[RegistrySource]:

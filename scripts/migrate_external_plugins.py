@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -69,12 +70,26 @@ def _copy_source(source: Path, target: Path) -> None:
             shutil.copy2(item, dest)
 
 
+IMPORT_MODULES = {old.split()[1]: new.split()[1] for old, new in IMPORT_REWRITES.items()}
+IMPORT_LINE_RE = re.compile(r"^(\s*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$")
+
+
 def _rewrite_imports(root: Path) -> None:
     for path in root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        for old, new in IMPORT_REWRITES.items():
-            text = text.replace(old, new)
-        path.write_text(text, encoding="utf-8")
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        changed = False
+        for index, line in enumerate(lines):
+            match = IMPORT_LINE_RE.match(line)
+            if not match or match.group(2) not in IMPORT_MODULES:
+                continue
+            ending = chr(10) if line.endswith(chr(10)) else ""
+            lines[index] = (
+                f"{match.group(1)}from {IMPORT_MODULES[match.group(2)]} "
+                f"import {match.group(3).rstrip()}{ending}"
+            )
+            changed = True
+        if changed:
+            path.write_text("".join(lines), encoding="utf-8")
 
 
 def _write_support_files(root: Path, name: str, owner: str, main_repo: Path) -> None:

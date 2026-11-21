@@ -285,3 +285,121 @@ def test_installed_plugins_do_not_shadow_stdlib(tmp_path: Path) -> None:
         assert str(tmp_path) not in str(json.__file__)
 
     asyncio.run(run())
+
+
+def test_plugin_owned_tasks_with_custom_owner_are_cancelled(tmp_path: Path) -> None:
+    async def run() -> None:
+        from mohobot.services.task_supervisor import TaskSupervisor
+
+        ps = _plugin_system(tmp_path)
+        supervisor = TaskSupervisor()
+        ps.set_task_supervisor(supervisor)
+        _write(
+            tmp_path / "plugins" / "custom_owner.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    _supervisor = None\n"
+            "    @classmethod\n"
+            "    def inject_task_supervisor(cls, supervisor): cls._supervisor = supervisor\n"
+            "    async def on_startup(self):\n"
+            "        self.task = self._supervisor.create_task(\n"
+            "            asyncio.sleep(60), name='custom-owner-task', owner='events')\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        await ps.load_plugins()
+        task = ps._plugins[0]["instance"].task
+        await ps.reload_plugins()
+        await asyncio.sleep(0)
+        assert task.cancelled()
+
+    asyncio.run(run())
+
+
+def test_module_name_collision_is_reported(tmp_path: Path) -> None:
+    async def run() -> None:
+        body = (
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n"
+        )
+        ps = _plugin_system(tmp_path)
+        _write(tmp_path / "plugins" / "foo-bar.py", body)
+        _write(tmp_path / "plugins" / "foo_bar.py", body)
+        await ps.load_plugins()
+        errors = [m["error"] for m in ps._plugins if m.get("error")]
+        assert any("模块名冲突" in e for e in errors)
+        assert sum(1 for m in ps._plugins if m.get("loaded")) == 1
+
+    asyncio.run(run())
+
+
+def test_stale_staging_directories_are_cleaned(tmp_path: Path) -> None:
+    async def run() -> None:
+        import os
+        import time
+
+        ps = _plugin_system(tmp_path)
+        stale = tmp_path / "plugins" / ".plugin-install-stale"
+        stale.mkdir()
+        old = time.time() - 7200
+        os.utime(stale, (old, old))
+        fresh = tmp_path / "plugins" / ".plugin-install-fresh"
+        fresh.mkdir()
+        await ps.load_plugins()
+        assert not stale.exists()
+        assert fresh.exists()
+
+    asyncio.run(run())
+
+
+def test_reload_waits_for_inflight_handler(tmp_path: Path) -> None:
+    async def run() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "blocking.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw):\n"
+            "        self.started.set()\n"
+            "        await self.release.wait()\n"
+            "        return (True, 'done')\n",
+        )
+        ps.apply_injections = lambda *a, **k: None
+        ps.startup_plugins = _noop
+        ps.start_tick_tasks = lambda *a, **k: None
+        await ps.load_plugins()
+        instance = ps._plugins[0]["instance"]
+        instance.started = started
+        instance.release = release
+        call = asyncio.create_task(ps.intercept("bot_001", object(), {}))
+        await started.wait()
+        reload = asyncio.create_task(ps.reload_plugins())
+        await asyncio.sleep(0.05)
+        assert not reload.done()
+        release.set()
+        await call
+        await reload
+
+    asyncio.run(run())
+
+
+async def _noop(*args, **kwargs):
+    return None
+
+
+def test_lifecycle_hook_timeout_is_bounded(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        ps._hook_timeout = 0.01
+        _write(
+            tmp_path / "plugins" / "slow.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    async def on_startup(self): await asyncio.sleep(60)\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        await ps.load_plugins()
+        assert ps._plugins[0]["loaded"] is True
+
+    asyncio.run(run())

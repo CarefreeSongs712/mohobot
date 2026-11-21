@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from mohobot.plugins.sources import get_source, load_sources, remove_source, save_source
 
 
@@ -41,3 +43,16 @@ def test_registry_source_rejects_credentials() -> None:
         assert "凭据" in str(exc)
     else:
         raise AssertionError("带凭据的来源 URL 未拒绝")
+
+
+def test_source_host_resolving_to_private_ip_is_rejected(monkeypatch) -> None:
+    import socket
+
+    from mohobot.plugin_market import sources
+
+    def fake_getaddrinfo(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(sources.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError):
+        sources.validate_source_url("https://plugins.example.test/index.json")

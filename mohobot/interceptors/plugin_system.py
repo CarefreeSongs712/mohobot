@@ -32,33 +32,6 @@ from mohobot.models.onebot import (
     MetaEvent,
     NoticeEvent,
 )
-
-
-class _PluginTaskSupervisor:
-    """把插件显式使用的 owner="plugins" 映射为按插件隔离的 owner。"""
-
-    def __init__(self, supervisor: Any, plugin_name: str) -> None:
-        self._supervisor = supervisor
-        self._plugin_name = plugin_name
-
-    @property
-    def stopping(self) -> bool:
-        return bool(getattr(self._supervisor, "stopping", False))
-
-    def create_task(self, coro: Any, *, name: str, owner: str = "application") -> Any:
-        if owner == "plugins":
-            owner = f"plugin:{self._plugin_name}"
-        return self._supervisor.create_task(coro, name=name, owner=owner)
-
-    async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
-        if owner == "plugins":
-            owner = f"plugin:{self._plugin_name}"
-        await self._supervisor.cancel_owner(owner, timeout)
-
-    async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
-        if prefix == "plugins":
-            prefix = f"plugin:{self._plugin_name}"
-        await self._supervisor.cancel_owner_prefix(prefix, timeout)
 from mohobot import __version__ as MOHOBOT_VERSION
 from mohobot.plugins.manifest import (
     ManifestError,
@@ -72,6 +45,33 @@ from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 from mohobot.api import api_version as PLUGIN_API_VERSION
 
 
+class _PluginTaskSupervisor:
+    """把插件显式使用的 owner="plugins" 映射为按插件隔离的 owner。"""
+
+    def __init__(self, supervisor: Any, plugin_name: str) -> None:
+        self._supervisor = supervisor
+        self._plugin_name = plugin_name
+
+    @property
+    def stopping(self) -> bool:
+        return bool(getattr(self._supervisor, "stopping", False))
+
+    def _owner(self, owner: str) -> str:
+        prefix = f"plugin:{self._plugin_name}"
+        if not owner or owner == "plugins":
+            return prefix
+        if owner.startswith("plugin:"):
+            return f"{prefix}:{owner[7:]}"
+        return f"{prefix}:{owner}"
+
+    def create_task(self, coro: Any, *, name: str, owner: str = "application") -> Any:
+        return self._supervisor.create_task(coro, name=name, owner=self._owner(owner))
+
+    async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
+        await self._supervisor.cancel_owner(self._owner(owner), timeout)
+
+    async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
+        await self._supervisor.cancel_owner_prefix(self._owner(prefix), timeout)
 class PluginSystem(Interceptor):
     """Loads and manages plugins from a designated directory."""
 
@@ -110,6 +110,10 @@ class PluginSystem(Interceptor):
         self._loaded_sys_paths: set[str] = set()
         self._plugin_sys_paths: dict[str, str] = {}
         self._plugin_api_version = PLUGIN_API_VERSION
+        self._active_dispatches = 0
+        self._dispatch_drained = asyncio.Event()
+        self._dispatch_drained.set()
+        self._hook_timeout = 30.0
 
     @property
     def plugins_dir(self) -> Path:
@@ -400,6 +404,7 @@ class PluginSystem(Interceptor):
             if not directory.exists():
                 directory.mkdir(parents=True, exist_ok=True)
                 logger.info(f"Created plugins directory: {directory}")
+        self._cleanup_stale_staging()
 
         state = self._load_state()
         from mohobot.plugins.sources import load_sources
@@ -407,6 +412,7 @@ class PluginSystem(Interceptor):
         sources = await load_sources(self._data_dir)
         count = 0
         seen: set[str] = set()
+        module_names: dict[str, str] = {}
         for entry_path, plugin_name, entry_dir, source in self._iter_entries():
             if plugin_name in seen:
                 self._plugins.append(
@@ -433,11 +439,21 @@ class PluginSystem(Interceptor):
                 logger.error(f"插件名冲突: {plugin_name} ({entry_path})")
                 continue
             seen.add(plugin_name)
-            try:
-                meta = self._load_one(entry_path, plugin_name, entry_dir, state, source)
-            except Exception as e:
-                meta = self._error_meta(entry_path, plugin_name, entry_dir, source, e)
-                logger.error(f"Failed to load plugin {entry_path.name}: {e}")
+            module_name = self._module_name(plugin_name)
+            previous = module_names.get(module_name)
+            if previous is not None:
+                logger.error(f"插件模块名冲突: {plugin_name} 与 {previous}")
+                meta = self._error_meta(
+                    entry_path, plugin_name, entry_dir, source,
+                    ValueError(f"插件模块名冲突: {plugin_name} 与 {previous}"),
+                )
+            else:
+                module_names[module_name] = plugin_name
+                try:
+                    meta = self._load_one(entry_path, plugin_name, entry_dir, state, source)
+                except Exception as e:
+                    meta = self._error_meta(entry_path, plugin_name, entry_dir, source, e)
+                    logger.error(f"Failed to load plugin {entry_path.name}: {e}")
             record = sources.get(meta["name"])
             if record:
                 meta["source_record"] = record
@@ -454,7 +470,25 @@ class PluginSystem(Interceptor):
         self.start_tick_tasks()
         return count
 
+    def _cleanup_stale_staging(self) -> None:
+        cutoff = time.time() - 3600
+        prefixes = (".plugin-install-", ".plugin-backup-", ".plugin-upgrade-")
+        for root in (self._plugins_dir, self._installed_dir):
+            if not root.exists():
+                continue
+            for path in root.iterdir():
+                if not path.is_dir() or not path.name.startswith(prefixes):
+                    continue
+                try:
+                    if path.stat().st_mtime >= cutoff:
+                        continue
+                    shutil.rmtree(path, ignore_errors=True)
+                    logger.warning(f"Removed stale plugin staging directory: {path}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove stale staging directory {path}: {e}")
+
     async def _shutdown_unlocked(self) -> None:
+        await self._wait_for_dispatches()
         await self.stop_tick_tasks_async()
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
@@ -477,6 +511,26 @@ class PluginSystem(Interceptor):
         """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
         self._task_supervisor = supervisor
 
+    async def _run_plugin_handler(self, handler, *args):
+        self._active_dispatches += 1
+        self._dispatch_drained.clear()
+        try:
+            return await handler(*args)
+        finally:
+            self._active_dispatches -= 1
+            if self._active_dispatches <= 0:
+                self._dispatch_drained.set()
+
+    async def _wait_for_dispatches(self) -> None:
+        if self._active_dispatches <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._dispatch_drained.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Plugin dispatch barrier timed out with {self._active_dispatches} active handler(s)"
+            )
+
     async def _call_hook(self, meta: dict[str, Any], hook_name: str) -> None:
         """调用可选生命周期 hook, 同步/异步实现均可且互不影响。"""
         plugin = meta.get("instance")
@@ -486,7 +540,7 @@ class PluginSystem(Interceptor):
         try:
             result = hook()
             if inspect.isawaitable(result):
-                await result
+                await asyncio.wait_for(result, timeout=self._hook_timeout)
         except Exception as e:
             logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
 
@@ -533,9 +587,7 @@ class PluginSystem(Interceptor):
                 try:
                     secs = max(1, int(getattr(inst, "interval_sec", 60)))
                     await asyncio.sleep(secs)
-                    result = inst.on_tick()
-                    if inspect.isawaitable(result):
-                        await result
+                    await self._run_plugin_handler(inst.on_tick)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -1004,7 +1056,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_notice", None)
                 if handler:
-                    await handler(bot_id, event, raw)
+                    await self._run_plugin_handler(handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} notice handler error: {e}")
 
@@ -1019,7 +1071,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_meta", None)
                 if handler:
-                    await handler(bot_id, event, raw)
+                    await self._run_plugin_handler(handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} meta handler error: {e}")
 
@@ -1039,7 +1091,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_request", None)
                 if handler:
-                    handled = await handler(bot_id, event, raw)
+                    handled = await self._run_plugin_handler(handler, bot_id, event, raw)
                     if handled:
                         return True
             except Exception as e:
@@ -1066,7 +1118,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message_observed", None)
                 if handler:
-                    handled, response = await handler(bot_id, event, raw)
+                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw)
                     if handled:
                         return (True, response)
             except Exception as e:
@@ -1143,7 +1195,7 @@ class PluginSystem(Interceptor):
                 handler = getattr(plugin, "on_perception", None)
                 if not handler:
                     continue
-                text = await handler(bot_id, event, raw)
+                text = await self._run_plugin_handler(handler, bot_id, event, raw)
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
             except Exception as e:
@@ -1166,7 +1218,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message", None)
                 if handler:
-                    handled, response = await handler(bot_id, event, raw_event)
+                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw_event)
                     if handled:
                         return (True, response)
             except Exception as e:
