@@ -31,36 +31,52 @@ def convert_duration_advanced(duration: int) -> str:
     return "".join(f"{value}{label}" for value, label in non_zero)
 
 
-async def api_call(ws_server, bot_id: str, action: str, params: dict | None = None,
-                   timeout: float = 10.0) -> Any:
-    """调用 OneBot API 并返回响应 data(任意类型; 失败/超时返回 None)。
+async def api_call_ex(ws_server, bot_id: str, action: str, params: dict | None = None,
+                      timeout: float = 10.0) -> tuple[bool, Any, str]:
+    """调用 OneBot API, 返回 (是否成功, data, 错误文本)。
 
-    兼容不同实现的 retcode 类型(str/int)与缺失 status 的情况。
+    失败时错误文本可用于回给审批人; api_call 只在内部丢弃它。
     """
     if ws_server is None:
-        return None
+        return False, None, "WebSocket 未就绪"
     try:
         resp = await ws_server.send_to_bot(
             bot_id, action, params or {}, wait_response=True, timeout=timeout,
         )
     except Exception as e:
         logger.warning(f"API {action} 调用失败: {e}")
-        return None
+        return False, None, str(e) or type(e).__name__
     if not isinstance(resp, dict):
-        return None
+        return False, None, "响应格式异常"
+
+    def _err_text(fallback: str) -> str:
+        return str(resp.get("wording") or resp.get("message") or fallback)
+
     # 失败判定: status 显式为 failed/error, 或 retcode 非 0(兼容字符串)
     status = str(resp.get("status", "")).lower()
     if status in ("failed", "error", "fail"):
-        logger.warning(f"API {action} 返回错误: {resp.get('wording') or resp.get('message')}")
-        return None
+        err = _err_text("请求被协议端拒绝")
+        logger.warning(f"API {action} 返回错误: {err}")
+        return False, None, err
     try:
         retcode = int(resp.get("retcode", 0))
     except (TypeError, ValueError):
         retcode = 0
     if retcode != 0:
-        logger.warning(f"API {action} 返回错误: {resp.get('wording') or resp.get('message')}")
-        return None
-    return resp.get("data")
+        err = _err_text(f"retcode={retcode}")
+        logger.warning(f"API {action} 返回错误: {err}")
+        return False, None, err
+    return True, resp.get("data"), ""
+
+
+async def api_call(ws_server, bot_id: str, action: str, params: dict | None = None,
+                   timeout: float = 10.0) -> Any:
+    """调用 OneBot API 并返回响应 data(任意类型; 失败/超时返回 None)。
+
+    兼容不同实现的 retcode 类型(str/int)与缺失 status 的情况。
+    """
+    ok, data, _ = await api_call_ex(ws_server, bot_id, action, params, timeout)
+    return data if ok else None
 
 
 async def get_nickname(ws_server, bot_id: str, group_id: str | int, user_id: str | int) -> str:
