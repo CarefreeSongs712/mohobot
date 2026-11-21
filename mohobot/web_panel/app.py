@@ -1408,8 +1408,7 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_market:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
-            if not self._plugin_market.sources:
-                await self._plugin_market.refresh()
+            await self._plugin_market.reload_sources()
             return [
                 {"id": source.id, "name": source.name, "url": source.url, "official": source.official}
                 for source in self._plugin_market.sources

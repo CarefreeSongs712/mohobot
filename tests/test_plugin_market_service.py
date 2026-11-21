@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from mohobot.plugin_market.service import MarketService
 from mohobot.plugin_market.sources import add_registry_source
+from mohobot.file_store import json_write
 from mohobot.plugins.installer import sha256_file
 from mohobot.plugins.sources import load_sources
 
@@ -149,5 +150,32 @@ def test_update_market_plugin(tmp_path: Path) -> None:
             name, destination = await service.update("CarefreeSongs712/demo")
         assert name == "demo"
         assert "2.0.0" in (destination / "metadata.yaml").read_text(encoding="utf-8")
+
+    asyncio.run(run())
+
+
+def test_reload_sources_reads_persisted_changes(tmp_path: Path) -> None:
+    async def run() -> None:
+        data = tmp_path / "data"
+        service = MarketService(data, tmp_path / "plugins")
+        await json_write(
+            data / "plugin_registries.json",
+            {
+                "schema_version": 1,
+                "sources": [
+                    {
+                        "id": "custom",
+                        "name": "自定义源",
+                        "url": "https://plugins.example.test/index.json",
+                    }
+                ],
+            },
+        )
+        with patch(
+            "mohobot.plugin_market.sources.validate_source_url",
+            lambda url: url,
+        ):
+            sources = await service.reload_sources()
+        assert [source.id for source in sources] == ["official", "custom"]
 
     asyncio.run(run())
