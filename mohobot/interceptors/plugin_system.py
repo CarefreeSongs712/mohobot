@@ -1212,7 +1212,9 @@ class PluginSystem(Interceptor):
                             continue
                         msg_handler = getattr(plugin, "on_message", None)
                         if msg_handler:
-                            handled, response = await msg_handler(bot_id, event, raw)
+                            handled, response = await self._run_plugin_handler(
+                                msg_handler, bot_id, event, raw
+                            )
                             if handled:
                                 return (True, response)
             except Exception as e:

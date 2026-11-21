@@ -399,6 +399,32 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_no_prefix_handler_is_tracked_by_dispatch_barrier(tmp_path: Path) -> None:
+    async def run() -> None:
+        from types import SimpleNamespace
+
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "prefix_probe.py",
+            """import asyncio
+class Plugin:
+    no_prefix_triggers = {"go"}
+    async def on_message(self, bot_id, event, raw):
+        await asyncio.sleep(0.2)
+        return (True, "ok")
+""",
+        )
+        await ps.load_plugins()
+        event = SimpleNamespace(message=[{"type": "text", "data": {"text": "go"}}])
+        task = asyncio.create_task(ps.dispatch_observed("bot_001", event, {}))
+        await asyncio.sleep(0.05)
+        assert ps._active_dispatches == 1
+        handled, reply = await task
+        assert handled is True and reply == "ok"
+
+    asyncio.run(run())
+
+
 def test_module_name_collision_is_reported(tmp_path: Path) -> None:
     async def run() -> None:
         body = (
