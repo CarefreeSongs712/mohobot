@@ -48,6 +48,9 @@ class _FakeMarket:
 class _FakePluginSystem:
     installed_dir = Path("plugins")
 
+    async def set_enabled(self, name: str, enabled: bool) -> bool:
+        return name == "demo"
+
     async def reload_plugins(self) -> int:
         return 1
 
@@ -69,6 +72,16 @@ def _client(tmp_path: Path) -> tuple[TestClient, dict[str, str]]:
     response = client.post("/api/login", json={"username": "admin", "password": "test-password"})
     assert response.status_code == 200
     return client, {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    response = client.post(
+        "/api/plugins/toggle",
+        headers=headers,
+        json={"name": "missing", "enabled": False},
+    )
+    assert response.status_code == 404
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:

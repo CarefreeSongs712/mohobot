@@ -1217,7 +1217,8 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            await self._plugin_system.set_enabled(body.name, body.enabled)
+            if not await self._plugin_system.set_enabled(body.name, body.enabled):
+                raise HTTPException(status_code=404, detail="插件不存在")
             logger.info(f"Web panel: plugin {body.name} {'enabled' if body.enabled else 'disabled'} (hot)")
             return {"status": "ok", "name": body.name, "enabled": body.enabled}
 
