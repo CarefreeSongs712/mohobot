@@ -315,6 +315,39 @@ def test_plugin_owned_tasks_with_custom_owner_are_cancelled(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_single_reload_and_unload_cancel_custom_owned_tasks(tmp_path: Path) -> None:
+    async def run() -> None:
+        from mohobot.services.task_supervisor import TaskSupervisor
+
+        ps = _plugin_system(tmp_path)
+        supervisor = TaskSupervisor()
+        ps.set_task_supervisor(supervisor)
+        _write(
+            tmp_path / "plugins" / "custom_owner.py",
+            """import asyncio
+class Plugin:
+    _supervisor = None
+    @classmethod
+    def inject_task_supervisor(cls, supervisor): cls._supervisor = supervisor
+    async def on_startup(self):
+        self.task = self._supervisor.create_task(
+            asyncio.sleep(60), name='custom-owner-task', owner='events')
+    async def on_message(self, bot_id, event, raw): return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        first = ps._plugins[0]["instance"].task
+        assert await ps.reload_plugin("custom_owner") is True
+        await asyncio.sleep(0)
+        assert first.cancelled()
+        second = ps._plugins[0]["instance"].task
+        assert await ps.unload_plugin("custom_owner") is True
+        await asyncio.sleep(0)
+        assert second.cancelled()
+
+    asyncio.run(run())
+
+
 def test_module_name_collision_is_reported(tmp_path: Path) -> None:
     async def run() -> None:
         body = (

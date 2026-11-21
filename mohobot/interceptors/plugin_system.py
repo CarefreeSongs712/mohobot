@@ -960,7 +960,7 @@ class PluginSystem(Interceptor):
             await self._wait_for_dispatches()
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner(f"plugin:{name}")
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
             self._unload_plugin(meta)
@@ -993,7 +993,7 @@ class PluginSystem(Interceptor):
             old_path = self._plugin_sys_paths.get(name)
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner(f"plugin:{name}")
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
             self._unload_plugin(meta)
