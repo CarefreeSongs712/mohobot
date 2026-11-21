@@ -1021,7 +1021,11 @@ class PluginSystem(Interceptor):
 
             sources = await load_sources(self._data_dir)
             new_meta["source_record"] = sources.get(new_meta.get("name", ""))
-            if not new_meta.get("loaded") and old_meta.get("loaded"):
+            if (
+                not new_meta.get("loaded")
+                and new_meta.get("enabled", True)
+                and old_meta.get("loaded")
+            ):
                 sys.modules.update(old_modules)
                 if old_path:
                     if old_path not in sys.path:

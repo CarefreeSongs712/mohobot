@@ -348,6 +348,28 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_reload_respects_disabled_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "alpha.py",
+            """class Plugin:
+    async def on_message(self, bot_id, event, raw): return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        assert ps._plugins[0]["loaded"] is True
+        state_path = tmp_path / "data" / "plugins_state.json"
+        _write(state_path, '{"alpha": {"enabled": false}}')
+        assert await ps.reload_plugin("alpha") is False
+        meta = next(m for m in ps._plugins if m["name"] == "alpha")
+        assert meta["enabled"] is False
+        assert meta["loaded"] is False
+        assert meta.get("instance") is None
+
+    asyncio.run(run())
+
+
 def test_module_name_collision_is_reported(tmp_path: Path) -> None:
     async def run() -> None:
         body = (
