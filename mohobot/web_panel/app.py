@@ -1357,6 +1357,9 @@ class WebPanel:
             from mohobot.plugins.sources import remove_source
 
             try:
+                installed = Path(self._plugin_system.installed_dir) / name
+                if installed.is_dir():
+                    await self._plugin_system.unload_plugin(name)
                 if self._plugin_market is not None:
                     target = await self._plugin_market.uninstall(
                         name,

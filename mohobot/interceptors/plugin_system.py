@@ -951,6 +951,22 @@ class PluginSystem(Interceptor):
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
         return count
 
+    async def unload_plugin(self, name: str) -> bool:
+        """卸载单个已加载插件; 文件移除前先停任务并执行 on_shutdown。"""
+        async with self._lock():
+            meta = next((m for m in self._plugins if m["name"] == name), None)
+            if meta is None:
+                return False
+            await self._wait_for_dispatches()
+            await self._stop_tick_for(name)
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner(f"plugin:{name}")
+            if meta.get("loaded"):
+                await self._call_hook(meta, "on_shutdown")
+            self._unload_plugin(meta)
+            self._plugins.remove(meta)
+            return True
+
     async def reload_plugin(self, name: str) -> bool:
         """只重载一个插件, 其余插件实例与周期任务保持不变。"""
         async with self._lock():
