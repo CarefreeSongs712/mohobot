@@ -13,7 +13,7 @@ from loguru import logger
 from relationship_core.config import PluginConfig
 from relationship_core.request.decision import RequestDecision
 from relationship_core.request.model import BaseRequest, FriendRequest, GroupRequest
-from relationship_core.utils import api_call, get_reply_text
+from relationship_core.utils import api_call_ex, get_reply_text
 
 
 class RequestHandle:
@@ -46,7 +46,9 @@ class RequestHandle:
         ).decide(approve=approve, extra=extra, block=block)
 
         if result.approve is not None:
-            await self._do_approve(bot_id, req, result.approve)
+            ok, err = await self._do_approve(bot_id, req, result.approve)
+            if not ok:
+                return f"❌ 审批失败：{err}"
 
         # 黑名单状态同步(必须在 event_reply 返回前执行, 否则 /拉黑 不会生效)
         if isinstance(req, GroupRequest):
@@ -69,7 +71,9 @@ class RequestHandle:
 
         # 执行自动同意/拒绝
         if result.approve is not None:
-            await self._do_approve(bot_id, req, result.approve)
+            ok, err = await self._do_approve(bot_id, req, result.approve)
+            if not ok:
+                logger.error(f"自动审批失败: {err}")
 
         # 回复申请人(好友申请/群邀请方)
         if result.user_reply:
@@ -91,20 +95,19 @@ class RequestHandle:
             elif result.block_user:
                 await self.cfg.add_block_user(req.user_id)
 
-    async def _do_approve(self, bot_id: str, req: BaseRequest, approve: bool) -> None:
-        try:
-            if isinstance(req, FriendRequest):
-                await api_call(
-                    self.cfg.ws_server, bot_id, "set_friend_add_request",
-                    {"flag": req.flag, "approve": approve},
-                )
-            elif isinstance(req, GroupRequest):
-                await api_call(
-                    self.cfg.ws_server, bot_id, "set_group_add_request",
-                    {"flag": req.flag, "sub_type": "invite", "approve": approve},
-                )
-        except Exception as e:
-            logger.error(f"审批失败: {e}")
+    async def _do_approve(self, bot_id: str, req: BaseRequest, approve: bool) -> tuple[bool, str]:
+        if isinstance(req, FriendRequest):
+            action = "set_friend_add_request"
+            params = {"flag": req.flag, "approve": approve}
+        elif isinstance(req, GroupRequest):
+            action = "set_group_add_request"
+            params = {"flag": req.flag, "sub_type": "invite", "approve": approve}
+        else:
+            return False, "未知申请类型"
+        ok, _, err = await api_call_ex(self.cfg.ws_server, bot_id, action, params)
+        if not ok:
+            logger.error(f"审批失败({action}): {err}")
+        return ok, err
 
     async def _send_user_reply(self, bot_id: str, req: BaseRequest, text: str) -> None:
         """给申请人发私聊(失败则放弃, 避免暴露错误)。"""

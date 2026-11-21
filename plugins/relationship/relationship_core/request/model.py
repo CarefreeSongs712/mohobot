@@ -7,7 +7,7 @@ BaseRequest 统一 display/parse/raw 构造; 审批命令通过解析引用消�
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from relationship_core.utils import api_call
@@ -20,24 +20,30 @@ class BaseRequest(ABC):
     _FIELD_MAP: ClassVar[dict[str, str]]
 
     @staticmethod
-    def _sanitize_value(value: Any) -> str:
+    def _sanitize_value(value: Any, *, keep_colons: bool = False) -> str:
         """把字段值压成单行, 防止通过换行伪造后续字段(审批文本注入)。
 
         申请人的验证信息(comment)完全可控: 若原样拼进多行卡片, 攻击者可以
         在评论里插入 ``\nQQ号：2002`` 伪造字段, 使管理员按行解析时把无辜用户
         当成申请人(issue #7)。这里把所有换行折成空格, 并去掉行内冒号,
         让注入内容无法构造出新的 "键：值" 行。
+
+        flag 由协议端下发、含 ``:`` 分隔符, 审批时必须原样回传, 否则协议端
+        解析失败(如 snowluma 报 invalid group request flag)。flag 在卡片里
+        排在用户可写字段之前, 解析又是"首次出现优先", 保留冒号不会引入注入。
         """
         text = str(value if value is not None else "")
         for ch in ("\r\n", "\r", "\n", "\u2028", "\u2029"):
             text = text.replace(ch, " ")
-        text = text.replace("：", ":").replace(":", "\uff1a").replace("\uff1a", "、")
+        if not keep_colons:
+            text = text.replace("：", ":").replace(":", "\uff1a").replace("\uff1a", "、")
         return " ".join(text.split())
 
     def to_display_text(self) -> str:
         lines = [self._HEADER]
         for cn, fld in self._FIELD_MAP.items():
-            lines.append(f"{cn}：{self._sanitize_value(getattr(self, fld))}")
+            value = self._sanitize_value(getattr(self, fld), keep_colons=fld == "flag")
+            lines.append(f"{cn}：{value}")
         return "\n".join(lines)
 
     @classmethod
