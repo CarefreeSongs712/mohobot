@@ -717,7 +717,7 @@ async def test_plugin_loads_through_plugin_system():
             return state
 
         await json_update(tmp_path / "data" / "proactive_chat" / "state.json", _force_due)
-        inst.plugin_config = dict(inst.plugin_config, enable=True)
+        inst.plugin_config = dict(inst.plugin_config, enable=True, quiet_hours="")
         inst.on_config_update()
         await inst.on_tick()
         assert sent and sent[0][0] == "bot_001" and sent[0][1] == "主动问候测试"

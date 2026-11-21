@@ -66,6 +66,14 @@ class TaskSupervisor:
     async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
         await self._cancel_tasks(set(self._owners.get(owner, ())), timeout)
 
+    async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
+        """取消所有 owner 以 prefix 开头的任务。"""
+        tasks: set[asyncio.Task[Any]] = set()
+        for owner, owned in list(self._owners.items()):
+            if owner.startswith(prefix):
+                tasks.update(owned)
+        await self._cancel_tasks(tasks, timeout)
+
     async def shutdown(self, timeout: float = 10.0) -> None:
         self._stopping = True
         await self._cancel_tasks(set(self._tasks), timeout)

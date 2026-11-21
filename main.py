@@ -29,6 +29,7 @@ from mohobot.services.usage import UsageRecorder
 from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig
 from mohobot.persona_service import PersonaService
+from mohobot.plugin_market import MarketService
 from mohobot.services.task_supervisor import TaskSupervisor
 from mohobot.utils.logger import setup_logger
 from mohobot.web_panel.app import WebPanel
@@ -49,6 +50,7 @@ class MohobotApplication:
         self._image_cache: ImageCache | None = None
         self._message_handler: MessageHandler | None = None
         self._plugin_system: PluginSystem | None = None
+        self._plugin_market: MarketService | None = None
         self._web_panel: WebPanel | None = None
         self._database_manager: DatabaseManager | None = None
         self._usage_recorder: UsageRecorder | None = None
@@ -322,10 +324,17 @@ class MohobotApplication:
             except Exception:
                 pass
 
+        data_dir_abs = Path(self._config.data_dir).resolve()
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
             # 绝对路径: 插件内 data 目录按进程 cwd 解析, 启动 cwd 不对会读错文件
-            data_dir=str(Path(self._config.data_dir).resolve()),
+            data_dir=str(data_dir_abs),
+            installed_dir=str(data_dir_abs / "plugins"),
+        )
+        self._plugin_market = MarketService(
+            data_dir_abs,
+            str(data_dir_abs / "plugins"),
+            proxy=self._config.plugin_market_proxy,
         )
         self._plugin_system.set_task_supervisor(self._task_supervisor)
         self._plugin_system.set_song_matcher(self._song_matcher)
@@ -467,6 +476,7 @@ class MohobotApplication:
                 context_manager=self._context_manager,
                 llm_service=self._llm_service,
                 plugin_system=self._plugin_system,
+                plugin_market=self._plugin_market,
                 ban_store=self._ban_store,
                 ban_filter=ban_filter,
                 restart_callback=self.restart,

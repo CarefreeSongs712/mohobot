@@ -12,9 +12,13 @@ Plugins can be enabled/disabled via data/plugins_state.json (managed by the web 
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import importlib.util
 import inspect
+import shutil
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -24,20 +28,65 @@ from loguru import logger
 
 from mohobot.interceptors.base import Interceptor
 from mohobot.models.onebot import (
-    Event,
     MessageEvent,
     MetaEvent,
     NoticeEvent,
 )
+from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.plugins.installer import STAGING_MAX_AGE_SECONDS, STAGING_PREFIXES
+from mohobot.plugins.manifest import (
+    ManifestError,
+    PluginManifest,
+    check_compatibility,
+    find_manifest,
+    parse_manifest,
+)
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
+from mohobot.api import api_version as PLUGIN_API_VERSION
 
+
+class _PluginTaskSupervisor:
+    """把插件显式使用的 owner="plugins" 映射为按插件隔离的 owner。"""
+
+    def __init__(self, supervisor: Any, plugin_name: str) -> None:
+        self._supervisor = supervisor
+        self._plugin_name = plugin_name
+
+    @property
+    def stopping(self) -> bool:
+        return bool(getattr(self._supervisor, "stopping", False))
+
+    def _owner(self, owner: str) -> str:
+        prefix = f"plugin:{self._plugin_name}"
+        if not owner or owner == "plugins":
+            return prefix
+        if owner.startswith("plugin:"):
+            return f"{prefix}:{owner[7:]}"
+        return f"{prefix}:{owner}"
+
+    def create_task(self, coro: Any, *, name: str, owner: str = "application") -> Any:
+        return self._supervisor.create_task(coro, name=name, owner=self._owner(owner))
+
+    async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
+        await self._supervisor.cancel_owner(self._owner(owner), timeout)
+
+    async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
+        await self._supervisor.cancel_owner_prefix(self._owner(prefix), timeout)
 class PluginSystem(Interceptor):
     """Loads and manages plugins from a designated directory."""
 
-    def __init__(self, plugins_dir: str = "./plugins", data_dir: str = "./data"):
+    def __init__(
+        self,
+        plugins_dir: str = "./plugins",
+        data_dir: str = "./data",
+        installed_dir: str | None = None,
+    ):
         self._plugins_dir = Path(plugins_dir)
         self._data_dir = Path(data_dir)
+        self._installed_dir = (
+            Path(installed_dir) if installed_dir else self._data_dir / "plugins"
+        )
         self._plugins: list[dict[str, Any]] = []  # Plugin metadata + instance
         # {plugin_name: {"enabled": bool, "file": str, "loaded": bool, "info": {...}}}
         self._state_file = self._data_dir / "plugins_state.json"
@@ -55,8 +104,412 @@ class PluginSystem(Interceptor):
         self._admin_ids: set[str] = set()  # 全局管理员(封禁/插件命令共用)
         # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
         self._tick_tasks: list[Any] = []
+        self._tick_tasks_by_name: dict[str, Any] = {}
         self._task_supervisor = None
         self._matcher = None
+        self._reload_lock: asyncio.Lock | None = None
+        self._loaded_sys_paths: set[str] = set()
+        self._plugin_sys_paths: dict[str, str] = {}
+        self._plugin_api_version = PLUGIN_API_VERSION
+        self._active_dispatches = 0
+        self._dispatch_drained = asyncio.Event()
+        self._dispatch_drained.set()
+        self._hook_timeout = 30.0
+
+    @property
+    def plugins_dir(self) -> Path:
+        return self._plugins_dir
+
+    @property
+    def installed_dir(self) -> Path:
+        return self._installed_dir
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
+
+    def _lock(self) -> asyncio.Lock:
+        if self._reload_lock is None:
+            self._reload_lock = asyncio.Lock()
+        return self._reload_lock
+
+    @staticmethod
+    def _module_name(plugin_name: str) -> str:
+        return "mohobot_plugin_" + re.sub(r"[^0-9A-Za-z_]", "_", plugin_name)
+
+    def _module_name_conflict(self, module_name: str, exclude_name: str | None = None) -> str | None:
+        for meta in self._plugins:
+            if not meta.get("loaded"):
+                continue
+            if exclude_name is not None and meta.get("name") == exclude_name:
+                continue
+            if meta.get("module_name") == module_name:
+                return str(meta.get("name") or "?")
+        return None
+
+    @staticmethod
+    def _is_under(path: str | Path, directory: str | Path) -> bool:
+        try:
+            Path(path).resolve().relative_to(Path(directory).resolve())
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def _unload_plugin(self, meta: dict[str, Any]) -> None:
+        name = meta.get("name", "")
+        base = meta.get("module_name") or self._module_name(name)
+        entry_dir = meta.get("entry_dir") or ""
+        for module_name in list(sys.modules):
+            if module_name == base or module_name.startswith(base + "."):
+                sys.modules.pop(module_name, None)
+                continue
+            if entry_dir:
+                module_file = getattr(sys.modules.get(module_name), "__file__", None)
+                if module_file and self._is_under(module_file, entry_dir):
+                    sys.modules.pop(module_name, None)
+        old_path = self._plugin_sys_paths.pop(name, None)
+        if old_path and old_path not in self._plugin_sys_paths.values():
+            while old_path in sys.path:
+                sys.path.remove(old_path)
+            self._loaded_sys_paths.discard(old_path)
+        if entry_dir:
+            for cache_dir in Path(entry_dir).rglob("__pycache__"):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+        else:
+            cache_dir = self._plugins_dir / "__pycache__"
+            if cache_dir.is_dir():
+                for cache_file in cache_dir.glob(f"{name}.*.pyc"):
+                    cache_file.unlink(missing_ok=True)
+        importlib.invalidate_caches()
+        meta["instance"] = None
+        meta["loaded"] = False
+
+    def _unload_all_plugins(self) -> None:
+        for meta in tuple(self._plugins):
+            self._unload_plugin(meta)
+
+    @staticmethod
+    def _validate_plugin(instance: Any) -> None:
+        for hook_name in (
+            "on_message",
+            "on_message_observed",
+            "on_notice",
+            "on_meta",
+            "on_request",
+            "on_perception",
+            "on_tick",
+        ):
+            hook = getattr(instance, hook_name, None)
+            if hook is not None and not inspect.iscoroutinefunction(hook):
+                raise ManifestError(f"{hook_name} 必须是 async 函数")
+        updater = getattr(instance, "on_config_update", None)
+        if updater is not None and inspect.iscoroutinefunction(updater):
+            raise ManifestError("on_config_update 必须是同步函数")
+        tick = getattr(instance, "on_tick", None)
+        interval = getattr(instance, "interval_sec", None)
+        if tick is not None and interval is not None:
+            try:
+                seconds = float(interval)
+            except (TypeError, ValueError) as exc:
+                raise ManifestError("interval_sec 必须是正数") from exc
+            if seconds <= 0:
+                raise ManifestError("interval_sec 必须是正数")
+
+    def _load_one(
+        self,
+        entry_path: Path,
+        plugin_name: str,
+        entry_dir: str,
+        state: dict[str, Any],
+        source: str = "builtin",
+    ) -> dict[str, Any]:
+        manifest: PluginManifest | None = None
+        manifest_path = find_manifest(entry_path.parent)
+        if manifest_path is not None:
+            manifest = parse_manifest(manifest_path)
+            plugin_name = manifest.name
+            if manifest.entry != entry_path.name:
+                raise ManifestError(
+                    f"metadata entry={manifest.entry} 与入口 {entry_path.name} 不一致"
+                )
+            check_compatibility(
+                manifest,
+                api_version=self._plugin_api_version,
+                mohobot_version=MOHOBOT_VERSION,
+            )
+        elif source == "installed":
+            raise ManifestError("已安装插件缺少 metadata.yaml")
+        if source == "installed" and manifest.name != entry_path.parent.name:
+            raise ManifestError(
+                f"metadata name={manifest.name} 与安装目录 {entry_path.parent.name} 不一致"
+            )
+
+        root = self._installed_dir if source == "installed" else self._plugins_dir
+        meta: dict[str, Any] = {
+            "name": plugin_name,
+            "file": entry_path.relative_to(root).as_posix(),
+            "entry_dir": entry_dir,
+            "enabled": state.get(plugin_name, {}).get("enabled", True),
+            "loaded": False,
+            "error": None,
+            "info": {},
+            "config_schema": None,
+            "config": None,
+            "loaded_at": None,
+            "source": source,
+            "version": manifest.version if manifest else "",
+            "author": manifest.author if manifest else "",
+            "plugin_id": manifest.plugin_id if manifest else "",
+            "api_version": manifest.api_version if manifest else 0,
+            "manifest": manifest,
+            "module_name": self._module_name(plugin_name),
+        }
+        if not meta["enabled"]:
+            logger.info(f"Plugin {plugin_name} skipped (disabled)")
+            return meta
+
+        module_name = meta["module_name"]
+        module = None
+        try:
+            if not entry_dir:
+                spec = importlib.util.spec_from_file_location(module_name, entry_path)
+            else:
+                plugin_dir_abs = str(Path(entry_dir).absolute())
+                if plugin_dir_abs not in sys.path:
+                    sys.path.insert(0, plugin_dir_abs)
+                    self._loaded_sys_paths.add(plugin_dir_abs)
+                self._plugin_sys_paths[plugin_name] = plugin_dir_abs
+                spec = importlib.util.spec_from_file_location(
+                    module_name,
+                    entry_path,
+                    submodule_search_locations=[plugin_dir_abs],
+                )
+            if spec is None or spec.loader is None:
+                raise ManifestError("spec load failed")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            plugin_instance = None
+            for name, cls in inspect.getmembers(module, inspect.isclass):
+                if name == "Plugin" and cls.__module__ == module.__name__:
+                    plugin_instance = cls()
+                    break
+            if plugin_instance is None:
+                raise ManifestError("no Plugin class found")
+            self._validate_plugin(plugin_instance)
+
+            meta["instance"] = plugin_instance
+            meta["loaded"] = True
+            meta["loaded_at"] = time.time()
+            meta["info"] = {
+                "description": inspect.getdoc(plugin_instance.__class__) or "",
+            }
+            if manifest is not None:
+                meta["info"]["display_name"] = manifest.display_name
+                meta["info"]["version"] = manifest.version
+            cls_info = getattr(plugin_instance.__class__, "info", None)
+            if isinstance(cls_info, dict):
+                meta["info"].update(cls_info)
+
+            schema = self._load_config_schema(entry_path.parent)
+            if schema:
+                meta["config_schema"] = schema
+                meta["config"] = self._load_plugin_config(plugin_name, schema)
+                self._inject_config(plugin_instance, meta["config"])
+            logger.info(f"Loaded plugin: {plugin_name}")
+        except Exception as e:
+            if module is not None:
+                for loaded_name in list(sys.modules):
+                    if loaded_name == module_name or loaded_name.startswith(module_name + "."):
+                        sys.modules.pop(loaded_name, None)
+            meta["error"] = str(e)
+            meta["loaded"] = False
+            self._unload_plugin(meta)
+            logger.error(f"Failed to load plugin {entry_path.name}: {e}")
+        return meta
+
+    def _iter_entries(self) -> list[tuple[Path, str, str, str]]:
+        entries: list[tuple[Path, str, str, str]] = []
+        installed_names: set[str] = set()
+        for root, source in (
+            (self._installed_dir, "installed"),
+            (self._plugins_dir, "builtin"),
+        ):
+            if not root.exists():
+                continue
+            for item in sorted(root.iterdir()):
+                if item.is_file():
+                    if source == "installed":
+                        # 已安装插件统一使用目录形态，避免 metadata 与安装目录名无法对应。
+                        continue
+                    if (
+                        item.suffix != ".py"
+                        or item.name.startswith(("_", "."))
+                        or item.name == "__init__.py"
+                    ):
+                        continue
+                    name = item.stem
+                    if name in installed_names:
+                        continue
+                    entries.append((item, name, "", source))
+                    continue
+                if not item.is_dir():
+                    continue
+                if item.name.startswith(("_", ".", "__pycache__")):
+                    continue
+                manifest_path = find_manifest(item)
+                entry_name = "main.py"
+                display_name = item.name
+                if manifest_path is not None:
+                    try:
+                        manifest = parse_manifest(manifest_path)
+                        entry_name = manifest.entry
+                        display_name = manifest.name
+                    except Exception:
+                        entry_name = "main.py"
+                entry_file = item / entry_name
+                if not entry_file.is_file():
+                    continue
+                if source == "builtin" and display_name in installed_names:
+                    continue
+                if source == "installed":
+                    installed_names.add(display_name)
+                entries.append((entry_file, display_name, str(item), source))
+        return entries
+
+    def _error_meta(
+        self,
+        entry_path: Path,
+        plugin_name: str,
+        entry_dir: str,
+        source: str,
+        error: Exception | str,
+    ) -> dict[str, Any]:
+        root = self._installed_dir if source == "installed" else self._plugins_dir
+        return {
+            "name": plugin_name,
+            "file": entry_path.relative_to(root).as_posix(),
+            "entry_dir": entry_dir,
+            "enabled": False,
+            "loaded": False,
+            "error": str(error),
+            "info": {},
+            "config_schema": None,
+            "config": None,
+            "loaded_at": None,
+            "source": source,
+            "version": "",
+            "author": "",
+            "plugin_id": "",
+            "api_version": 0,
+            "manifest": None,
+            "module_name": self._module_name(plugin_name),
+        }
+
+    async def _load_all_unlocked(self) -> int:
+        await self.stop_tick_tasks_async()
+        self._unload_all_plugins()
+        self._plugins = []
+        for directory in (self._plugins_dir, self._installed_dir):
+            if not directory.exists():
+                directory.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created plugins directory: {directory}")
+        self._cleanup_stale_staging()
+
+        state = self._load_state()
+        from mohobot.plugins.sources import load_sources
+
+        sources = await load_sources(self._data_dir)
+        count = 0
+        seen: set[str] = set()
+        for entry_path, plugin_name, entry_dir, source in self._iter_entries():
+            if plugin_name in seen:
+                self._plugins.append(
+                    {
+                        "name": plugin_name,
+                        "file": str(entry_path.name),
+                        "entry_dir": entry_dir,
+                        "enabled": False,
+                        "loaded": False,
+                        "error": "插件名与已加载插件冲突",
+                        "info": {},
+                        "config_schema": None,
+                        "config": None,
+                        "loaded_at": None,
+                        "source": source,
+                        "version": "",
+                        "author": "",
+                        "plugin_id": "",
+                        "api_version": 0,
+                        "manifest": None,
+                        "module_name": self._module_name(plugin_name),
+                    }
+                )
+                logger.error(f"插件名冲突: {plugin_name} ({entry_path})")
+                continue
+            seen.add(plugin_name)
+            module_name = self._module_name(plugin_name)
+            previous = self._module_name_conflict(module_name)
+            if previous is not None:
+                logger.error(f"插件模块名冲突: {plugin_name} 与 {previous}")
+                meta = self._error_meta(
+                    entry_path, plugin_name, entry_dir, source,
+                    ValueError(f"插件模块名冲突: {plugin_name} 与 {previous}"),
+                )
+            else:
+                try:
+                    meta = self._load_one(entry_path, plugin_name, entry_dir, state, source)
+                except Exception as e:
+                    meta = self._error_meta(entry_path, plugin_name, entry_dir, source, e)
+                    logger.error(f"Failed to load plugin {entry_path.name}: {e}")
+            record = sources.get(meta["name"])
+            if record:
+                meta["source_record"] = record
+            self._plugins.append(meta)
+            if meta.get("loaded"):
+                count += 1
+
+        logger.info(f"Plugin system loaded {count} plugin(s)")
+        try:
+            self.apply_injections()
+        except Exception as e:
+            logger.error(f"Plugin injection failed: {e}")
+        await self.startup_plugins()
+        self.start_tick_tasks()
+        return count
+
+    def _cleanup_stale_staging(self) -> None:
+        cutoff = time.time() - STAGING_MAX_AGE_SECONDS
+        for root in (self._plugins_dir, self._installed_dir):
+            if not root.exists():
+                continue
+            for path in root.iterdir():
+                if not path.is_dir() or not path.name.startswith(STAGING_PREFIXES):
+                    continue
+                try:
+                    if path.stat().st_mtime >= cutoff:
+                        continue
+                    shutil.rmtree(path, ignore_errors=True)
+                    logger.warning(f"Removed stale plugin staging directory: {path}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove stale staging directory {path}: {e}")
+
+    async def _shutdown_unlocked(self) -> None:
+        await self._wait_for_dispatches()
+        await self.stop_tick_tasks_async()
+        if self._task_supervisor is not None:
+            await self._task_supervisor.cancel_owner("plugins")
+            await self._task_supervisor.cancel_owner_prefix("plugin:")
+        for meta in reversed(tuple(self._plugins)):
+            if meta.get("loaded"):
+                await self._call_hook(meta, "on_shutdown")
+        self._unload_all_plugins()
+
+    async def _reload_unlocked(self) -> int:
+        await self._shutdown_unlocked()
+        count = await self._load_all_unlocked()
+        return count
 
     def set_song_matcher(self, matcher) -> None:
         """注入全局歌曲匹配器, 供同步插件刷新内存索引。"""
@@ -65,6 +518,26 @@ class PluginSystem(Interceptor):
     def set_task_supervisor(self, supervisor) -> None:
         """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
         self._task_supervisor = supervisor
+
+    async def _run_plugin_handler(self, handler, *args):
+        self._active_dispatches += 1
+        self._dispatch_drained.clear()
+        try:
+            return await handler(*args)
+        finally:
+            self._active_dispatches -= 1
+            if self._active_dispatches <= 0:
+                self._dispatch_drained.set()
+
+    async def _wait_for_dispatches(self) -> None:
+        if self._active_dispatches <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._dispatch_drained.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Plugin dispatch barrier timed out with {self._active_dispatches} active handler(s)"
+            )
 
     async def _call_hook(self, meta: dict[str, Any], hook_name: str) -> None:
         """调用可选生命周期 hook, 同步/异步实现均可且互不影响。"""
@@ -75,7 +548,7 @@ class PluginSystem(Interceptor):
         try:
             result = hook()
             if inspect.isawaitable(result):
-                await result
+                await asyncio.wait_for(result, timeout=self._hook_timeout)
         except Exception as e:
             logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
 
@@ -87,12 +560,8 @@ class PluginSystem(Interceptor):
 
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
-        await self.stop_tick_tasks_async()
-        if self._task_supervisor is not None:
-            await self._task_supervisor.cancel_owner("plugins")
-        for meta in reversed(list(self._plugins)):
-            if meta.get("loaded"):
-                await self._call_hook(meta, "on_shutdown")
+        async with self._lock():
+            await self._shutdown_unlocked()
 
     # ── 周期任务 ─────────────────────────────────────────────
 
@@ -103,57 +572,77 @@ class PluginSystem(Interceptor):
         调用一次插件 on_tick()。热重载前需先 stop_tick_tasks()。
         """
         self.stop_tick_tasks()
-        import asyncio
 
-        for meta in self._plugins:
-            if not meta.get("enabled") or not meta.get("loaded"):
-                continue
-            plugin = meta.get("instance")
-            if plugin is None:
-                continue
-            ticker = getattr(plugin, "on_tick", None)
-            interval = getattr(plugin, "interval_sec", None)
-            if ticker is None or interval is None:
-                continue
+        for meta in tuple(self._plugins):
+            self._start_tick_for(meta)
 
-            async def _loop(inst=plugin, name=meta.get("name", "?")):
-                while True:
-                    try:
-                        secs = max(1, int(getattr(inst, "interval_sec", 60)))
-                        await asyncio.sleep(secs)
-                        result = inst.on_tick()
-                        if inspect.isawaitable(result):
-                            await result
-                    except asyncio.CancelledError:
-                        break
-                    except Exception as e:
-                        logger.error(f"插件 {name} 周期任务异常: {e}")
+    def _start_tick_for(self, meta: dict[str, Any]) -> None:
+        if not meta.get("enabled") or not meta.get("loaded"):
+            return
+        plugin = meta.get("instance")
+        if plugin is None:
+            return
+        ticker = getattr(plugin, "on_tick", None)
+        interval = getattr(plugin, "interval_sec", None)
+        if ticker is None or interval is None:
+            return
+        name = meta.get("name", "?")
+        if name in self._tick_tasks_by_name and not self._tick_tasks_by_name[name].done():
+            return
 
-            task_name = f"plugin-tick:{meta.get('name', '?')}"
-            if self._task_supervisor is not None:
-                task = self._task_supervisor.create_task(
-                    _loop(), name=task_name, owner="plugins"
-                )
-            else:
-                task = asyncio.create_task(_loop(), name=task_name)
-            self._tick_tasks.append(task)
-            logger.info(f"插件周期任务已启动: {meta.get('name')}")
+        async def _loop(inst=plugin, plugin_name=name):
+            while True:
+                try:
+                    secs = max(1, int(getattr(inst, "interval_sec", 60)))
+                    await asyncio.sleep(secs)
+                    await self._run_plugin_handler(inst.on_tick)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"插件 {plugin_name} 周期任务异常: {e}")
+
+        task_name = f"plugin-tick:{name}"
+        if self._task_supervisor is not None:
+            task = self._task_supervisor.create_task(
+                _loop(), name=task_name, owner="plugins"
+            )
+        else:
+            task = asyncio.create_task(_loop(), name=task_name)
+        self._tick_tasks.append(task)
+        self._tick_tasks_by_name[name] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            if self._tick_tasks_by_name.get(name) is done:
+                self._tick_tasks_by_name.pop(name, None)
+
+        task.add_done_callback(_forget)
+        logger.info(f"插件周期任务已启动: {name}")
 
     def stop_tick_tasks(self) -> None:
         """同步兼容包装器: 发出取消请求；异步调用者应使用 stop_tick_tasks_async。"""
         for task in self._tick_tasks:
             if not task.done():
                 task.cancel()
+        self._tick_tasks_by_name.clear()
+
+    async def _stop_tick_for(self, name: str) -> None:
+        task = self._tick_tasks_by_name.pop(name, None)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if task in self._tick_tasks:
+            self._tick_tasks.remove(task)
 
     async def stop_tick_tasks_async(self) -> None:
         """取消全部插件周期任务并等待其真正退出。"""
-        import asyncio
-
         tasks = list(self._tick_tasks)
         self.stop_tick_tasks()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tick_tasks.clear()
+        self._tick_tasks_by_name.clear()
 
     # ── 管理员注入 ─────────────────────────────────────────────
 
@@ -165,7 +654,7 @@ class PluginSystem(Interceptor):
 
     def apply_admin_injection(self) -> None:
         """把管理员列表注入插件实例(类级 inject_admin_ids classmethod)。"""
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             inst = meta.get("instance")
             if inst is None:
                 continue
@@ -203,7 +692,7 @@ class PluginSystem(Interceptor):
 
         通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
         """
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             inst = meta.get("instance")
             if inst is None:
                 continue
@@ -218,6 +707,11 @@ class PluginSystem(Interceptor):
             injector = getattr(inst.__class__, "inject_data_dir", None)
             if injector:
                 injector(str(self._data_dir))
+            plugin_data_dir = self._data_dir / "plugins_data" / str(meta.get("name", ""))
+            injector = getattr(inst.__class__, "inject_plugin_data_dir", None)
+            if injector:
+                plugin_data_dir.mkdir(parents=True, exist_ok=True)
+                injector(str(plugin_data_dir))
             if self._anysearch_client is not None:
                 injector = getattr(inst.__class__, "inject_anysearch_client", None)
                 if injector:
@@ -245,7 +739,7 @@ class PluginSystem(Interceptor):
             if self._task_supervisor is not None:
                 injector = getattr(inst.__class__, "inject_task_supervisor", None)
                 if injector:
-                    injector(self._task_supervisor)
+                    injector(_PluginTaskSupervisor(self._task_supervisor, meta["name"]))
             if self._matcher is not None:
                 injector = getattr(inst.__class__, "inject_song_matcher", None)
                 if injector:
@@ -254,128 +748,11 @@ class PluginSystem(Interceptor):
         self.apply_admin_injection()
 
     async def load_plugins(self) -> int:
-        """Scan plugins directory and load all enabled plugins.
-
-        支持两种形态:
-        - 单文件插件: plugins/xxx.py (定义 class Plugin)
-        - 目录插件:   plugins/xxx/main.py (定义 class Plugin, 可含 core/ 子模块与 _conf_schema.json)
-        """
-        self._plugins.clear()
-
-        if not self._plugins_dir.exists():
-            self._plugins_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created plugins directory: {self._plugins_dir}")
-            return 0
-
-        state = self._load_state()
-
-        # Add plugins dir to sys.path
-        plugins_path = str(self._plugins_dir.absolute())
-        if plugins_path not in sys.path:
-            sys.path.insert(0, plugins_path)
-
-        count = 0
-        for entry in sorted(self._plugins_dir.iterdir()):
-            # 定位插件入口文件: 单文件 xxx.py 或 目录 xxx/main.py
-            entry_path = None
-            plugin_name = ""
-            if entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_") and entry.name != "__init__.py":
-                entry_path = entry
-                plugin_name = entry.stem
-            elif entry.is_dir() and not entry.name.startswith("_") and entry.name != "__pycache__":
-                main_file = entry / "main.py"
-                if main_file.exists():
-                    entry_path = main_file
-                    plugin_name = entry.name
-                else:
-                    continue
-            else:
-                continue
-
-            plugin_state = state.get(plugin_name, {"enabled": True})
-            enabled = plugin_state.get("enabled", True)
-
-            meta = {
-                "name": plugin_name,
-                "file": str(entry_path.relative_to(self._plugins_dir)),
-                "entry_dir": str(entry_path.parent) if entry_path.parent != self._plugins_dir else "",
-                "enabled": enabled,
-                "loaded": False,
-                "error": None,
-                "info": {},
-                "config_schema": None,
-                "config": None,
-                "loaded_at": None,
-            }
-
-            if not enabled:
-                self._plugins.append(meta)
-                logger.info(f"Plugin {plugin_name} skipped (disabled)")
-                continue
-
-            try:
-                # 目录插件: 把插件目录加入 sys.path(其 main.py 内可 import 同目录模块)
-                if meta["entry_dir"]:
-                    plugin_dir_abs = str(entry_path.parent.absolute())
-                    if plugin_dir_abs not in sys.path:
-                        sys.path.insert(0, plugin_dir_abs)
-
-                module_name = f"mohobot_plugin_{plugin_name}"
-                spec = importlib.util.spec_from_file_location(module_name, entry_path)
-                if spec is None or spec.loader is None:
-                    meta["error"] = "spec load failed"
-                    self._plugins.append(meta)
-                    continue
-
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-
-                # Find Plugin class in module
-                plugin_instance = None
-                for name, cls in inspect.getmembers(module, inspect.isclass):
-                    if name == "Plugin" and cls.__module__ == module.__name__:
-                        plugin_instance = cls()
-                        break
-
-                if plugin_instance is None:
-                    meta["error"] = "no Plugin class found"
-                    self._plugins.append(meta)
-                    continue
-
-                meta["instance"] = plugin_instance
-                meta["loaded"] = True
-                meta["loaded_at"] = time.time()
-                # Collect plugin info: class docstring + optional class-level `info` dict
-                # (plugins may declare info = {"commands": [{"name": "...", "desc": "..."}]})
-                meta["info"] = {
-                    "description": inspect.getdoc(plugin_instance.__class__) or "",
-                }
-                cls_info = getattr(plugin_instance.__class__, "info", None)
-                if isinstance(cls_info, dict):
-                    meta["info"].update(cls_info)
-
-                # 插件配置: 读取 _conf_schema.json(若有) + 合并已存配置
-                schema = self._load_config_schema(entry_path.parent)
-                if schema:
-                    meta["config_schema"] = schema
-                    meta["config"] = self._load_plugin_config(plugin_name, schema)
-                    self._inject_config(plugin_instance, meta["config"])
-
-                self._plugins.append(meta)
-                count += 1
-                logger.info(f"Loaded plugin: {plugin_name}")
-            except Exception as e:
-                meta["error"] = str(e)
-                self._plugins.append(meta)
-                logger.error(f"Failed to load plugin {entry.name}: {e}")
-
-        logger.info(f"Plugin system loaded {count} plugin(s)")
-        # 加载完成后注入运行时引用(热重载也走这里)
-        self.apply_injections()
-        await self.startup_plugins()
-        # 启动周期任务(声明 interval_sec + on_tick 的插件)
-        self.start_tick_tasks()
-        return count
+        """扫描并加载插件; 与热重载共用同一把锁, 避免并发替换注册表。"""
+        async with self._lock():
+            if self._plugins:
+                await self._shutdown_unlocked()
+            return await self._load_all_unlocked()
 
     # ── 插件配置 (schema 驱动) ────────────────────────────────
 
@@ -520,7 +897,7 @@ class PluginSystem(Interceptor):
         return meta.get("config")
 
     def get_config_schema(self, name: str) -> dict | None:
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if meta["name"] == name:
                 return meta.get("config_schema")
         return None
@@ -567,16 +944,61 @@ class PluginSystem(Interceptor):
         return True
 
     async def reload_plugins(self) -> int:
-        """热重载: 重新扫描 plugins/ 目录并加载全部插件。
-
-        新增/修改/删除插件文件、启停状态均立即生效, 无需重启。
-        """
+        """热重载: 重新扫描 plugins/ 目录并加载全部插件。"""
         logger.info("Hot-reloading plugins...")
-        await self.shutdown_plugins()
-        self._plugins.clear()
-        count = await self.load_plugins()
+        async with self._lock():
+            count = await self._reload_unlocked()
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
         return count
+
+    async def reload_plugin(self, name: str) -> bool:
+        """只重载一个插件, 其余插件实例与周期任务保持不变。"""
+        async with self._lock():
+            meta = next((m for m in self._plugins if m["name"] == name), None)
+            if meta is None:
+                await self._reload_unlocked()
+                meta = next((m for m in self._plugins if m["name"] == name), None)
+                return bool(meta and meta.get("loaded"))
+            index = self._plugins.index(meta)
+            await self._stop_tick_for(name)
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner(f"plugin:{name}")
+            if meta.get("loaded"):
+                await self._call_hook(meta, "on_shutdown")
+            self._unload_plugin(meta)
+            entry = next((item for item in self._iter_entries() if item[1] == name), None)
+            if entry is None:
+                self._plugins.pop(index)
+                return False
+            module_name = self._module_name(entry[1])
+            previous = self._module_name_conflict(module_name, exclude_name=entry[1])
+            if previous is not None:
+                logger.error(f"插件模块名冲突: {entry[1]} 与 {previous}")
+                new_meta = self._error_meta(
+                    entry[0], entry[1], entry[2], entry[3],
+                    ValueError(f"插件模块名冲突: {entry[1]} 与 {previous}"),
+                )
+            else:
+                try:
+                    new_meta = self._load_one(
+                        entry[0], entry[1], entry[2], self._load_state(), entry[3]
+                    )
+                except Exception as e:
+                    new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
+                    logger.error(f"Failed to reload plugin {entry[1]}: {e}")
+            from mohobot.plugins.sources import load_sources
+
+            sources = await load_sources(self._data_dir)
+            new_meta["source_record"] = sources.get(new_meta.get("name", ""))
+            self._plugins[index] = new_meta
+            if new_meta.get("loaded"):
+                try:
+                    self.apply_injections()
+                except Exception as e:
+                    logger.error(f"Plugin injection failed after reload: {e}")
+                await self._call_hook(new_meta, "on_startup")
+                self._start_tick_for(new_meta)
+            return bool(new_meta.get("loaded"))
 
     # ── Plugin State (enable/disable) ─────────────────────────
 
@@ -589,49 +1011,37 @@ class PluginSystem(Interceptor):
             logger.error(f"Failed to load plugin state: {e}")
         return {}
 
-    def _save_state(self, state: dict[str, Any]) -> None:
-        """Persist plugin state to data/plugins_state.json."""
+    async def _save_state(self, state: dict[str, Any]) -> None:
+        """原子合并写入插件启停状态。"""
+        from mohobot.file_store import json_update
+
         try:
-            self._state_file.parent.mkdir(parents=True, exist_ok=True)
-            self._state_file.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            await json_update(
+                self._state_file,
+                lambda current: {**(current if isinstance(current, dict) else {}), **state},
+                default=state,
             )
         except Exception as e:
             logger.error(f"Failed to save plugin state: {e}")
 
     async def set_enabled(self, name: str, enabled: bool) -> bool:
         """启用/禁用插件, 立即生效(无需重启)。"""
-        state = self._load_state()
-        state[name] = {"enabled": enabled}
-        self._save_state(state)
-
-        found = False
-        for meta in self._plugins:
-            if meta["name"] == name:
-                meta["enabled"] = enabled
-                found = True
-                break
-        if not found:
-            # 未扫描到(如新文件) — 全量重载以纳入
-            await self.reload_plugins()
-            return True
-        if not enabled:
-            # 禁用已加载插件时走完整关闭流程，确保资源与周期任务释放
-            await self.reload_plugins()
-        elif enabled:
-            # 热启用: 若该插件此前加载失败或未加载, 重新加载它
+        async with self._lock():
             meta = next((m for m in self._plugins if m["name"] == name), None)
-            if meta is not None and not meta.get("loaded"):
-                logger.info(f"Plugin {name} 热启用: 重新加载")
-                await self.reload_plugins()
+            if meta is None:
+                return False
+            await self._save_state({name: {"enabled": enabled}})
+            if not enabled or not meta.get("loaded"):
+                await self._reload_unlocked()
+            else:
+                meta["enabled"] = enabled
         logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (热生效)")
         return True
 
     def list_plugins(self) -> list[dict[str, Any]]:
         """Return plugin metadata (without instances) for the web panel."""
         result = []
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             item = {k: v for k, v in meta.items() if k != "instance"}
             result.append(item)
         return result
@@ -654,7 +1064,7 @@ class PluginSystem(Interceptor):
 
     async def dispatch_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Dispatch a notice event to all enabled plugins."""
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -663,13 +1073,13 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_notice", None)
                 if handler:
-                    await handler(bot_id, event, raw)
+                    await self._run_plugin_handler(handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} notice handler error: {e}")
 
     async def dispatch_meta(self, bot_id: str, event: MetaEvent, raw: dict) -> None:
         """Dispatch a meta event to all enabled plugins."""
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -678,7 +1088,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_meta", None)
                 if handler:
-                    await handler(bot_id, event, raw)
+                    await self._run_plugin_handler(handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} meta handler error: {e}")
 
@@ -689,7 +1099,7 @@ class PluginSystem(Interceptor):
 
         Returns True if a plugin handled the request (框架不再自动同意)。
         """
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -698,7 +1108,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_request", None)
                 if handler:
-                    handled = await handler(bot_id, event, raw)
+                    handled = await self._run_plugin_handler(handler, bot_id, event, raw)
                     if handled:
                         return True
             except Exception as e:
@@ -716,7 +1126,7 @@ class PluginSystem(Interceptor):
         用于插件捕获普通消息(活跃记录、求婚"同意/拒绝"回复、无前缀关键词触发)。
         返回 (是否消费, 回复); 不消费时消息继续走正常流程(gate → 拦截链 → LLM)。
         """
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -725,7 +1135,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message_observed", None)
                 if handler:
-                    handled, response = await handler(bot_id, event, raw)
+                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw)
                     if handled:
                         return (True, response)
             except Exception as e:
@@ -792,7 +1202,7 @@ class PluginSystem(Interceptor):
         由 message_handler 附加到 LLM 请求(仅回复生成, 不写入 context)。
         """
         parts: list[str] = []
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -802,7 +1212,7 @@ class PluginSystem(Interceptor):
                 handler = getattr(plugin, "on_perception", None)
                 if not handler:
                     continue
-                text = await handler(bot_id, event, raw)
+                text = await self._run_plugin_handler(handler, bot_id, event, raw)
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
             except Exception as e:
@@ -816,7 +1226,7 @@ class PluginSystem(Interceptor):
         raw_event: dict[str, Any],
     ) -> tuple[bool, str | list[dict[str, Any]] | None]:
         """Give plugins a chance to intercept messages."""
-        for meta in self._plugins:
+        for meta in tuple(self._plugins):
             if not meta.get("enabled") or not meta.get("loaded"):
                 continue
             if not self._bot_allowed(meta, bot_id):
@@ -825,7 +1235,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message", None)
                 if handler:
-                    handled, response = await handler(bot_id, event, raw_event)
+                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw_event)
                     if handled:
                         return (True, response)
             except Exception as e:

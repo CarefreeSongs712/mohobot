@@ -360,6 +360,8 @@ ignore_auto_reply: true
 log_dir: "./logs"
 data_dir: "./data"
 plugins_dir: "./plugins"
+# 插件市场下载代理；留空表示直连 GitHub。默认值便于大陆网络访问 release。
+plugin_market_proxy: "https://v4.gh-proxy.org/"
 # ── 上下文 AI 总结压缩(时间维度) ──────────────────────────────
 # 满轮压缩(默认满 40 轮)时会把超过 age_hours 的旧对话一并收走;
 # 另有后台周期任务按 sweep_interval_minutes 扫描, 压缩超龄旧对话。
