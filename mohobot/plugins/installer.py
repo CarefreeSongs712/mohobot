@@ -151,22 +151,12 @@ def install_from_directory(
     if destination.exists():
         raise InstallError(f"插件已安装: {manifest.name}")
 
-    backup = None
     try:
-        if destination.exists():
-            backup = _backup_path(plugins_dir)
-            shutil.copytree(destination, backup / "old")
-            shutil.rmtree(destination)
         shutil.copytree(source, destination)
         return manifest, destination
     except Exception as exc:
         shutil.rmtree(destination, ignore_errors=True)
-        if backup is not None and (backup / "old").exists():
-            shutil.copytree(backup / "old", destination)
         raise InstallError(f"安装失败: {exc}") from exc
-    finally:
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
 
 
 def install_from_archive(

@@ -22,7 +22,10 @@ def _entry(name: str, archive: Path | None = None) -> dict:
     }
     if archive is not None:
         data["sha256"] = sha256_file(archive)
-        data["download_url"] = archive.as_uri()
+        data["download_url"] = (
+            f"https://github.com/CarefreeSongs712/mohobot-plugin-{name}/"
+            f"releases/download/v1.0.0/{name}-1.0.0.zip"
+        )
     return data
 
 

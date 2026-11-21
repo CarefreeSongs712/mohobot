@@ -44,3 +44,30 @@ def test_market_requires_sha256() -> None:
     del payload["plugins"]["CarefreeSongs712/demo"]["sha256"]
     with pytest.raises(InstallError):
         parse_market_index(payload)
+
+
+def test_market_rejects_non_github_download_url(tmp_path: Path) -> None:
+    from mohobot.plugins.installer import InstallError
+    from mohobot.plugins.market import parse_market_index
+
+    payload = {
+        "$meta": {"schema_version": 1},
+        "plugins": {
+            "CarefreeSongs712/demo": {
+                "author": "CarefreeSongs712",
+                "name": "demo",
+                "version": "1.0.0",
+                "repo": "https://github.com/CarefreeSongs712/mohobot-plugin-demo",
+                "description": "demo",
+                "sha256": "a" * 64,
+                "api_version": 1,
+                "download_url": "file:///etc/passwd",
+            }
+        },
+    }
+    try:
+        parse_market_index(payload)
+    except InstallError as exc:
+        assert "download_url" in str(exc)
+    else:
+        raise AssertionError("download_url 未校验")

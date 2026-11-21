@@ -69,7 +69,7 @@ from mohobot.plugins.manifest import (
 )
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
-PLUGIN_API_VERSION = 1
+from mohobot.api import api_version as PLUGIN_API_VERSION
 
 
 class PluginSystem(Interceptor):
@@ -257,11 +257,6 @@ class PluginSystem(Interceptor):
         module = None
         try:
             if not entry_dir:
-                plugin_dir_abs = str(entry_path.parent.absolute())
-                if plugin_dir_abs not in sys.path:
-                    sys.path.insert(0, plugin_dir_abs)
-                    self._loaded_sys_paths.add(plugin_dir_abs)
-                self._plugin_sys_paths[plugin_name] = plugin_dir_abs
                 spec = importlib.util.spec_from_file_location(module_name, entry_path)
             else:
                 plugin_dir_abs = str(Path(entry_dir).absolute())
@@ -410,12 +405,6 @@ class PluginSystem(Interceptor):
         from mohobot.plugins.sources import load_sources
 
         sources = await load_sources(self._data_dir)
-        for directory in (self._plugins_dir, self._installed_dir):
-            plugins_path = str(directory.absolute())
-            if plugins_path not in sys.path:
-                sys.path.insert(0, plugins_path)
-                self._loaded_sys_paths.add(plugins_path)
-
         count = 0
         seen: set[str] = set()
         for entry_path, plugin_name, entry_dir, source in self._iter_entries():
@@ -469,6 +458,7 @@ class PluginSystem(Interceptor):
         await self.stop_tick_tasks_async()
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
+            await self._task_supervisor.cancel_owner_prefix("plugin:")
         for meta in reversed(tuple(self._plugins)):
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")

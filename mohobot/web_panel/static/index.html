@@ -2316,7 +2316,7 @@ async function loadPlugins() {
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
           <button class="btn btn-sm secondary" onclick="reloadPlugin('${p.name}')">重载</button>
-          ${p.source_record?.install_method === 'market' ? `<button class="btn btn-sm secondary" onclick="updateMarketPlugin('${p.source_record.plugin_id}', '${p.name}')">更新</button>` : ''}
+          ${p.source_record?.install_method === 'market' ? `<button class="btn btn-sm secondary" onclick="updateMarketPlugin('${escapeHtml(p.source_record.plugin_id)}', '${escapeHtml(p.name)}')">更新</button>` : ''}
           ${p.source === 'installed' ? `<button class="btn btn-sm secondary" onclick="uninstallPlugin('${p.name}')">卸载</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">暂无插件</td></tr>';
@@ -2345,7 +2345,7 @@ let pluginMarketCache = [];
 function escapeHtml(value) {
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function switchPluginTab(tab) {

@@ -5,12 +5,27 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from mohobot.plugins.installer import InstallError, parse_github_repo, with_proxy
 from mohobot.plugins.manifest import AUTHOR_RE, NAME_RE, SEMVER_RE
 
 INDEX_SCHEMA_VERSION = 1
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+ALLOWED_DOWNLOAD_HOSTS = {"github.com", "codeload.github.com"}
+
+
+def _validate_download_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise InstallError("download_url 必须是 https://github.com 地址")
+    if parsed.username or parsed.password:
+        raise InstallError("download_url 不允许携带凭据")
+    if parsed.hostname.lower() not in ALLOWED_DOWNLOAD_HOSTS:
+        raise InstallError(f"download_url 主机不允许: {parsed.hostname}")
+    return url
 
 
 @dataclass(frozen=True)
@@ -83,7 +98,7 @@ def parse_market_entry(key: str, data: Any) -> MarketEntry:
         repo=repo,
         description=description,
         display_name=str(data.get("display_name") or ""),
-        download_url=str(data.get("download_url") or ""),
+        download_url=_validate_download_url(str(data.get("download_url") or "")),
         sha256=sha256.lower(),
         api_version=api_version,
         mohobot_version=str(data.get("mohobot_version") or ""),

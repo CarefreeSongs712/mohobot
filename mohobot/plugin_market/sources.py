@@ -45,6 +45,8 @@ def validate_source_url(url: str) -> str:
         raise ValueError("插件源只支持 http/https")
     if not parsed.hostname:
         raise ValueError("插件源缺少主机名")
+    if parsed.username or parsed.password:
+        raise ValueError("插件源 URL 不允许携带凭据")
     host = parsed.hostname.lower()
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
         raise ValueError("插件源不能指向本机")

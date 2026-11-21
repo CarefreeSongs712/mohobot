@@ -2,7 +2,7 @@
 
 ## 目录约定
 
-内置插件放在主仓库 `plugins/`，从市场安装的插件放在 `data/plugins/{name}/`。两处都支持单文件插件与目录插件；目录插件必须包含 `main.py`，入口类字面名为 `Plugin`。
+内置插件放在主仓库 `plugins/`，从市场安装的插件放在 `data/plugins/{name}/`。内置目录支持单文件插件与目录插件；市场安装统一使用目录形态，必须包含 `metadata.yaml` 与 `main.py`，入口类字面名为 `Plugin`。
 
 外置插件仓库推荐结构：
 
@@ -42,11 +42,11 @@ logo: logo.png                # 可选
 
 ## 导入边界
 
-外置插件只允许导入 `mohobot.api`，不得导入 `mohobot` 其他子模块。`mohobot.api` 当前导出：
+外置插件应只导入 `mohobot.api`，不要导入 `mohobot` 其他子模块。这是发布约定，当前加载器没有 import 守卫。`mohobot.api` 当前导出：
 
 - 事件模型：`Event`、`MessageEvent`、`GroupMessageEvent`、`PrivateMessageEvent`、`NoticeEvent`、`MetaEvent`、`RequestEvent`、`MessageSegment`
 - CQ 工具：`build_cq_code`、`parse_cq_code`、`extract_plain_text`、`extract_at_targets`
-- 文件 I/O：`json_read`、`json_write`、`json_update`、`JSONLWriter`、`ensure_dir`
+- 文件 I/O：`json_read`、`json_write`、`json_update`、`JSONLWriter`、`ensure_dir`。`json_write` 是就地截断写，不保证进程崩溃时的原子性；关键数据请自行使用临时文件加 `os.replace`。
 - 消息归属：`Sender`、`SentMessageClaims`、`message_signature`
 - 媒体与文本：`extract_image_urls`
 - 封禁：`BanStore`、`UserDataList`、`UserDataModel`

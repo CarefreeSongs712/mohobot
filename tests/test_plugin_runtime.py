@@ -225,3 +225,63 @@ def test_staging_directories_are_not_loaded(tmp_path: Path) -> None:
         assert ps._plugins == []
 
     asyncio.run(run())
+
+
+def test_full_reload_cancels_plugin_owned_tasks(tmp_path: Path) -> None:
+    async def run() -> None:
+        from mohobot.services.task_supervisor import TaskSupervisor
+
+        ps = _plugin_system(tmp_path)
+        supervisor = TaskSupervisor()
+        ps.set_task_supervisor(supervisor)
+        _write(
+            tmp_path / "plugins" / "worker.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    _supervisor = None\n"
+            "    @classmethod\n"
+            "    def inject_task_supervisor(cls, supervisor): cls._supervisor = supervisor\n"
+            "    async def on_startup(self):\n"
+            "        self.task = self._supervisor.create_task(\n"
+            "            asyncio.sleep(60), name='worker-task', owner='plugins')\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        await ps.load_plugins()
+        instance = ps._plugins[0]["instance"]
+        task = instance.task
+        assert not task.cancelled()
+        await ps.reload_plugins()
+        await asyncio.sleep(0)
+        assert task.cancelled()
+
+    asyncio.run(run())
+
+
+def test_installed_plugins_do_not_shadow_stdlib(tmp_path: Path) -> None:
+    async def run() -> None:
+        import json
+
+        installed = tmp_path / "data" / "plugins" / "json"
+        _write(
+            installed / "main.py",
+            "class Plugin:\n"
+            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+        )
+        _write(
+            installed / "metadata.yaml",
+            "name: json\n"
+            "author: CarefreeSongs712\n"
+            "display_name: shadow\n"
+            "version: 1.0.0\n"
+            "description: shadow test\n"
+            "repo: https://github.com/CarefreeSongs712/mohobot-plugin-json\n"
+            "license: MIT\n"
+            "api_version: 1\n",
+        )
+        ps = _plugin_system(tmp_path)
+        await ps.load_plugins()
+        assert str((tmp_path / "data" / "plugins").absolute()) not in sys.path
+        assert "site-packages" not in str(json.__file__)
+        assert str(tmp_path) not in str(json.__file__)
+
+    asyncio.run(run())
