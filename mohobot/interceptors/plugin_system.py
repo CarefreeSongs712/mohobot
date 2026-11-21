@@ -976,6 +976,21 @@ class PluginSystem(Interceptor):
                 meta = next((m for m in self._plugins if m["name"] == name), None)
                 return bool(meta and meta.get("loaded"))
             index = self._plugins.index(meta)
+            old_meta = dict(meta)
+            old_module_name = str(meta.get("module_name") or "")
+            old_entry_dir = str(meta.get("entry_dir") or "")
+            old_modules = {
+                module_name: module
+                for module_name, module in list(sys.modules.items())
+                if module_name == old_module_name
+                or module_name.startswith(old_module_name + ".")
+                or (
+                    old_entry_dir
+                    and getattr(module, "__file__", None)
+                    and self._is_under(getattr(module, "__file__"), old_entry_dir)
+                )
+            }
+            old_path = self._plugin_sys_paths.get(name)
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
                 await self._task_supervisor.cancel_owner(f"plugin:{name}")
@@ -1006,6 +1021,24 @@ class PluginSystem(Interceptor):
 
             sources = await load_sources(self._data_dir)
             new_meta["source_record"] = sources.get(new_meta.get("name", ""))
+            if not new_meta.get("loaded") and old_meta.get("loaded"):
+                sys.modules.update(old_modules)
+                if old_path:
+                    if old_path not in sys.path:
+                        sys.path.insert(0, old_path)
+                    self._plugin_sys_paths[name] = old_path
+                    self._loaded_sys_paths.add(old_path)
+                self._plugins[index] = old_meta
+                try:
+                    self.apply_injections()
+                except Exception as e:
+                    logger.error(f"Plugin injection failed after reload rollback: {e}")
+                await self._call_hook(old_meta, "on_startup")
+                self._start_tick_for(old_meta)
+                logger.error(
+                    f"Plugin {name} reload failed, kept previous instance: {new_meta.get('error')}"
+                )
+                return False
             self._plugins[index] = new_meta
             if new_meta.get("loaded"):
                 try:
