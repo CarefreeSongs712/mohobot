@@ -1217,7 +1217,8 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            await self._plugin_system.set_enabled(body.name, body.enabled)
+            if not await self._plugin_system.set_enabled(body.name, body.enabled):
+                raise HTTPException(status_code=404, detail="插件不存在")
             logger.info(f"Web panel: plugin {body.name} {'enabled' if body.enabled else 'disabled'} (hot)")
             return {"status": "ok", "name": body.name, "enabled": body.enabled}
 
@@ -1307,11 +1308,20 @@ class WebPanel:
             if not self._plugin_market or not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
             try:
+                async def _unload_installed(plugin_name: str) -> None:
+                    await self._plugin_system.unload_plugin(plugin_name)
+
                 name, destination = await self._plugin_market.update(
-                    body.plugin_id, source_id=body.source_id
+                    body.plugin_id,
+                    source_id=body.source_id,
+                    before_replace=_unload_installed,
                 )
                 count = await self._plugin_system.reload_plugins()
             except Exception as exc:
+                try:
+                    await self._plugin_system.reload_plugins()
+                except Exception as reload_exc:
+                    logger.error(f"Plugin reload after failed update failed: {reload_exc}")
                 await self._audit.write(
                     actor="admin",
                     action="plugin_market_update",
@@ -1428,6 +1438,7 @@ class WebPanel:
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._plugin_market.reload_sources()
             await self._audit.write(
                 actor="admin",
                 action="plugin_source_add",
@@ -1447,6 +1458,7 @@ class WebPanel:
                 await remove_registry_source(self._data_dir, source_id)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._plugin_market.reload_sources()
             await self._audit.write(
                 actor="admin",
                 action="plugin_source_remove",

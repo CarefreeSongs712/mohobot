@@ -348,6 +348,177 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_reload_respects_disabled_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "alpha.py",
+            """class Plugin:
+    async def on_message(self, bot_id, event, raw): return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        assert ps._plugins[0]["loaded"] is True
+        state_path = tmp_path / "data" / "plugins_state.json"
+        _write(state_path, '{"alpha": {"enabled": false}}')
+        assert await ps.reload_plugin("alpha") is False
+        meta = next(m for m in ps._plugins if m["name"] == "alpha")
+        assert meta["enabled"] is False
+        assert meta["loaded"] is False
+        assert meta.get("instance") is None
+
+    asyncio.run(run())
+
+
+def test_shutdown_created_tasks_are_cancelled(tmp_path: Path) -> None:
+    async def run() -> None:
+        from mohobot.services.task_supervisor import TaskSupervisor
+
+        ps = _plugin_system(tmp_path)
+        supervisor = TaskSupervisor()
+        ps.set_task_supervisor(supervisor)
+        _write(
+            tmp_path / "plugins" / "shutdown_task.py",
+            """import asyncio
+class Plugin:
+    _supervisor = None
+    @classmethod
+    def inject_task_supervisor(cls, supervisor): cls._supervisor = supervisor
+    async def on_shutdown(self):
+        self.task = self._supervisor.create_task(
+            asyncio.sleep(60), name='shutdown-task', owner='events')
+    async def on_message(self, bot_id, event, raw): return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        old = ps._plugins[0]["instance"]
+        assert await ps.reload_plugin("shutdown_task") is True
+        await asyncio.sleep(0)
+        assert old.task.cancelled()
+
+    asyncio.run(run())
+
+
+def test_plugin_dir_appended_does_not_shadow_stdlib(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "shadow_probe" / "metadata.yaml",
+            """name: shadow_probe
+author: CarefreeSongs712
+version: 1.0.0
+description: shadow
+repo: https://github.com/CarefreeSongs712/shadow
+license: MIT
+api_version: 1
+""",
+        )
+        _write(
+            tmp_path / "plugins" / "shadow_probe" / "main.py",
+            """class Plugin:
+    async def on_message(self, bot_id, event, raw):
+        return (False, None)
+""",
+        )
+        _write(
+            tmp_path / "plugins" / "shadow_probe" / "colorsys.py",
+            "SENTINEL = True\n",
+        )
+        await ps.load_plugins()
+        import colorsys
+
+        assert "shadow_probe" not in (getattr(colorsys, "__file__", "") or "")
+
+    asyncio.run(run())
+
+
+def test_root_metadata_does_not_apply_to_single_file_plugin(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "metadata.yaml",
+            """name: root_manifest
+author: CarefreeSongs712
+version: 1.0.0
+description: root
+repo: https://github.com/CarefreeSongs712/root
+license: MIT
+api_version: 1
+""",
+        )
+        _write(
+            tmp_path / "plugins" / "single_probe.py",
+            """class Plugin:
+    async def on_message(self, bot_id, event, raw):
+        return (False, None)
+""",
+        )
+        await ps.load_plugins()
+        assert [meta["name"] for meta in ps.list_plugins()] == ["single_probe"]
+
+    asyncio.run(run())
+
+
+def test_reload_waits_for_inflight_dispatch(tmp_path: Path) -> None:
+    async def run() -> None:
+        from types import SimpleNamespace
+
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "slow_probe.py",
+            """import asyncio
+class Plugin:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    async def on_message(self, bot_id, event, raw):
+        self.started.set()
+        await self.release.wait()
+        return (True, "ok")
+    async def on_shutdown(self):
+        pass
+""",
+        )
+        await ps.load_plugins()
+        plugin = ps._plugins[0]["instance"]
+        event = SimpleNamespace(message=[{"type": "text", "data": {"text": "/slow"}}])
+        handler = asyncio.create_task(ps.intercept("bot_001", event, {}))
+        await plugin.started.wait()
+        reload = asyncio.create_task(ps.reload_plugin("slow_probe"))
+        await asyncio.sleep(0.05)
+        assert not reload.done()
+        plugin.release.set()
+        await handler
+        assert await reload is True
+
+    asyncio.run(run())
+
+
+def test_no_prefix_handler_is_tracked_by_dispatch_barrier(tmp_path: Path) -> None:
+    async def run() -> None:
+        from types import SimpleNamespace
+
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "prefix_probe.py",
+            """import asyncio
+class Plugin:
+    no_prefix_triggers = {"go"}
+    async def on_message(self, bot_id, event, raw):
+        await asyncio.sleep(0.2)
+        return (True, "ok")
+""",
+        )
+        await ps.load_plugins()
+        event = SimpleNamespace(message=[{"type": "text", "data": {"text": "go"}}])
+        task = asyncio.create_task(ps.dispatch_observed("bot_001", event, {}))
+        await asyncio.sleep(0.05)
+        assert ps._active_dispatches == 1
+        handled, reply = await task
+        assert handled is True and reply == "ok"
+
+    asyncio.run(run())
+
+
 def test_module_name_collision_is_reported(tmp_path: Path) -> None:
     async def run() -> None:
         body = (

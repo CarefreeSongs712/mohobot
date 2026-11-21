@@ -224,7 +224,7 @@ class PluginSystem(Interceptor):
         source: str = "builtin",
     ) -> dict[str, Any]:
         manifest: PluginManifest | None = None
-        manifest_path = find_manifest(entry_path.parent)
+        manifest_path = find_manifest(entry_path.parent) if entry_dir else None
         if manifest_path is not None:
             manifest = parse_manifest(manifest_path)
             plugin_name = manifest.name
@@ -276,7 +276,7 @@ class PluginSystem(Interceptor):
             else:
                 plugin_dir_abs = str(Path(entry_dir).absolute())
                 if plugin_dir_abs not in sys.path:
-                    sys.path.insert(0, plugin_dir_abs)
+                    sys.path.append(plugin_dir_abs)
                     self._loaded_sys_paths.add(plugin_dir_abs)
                 self._plugin_sys_paths[plugin_name] = plugin_dir_abs
                 spec = importlib.util.spec_from_file_location(
@@ -504,6 +504,8 @@ class PluginSystem(Interceptor):
         for meta in reversed(tuple(self._plugins)):
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+        if self._task_supervisor is not None:
+            await self._task_supervisor.cancel_owner_prefix("plugin:")
         self._unload_all_plugins()
 
     async def _reload_unlocked(self) -> int:
@@ -963,6 +965,8 @@ class PluginSystem(Interceptor):
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             self._unload_plugin(meta)
             self._plugins.remove(meta)
             return True
@@ -975,6 +979,7 @@ class PluginSystem(Interceptor):
                 await self._reload_unlocked()
                 meta = next((m for m in self._plugins if m["name"] == name), None)
                 return bool(meta and meta.get("loaded"))
+            await self._wait_for_dispatches()
             index = self._plugins.index(meta)
             old_meta = dict(meta)
             old_module_name = str(meta.get("module_name") or "")
@@ -996,6 +1001,8 @@ class PluginSystem(Interceptor):
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             self._unload_plugin(meta)
             entry = next((item for item in self._iter_entries() if item[1] == name), None)
             if entry is None:
@@ -1021,11 +1028,15 @@ class PluginSystem(Interceptor):
 
             sources = await load_sources(self._data_dir)
             new_meta["source_record"] = sources.get(new_meta.get("name", ""))
-            if not new_meta.get("loaded") and old_meta.get("loaded"):
+            if (
+                not new_meta.get("loaded")
+                and new_meta.get("enabled", True)
+                and old_meta.get("loaded")
+            ):
                 sys.modules.update(old_modules)
                 if old_path:
                     if old_path not in sys.path:
-                        sys.path.insert(0, old_path)
+                        sys.path.append(old_path)
                     self._plugin_sys_paths[name] = old_path
                     self._loaded_sys_paths.add(old_path)
                 self._plugins[index] = old_meta
@@ -1202,7 +1213,9 @@ class PluginSystem(Interceptor):
                             continue
                         msg_handler = getattr(plugin, "on_message", None)
                         if msg_handler:
-                            handled, response = await msg_handler(bot_id, event, raw)
+                            handled, response = await self._run_plugin_handler(
+                                msg_handler, bot_id, event, raw
+                            )
                             if handled:
                                 return (True, response)
             except Exception as e:

@@ -41,12 +41,20 @@ class _FakeMarket:
     async def install(self, plugin_id: str, *, source_id: str = "official"):
         return "demo", Path("demo")
 
-    async def update(self, plugin_id: str, *, source_id: str = "official"):
+    async def update(self, plugin_id: str, *, source_id: str = "official", before_replace=None):
+        if before_replace is not None:
+            await before_replace("demo")
         return "demo", Path("demo")
 
 
 class _FakePluginSystem:
     installed_dir = Path("plugins")
+
+    async def set_enabled(self, name: str, enabled: bool) -> bool:
+        return name == "demo"
+
+    async def unload_plugin(self, name: str) -> bool:
+        return True
 
     async def reload_plugins(self) -> int:
         return 1
@@ -69,6 +77,16 @@ def _client(tmp_path: Path) -> tuple[TestClient, dict[str, str]]:
     response = client.post("/api/login", json={"username": "admin", "password": "test-password"})
     assert response.status_code == 200
     return client, {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    response = client.post(
+        "/api/plugins/toggle",
+        headers=headers,
+        json={"name": "missing", "enabled": False},
+    )
+    assert response.status_code == 404
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:
@@ -105,6 +123,27 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json()["name"] == "demo"
+
+
+def test_add_source_refreshes_market_sources(tmp_path: Path) -> None:
+    market = _FakeMarket()
+    panel = WebPanel(
+        password_hash=WebPanel._hash_password("test-password"),
+        data_dir=str(tmp_path),
+        plugin_system=_FakePluginSystem(),
+        plugin_market=market,
+    )
+    client = TestClient(panel._app)
+    token = client.post(
+        "/api/login", json={"username": "admin", "password": "test-password"}
+    ).json()["token"]
+    response = client.post(
+        "/api/plugin-sources",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"id": "custom", "name": "自定义", "url": "https://example.com/index.json"},
+    )
+    assert response.status_code == 200
+    assert market.reload_count == 1
 
 
 def test_source_list_reloads_from_disk(tmp_path: Path) -> None:
