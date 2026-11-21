@@ -1357,17 +1357,26 @@ class WebPanel:
             from mohobot.plugins.sources import remove_source
 
             try:
-                target = await asyncio.to_thread(
-                    uninstall_plugin,
-                    name,
-                    self._plugin_system.installed_dir,
-                    self._data_dir / "plugin_recycle",
-                    config_dir=self._data_dir / "plugins_config",
-                    data_dir=self._data_dir,
-                    delete_config=delete_config,
-                    delete_data=delete_data,
-                )
-                await remove_source(self._data_dir, name)
+                if self._plugin_market is not None:
+                    target = await self._plugin_market.uninstall(
+                        name,
+                        config_dir=self._data_dir / "plugins_config",
+                        recycle_dir=self._data_dir / "plugin_recycle",
+                        delete_config=delete_config,
+                        delete_data=delete_data,
+                    )
+                else:
+                    target = await asyncio.to_thread(
+                        uninstall_plugin,
+                        name,
+                        self._plugin_system.installed_dir,
+                        self._data_dir / "plugin_recycle",
+                        config_dir=self._data_dir / "plugins_config",
+                        data_dir=self._data_dir,
+                        delete_config=delete_config,
+                        delete_data=delete_data,
+                    )
+                    await remove_source(self._data_dir, name)
                 await self._plugin_system.reload_plugins()
             except (InstallError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc

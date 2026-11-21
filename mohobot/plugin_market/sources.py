@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from loguru import logger
+
 from mohobot.file_store import json_read, json_update
 
 DEFAULT_SOURCE_ID = "official"
@@ -58,7 +60,11 @@ def validate_source_url(url: str) -> str:
 
 
 async def load_registry_sources(data_dir: str | Path) -> list[RegistrySource]:
-    data = await json_read(_source_file(data_dir))
+    try:
+        data = await json_read(_source_file(data_dir))
+    except (OSError, ValueError) as e:
+        logger.error(f"读取插件源配置失败: {e}")
+        return default_sources()
     if not isinstance(data, dict):
         return default_sources()
     raw = data.get("sources")

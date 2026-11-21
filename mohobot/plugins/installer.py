@@ -132,6 +132,7 @@ def install_from_directory(
     plugins_dir: Path,
     *,
     expected_name: str | None = None,
+    expected_version: str | None = None,
 ) -> tuple[PluginManifest, Path]:
     source = Path(source).resolve()
     manifest_path = find_manifest(source)
@@ -140,6 +141,10 @@ def install_from_directory(
     manifest = parse_manifest(manifest_path)
     if expected_name and manifest.name != expected_name:
         raise InstallError(f"插件名不匹配: 期望 {expected_name}, 实际 {manifest.name}")
+    if expected_version and manifest.version != expected_version:
+        raise InstallError(
+            f"插件版本不匹配: 期望 {expected_version}, 实际 {manifest.version}"
+        )
 
     plugins_dir = Path(plugins_dir).resolve()
     plugins_dir.mkdir(parents=True, exist_ok=True)
@@ -169,6 +174,8 @@ def install_from_archive(
     archive: Path,
     plugins_dir: Path,
     *,
+    expected_name: str | None = None,
+    expected_version: str | None = None,
     expected_sha256: str = "",
     proxy: str = "",
 ) -> tuple[PluginManifest, Path]:
@@ -186,7 +193,12 @@ def install_from_archive(
     try:
         safe_extract_zip(archive, staging / "extract")
         root = find_plugin_root(staging / "extract")
-        return install_from_directory(root, plugins_dir)
+        return install_from_directory(
+            root,
+            plugins_dir,
+            expected_name=expected_name,
+            expected_version=expected_version,
+        )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -254,14 +266,18 @@ def upgrade_from_archive(
             )
         backup = temp_path / "backup"
         shutil.copytree(destination, backup)
-        shutil.rmtree(destination)
         try:
+            shutil.rmtree(destination)
             shutil.move(str(root), str(destination))
-            installed = parse_manifest(destination / "metadata.yaml")
+            installed_path = find_manifest(destination)
+            if installed_path is None:
+                raise InstallError("更新后清单缺失")
+            installed = parse_manifest(installed_path)
             if installed.name != expected_name:
                 raise InstallError("更新后清单名称不一致")
         except Exception:
             shutil.rmtree(destination, ignore_errors=True)
-            shutil.move(str(backup), str(destination))
+            if backup.exists():
+                shutil.move(str(backup), str(destination))
             raise
     return manifest, destination

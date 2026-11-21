@@ -34,7 +34,7 @@ from mohobot.plugins.market import (
     entry_download_url,
     parse_market_index,
 )
-from mohobot.plugins.sources import load_sources, save_source
+from mohobot.plugins.sources import load_sources, remove_source, save_source
 
 MAX_INDEX_BYTES = 5 * 1024 * 1024
 
@@ -89,6 +89,7 @@ class MarketService:
         self._fetcher = fetcher or fetch_json
         self._indexes: dict[str, MarketIndex] = {}
         self._sources: list[RegistrySource] = []
+        self._op_lock = asyncio.Lock()
 
     @property
     def sources(self) -> list[RegistrySource]:
@@ -160,6 +161,15 @@ class MarketService:
         *,
         source_id: str = "official",
     ) -> tuple[str, Path]:
+        async with self._op_lock:
+            return await self._install_from_entry_unlocked(entry, source_id=source_id)
+
+    async def _install_from_entry_unlocked(
+        self,
+        entry: MarketEntry,
+        *,
+        source_id: str = "official",
+    ) -> tuple[str, Path]:
         _check_entry_compatibility(entry)
         source_id = entry.source_id or source_id
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
@@ -168,7 +178,11 @@ class MarketService:
             if entry.sha256:
                 await asyncio.to_thread(verify_sha256, archive, entry.sha256)
             manifest, destination = await asyncio.to_thread(
-                install_from_archive, archive, self.plugins_dir
+                install_from_archive,
+                archive,
+                self.plugins_dir,
+                expected_name=entry.name,
+                expected_version=entry.version,
             )
         registry_url = next(
             (source.url for source in self._sources if source.id == source_id), ""
@@ -184,7 +198,7 @@ class MarketService:
                 "repo": entry.repo,
                 "download_url": entry.download_url,
                 "sha256": entry.sha256,
-                "version": entry.version,
+                "version": manifest.version,
                 "installed_at": time.time(),
             },
         )
@@ -193,27 +207,74 @@ class MarketService:
     async def install(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
         if not self._sources:
             await self.refresh()
-        entry = self.find(plugin_id)
+        entry = self.find(plugin_id, source_id)
         if entry is None:
             raise InstallError(f"插件不存在: {plugin_id}")
         return await self.install_from_entry(entry, source_id=source_id)
 
 
+    async def uninstall(
+        self,
+        name: str,
+        *,
+        config_dir: str | Path,
+        recycle_dir: str | Path,
+        delete_config: bool = False,
+        delete_data: bool = False,
+    ) -> Path:
+        from mohobot.plugins.installer import uninstall_plugin
+
+        async with self._op_lock:
+            target = await asyncio.to_thread(
+                uninstall_plugin,
+                name,
+                self.plugins_dir,
+                recycle_dir,
+                config_dir=config_dir,
+                data_dir=self.data_dir,
+                delete_config=delete_config,
+                delete_data=delete_data,
+            )
+            await remove_source(self.data_dir, name)
+            return target
+
     async def update(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
+        async with self._op_lock:
+            return await self._update_unlocked(plugin_id, source_id=source_id)
+
+    async def _update_unlocked(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
         if not self._sources:
             await self.refresh()
-        entry = self.find(plugin_id)
-        if entry is None:
-            raise InstallError(f"插件不存在: {plugin_id}")
         records = await load_sources(self.data_dir)
-        record = records.get(entry.name)
+        record_name = next(
+            (
+                name
+                for name, item in records.items()
+                if isinstance(item, dict)
+                and (
+                    item.get("plugin_id") == plugin_id
+                    or item.get("market_plugin_id") == plugin_id
+                )
+            ),
+            plugin_id.rsplit("/", 1)[-1],
+        )
+        record = records.get(record_name)
         if not record or record.get("install_method") != "market":
             raise InstallError("该插件不是通过插件市场安装，无法更新")
-        _check_entry_compatibility(entry)
         source_id = str(record.get("registry_id") or source_id)
         entry = self.find(plugin_id, source_id)
         if entry is None:
             raise InstallError(f"插件源中已找不到 {plugin_id}")
+        _check_entry_compatibility(entry)
+        installed_version = str(record.get("version") or "")
+        if installed_version:
+            try:
+                if Version(entry.version) <= Version(installed_version):
+                    raise InstallError(
+                        f"市场版本 {entry.version} 不高于已安装版本 {installed_version}"
+                    )
+            except InvalidVersion:
+                pass
         with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
             archive = Path(temp) / "plugin.zip"
             await self._download_entry(entry, archive)

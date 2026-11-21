@@ -47,10 +47,12 @@ logo: logo.png                # 可选
 - 事件模型：`Event`、`MessageEvent`、`GroupMessageEvent`、`PrivateMessageEvent`、`NoticeEvent`、`MetaEvent`、`RequestEvent`、`MessageSegment`
 - CQ 工具：`build_cq_code`、`parse_cq_code`、`extract_plain_text`、`extract_at_targets`
 - 文件 I/O：`json_read`、`json_write`、`json_update`、`JSONLWriter`、`ensure_dir`
-- 消息归属：`SentMessageClaims`、`message_signature`
+- 消息归属：`Sender`、`SentMessageClaims`、`message_signature`
+- 媒体与文本：`extract_image_urls`
 - 封禁：`BanStore`、`UserDataList`、`UserDataModel`
-- LLM 工具：`LLMTool`、`registry`、`tool_schema`
-- 渲染与时间：`render_info_card`、`render_help_card`、`format_duration`、`now_utc8`、`format_utc8`
+- LLM：`LLMTool`、`registry`、`tool_schema`、`LLMDiagnostic`
+- 渲染与时间：`render_info_card`、`render_help_card`、`find_cjk_font`、`format_duration`、`TZ_UTC8`、`now_utc8`、`format_utc8`
+- 状态卡颜色：`status_card` 颜色常量与 `usage_color`
 - `logger`
 
 ## 生命周期钩子

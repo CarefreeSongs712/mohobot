@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from mohobot.file_store import json_read, json_update
 
 SOURCE_SCHEMA_VERSION = 1
@@ -13,7 +15,11 @@ def sources_path(data_dir: str | Path) -> Path:
 
 
 async def load_sources(data_dir: str | Path) -> dict[str, dict[str, Any]]:
-    data = await json_read(sources_path(data_dir))
+    try:
+        data = await json_read(sources_path(data_dir))
+    except (OSError, ValueError) as e:
+        logger.error(f"读取插件来源记录失败: {e}")
+        return {}
     return data if isinstance(data, dict) else {}
 
 

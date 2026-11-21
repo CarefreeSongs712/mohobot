@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mohobot.plugins.installer import InstallError, parse_github_repo, with_proxy
-from mohobot.plugins.manifest import NAME_RE, SEMVER_RE
+from mohobot.plugins.manifest import AUTHOR_RE, NAME_RE, SEMVER_RE
 
 INDEX_SCHEMA_VERSION = 1
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -57,6 +57,8 @@ def parse_market_entry(key: str, data: Any) -> MarketEntry:
     name = _required_text(data, "name")
     if not NAME_RE.fullmatch(name):
         raise InstallError(f"市场条目 {key} 的 name 非法")
+    if not AUTHOR_RE.fullmatch(author):
+        raise InstallError(f"市场条目 {key} 的 author 非法")
     if key != f"{author}/{name}":
         raise InstallError(f"市场条目键 {key} 与 author/name 不一致")
     version = _required_text(data, "version")

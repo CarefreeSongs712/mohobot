@@ -33,6 +33,33 @@ from mohobot.models.onebot import (
     MetaEvent,
     NoticeEvent,
 )
+
+
+class _PluginTaskSupervisor:
+    """把插件显式使用的 owner="plugins" 映射为按插件隔离的 owner。"""
+
+    def __init__(self, supervisor: Any, plugin_name: str) -> None:
+        self._supervisor = supervisor
+        self._plugin_name = plugin_name
+
+    @property
+    def stopping(self) -> bool:
+        return bool(getattr(self._supervisor, "stopping", False))
+
+    def create_task(self, coro: Any, *, name: str, owner: str = "application") -> Any:
+        if owner == "plugins":
+            owner = f"plugin:{self._plugin_name}"
+        return self._supervisor.create_task(coro, name=name, owner=owner)
+
+    async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
+        if owner == "plugins":
+            owner = f"plugin:{self._plugin_name}"
+        await self._supervisor.cancel_owner(owner, timeout)
+
+    async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
+        if prefix == "plugins":
+            prefix = f"plugin:{self._plugin_name}"
+        await self._supervisor.cancel_owner_prefix(prefix, timeout)
 from mohobot import __version__ as MOHOBOT_VERSION
 from mohobot.plugins.manifest import (
     ManifestError,
@@ -289,6 +316,7 @@ class PluginSystem(Interceptor):
                         sys.modules.pop(loaded_name, None)
             meta["error"] = str(e)
             meta["loaded"] = False
+            self._unload_plugin(meta)
             logger.error(f"Failed to load plugin {entry_path.name}: {e}")
         return meta
 
@@ -301,29 +329,44 @@ class PluginSystem(Interceptor):
         ):
             if not root.exists():
                 continue
-            for entry in sorted(root.iterdir()):
-                if (
-                    entry.is_file()
-                    and entry.suffix == ".py"
-                    and not entry.name.startswith(("_", "."))
-                    and entry.name != "__init__.py"
-                ):
-                    name = entry.stem
-                    if source == "builtin" and name in installed_names:
-                        continue
-                    entries.append((entry, name, "", source))
-                elif (
-                    entry.is_dir()
-                    and not entry.name.startswith(("_", "."))
-                    and entry.name != "__pycache__"
-                    and (entry / "main.py").exists()
-                ):
-                    name = entry.name
-                    if source == "builtin" and name in installed_names:
-                        continue
+            for item in sorted(root.iterdir()):
+                if item.is_file():
                     if source == "installed":
-                        installed_names.add(name)
-                    entries.append((entry / "main.py", name, str(entry), source))
+                        # 已安装插件统一使用目录形态，避免 metadata 与安装目录名无法对应。
+                        continue
+                    if (
+                        item.suffix != ".py"
+                        or item.name.startswith(("_", "."))
+                        or item.name == "__init__.py"
+                    ):
+                        continue
+                    name = item.stem
+                    if name in installed_names:
+                        continue
+                    entries.append((item, name, "", source))
+                    continue
+                if not item.is_dir():
+                    continue
+                if item.name.startswith(("_", ".", "__pycache__")):
+                    continue
+                manifest_path = find_manifest(item)
+                entry_name = "main.py"
+                display_name = item.name
+                if manifest_path is not None:
+                    try:
+                        manifest = parse_manifest(manifest_path)
+                        entry_name = manifest.entry
+                        display_name = manifest.name
+                    except Exception:
+                        entry_name = "main.py"
+                entry_file = item / entry_name
+                if not entry_file.is_file():
+                    continue
+                if source == "builtin" and display_name in installed_names:
+                    continue
+                if source == "installed":
+                    installed_names.add(display_name)
+                entries.append((entry_file, display_name, str(item), source))
         return entries
 
     def _error_meta(
@@ -415,7 +458,10 @@ class PluginSystem(Interceptor):
                 count += 1
 
         logger.info(f"Plugin system loaded {count} plugin(s)")
-        self.apply_injections()
+        try:
+            self.apply_injections()
+        except Exception as e:
+            logger.error(f"Plugin injection failed: {e}")
         await self.startup_plugins()
         self.start_tick_tasks()
         return count
@@ -644,7 +690,7 @@ class PluginSystem(Interceptor):
             if self._task_supervisor is not None:
                 injector = getattr(inst.__class__, "inject_task_supervisor", None)
                 if injector:
-                    injector(self._task_supervisor)
+                    injector(_PluginTaskSupervisor(self._task_supervisor, meta["name"]))
             if self._matcher is not None:
                 injector = getattr(inst.__class__, "inject_song_matcher", None)
                 if injector:
@@ -866,6 +912,8 @@ class PluginSystem(Interceptor):
                 return bool(meta and meta.get("loaded"))
             index = self._plugins.index(meta)
             await self._stop_tick_for(name)
+            if self._task_supervisor is not None:
+                await self._task_supervisor.cancel_owner(f"plugin:{name}")
             if meta.get("loaded"):
                 await self._call_hook(meta, "on_shutdown")
             self._unload_plugin(meta)
@@ -880,9 +928,16 @@ class PluginSystem(Interceptor):
             except Exception as e:
                 new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
                 logger.error(f"Failed to reload plugin {entry[1]}: {e}")
+            from mohobot.plugins.sources import load_sources
+
+            sources = await load_sources(self._data_dir)
+            new_meta["source_record"] = sources.get(new_meta.get("name", ""))
             self._plugins[index] = new_meta
             if new_meta.get("loaded"):
-                self.apply_injections()
+                try:
+                    self.apply_injections()
+                except Exception as e:
+                    logger.error(f"Plugin injection failed after reload: {e}")
                 await self._call_hook(new_meta, "on_startup")
                 self._start_tick_for(new_meta)
             return bool(new_meta.get("loaded"))
@@ -914,9 +969,11 @@ class PluginSystem(Interceptor):
     async def set_enabled(self, name: str, enabled: bool) -> bool:
         """启用/禁用插件, 立即生效(无需重启)。"""
         async with self._lock():
-            await self._save_state({name: {"enabled": enabled}})
             meta = next((m for m in self._plugins if m["name"] == name), None)
-            if meta is None or not enabled or not meta.get("loaded"):
+            if meta is None:
+                return False
+            await self._save_state({name: {"enabled": enabled}})
+            if not enabled or not meta.get("loaded"):
                 await self._reload_unlocked()
             else:
                 meta["enabled"] = enabled

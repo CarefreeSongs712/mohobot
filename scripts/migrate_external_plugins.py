@@ -8,17 +8,17 @@ from pathlib import Path
 EXTERNAL_PLUGINS = {
     "anysearch": ("搜索", "AnySearch 网页搜索工具", "MIT", ["search"]),
     "beszel_servers": ("Beszel 监控", "Beszel 服务器状态卡片", "MIT", ["monitor"]),
-    "bilibiliparse": ("B 站解析", "Bilibili 视频/动态链接解析", "MIT", ["bilibili"]),
+    "bilibiliparse": ("B 站解析", "Bilibili 视频/动态链接解析", "AGPL-3.0", ["bilibili"]),
     "divination": ("占卜", "每日占卜与运势", "MIT", ["fun"]),
     "meme_stealer": ("表情包小偷", "表情包收集、检索与发送", "AGPL-3.0", ["meme"]),
     "neteasemusic": ("网易云点歌", "网易云音乐搜索与点歌", "MIT", ["music"]),
     "proactive_chat": ("主动聊天", "私聊主动发起对话", "AGPL-3.0", ["chat"]),
     "praise": ("点赞", "赞我指令自动点赞", "MIT", ["praise"]),
-    "qzone": ("QQ 空间", "QQ 空间发布与浏览", "MIT", ["qzone"]),
+    "qzone": ("QQ 空间", "QQ 空间发布与浏览", "GPL-3.0", ["qzone"]),
     "relationship": ("关系管理", "QQ 好友与群聊管理、入群/好友申请审批、通知处理", "AGPL-3.0", ["relationship", "admin", "approval"]),
     "six66": ("六六六", "群聊随机复读 6/66/666", "MIT", ["fun"]),
     "welcome": ("欢迎", "新好友/新入群自动欢迎", "MIT", ["welcome"]),
-    "wifepicker": ("抽老婆", "群聊抽老婆互动", "MIT", ["fun"]),
+    "wifepicker": ("抽老婆", "群聊抽老婆互动", "AGPL-3.0", ["fun"]),
 }
 
 IMPORT_REWRITES = {
@@ -77,7 +77,7 @@ def _rewrite_imports(root: Path) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def _write_support_files(root: Path, name: str, owner: str) -> None:
+def _write_support_files(root: Path, name: str, owner: str, main_repo: Path) -> None:
     display_name, description, license_name, tags = EXTERNAL_PLUGINS[name]
     repo = f"https://github.com/{owner}/mohobot-plugin-{name}"
     (root / "metadata.yaml").write_text(
@@ -108,10 +108,15 @@ def _write_support_files(root: Path, name: str, owner: str) -> None:
     )
     license_path = root / "LICENSE"
     if not license_path.exists():
-        if license_name == "AGPL-3.0":
-            shutil.copy2(Path("plugins/meme_stealer/LICENSE"), license_path)
+        source_license = main_repo / "plugins" / name / "LICENSE"
+        if source_license.exists():
+            shutil.copy2(source_license, license_path)
+        elif license_name == "AGPL-3.0":
+            shutil.copy2(main_repo / "plugins" / "proactive_chat" / "LICENSE", license_path)
+        elif license_name == "GPL-3.0":
+            raise SystemExit(f"缺少 GPL 许可证文本: {source_license}")
         else:
-            shutil.copy2(Path("LICENSE"), license_path)
+            shutil.copy2(main_repo / "LICENSE", license_path)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -129,7 +134,7 @@ def build(main_repo: Path, output: Path, name: str, owner: str) -> Path:
         raise SystemExit(f"目标已存在: {repo}")
     _copy_source(source, repo)
     _rewrite_imports(repo)
-    _write_support_files(repo, name, owner)
+    _write_support_files(repo, name, owner, main_repo)
     _git(repo, "init", "-q")
     _git(repo, "-c", "user.name=CarefreeSongs712", "-c", "user.email=carefreesongs@163.com", "add", ".")
     _git(repo, "-c", "user.name=CarefreeSongs712", "-c", "user.email=carefreesongs@163.com", "commit", "-qm", f"init {name} plugin")

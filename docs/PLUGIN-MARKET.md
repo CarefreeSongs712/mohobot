@@ -15,7 +15,7 @@
       "version": "1.0.0",
       "description": "一句话说明",
       "repo": "https://github.com/CarefreeSongs712/mohobot-plugin-demo",
-      "download_url": "https://github.com/CarefreeSongs712/mohobot-plugin-demo/archive/refs/tags/v1.0.0.zip",
+      "download_url": "https://github.com/CarefreeSongs712/mohobot-plugin-demo/releases/download/v1.0.0/demo-1.0.0.zip",
       "sha256": "<64 位十六进制>",
       "api_version": 1,
       "mohobot_version": "",
@@ -76,7 +76,7 @@
 
 索引更新步骤：
 
-1. 在插件仓库打 tag，生成 `https://github.com/{owner}/{repo}/archive/refs/tags/{tag}.zip`；
+1. 在插件仓库打 tag，附加 release 资产 `<name>-<version>.zip`；
 2. 计算归档 SHA256；
 3. 更新 `mohobot-plugin-index/index.json` 的 `version`、`download_url`、`sha256`、`updated_at`；
 4. 提交并推送索引仓库。
