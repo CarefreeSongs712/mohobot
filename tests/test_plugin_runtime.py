@@ -399,6 +399,40 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_reload_waits_for_inflight_dispatch(tmp_path: Path) -> None:
+    async def run() -> None:
+        from types import SimpleNamespace
+
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "slow_probe.py",
+            """import asyncio
+class Plugin:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    async def on_message(self, bot_id, event, raw):
+        self.started.set()
+        await self.release.wait()
+        return (True, "ok")
+    async def on_shutdown(self):
+        pass
+""",
+        )
+        await ps.load_plugins()
+        plugin = ps._plugins[0]["instance"]
+        event = SimpleNamespace(message=[{"type": "text", "data": {"text": "/slow"}}])
+        handler = asyncio.create_task(ps.intercept("bot_001", event, {}))
+        await plugin.started.wait()
+        reload = asyncio.create_task(ps.reload_plugin("slow_probe"))
+        await asyncio.sleep(0.05)
+        assert not reload.done()
+        plugin.release.set()
+        await handler
+        assert await reload is True
+
+    asyncio.run(run())
+
+
 def test_no_prefix_handler_is_tracked_by_dispatch_barrier(tmp_path: Path) -> None:
     async def run() -> None:
         from types import SimpleNamespace

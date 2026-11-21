@@ -979,6 +979,7 @@ class PluginSystem(Interceptor):
                 await self._reload_unlocked()
                 meta = next((m for m in self._plugins if m["name"] == name), None)
                 return bool(meta and meta.get("loaded"))
+            await self._wait_for_dispatches()
             index = self._plugins.index(meta)
             old_meta = dict(meta)
             old_module_name = str(meta.get("module_name") or "")
