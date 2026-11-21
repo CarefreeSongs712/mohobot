@@ -276,7 +276,7 @@ class PluginSystem(Interceptor):
             else:
                 plugin_dir_abs = str(Path(entry_dir).absolute())
                 if plugin_dir_abs not in sys.path:
-                    sys.path.insert(0, plugin_dir_abs)
+                    sys.path.append(plugin_dir_abs)
                     self._loaded_sys_paths.add(plugin_dir_abs)
                 self._plugin_sys_paths[plugin_name] = plugin_dir_abs
                 spec = importlib.util.spec_from_file_location(
@@ -1036,7 +1036,7 @@ class PluginSystem(Interceptor):
                 sys.modules.update(old_modules)
                 if old_path:
                     if old_path not in sys.path:
-                        sys.path.insert(0, old_path)
+                        sys.path.append(old_path)
                     self._plugin_sys_paths[name] = old_path
                     self._loaded_sys_paths.add(old_path)
                 self._plugins[index] = old_meta
