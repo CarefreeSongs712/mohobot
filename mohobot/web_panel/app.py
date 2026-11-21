@@ -1429,6 +1429,7 @@ class WebPanel:
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._plugin_market.reload_sources()
             await self._audit.write(
                 actor="admin",
                 action="plugin_source_add",
@@ -1448,6 +1449,7 @@ class WebPanel:
                 await remove_registry_source(self._data_dir, source_id)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await self._plugin_market.reload_sources()
             await self._audit.write(
                 actor="admin",
                 action="plugin_source_remove",

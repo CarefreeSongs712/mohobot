@@ -120,6 +120,27 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
+def test_add_source_refreshes_market_sources(tmp_path: Path) -> None:
+    market = _FakeMarket()
+    panel = WebPanel(
+        password_hash=WebPanel._hash_password("test-password"),
+        data_dir=str(tmp_path),
+        plugin_system=_FakePluginSystem(),
+        plugin_market=market,
+    )
+    client = TestClient(panel._app)
+    token = client.post(
+        "/api/login", json={"username": "admin", "password": "test-password"}
+    ).json()["token"]
+    response = client.post(
+        "/api/plugin-sources",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"id": "custom", "name": "自定义", "url": "https://example.com/index.json"},
+    )
+    assert response.status_code == 200
+    assert market.reload_count == 1
+
+
 def test_source_list_reloads_from_disk(tmp_path: Path) -> None:
     market = _FakeMarket()
     panel = WebPanel(
