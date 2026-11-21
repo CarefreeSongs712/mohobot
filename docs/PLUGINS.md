@@ -2,26 +2,23 @@
 
 本文件承接 README 的能力概览，记录各内置插件的命令与配置入口。命令细节以 `/help` 输出、各插件 `_conf_schema.json` 与源码为准；权限说明中的「管理员」均为全局 `admins`。
 
+插件开发与市场发布细节见 [PLUGIN-API.md](PLUGIN-API.md) 与 [PLUGIN-MARKET.md](PLUGIN-MARKET.md)。
+
 ## 插件一览
 
 | 插件 | 位置 | 功能 | 有独立文档 |
 |---|---|---|---|
 | status | `plugins/status/` | `/status` 状态卡 | 否（配置 `admin_qqs`/`community_group`/`help_url`，见 `_conf_schema.json`） |
-| beszel_servers | `plugins/beszel_servers/` | `/servers`、`/服务器` 查看 Beszel 全部服务器状态 | [README](../plugins/beszel_servers/README.md) |
-| praise | `plugins/praise.py` | `赞我`/`zanwo` 点赞 | 否 |
-| divination | `plugins/divination.py` | `/占卜` | 否 |
 | perception | `plugins/perception/` | 日历/节日感知注入 | 否 |
-| welcome | `plugins/welcome.py` | 欢迎语 | 否 |
 | usage_stats | `plugins/usage_stats/` | `/用量` 统计 | 否 |
-| anysearch | `plugins/anysearch.py` | `/搜索` + LLM 搜索工具 | 否 |
 | song_sync | `plugins/song_sync/` | 歌曲库定时同步 | 否（详见 [DEVELOPMENT §8.6](DEVELOPMENT.md)） |
 | chat_manager | `plugins/chat_manager/` | 查看聊天记录 / 代发消息 | 否（见下） |
-| relationship | `plugins/relationship/` | 好友/群管理与审批流 | 否（见下） |
-| wifepicker | `plugins/wifepicker/` | 抽老婆互动 | 否（见下） |
-| neteasemusic | `plugins/neteasemusic/` | 网易云点歌 | 否（见下） |
-| qzone | `plugins/qzone/` | QQ 空间说说 | 否（见下） |
-| meme_stealer | `plugins/meme_stealer/` | 表情包偷取与管理 | [README](../plugins/meme_stealer/README.md) |
-| proactive_chat | `plugins/proactive_chat/` | 主动聊天 | [README](../plugins/proactive_chat/README.md) |
+| ctx_restore | `plugins/ctx_restore/` | 私聊合并转发恢复上下文 | 否 |
+| broadcast | `plugins/broadcast/` | 主动广播 | 否 |
+| song_tools | `plugins/song_tools.py` | 歌曲查询 LLM 工具 | 否 |
+| snitch | `plugins/snitch.py` | 内部举报/排查工具 | 否 |
+
+主仓库 `plugins/` 暂保留外置插件的兼容副本用于回归测试；运行时若 `data/plugins/` 存在同名已安装版本，则优先使用已安装版本。外置插件独立维护，通过插件市场安装：`anysearch`、`beszel_servers`、`bilibiliparse`、`divination`、`meme_stealer`、`neteasemusic`、`praise`、`proactive_chat`、`qzone`、`relationship`、`six66`、`welcome`、`wifepicker`。索引仓库为 `CarefreeSongs712/mohobot-plugin-index`，各仓库名为 `mohobot-plugin-<name>`；外置代码应只导入 `mohobot.api`。
 
 ## 插件系统与配置
 
@@ -34,12 +31,12 @@
 
 `/servers` 与 `/服务器` 读取 Beszel Hub 的 `systems` 集合，生成与 `/status` 同风格的图卡；群内无需 @，按 `global_triggers` 多 bot 去重，全体用户可用。
 
-配置、认证、故障排查与安全边界见插件文档：[`plugins/beszel_servers/README.md`](../plugins/beszel_servers/README.md)。
+配置、认证、故障排查与安全边界见插件文档：[`plugins/beszel_servers/README.md`](https://github.com/CarefreeSongs712/mohobot-plugin-beszel_servers#readme)。
 
 - **配置**：`base_url`（默认 `http://127.0.0.1:8090`）、`email`、`password`（明文保存在 `data/plugins_config/`）、`timeout_secs`、`max_systems`（默认 12，上限 50，超出只提示剩余台数）。
 - **认证**：调用 Hub 的用户登录接口换取 token，按 JWT 过期时间缓存，401/403 时重新登录一次；配置切换使用独立快照，旧 token 不跨 Hub。
 
-## 🗂️ 聊天记录管理插件（chat_manager）
+## 🗂️ 聊天记录管理插件（chat_manager，系统插件）
 
 查看指定会话的聊天记录、以 bot 身份代发消息。两个命令均**仅全局管理员**、带 `/` 前缀，群内多 bot 时只由一个 bot 响应。
 
@@ -47,7 +44,7 @@
 - **`/发送消息 <QQ号|群号> <内容>`** — 把内容以纯文本段发到指定会话（不解析 `[CQ:...]`，避免被当消息构造入口）；成功回执、失败给出原因。
 - **目标判定**：群号与 QQ 都是纯数字，按上下文判定（`/发送消息` 按 `get_group_list`，接口失败即取消）；配置项 `default_count` / `batch_size`。
 
-## 👥 关系管理器插件（relationship）
+## 👥 关系管理器插件（relationship，外置）
 
 管理 QQ 好友和群聊；审批员 = 管理员 + 插件配置的额外审批员。
 
@@ -56,7 +53,7 @@
 - **通知自动处理**：设为/撤管理员、被禁言（超时自动退群）、被踢（自动拉黑群/操作者）、被拉群（小群/大群/容量/互斥成员检查后自动退群）
 - **其他**：`/推荐 <群号|@qq>` 发送名片；`/加审批员 @某人` `/减审批员 @某人`
 
-## 🌸 抽老婆插件（wifepicker）
+## 🌸 抽老婆插件（wifepicker，外置）
 
 群聊互动：活跃成员抽「今日老婆」、我的老婆、强娶（冷却+排除列表）、关系图、rbq 排行、求婚（30 秒同意/拒绝交互，拒绝后可强娶确认）。
 
@@ -65,14 +62,14 @@
 - **渲染**：关系图/排行用 Playwright 渲染图片；未安装依赖时自动降级文本。
 - **数据**：`data/plugins_data/wifepicker/data.json`；支持群白/黑名单；自动撤回停用。
 
-## 🎵 网易云点歌插件（neteasemusic）
+## 🎵 网易云点歌插件（neteasemusic，外置）
 
 - **`/点歌 <关键词>`**（别名 `/music` `/听歌` `/网易云`）：搜索展示编号列表，群内任意成员回复数字即可选歌（60 秒内有效）。
 - 播放走 record 语音（NapCat 拉取 URL，失败降级文本链接）；音质按配置优先级回退（lossless → exhigh → higher → standard）。
 - 点歌命令群内多 bot 抽签去重；数字选择状态按 bot/会话隔离。
 - **配置**：`api_url`（自部署 NeteaseCloudMusicApi）/ `quality` / `search_limit` / `cookie`；不支持自然语言点歌。
 
-## 📝 QQ 空间说说插件（qzone）
+## 📝 QQ 空间说说插件（qzone，外置）
 
 看/发/删/评/回评/赞说说；管理员命令仅私聊处理，群内忽略。
 

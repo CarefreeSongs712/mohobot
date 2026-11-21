@@ -550,14 +550,63 @@ tbody tr:hover { background: rgba(255,255,255,.02); }
   <div class="page" id="page-plugins">
     <h2>🧩 插件管理</h2>
     <div class="subtitle">启用 / 禁用 / 热重载插件（无需重启）</div>
-    <div class="card">
-      <div class="form-row" style="justify-content:flex-end">
-        <button class="btn btn-sm" onclick="reloadPlugins()">🔄 重新加载插件</button>
+    <div class="form-row" style="gap:8px;margin-bottom:12px">
+      <button class="btn btn-sm" id="plugin-tab-installed" onclick="switchPluginTab('installed')">已安装</button>
+      <button class="btn btn-sm secondary" id="plugin-tab-market" onclick="switchPluginTab('market')">插件市场</button>
+    </div>
+    <div id="plugin-installed-panel">
+      <div class="card">
+        <div class="form-row" style="justify-content:flex-end">
+          <button class="btn btn-sm" onclick="reloadPlugins()">🔄 重新加载插件</button>
+        </div>
+        <table>
+          <thead><tr><th>插件</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
+          <tbody id="plugins-table-body"></tbody>
+        </table>
       </div>
-      <table>
-        <thead><tr><th>插件</th><th>状态</th><th>说明</th><th>操作</th></tr></thead>
-        <tbody id="plugins-table-body"></tbody>
-      </table>
+    </div>
+    <div id="plugin-market-panel" class="hidden">
+      <div class="card">
+        <div class="form-row" style="justify-content:space-between;align-items:center">
+          <div>
+            <div class="card-title">插件市场</div>
+            <div class="hint">从 GitHub 插件源安装，安装后立即生效</div>
+          </div>
+          <div class="form-row" style="gap:8px">
+            <button class="btn btn-sm secondary" onclick="loadMarket(true)">刷新索引</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>插件</th><th>版本</th><th>说明</th><th>操作</th></tr></thead>
+          <tbody id="plugin-market-body"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="form-row" style="justify-content:space-between;align-items:center">
+          <div>
+            <div class="card-title">插件源</div>
+            <div class="hint">官方源只读，自定义源可添加 GitHub raw 索引地址</div>
+          </div>
+          <button class="btn btn-sm secondary" onclick="openPluginSourceModal()">添加源</button>
+        </div>
+        <table>
+          <thead><tr><th>名称</th><th>索引地址</th><th>操作</th></tr></thead>
+          <tbody id="plugin-source-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="plugin-source-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px">
+    <div class="card" style="width:520px">
+      <div class="card-title">添加插件源</div>
+      <div class="form-row"><label>ID</label><input id="plugin-source-id" placeholder="例如 my-registry"></div>
+      <div class="form-row"><label>名称</label><input id="plugin-source-name" placeholder="显示名称"></div>
+      <div class="form-row"><label>索引 URL</label><input id="plugin-source-url" placeholder="https://.../index.json"></div>
+      <div class="form-row" style="justify-content:flex-end">
+        <button class="btn btn-sm secondary" onclick="closePluginSourceModal()">取消</button>
+        <button class="btn btn-sm" onclick="savePluginSource()">保存</button>
+      </div>
     </div>
   </div>
 
@@ -2260,12 +2309,15 @@ async function loadPlugins() {
     const plugins = await apiJSON('/api/plugins');
     document.getElementById('plugins-table-body').innerHTML = plugins.map(p => `
       <tr>
-        <td><b>${p.name}</b><div class="small" style="color:var(--text-dim);font-size:11px">${p.file}</div></td>
+        <td><b>${escapeHtml(p.name)}</b><div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.file)}</div></td>
         <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
-        <td style="color:var(--text-dim)">${p.info?.description || p.error || '—'}</td>
+        <td style="color:var(--text-dim)">${escapeHtml(p.info?.description || p.error || '—')}</td>
         <td>
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
+          <button class="btn btn-sm secondary" onclick="reloadPlugin('${p.name}')">重载</button>
+          ${p.source_record?.install_method === 'market' ? `<button class="btn btn-sm secondary" onclick="updateMarketPlugin('${escapeHtml(p.source_record.plugin_id)}', '${escapeHtml(p.name)}')">更新</button>` : ''}
+          ${p.source === 'installed' ? `<button class="btn btn-sm secondary" onclick="uninstallPlugin('${p.name}')">卸载</button>` : ''}
         </td>
       </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">暂无插件</td></tr>';
   } catch (e) { showToast('加载插件失败: ' + e.message, false); }
@@ -2285,6 +2337,118 @@ async function reloadPlugins() {
     showToast('插件已热重载');
     loadPlugins();
   } catch (e) { showToast('重载失败: ' + e.message, false); }
+}
+
+let pluginTab = 'installed';
+let pluginMarketCache = [];
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function switchPluginTab(tab) {
+  pluginTab = tab;
+  document.getElementById('plugin-installed-panel').classList.toggle('hidden', tab !== 'installed');
+  document.getElementById('plugin-market-panel').classList.toggle('hidden', tab !== 'market');
+  document.getElementById('plugin-tab-installed').classList.toggle('secondary', tab !== 'installed');
+  document.getElementById('plugin-tab-market').classList.toggle('secondary', tab !== 'market');
+  if (tab === 'market') loadMarket();
+}
+
+async function loadMarket(refresh = false) {
+  const body = document.getElementById('plugin-market-body');
+  body.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">加载中…</td></tr>';
+  try {
+    const r = await apiJSON('/api/plugins/market' + (refresh ? '?refresh=true' : ''));
+    pluginMarketCache = r.plugins || [];
+    document.getElementById('plugin-source-body').innerHTML = (r.sources || []).map(source => `
+      <tr>
+        <td>${escapeHtml(source.name)}${source.official ? ' <span class="badge">官方</span>' : ''}</td>
+        <td class="small" style="color:var(--text-dim);word-break:break-all">${escapeHtml(source.url)}</td>
+        <td>${source.official ? '—' : `<button class="btn btn-sm secondary" onclick="removePluginSource('${escapeHtml(source.id)}')">删除</button>`}</td>
+      </tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--text-dim)">暂无插件源</td></tr>';
+    body.innerHTML = pluginMarketCache.map(p => `
+      <tr>
+        <td><b>${escapeHtml(p.display_name || p.name)}</b>
+          <div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.author)} / ${escapeHtml(p.name)} · API ${p.api_version}</div></td>
+        <td>${escapeHtml(p.version)}</td>
+        <td style="color:var(--text-dim)">${escapeHtml(p.description)}</td>
+        <td><button class="btn btn-sm" onclick="installMarketPlugin('${escapeHtml(p.plugin_id)}', '${escapeHtml(p.source_id || 'official')}')">安装</button></td>
+      </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">市场暂无插件</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--red)">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function installMarketPlugin(pluginId, sourceId) {
+  if (!confirm(`安装 ${pluginId}？`)) return;
+  showToast('正在下载并安装…');
+  try {
+    const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId, source_id: sourceId || 'official' } });
+    showToast(`已安装 ${r.name}`);
+    await loadPlugins();
+    switchPluginTab('installed');
+  } catch (e) { showToast('安装失败: ' + e.message, false); }
+}
+
+function openPluginSourceModal() {
+  document.getElementById('plugin-source-modal').classList.remove('hidden');
+}
+
+function closePluginSourceModal() {
+  document.getElementById('plugin-source-modal').classList.add('hidden');
+}
+
+async function savePluginSource() {
+  const id = document.getElementById('plugin-source-id').value.trim();
+  const name = document.getElementById('plugin-source-name').value.trim();
+  const url = document.getElementById('plugin-source-url').value.trim();
+  if (!id || !name || !url) { showToast('请填写完整信息', false); return; }
+  try {
+    await apiJSON('/api/plugin-sources', { method: 'POST', body: { id, name, url } });
+    closePluginSourceModal();
+    showToast('插件源已添加');
+    await loadMarket(true);
+  } catch (e) { showToast('添加失败: ' + e.message, false); }
+}
+
+async function removePluginSource(id) {
+  if (!confirm(`删除插件源 ${id}？`)) return;
+  try {
+    await apiJSON('/api/plugin-sources/' + encodeURIComponent(id), { method: 'DELETE' });
+    showToast('插件源已删除');
+    await loadMarket(true);
+  } catch (e) { showToast('删除失败: ' + e.message, false); }
+}
+
+async function updateMarketPlugin(pluginId, name) {
+  if (!confirm(`更新 ${name}？`)) return;
+  showToast('正在检查并更新…');
+  try {
+    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId, source_id: 'official' } });
+    showToast(`已更新 ${r.name}`);
+    await loadPlugins();
+  } catch (e) { showToast('更新失败: ' + e.message, false); }
+}
+
+async function reloadPlugin(name) {
+  try {
+    await apiJSON(`/api/plugins/${encodeURIComponent(name)}/reload`, { method: 'POST' });
+    showToast(`${name} 已重载`);
+    loadPlugins();
+  } catch (e) { showToast('重载失败: ' + e.message, false); }
+}
+
+async function uninstallPlugin(name) {
+  if (!confirm(`卸载 ${name}？插件目录会移入回收站。`)) return;
+  const deleteData = confirm('同时删除该插件的配置与私有数据？选择“取消”则保留。');
+  try {
+    await apiJSON(`/api/plugins/${encodeURIComponent(name)}?delete_config=${deleteData}&delete_data=${deleteData}`, { method: 'DELETE' });
+    showToast(`${name} 已卸载`);
+    loadPlugins();
+  } catch (e) { showToast('卸载失败: ' + e.message, false); }
 }
 
 // ── 插件配置 (schema 驱动表单) ────────────────────────────────
