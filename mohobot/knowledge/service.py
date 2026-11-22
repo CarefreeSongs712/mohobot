@@ -536,9 +536,13 @@ class KnowledgeService:
         candidates = [(chunks[int(i)], float(scores[int(i)])) for i in idx]
 
         reranked = False
-        if self._rerank is not None and len(candidates) > 1:
+        # 在途 rerank 也计入 provider 使用: 热切换后旧 rerank 的延迟关闭任务
+        # 必须等本次请求结束, 否则 httpx client 被提前关闭会让 rerank 降级(#158 复审)。
+        rerank_provider = self._rerank
+        if rerank_provider is not None and len(candidates) > 1:
+            self._acquire_provider(rerank_provider)
             try:
-                ranked = await self._rerank.rerank(
+                ranked = await rerank_provider.rerank(
                     query, [c["text"] for c, _ in candidates], top_n=eff_top_n,
                 )
                 if ranked:
@@ -548,6 +552,8 @@ class KnowledgeService:
                     reranked = True
             except Exception as exc:
                 logger.warning(f"知识库 rerank 失败, 回退 embedding 排序: {exc}")
+            finally:
+                self._release_provider(rerank_provider)
 
         max_chars = max(100, int(self._cfg.max_chars_per_result or 800))
         results = [

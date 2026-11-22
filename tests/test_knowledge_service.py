@@ -307,6 +307,24 @@ class GatedEmbedding(FakeEmbedding):
         return await super().embed(texts)
 
 
+class GatedRerank(FakeRerank):
+    """rerank 阻塞到 gate 放开, 并在 close 时记录, 用于在途客户端关闭竞态。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.started = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.closed = False
+
+    async def rerank(self, query, documents, top_n=None):
+        self.started.set()
+        await self.gate.wait()
+        return await super().rerank(query, documents, top_n)
+
+    async def close(self):
+        self.closed = True
+
+
 async def _prepared_service(tmp: Path, *, dim: int = 8):
     (tmp / "kb").mkdir(exist_ok=True)
     _write_kb(tmp / "kb")
@@ -643,6 +661,44 @@ async def test_retired_client_not_closed_while_in_use(tmp_path):
         await asyncio.wait_for(task, 1)
         assert provider.closed is True
     finally:
+        await svc.close()
+
+
+async def test_retired_rerank_client_not_closed_while_in_use(tmp_path):
+    """#158 复审: 检索 await 旧 rerank 期间不能关闭其 httpx client。
+
+    热切换会把旧 rerank 交给延迟关闭任务; 若该路径不计在途使用, 60s 后
+    idle 计数为 0 就会关闭仍在请求的 client, 让 rerank 静默降级为 embedding 排序。
+    """
+    svc, _emb, _rerank = await _prepared_service(tmp_path)
+    gated = GatedRerank()
+    svc._rerank = gated
+    try:
+        search_task = asyncio.create_task(svc.search("洛天依"))
+        await asyncio.wait_for(gated.started.wait(), 1)
+        # 该 rerank 实例正在途: 计数可被延迟关闭任务看到
+        assert svc._provider_inflight.get(gated) == 1
+        # 热切换登记的就是同一个实例(与 sync_config 传入的 old_rerank 一致)
+        svc._retire_providers(gated)
+        assert svc._retired_providers[-1] is gated
+        svc._retired_providers.remove(gated)
+
+        close_task = asyncio.create_task(
+            svc._close_retired_when_idle(gated, delay=0.02),
+        )
+        await asyncio.sleep(0.08)
+        assert gated.closed is False  # 在途未结束, 不应关闭
+
+        gated.gate.set()
+        result = await asyncio.wait_for(search_task, 1)
+        assert "error" not in result, result
+        assert result["reranked"] is True, result
+        assert gated not in svc._provider_inflight  # 请求结束已释放计数
+
+        await asyncio.wait_for(close_task, 1)
+        assert gated.closed is True
+    finally:
+        gated.gate.set()
         await svc.close()
 
 
