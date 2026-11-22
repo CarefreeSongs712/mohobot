@@ -43,11 +43,16 @@ class ModelEndpoint:
     model: str
     base_url: str
     api_key: str
+    # 请求维度也是向量空间的一部分：同名同地址但 dimensions 不同，得到的向量
+    # 不可混用。endpoint 在解析时快照该值，热切换后旧请求仍按旧维度发送，
+    # 不会把新配置的维度带到旧端点（issue #129 / PR #158 审查 N2）。
+    dimensions: int = 0
 
     @property
     def signature(self) -> str:
         host = self.base_url or "default"
-        return f"{self.model}@{host}"
+        base = f"{self.model}@{host}"
+        return f"{base}#{self.dimensions}" if self.dimensions else base
 
 
 def _image_data_uri(path: str) -> str:
@@ -128,7 +133,14 @@ class ModelGateway:
 
         if not model:
             return None
-        return ModelEndpoint(role=role, model=model, base_url=base, api_key=key)
+        dimensions = self._embedding_dimensions() if role == "embedding" else 0
+        return ModelEndpoint(
+            role=role,
+            model=model,
+            base_url=base,
+            api_key=key,
+            dimensions=dimensions,
+        )
 
     def describe(self, role: str) -> str:
         endpoint = self.endpoint(role)
@@ -220,9 +232,10 @@ class ModelGateway:
         """
         endpoint = endpoint or self._require("embedding")
         kwargs: dict[str, Any] = {"model": endpoint.model, "input": text}
-        dims = self._embedding_dimensions()
-        if dims:
-            kwargs["dimensions"] = dims
+        # 只使用 endpoint 快照里的维度，绝不重新读实时配置：热切换端点与维度
+        # 同时发生时，在途旧请求必须仍按旧维度发给旧端点（PR #158 审查 N2）。
+        if endpoint.dimensions:
+            kwargs["dimensions"] = endpoint.dimensions
         response = await self._client(endpoint).embeddings.create(**kwargs)
         await self._record_usage(endpoint.model, getattr(response, "usage", None), "embedding")
         data = getattr(response, "data", None) or []
@@ -235,7 +248,9 @@ class ModelGateway:
         endpoint = endpoint or self.endpoint("embedding")
         if endpoint is None:
             return 0
-        return self._embedding_dims.get(endpoint.signature) or self._embedding_dimensions()
+        # 已记录的实际维度优先，否则用 endpoint 快照的配置维度；不再回退实时
+        # 配置，否则旧端点会读出新配置的维度（PR #158 审查 N2）。
+        return self._embedding_dims.get(endpoint.signature) or endpoint.dimensions
 
     def embedding_provider(self) -> "EmbeddingProvider | None":
         endpoint = self.endpoint("embedding")

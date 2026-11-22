@@ -8,7 +8,6 @@
 """
 
 import json
-import tempfile
 import time
 from pathlib import Path
 
@@ -51,10 +50,12 @@ def _rec(ts: float, total: int, **overrides) -> dict:
     return rec
 
 
-async def test_usage_cache_is_bounded_and_long_range_streams(monkeypatch):
+async def test_usage_cache_is_bounded_and_long_range_streams(tmp_path):
     """常驻明细不超过"最近窗口 + 乱序缓冲"; 更早范围流式回读后聚合仍完整。"""
-    monkeypatch.setattr(llm_mod, "_USAGE_RECORD_WINDOW_SECONDS", 86400)
-    tmp = tempfile.mkdtemp()
+    # tests/_run_all.py 只支持 tmp_path, 不能用 monkeypatch fixture; 手工还原。
+    original_window = llm_mod._USAGE_RECORD_WINDOW_SECONDS
+    llm_mod._USAGE_RECORD_WINDOW_SECONDS = 86400
+    tmp = str(tmp_path)
     now = time.time()
     old = [_rec(now - 10 * 86400 + i, 1) for i in range(2500)]
     recent = [_rec(now - i, 10) for i in range(5)]
@@ -84,13 +85,15 @@ async def test_usage_cache_is_bounded_and_long_range_streams(monkeypatch):
         hour2 = await svc.get_session_usage_stats("1h")
         assert hour2["totals"]["calls"] == 105
     finally:
+        llm_mod._USAGE_RECORD_WINDOW_SECONDS = original_window
         await svc.close()
 
 
-async def test_long_range_aggregation_respects_excluded_models(monkeypatch):
+async def test_long_range_aggregation_respects_excluded_models(tmp_path):
     """流式回读路径同样应用 usage_excluded_models 排除。"""
-    monkeypatch.setattr(llm_mod, "_USAGE_RECORD_WINDOW_SECONDS", 3600)
-    tmp = tempfile.mkdtemp()
+    original_window = llm_mod._USAGE_RECORD_WINDOW_SECONDS
+    llm_mod._USAGE_RECORD_WINDOW_SECONDS = 3600
+    tmp = str(tmp_path)
     now = time.time()
     _write_records(tmp, [
         _rec(now - 5 * 86400, 1000, model="excluded-model"),
@@ -107,4 +110,5 @@ async def test_long_range_aggregation_respects_excluded_models(monkeypatch):
         assert month["totals"]["calls"] == 2, month["totals"]
         assert month["totals"]["total_tokens"] == 110, month["totals"]
     finally:
+        llm_mod._USAGE_RECORD_WINDOW_SECONDS = original_window
         await svc.close()

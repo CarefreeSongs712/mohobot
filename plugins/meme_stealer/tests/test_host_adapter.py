@@ -267,6 +267,58 @@ async def test_embedding_provider_uses_captured_endpoint_after_config_switch():
 
 
 @pytest.mark.asyncio
+async def test_embedding_provider_snapshots_dimensions_after_config_switch():
+    """端点与 dimensions 同时热切换时，在途旧 provider 仍按旧维度请求（审查 N2）。"""
+    gw = _gateway(
+        {
+            "embedding_model": "emb-a",
+            "embedding_base_url": "https://a.example/v1",
+            "embedding_api_key": "key-a",
+            "embedding_dimensions": 1024,
+        }
+    )
+    create = AsyncMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(embedding=[0.5, 1.0])], usage=None)
+    )
+    used = []
+    gw._client = lambda endpoint: (
+        used.append(endpoint.signature)
+        or SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    )
+
+    provider = gw.embedding_provider()
+    assert provider.signature == "emb-a@https://a.example/v1#1024"
+
+    # 运行时同时切换端点与维度：A=1024 → B=768
+    config = gw._config_getter()
+    config.embedding_model = "emb-b"
+    config.embedding_base_url = "https://b.example/v1"
+    config.embedding_api_key = "key-b"
+    config.embedding_dimensions = 768
+    assert gw.describe("embedding") == "emb-b@https://b.example/v1#768"
+
+    # 旧 provider 的维度查询仍返回捕获值，不读取实时配置的 768
+    assert provider.get_dim() == 1024
+    assert await provider.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs == {
+        "model": "emb-a",
+        "input": "文本",
+        "dimensions": 1024,
+    }
+    assert used == ["emb-a@https://a.example/v1#1024"]
+
+    # 新 provider 使用新端点与新维度，维度缓存按新签名隔离
+    provider_b = gw.embedding_provider()
+    assert provider_b.signature == "emb-b@https://b.example/v1#768"
+    assert provider_b.get_dim() == 768
+    assert await provider_b.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs["model"] == "emb-b"
+    assert create.await_args.kwargs["dimensions"] == 768
+    assert gw._embedding_dims["emb-a@https://a.example/v1#1024"] == 2
+    assert gw._embedding_dims["emb-b@https://b.example/v1#768"] == 2
+
+
+@pytest.mark.asyncio
 async def test_vision_sends_image_as_data_uri_and_records_usage(tmp_path):
     gw = _gateway({"vision_model": "my-vl"})
     recorded = []

@@ -442,10 +442,12 @@ def test_select_top_k_matches_full_sort():
     assert KnowledgeService._select_top_k(scores, 10_000).shape[0] == 10_000
 
 
-async def test_sync_config_same_model_new_base_url_triggers_rebuild(monkeypatch):
+async def test_sync_config_same_model_new_base_url_triggers_rebuild(tmp_path):
     """内置 provider 模式下只看模型名会漏掉"同名换端点"; 指纹变更必须重建。"""
+    # tests/_run_all.py 只支持 tmp_path, 不能用 monkeypatch fixture; 手工还原。
     import mohobot.knowledge.service as service_mod
 
+    original_provider_cls = service_mod.EmbeddingProvider
     created: list[FakeEmbedding] = []
 
     def fake_provider(*, base_url, api_key, model, timeout=60.0):
@@ -455,56 +457,55 @@ async def test_sync_config_same_model_new_base_url_triggers_rebuild(monkeypatch)
         created.append(provider)
         return provider
 
-    monkeypatch.setattr(service_mod, "EmbeddingProvider", fake_provider)
+    def make_cfg(base_url: str) -> KnowledgeConfig:
+        return KnowledgeConfig(
+            enabled=True,
+            source_dir=str(tmp_path / "kb"), index_dir=str(tmp_path / "idx"),
+            embedding_model="embed-m", embedding_base_url=base_url,
+            embedding_api_key="k", rerank_model="",
+        )
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        (tmp / "kb").mkdir()
-        _write_kb(tmp / "kb")
+    (tmp_path / "kb").mkdir()
+    _write_kb(tmp_path / "kb")
 
-        def make_cfg(base_url: str) -> KnowledgeConfig:
-            return KnowledgeConfig(
-                enabled=True,
-                source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
-                embedding_model="embed-m", embedding_base_url=base_url,
-                embedding_api_key="k", rerank_model="",
+    service_mod.EmbeddingProvider = fake_provider
+    svc = KnowledgeService(make_cfg("https://a.example/v1"))
+    try:
+        await svc.startup()
+        stats1 = await svc.reindex()
+        assert stats1["reembedded_files"] == 3, stats1
+        assert created and created[0].base_url == "https://a.example/v1"
+
+        # 同名模型换端点 → 后台重建
+        await svc.sync_config(make_cfg("https://b.example/v1"))
+        fp = ""
+        for _ in range(300):
+            fp = await asyncio.to_thread(
+                svc._store.get_meta, "embedding_fingerprint",
             )
+            if fp == "embed-m@https://b.example/v1" and not svc._state["indexing"]:
+                break
+            await asyncio.sleep(0.01)
+        assert fp == "embed-m@https://b.example/v1", fp
+        stats2 = svc._state["last_stats"]
+        assert stats2["embedding_space_changed"] is True, stats2
+        assert stats2["model_changed"] is False, stats2
+        assert stats2["reembedded_files"] == 3, stats2
 
-        svc = KnowledgeService(make_cfg("https://a.example/v1"))
-        try:
-            await svc.startup()
-            stats1 = await svc.reindex()
-            assert stats1["reembedded_files"] == 3, stats1
-            assert created and created[0].base_url == "https://a.example/v1"
-
-            # 同名模型换端点 → 后台重建
-            await svc.sync_config(make_cfg("https://b.example/v1"))
-            fp = ""
-            for _ in range(300):
-                fp = await asyncio.to_thread(
-                    svc._store.get_meta, "embedding_fingerprint",
-                )
-                if fp == "embed-m@https://b.example/v1" and not svc._state["indexing"]:
-                    break
-                await asyncio.sleep(0.01)
-            assert fp == "embed-m@https://b.example/v1", fp
-            stats2 = svc._state["last_stats"]
-            assert stats2["embedding_space_changed"] is True, stats2
-            assert stats2["model_changed"] is False, stats2
-            assert stats2["reembedded_files"] == 3, stats2
-
-            # 配置未再变化 → 不应重复重建
-            await svc.sync_config(make_cfg("https://b.example/v1"))
-            await asyncio.sleep(0.1)
-            assert svc._state["last_stats"] is stats2
-        finally:
-            await svc.close()
+        # 配置未再变化 → 不应重复重建
+        await svc.sync_config(make_cfg("https://b.example/v1"))
+        await asyncio.sleep(0.1)
+        assert svc._state["last_stats"] is stats2
+    finally:
+        await svc.close()
+        service_mod.EmbeddingProvider = original_provider_cls
 
 
-async def test_retired_providers_are_capped_on_repeated_hot_reload(monkeypatch):
+async def test_retired_providers_are_capped_on_repeated_hot_reload(tmp_path):
     """#137: 连续热更新换 provider 时旧客户端有上限, 超出部分延迟关闭且 close 后不泄漏。"""
     import mohobot.knowledge.service as service_mod
 
+    original_provider_cls = service_mod.EmbeddingProvider
     created: list = []
 
     class TrackingEmbedding(FakeEmbedding):
@@ -524,32 +525,172 @@ async def test_retired_providers_are_capped_on_repeated_hot_reload(monkeypatch):
         created.append(provider)
         return provider
 
-    monkeypatch.setattr(service_mod, "EmbeddingProvider", fake_provider)
+    def make_cfg(base_url: str) -> KnowledgeConfig:
+        return KnowledgeConfig(
+            enabled=True,
+            source_dir=str(tmp_path / "kb"), index_dir=str(tmp_path / "idx"),
+            embedding_model="embed-m", embedding_base_url=base_url,
+            embedding_api_key="k", rerank_model="",
+        )
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        (tmp / "kb").mkdir()
-        _write_kb(tmp / "kb")
+    (tmp_path / "kb").mkdir()
+    _write_kb(tmp_path / "kb")
 
-        def make_cfg(base_url: str) -> KnowledgeConfig:
-            return KnowledgeConfig(
-                enabled=True,
-                source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
-                embedding_model="embed-m", embedding_base_url=base_url,
-                embedding_api_key="k", rerank_model="",
-            )
+    service_mod.EmbeddingProvider = fake_provider
+    svc = KnowledgeService(make_cfg("https://a.example/v1"))
+    try:
+        await svc.startup()
+        await svc.reindex()
+        for i in range(12):
+            await svc.sync_config(make_cfg(f"https://h{i}.example/v1"))
+        assert len(svc._retired_providers) <= service_mod._MAX_RETIRED_PROVIDERS
+        # 超出上限的旧 provider 排队延迟关闭, 不会被无限保留
+        assert len(svc._retired_tasks) >= 1
+    finally:
+        await svc.close()
+        service_mod.EmbeddingProvider = original_provider_cls
 
-        svc = KnowledgeService(make_cfg("https://a.example/v1"))
-        try:
-            await svc.startup()
-            await svc.reindex()
-            for i in range(12):
-                await svc.sync_config(make_cfg(f"https://h{i}.example/v1"))
-            assert len(svc._retired_providers) <= service_mod._MAX_RETIRED_PROVIDERS
-            # 超出上限的旧 provider 排队延迟关闭, 不会被无限保留
-            assert len(svc._retired_tasks) >= 1
-        finally:
-            await svc.close()
+    assert not svc._retired_tasks
+    assert all(p.closed for p in created), [p.closed for p in created]
 
-        assert not svc._retired_tasks
-        assert all(p.closed for p in created), [p.closed for p in created]
+
+class RecordingSupervisor:
+    """替身 task_supervisor: 记录 create_task 的 name/owner, 便于断言注册路径。"""
+
+    def __init__(self):
+        self.created: list[dict] = []
+
+    def create_task(self, coro, *, name, owner="application"):
+        task = asyncio.create_task(coro)
+        self.created.append({"name": name, "owner": owner, "task": task})
+        return task
+
+
+async def test_retired_provider_close_registered_with_supervisor(tmp_path):
+    """#158 N3: 旧 provider 延迟关闭任务必须注册到 task_supervisor(owner=knowledge)。"""
+    import mohobot.knowledge.service as service_mod
+
+    original_provider_cls = service_mod.EmbeddingProvider
+    created: list = []
+
+    class TrackingEmbedding(FakeEmbedding):
+        def __init__(self):
+            super().__init__()
+            self.model = ""
+            self.base_url = ""
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    def fake_provider(*, base_url, api_key, model, timeout=60.0):
+        provider = TrackingEmbedding()
+        provider.model = model
+        provider.base_url = base_url
+        created.append(provider)
+        return provider
+
+    def make_cfg(base_url: str) -> KnowledgeConfig:
+        return KnowledgeConfig(
+            enabled=True,
+            source_dir=str(tmp_path / "kb"), index_dir=str(tmp_path / "idx"),
+            embedding_model="embed-m", embedding_base_url=base_url,
+            embedding_api_key="k", rerank_model="",
+        )
+
+    (tmp_path / "kb").mkdir()
+    _write_kb(tmp_path / "kb")
+
+    supervisor = RecordingSupervisor()
+    service_mod.EmbeddingProvider = fake_provider
+    svc = KnowledgeService(
+        make_cfg("https://a.example/v1"), task_supervisor=supervisor,
+    )
+    try:
+        await svc.startup()
+        await svc.reindex()
+        for i in range(12):
+            await svc.sync_config(make_cfg(f"https://h{i}.example/v1"))
+        retired = [c for c in supervisor.created if c["name"] == "knowledge-retired-provider"]
+        assert retired, supervisor.created
+        assert all(c["owner"] == "knowledge" for c in retired), supervisor.created
+    finally:
+        await svc.close()
+        service_mod.EmbeddingProvider = original_provider_cls
+
+    # close() 取消受监管任务后, 未关闭的旧客户端在 close() 中统一回收
+    assert all(p.closed for p in created), [p.closed for p in created]
+
+
+async def test_retired_client_not_closed_while_in_use(tmp_path):
+    """#158 N3: 在途请求还没结束时, 延迟关闭任务不能关掉正在使用的客户端。"""
+    svc, _emb, _rerank = await _prepared_service(tmp_path)
+    try:
+        provider = FakeEmbedding()
+        provider.closed = False
+
+        async def close():
+            provider.closed = True
+
+        provider.close = close
+        svc._acquire_provider(provider)
+        task = asyncio.create_task(
+            svc._close_retired_when_idle(provider, delay=0.02),
+        )
+        await asyncio.sleep(0.08)
+        assert provider.closed is False
+        svc._release_provider(provider)
+        await asyncio.wait_for(task, 1)
+        assert provider.closed is True
+    finally:
+        await svc.close()
+
+
+async def test_search_identity_mismatch_recovers_via_background_rebuild(tmp_path):
+    """#158 N4: 身份不符时先 fail-closed, 后台自愈重建后无需人工介入即可恢复检索。"""
+    svc, _emb, _rerank = await _prepared_service(tmp_path)
+    try:
+        new_emb = FakeEmbedding()
+        new_emb.model = "other-model"
+        new_emb.base_url = "https://other.example/v1"
+        svc._embedding = new_emb
+        svc._bump_generation()
+        result = await svc.search("洛天依")
+        assert result.get("retryable") is True, result
+        expected = svc._embedding_identity(new_emb)
+        for _ in range(300):
+            if not svc._state["indexing"] and svc._index_identity == expected:
+                break
+            await asyncio.sleep(0.01)
+        assert svc._index_identity == expected, svc._index_identity
+        recovered = await svc.search("洛天依")
+        assert "error" not in recovered, recovered
+    finally:
+        await svc.close()
+
+
+async def test_background_reindex_retries_on_failure(tmp_path):
+    """#158 N4: 后台重建失败会按退避重试, 不是一次失败就永久停住。"""
+    import mohobot.knowledge.service as service_mod
+
+    svc, _emb, _rerank = await _prepared_service(tmp_path)
+    original_delay = service_mod._REINDEX_RETRY_DELAY
+    service_mod._REINDEX_RETRY_DELAY = 0.01
+    calls = 0
+
+    async def flaky_reindex(force: bool = False):
+        nonlocal calls
+        calls += 1
+        return {"error": "transient"} if calls < 3 else {"ok": True}
+
+    try:
+        svc.reindex = flaky_reindex
+        svc._schedule_model_reindex()
+        for _ in range(300):
+            if calls >= 3:
+                break
+            await asyncio.sleep(0.01)
+        assert calls == service_mod._REINDEX_RETRY_ATTEMPTS, calls
+    finally:
+        service_mod._REINDEX_RETRY_DELAY = original_delay
+        await svc.close()

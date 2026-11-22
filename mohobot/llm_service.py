@@ -22,7 +22,6 @@ from mohobot.models.config import GlobalConfig, BotConfig, LLMConfig
 from mohobot.models.onebot import (
     GroupMessageEvent,
     MessageEvent,
-    MessageSegment,
     PrivateMessageEvent,
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls

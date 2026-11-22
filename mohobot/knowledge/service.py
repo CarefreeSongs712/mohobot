@@ -45,6 +45,12 @@ def _now() -> str:
 # 避免长期运行反复热更新时旧客户端无界累积。
 _MAX_RETIRED_PROVIDERS = 8
 _RETIRED_PROVIDER_CLOSE_DELAY = 60.0
+# 检索发现 provider 身份与索引不符时, 后台自愈重建的冷却时间(#158 N4):
+# 第一次仍 fail-closed 返回可重试错误, 但不会再要求人工重建。
+_IDENTITY_REBUILD_COOLDOWN = 30.0
+# 后台重建失败的重试退避: 首次失败 5s, 之后 10s, 不做无限风暴(#158 N4)。
+_REINDEX_RETRY_ATTEMPTS = 3
+_REINDEX_RETRY_DELAY = 5.0
 
 
 class KnowledgeService:
@@ -68,6 +74,9 @@ class KnowledgeService:
         self._store: KnowledgeIndexStore | None = None
         self._retired_providers: list = []   # 换配置后保留到 close 统一回收(同 LLMService 约定)
         self._retired_tasks: dict[asyncio.Task, Any] = {}  # 延迟关闭任务 → 旧 provider(#137)
+        # 旧 provider 在途使用计数: 延迟关闭前必须清零, 避免关掉正在请求的客户端(#158 N3)
+        self._provider_inflight: dict[Any, int] = {}
+        self._identity_rebuild_at: float = 0.0  # 上次身份自愈重建时间(monotonic, #158 N4)
         self._lock = asyncio.Lock()          # reindex 互斥
         self._chunks: list[dict] = []        # 与矩阵行一一对应
         self._matrix: np.ndarray | None = None
@@ -167,11 +176,26 @@ class KnowledgeService:
         """让在途检索快照失效(矩阵/块/provider 身份即将或已经变化)。"""
         self._generation += 1
 
+    def _acquire_provider(self, provider) -> None:
+        """登记一次在途 provider 使用, 延迟关闭任务据此避免提前关客户端(#158 N3)。"""
+        if provider is None:
+            return
+        self._provider_inflight[provider] = self._provider_inflight.get(provider, 0) + 1
+
+    def _release_provider(self, provider) -> None:
+        if provider is None:
+            return
+        remaining = self._provider_inflight.get(provider, 0) - 1
+        if remaining > 0:
+            self._provider_inflight[provider] = remaining
+        else:
+            self._provider_inflight.pop(provider, None)
+
     def _retire_providers(self, *providers) -> None:
-        """登记换配置后的旧 provider, 超出上限的延迟关闭(#137)。
+        """登记换配置后的旧 provider, 超出上限的延迟关闭(#137 / 审查 N3)。
 
         旧客户端要留给可能仍在途的调用收尾, 但连续热更新不能无界累积;
-        超过上限的部分等一个请求超时(覆盖 embedding 时长)后关闭。
+        超过上限的部分注册为受监管后台任务, 空闲且无在途使用时才关闭。
         """
         for provider in providers:
             if provider is not None:
@@ -182,23 +206,43 @@ class KnowledgeService:
         retired = self._retired_providers[:overflow]
         del self._retired_providers[:overflow]
         for provider in retired:
-            try:
-                task = asyncio.create_task(self._close_retired_later(provider))
-            except RuntimeError:  # 无运行中的 event loop: 交给 close 统一回收
-                continue
-            self._retired_tasks[task] = provider
-            task.add_done_callback(
-                lambda done: self._retired_tasks.pop(done, None),
-            )
+            self._schedule_retired_close(provider)
 
-    @staticmethod
-    async def _close_retired_later(
-        provider, delay: float = _RETIRED_PROVIDER_CLOSE_DELAY,
+    def _schedule_retired_close(self, provider) -> None:
+        """排队延迟关闭旧 provider: 优先注册 task_supervisor(owner=knowledge)。"""
+        coro = self._close_retired_when_idle(provider)
+        task: asyncio.Task | None = None
+        if self._supervisor is not None:
+            try:
+                task = self._supervisor.create_task(
+                    coro, name="knowledge-retired-provider", owner="knowledge",
+                )
+            except Exception:
+                # 监管器已停止(create_task 会关闭 coro): 交回 close() 统一回收。
+                self._retired_providers.append(provider)
+                return
+        if task is None:
+            try:
+                task = asyncio.create_task(coro)
+            except RuntimeError:  # 无运行中的 event loop: 交给 close 统一回收
+                self._retired_providers.append(provider)
+                return
+        self._retired_tasks[task] = provider
+        task.add_done_callback(
+            lambda done: self._retired_tasks.pop(done, None),
+        )
+
+    async def _close_retired_when_idle(
+        self, provider, delay: float = _RETIRED_PROVIDER_CLOSE_DELAY,
     ) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            raise
+        """至少空闲 delay 秒且在途使用清零后才关闭, 防止关掉在途请求的客户端。"""
+        while True:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            if not self._provider_inflight.get(provider):
+                break
         try:
             await provider.close()
         except Exception:
@@ -235,6 +279,7 @@ class KnowledgeService:
             await self._close_providers()
             if self._store is not None:
                 await asyncio.to_thread(self._store.close)
+            self._provider_inflight.clear()
             self._embedding = self._rerank = None
             self._store = None
             self._matrix = None
@@ -308,10 +353,16 @@ class KnowledgeService:
             ]
             if pending:
                 # 嵌入输入带标题(标题不含在正文里, 带上才能命中"按名字搜"的查询)
-                vectors = await embed_in_batches(
-                    embedding,
-                    [f"{c.title}\n{c.text}" for _, c in pending],
-                )
+                # 在途使用期间 sync_config 可能把该 provider 移出活跃列表, 计数
+                # 保证延迟关闭任务不会关掉正在嵌入的客户端(#158 N3)。
+                self._acquire_provider(embedding)
+                try:
+                    vectors = await embed_in_batches(
+                        embedding,
+                        [f"{c.title}\n{c.text}" for _, c in pending],
+                    )
+                finally:
+                    self._release_provider(embedding)
                 by_file: dict[str, list[dict]] = {}
                 for (path, chunk), vec in zip(pending, vectors):
                     by_file.setdefault(path, []).append({
@@ -439,16 +490,21 @@ class KnowledgeService:
             # 宁可返回可重试错误。身份为空(旧索引未记录)时不做该判断。
             if self._index_identity and \
                     self._embedding_identity(provider) != self._index_identity:
+                # fail-closed 但不等人工: 冷却期内后台自动重建自愈(#158 N4)。
+                self._schedule_identity_recovery()
                 return {
                     "error": "embedding 配置已变更, 索引正在重建, 请稍后再试",
                     "retryable": True,
                 }
 
+            self._acquire_provider(provider)
             try:
                 vec = (await provider.embed([query]))[0]
             except Exception as exc:
                 logger.warning(f"知识库查询嵌入失败: {exc}")
                 return {"error": f"查询嵌入失败: {exc}"}
+            finally:
+                self._release_provider(provider)
 
             if (
                 self._generation != generation
@@ -661,12 +717,42 @@ class KnowledgeService:
         if need_reindex:
             self._schedule_model_reindex()
 
+    def _schedule_identity_recovery(self) -> None:
+        """检索发现 provider 身份与索引不符时, 后台按冷却时间重建自愈(#158 N4)。
+
+        本次检索仍 fail-closed 返回可重试错误, 但不再要求人工重建: 冷却期内只
+        排队一次后台 force reindex, 重建成功后重试检索即可恢复。重建失败的错误
+        记录在 service_status()["error"], 冷却到期后的新检索会再次触发。
+        """
+        if self._state["indexing"]:
+            return
+        now = time.monotonic()
+        if now - self._identity_rebuild_at < _IDENTITY_REBUILD_COOLDOWN:
+            return
+        self._identity_rebuild_at = now
+        logger.info("知识库 provider 身份与索引不符, 后台触发重建自愈")
+        self._schedule_model_reindex()
+
     def _schedule_model_reindex(self) -> None:
-        """embedding 模型变更后的强制重建(受监管后台任务; 关闭期静默放弃)。"""
+        """embedding 模型变更后的强制重建(受监管后台任务; 关闭期静默放弃)。
+
+        失败按退避重试若干次(#158 N4): 重建期间网络/额度抖动不再永久停在
+        fail-closed 状态; 仍失败则错误写入 state["error"], 下次热同步/自愈会再试。
+        """
 
         async def _run() -> None:
-            logger.info("embedding 模型已变更, 后台重建知识库索引")
-            await self.reindex(force=True)
+            logger.info("后台重建知识库索引")
+            for attempt in range(_REINDEX_RETRY_ATTEMPTS):
+                stats = await self.reindex(force=True)
+                if not stats.get("error"):
+                    return
+                if attempt + 1 >= _REINDEX_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "知识库索引重建失败(已尝试 {} 次): {}",
+                        _REINDEX_RETRY_ATTEMPTS, stats.get("error"),
+                    )
+                    return
+                await asyncio.sleep(_REINDEX_RETRY_DELAY * (2 ** attempt))
 
         if self._supervisor is not None:
             try:
