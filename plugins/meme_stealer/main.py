@@ -103,6 +103,63 @@ def _sniff_mime(head: bytes) -> str:
     return "image/jpeg"
 
 
+def _segment_is_displayable(segment: Any) -> bool:
+    """判断一个 OneBot 段是否还能显示；图片段缺少可用数据时丢弃（issue #128）。"""
+    if not isinstance(segment, dict):
+        return False
+    seg_type = str(segment.get("type", "") or "").strip().lower()
+    if seg_type != "image":
+        return True
+    data = segment.get("data")
+    if not isinstance(data, dict) or not data:
+        return False
+    for key in ("file", "url", "path"):
+        value = data.get(key)
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if not value:
+            continue
+        if value.startswith("base64://"):
+            if len(value) <= len("base64://"):
+                continue
+            return True
+        return True
+    return False
+
+
+def _parse_retcode_ok(value: Any) -> bool:
+    """retcode 只接受明确的整数 0（bool/float/非法字符串都算未确认）。"""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        try:
+            return int(text) == 0
+        except ValueError:
+            return False
+    return False
+
+
+def _delivery_is_success(response: Any) -> bool:
+    """投递结果判定：delivery_status=success，或 status+retcode 双证据均为成功。"""
+    if not isinstance(response, dict):
+        return False
+    delivery = str(response.get("delivery_status", "") or "").strip().lower()
+    if delivery in {"success", "failed", "unknown"}:
+        return delivery == "success"
+    status = str(response.get("status", "") or "").strip().lower()
+    if status in {"failed", "error", "fail"}:
+        return False
+    if status not in {"", "ok", "async"}:
+        return False
+    return _parse_retcode_ok(response.get("retcode"))
+
+
 class _MohobotBridge:
     """StealerEvent 发消息 / 取图用的 WSServer 适配。"""
 
@@ -123,15 +180,65 @@ class _MohobotBridge:
         if manager is not None and manager.get(bot_id) is None:
             logger.warning(f"[Stealer] bot {bot_id} 不在线，消息未发送")
             return False
+
+        # 空段 / 过滤后为空都不能算发送成功（issue #128）
+        cleaned = [
+            segment for segment in (segments or []) if _segment_is_displayable(segment)
+        ]
+        if not cleaned:
+            logger.warning("[Stealer] 没有可发送的消息段，消息未发送")
+            return False
+
         try:
             if chat_type == "group":
-                await ws.send_group_msg(bot_id, chat_id, segments)
+                try:
+                    group_id: Any = int(chat_id)
+                except (TypeError, ValueError):
+                    group_id = chat_id
+                if not hasattr(ws, "send_to_bot"):
+                    logger.warning("[Stealer] WSServer 不支持回执投递，消息未发送")
+                    return False
+                # 走 send_to_bot -> _send_tracked，保留归档/echo 追踪
+                response = await ws.send_to_bot(
+                    bot_id,
+                    "send_group_msg",
+                    {"group_id": group_id, "message": cleaned},
+                    wait_response=True,
+                    timeout=10.0,
+                )
             else:
-                await ws.send_private_msg(bot_id, chat_id, segments)
-            return True
+                if hasattr(ws, "send_private_msg"):
+                    try:
+                        response = await ws.send_private_msg(
+                            bot_id, chat_id, cleaned, wait_response=True
+                        )
+                    except TypeError:
+                        # 旧宿主签名没有 wait_response：退回通用回执路径
+                        response = await ws.send_to_bot(
+                            bot_id,
+                            "send_private_msg",
+                            {"user_id": chat_id, "message": cleaned},
+                            wait_response=True,
+                            timeout=10.0,
+                        )
+                else:
+                    response = await ws.send_to_bot(
+                        bot_id,
+                        "send_private_msg",
+                        {"user_id": chat_id, "message": cleaned},
+                        wait_response=True,
+                        timeout=10.0,
+                    )
         except Exception as e:
             logger.warning(f"[Stealer] 发送消息失败: {e}")
             return False
+
+        if not _delivery_is_success(response):
+            logger.warning(
+                f"[Stealer] 消息投递未确认(bot={bot_id}, chat={chat_id}): {response!r}"
+            )
+            return False
+        return True
 
     async def _call(self, bot_id: str, action: str, params: dict[str, Any], timeout: float) -> dict:
         ws = self._ws()

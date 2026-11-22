@@ -24,7 +24,6 @@ from ..utils import (
     extract_target_id,
     get_group_id,
     get_sender_id,
-    get_self_id,
     get_text,
     is_allowed_group,
     text_segment,
@@ -110,8 +109,13 @@ async def cmd_propose(plugin, bot_id: str, event, rest: str):
     }
     plugin._propose_requests[group_id] = pending
 
-    # 30 秒后超时提醒(后台任务, 不阻塞回复)
-    asyncio.create_task(_propose_timeout(plugin, bot_id, group_id, target_id, user_id))
+    # 30 秒后超时提醒(后台任务, 不阻塞回复): 交给 TaskSupervisor 登记,
+    # 插件禁用/卸载时按 owner 前缀取消, 避免停用后仍发提醒(issue #155)。
+    plugin._spawn_task(
+        _propose_timeout(plugin, bot_id, group_id, target_id, user_id),
+        name=f"propose-timeout:{group_id}:{target_id}",
+        owner="propose",
+    )
 
     return (
         f"🌹 @{proposer_name} 向【{target_name}】发起了求婚！\n"

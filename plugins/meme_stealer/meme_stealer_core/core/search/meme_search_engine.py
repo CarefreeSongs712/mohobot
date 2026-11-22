@@ -36,6 +36,8 @@ class MemeSearchEngine:
         self._bm25_doc_paths: list[str] = []
         self._bm25_dirty: bool = True
         self._bm25_signature: str = ""
+        # 构建索引时对应的语料代次；用于避免每次搜图都重算 O(n) 签名(issue #129)
+        self._bm25_generation: int = -1
         cache_dir = getattr(plugin_instance, "cache_dir", None)
         self._cache_path = Path(cache_dir) / "bm25_cache.json" if cache_dir else None
 
@@ -95,6 +97,40 @@ class MemeSearchEngine:
         # Fallback
         return self._search_signature_from_index(idx)
 
+    def _db_index_generation(self) -> int | None:
+        """数据库语料代次；无 DatabaseService 时返回 None。"""
+        db_service = getattr(self.plugin, "db_service", None)
+        getter = getattr(db_service, "get_index_generation", None)
+        if not callable(getter):
+            return None
+        try:
+            return int(getter())
+        except Exception:
+            return None
+
+    def bm25_index_stale(self, idx: dict[str, Any] | None = None) -> bool:
+        """BM25 索引是否过期。
+
+        先看脏标记；未脏时用数据库语料代次做一次 O(1) 校验，
+        代次一致就认为签名未变，不再重算 O(n) 语料签名(issue #129)。
+        若没有代次信息(旧 plugin/测试替身)，退化为计算签名比对。
+        """
+        if self._bm25_dirty or self._bm25_index is None:
+            return True
+        generation = self._db_index_generation()
+        if generation is not None and generation == self._bm25_generation:
+            return False
+        # 与 _build_bm25_index 保持签名口径一致: 显式 idx 用索引签名,
+        # 否则优先用数据库语料签名。
+        target = idx if idx is not None else self.get_index()
+        try:
+            current_sig = self._compute_bm25_signature(
+                target, prefer_db_signature=idx is None
+            )
+        except Exception:
+            return False
+        return bool(current_sig and current_sig != self._bm25_signature)
+
     async def _build_bm25_index(self, idx: dict | None = None) -> None:
         if BM25 is None:
             return
@@ -130,6 +166,8 @@ class MemeSearchEngine:
                             self._bm25_index = BM25(normalized_docs)
                             self._bm25_doc_paths = [str(p) for p in cached_doc_paths]
                             self._bm25_signature = signature
+                            generation = self._db_index_generation()
+                            self._bm25_generation = generation if generation is not None else -1
                             self._bm25_dirty = False
                             logger.debug(f"[BM25] 从缓存恢复索引: {len(normalized_docs)} 文档")
                             return
@@ -152,6 +190,8 @@ class MemeSearchEngine:
             self._bm25_index = BM25(documents)
             self._bm25_doc_paths = doc_paths
             self._bm25_signature = signature
+            generation = self._db_index_generation()
+            self._bm25_generation = generation if generation is not None else -1
             self._bm25_dirty = False
             logger.debug(f"[BM25] 索引构建完成: {len(documents)} 文档, 示例: {documents[:3]}")
 
@@ -187,6 +227,7 @@ class MemeSearchEngine:
         self._bm25_dirty = True
         self._bm25_index = None
         self._bm25_doc_paths = []
+        self._bm25_generation = -1
 
     def _score_entry(
         self,
