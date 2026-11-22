@@ -1253,8 +1253,12 @@ def test_unreviewed_counts_cache_keyed_by_identity_and_revision():
         assert data.unreviewed_counts(statuses, 0)[sk] == base[sk]
 
 
-def test_export_offloads_csv_build_to_thread(monkeypatch):
-    """CSV 导出必须走 asyncio.to_thread, 不能阻塞事件循环(#136)。"""
+def test_export_offloads_csv_build_to_thread():
+    """CSV 导出必须走 asyncio.to_thread, 不能阻塞事件循环(#136)。
+
+    不用 pytest 的 monkeypatch fixture: tests/_run_all.py 直接以 test() 调用
+    模块级用例, 不注入 fixture(审查 N2)。改为手工保存/还原 asyncio.to_thread。
+    """
     import asyncio
     import threading
 
@@ -1266,19 +1270,22 @@ def test_export_offloads_csv_build_to_thread(monkeypatch):
                       threading.current_thread().name))
         return await real_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr(asyncio, "to_thread", spy)
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        _build_fake_data(root)
-        client, store = _make_client(root)
-        try:
-            tok = _login(client, "admin", "pw123")
-            r = client.get("/api/export", headers=_auth(tok))
-            assert r.status_code == 200, r.text
-            assert r.headers["content-type"].startswith("text/csv")
-            assert r.text  # 非空(示例数据可能没有异常记录 → 仅表头也算)
-        finally:
-            store.close()
+    asyncio.to_thread = spy
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _build_fake_data(root)
+            client, store = _make_client(root)
+            try:
+                tok = _login(client, "admin", "pw123")
+                r = client.get("/api/export", headers=_auth(tok))
+                assert r.status_code == 200, r.text
+                assert r.headers["content-type"].startswith("text/csv")
+                assert r.text  # 非空(示例数据可能没有异常记录 → 仅表头也算)
+            finally:
+                store.close()
+    finally:
+        asyncio.to_thread = real_to_thread
     assert any(name == "_export_sync" for name, _ in calls), calls
     # 在请求线程以外执行 → 不占事件循环
     export_threads = [t for name, t in calls if name == "_export_sync"]

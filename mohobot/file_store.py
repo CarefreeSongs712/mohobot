@@ -208,7 +208,8 @@ async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, 
     line of the buffer, so a replacement-character decode there is harmless.
     Semantics are kept identical to the previous full-read version: same
     per-path lock, blank lines skipped, malformed JSON lines skipped, the last
-    line is returned even without a trailing newline.
+    line is returned even without a trailing newline, and universal newlines
+    (``\r\n``, lone ``\r``, ``\n``) all delimit lines.
     """
     path = Path(file_path)
     if n <= 0:
@@ -231,6 +232,10 @@ async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, 
                 data = await f.read(step) + data
             text = data.decode("utf-8", "replace")
 
+    # 旧实现用文本模式读取(universal newlines): \r\n 与仅 \r 结尾都算换行。
+    # 反向分块是二进制读, 这里显式还原该语义, 否则 CR-only 文件整段被当成
+    # 一行解析失败而返回 [](审查 N3)。
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     tail = lines[-n:]
     result: list[dict[str, Any]] = []

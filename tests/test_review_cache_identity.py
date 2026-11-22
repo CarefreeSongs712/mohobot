@@ -237,8 +237,12 @@ if __name__ == "__main__":
 
 
 def test_same_inode_equal_length_rewrite_with_restored_mtime_is_detected():
-    """同 inode、等长、恢复 mtime 的就地重写也必须被发现并重读(#133)。"""
+    """同 inode、等长、恢复 mtime 的就地重写也必须被发现并重读(#133)。
+
+    Windows 的 ChangeTime 粒度约 15.6ms, 写入前先跨过一个 tick(审查 N1)。
+    """
     import os
+    import time
 
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)
@@ -252,6 +256,7 @@ def test_same_inode_equal_length_rewrite_with_restored_mtime_is_detected():
         old_bytes = hist.read_bytes()
         new_bytes = old_bytes.replace("原始内容AAAA".encode("utf-8"), "篡改内容BBBB".encode("utf-8"))
         assert len(new_bytes) == len(old_bytes) and new_bytes != old_bytes
+        time.sleep(0.05)  # > NTFS ChangeTime tick, 保证 change_ns 推进
         hist.write_bytes(new_bytes)  # 同 inode 就地等长重写
         os.utime(hist, (st.st_atime, st.st_mtime))  # 恢复 float mtime
 
@@ -261,8 +266,15 @@ def test_same_inode_equal_length_rewrite_with_restored_mtime_is_detected():
 
 
 def test_in_place_rewrite_detected_with_exact_ns_mtime_restore():
-    """mtime_ns 精确恢复时, 靠头/尾内容锚点仍能发现改写(Windows ctime 无信号)。"""
+    """mtime_ns 精确恢复时, 靠 NTFS ChangeTime(Windows)/ctime(POSIX)发现改写。
+
+    Windows 上 st_ctime 是创建时间, 唯一元数据信号是 NTFS ChangeTime, 而它
+    只有约 15.6ms 的时钟粒度; 若 load→write_bytes→utime 全落在同一 tick,
+    change_ns 与缓存值相等, 中段等长改写又不在 64B 头/尾锚点范围内, 会复用
+    旧 rows(审查 N1)。因此写入前先跨过一个 tick, 使 change_ns 必然推进。
+    """
     import os
+    import time
 
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)
@@ -278,6 +290,7 @@ def test_in_place_rewrite_detected_with_exact_ns_mtime_restore():
             "开头原文CCCC".encode("utf-8"), "开头篡改CCCC".encode("utf-8"),
         )
         assert len(new_bytes) == len(old_bytes)
+        time.sleep(0.05)  # > NTFS ChangeTime tick(~15.6ms), 保证 change_ns 推进
         hist.write_bytes(new_bytes)
         os.utime(hist, ns=(st.st_atime_ns, st.st_mtime_ns))  # 精确恢复 ns
 
@@ -289,6 +302,7 @@ def test_in_place_rewrite_detected_with_exact_ns_mtime_restore():
 def test_merged_group_cache_invalidated_on_equal_length_rewrite():
     """群合并行的派生缓存(_merged_cache)同样必须按文件身份失效(#133)。"""
     import os
+    import time
 
     def group_bot(mid: int, text: str, ts: int) -> dict:
         return {
@@ -310,6 +324,7 @@ def test_merged_group_cache_invalidated_on_equal_length_rewrite():
         old_bytes = grp.read_bytes()
         new_bytes = old_bytes.replace("群原文AAAA".encode("utf-8"), "群篡改BBBB".encode("utf-8"))
         assert len(new_bytes) == len(old_bytes)
+        time.sleep(0.05)  # > NTFS ChangeTime tick, 保证 change_ns 推进
         grp.write_bytes(new_bytes)
         os.utime(grp, ns=(st.st_atime_ns, st.st_mtime_ns))
 
@@ -351,3 +366,37 @@ def test_append_after_anchor_guard_stays_incremental_and_visible():
             fh.write(json.dumps(_user_msg(2, "第二行"), ensure_ascii=False) + "\n")
         texts = [r["text"] for r in data.load_entries(sk)]
         assert texts == ["第一行", "第二行"], texts
+
+
+def test_anchor_verification_cached_within_identity():
+    """身份未变时复用锚点复核结论, 不每次请求都打开文件 seek(审查 N4)。
+
+    只替换 _anchors_match 记录调用次数, 其它逻辑不动; try/finally 还原。
+    """
+    calls: list[str] = []
+    real = MohobotData._anchors_match
+
+    def counting(path, idx):
+        calls.append(str(path))
+        return real(path, idx)
+
+    MohobotData._anchors_match = staticmethod(counting)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            hist = tmp_path / "history" / "bot_001" / "private" / "10001.jsonl"
+            _write_private(hist, [_user_msg(1, "锚点缓存")])
+            data = MohobotData(tmp_path)
+            sk = session_key("bot_001", "private", "10001")
+            assert len(data.load_entries(sk)) == 1
+            calls.clear()
+            # 文件身份完全一致 → 复用上次复核结论, 不再打开文件比对锚点
+            assert len(data.load_entries(sk)) == 1
+            assert not calls, f"同身份重复读取不应再复核锚点: {calls}"
+            # 追加后身份变化 → 正常增量解析, 新行可见
+            with hist.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_user_msg(2, "追加"), ensure_ascii=False) + "\n")
+            texts = [r["text"] for r in data.load_entries(sk)]
+            assert texts == ["锚点缓存", "追加"], texts
+    finally:
+        MohobotData._anchors_match = staticmethod(real)

@@ -67,6 +67,22 @@ def test_tail_without_trailing_newline_returns_last_line():
         assert _run(jsonl_read_tail(path, n=10)) == [{"i": 0}, {"i": 1}]
 
 
+def test_tail_supports_universal_newlines():
+    """CR-only / CRLF 结尾与旧文本模式(universal newlines)一致(#133 审查 N3)。"""
+    with tempfile.TemporaryDirectory() as td:
+        cr = Path(td) / "cr.jsonl"
+        cr_records = [{"i": i} for i in range(4)]
+        _write(cr, [json.dumps(r) for r in cr_records], trailing_newline=False)
+        cr.write_bytes(b"\r".join(json.dumps(r).encode() for r in cr_records) + b"\r")
+        assert _run(jsonl_read_tail(cr, n=2)) == cr_records[-2:]
+
+        crlf = Path(td) / "crlf.jsonl"
+        crlf_records = [{"i": i, "text": "中文"} for i in range(4)]
+        body = "\r\n".join(json.dumps(r, ensure_ascii=False) for r in crlf_records)
+        crlf.write_bytes((body + "\r\n").encode("utf-8"))
+        assert _run(jsonl_read_tail(crlf, n=3)) == crlf_records[-3:]
+
+
 def test_tail_skips_blank_and_malformed_lines():
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "bad.jsonl"

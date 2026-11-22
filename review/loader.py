@@ -212,9 +212,9 @@ class _FileIndex:
     """单个 history JSONL 的增量解析缓存。"""
 
     __slots__ = ("mtime", "mtime_ns", "ctime_ns", "change_ns", "generation",
-                 "tail_anchor", "head_anchor", "size", "offset", "inode", "rows",
-                 "bot_mids", "seen_mids", "bot_mids_by_bot", "bot_self_ids",
-                 "bots")
+                 "tail_anchor", "head_anchor", "verified_identity", "size",
+                 "offset", "inode", "rows", "bot_mids", "seen_mids",
+                 "bot_mids_by_bot", "bot_self_ids", "bots")
 
     def __init__(self) -> None:
         self.mtime: float = -1.0
@@ -230,9 +230,13 @@ class _FileIndex:
         # 已消费字节的尾部锚点(最多 _TAIL_ANCHOR_BYTES 字节): 文件变大但
         # 前缀被改写时(非追加更新)用少量回读发现, 避免漏掉整段替换。
         self.tail_anchor: bytes = b""
-        # 文件头部锚点(前 _TAIL_ANCHOR_BYTES 字节): 与 tail_anchor 一起在
-        # 文件身份不变时做内容复核, 发现"保持 mtime 的等长就地重写"(Windows
-        # 上 st_ctime 是创建时间, 元数据无信号, 只能靠内容锚点兜底)。
+        # 头/尾锚点最近一次复核通过时的文件身份(issue #136 review N4):
+        # 身份完全一致时复用复核结论, 避免每次读索引都重新打开文件 seek;
+        # 大文件另行跳过锚点(见 MohobotData._ANCHOR_VERIFY_MAX_BYTES)。
+        self.verified_identity: tuple[int, int, int, int, int] | None = None
+        # 头/尾锚点各只覆盖 _TAIL_ANCHOR_BYTES(64) 字节: 文件身份(含
+        # ChangeTime/ctime)不变时用它复核首尾内容; 落在两者之间的"中段
+        # 等长改写"发现不了, 需依赖 change_ns/ctime 的推进(见 identity())。
         self.head_anchor: bytes = b""
         self.size: int = -1
         # 文件身份(inode): 等长替换 + 保守 mtime 时仅靠 (mtime,size) 无法发现,
@@ -293,8 +297,9 @@ class _FileIndex:
 
         任一项变化 → 派生缓存必须失效(issue #133)。ctime 在 POSIX 上随
         inode 元数据变化; Windows 的 st_ctime 是创建时间, 改由 NTFS
-        ChangeTime(change_ns) 发现"保持 mtime 的等长就地重写"。锚点匹配
-        作为内容层面的最后一道兜底。
+        ChangeTime(change_ns) 发现"保持 mtime 的等长就地重写"。头/尾锚点
+        只覆盖首尾各 64B, 仅作为首尾内容微改的兜底, 不覆盖中段等长改写
+        (需靠 change_ns/ctime 推进发现)。
         """
         return (self.mtime_ns, self.size, self.inode, self.ctime_ns,
                 self.change_ns)
@@ -310,6 +315,7 @@ class _FileIndex:
         self.offset = 0
         self.tail_anchor = b""
         self.head_anchor = b""
+        self.verified_identity = None
         self.generation += 1
 
 
@@ -326,6 +332,10 @@ class MohobotData:
     _CACHE_VERSION = 9
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
     _TAIL_ANCHOR_BYTES = 64    # 已消费字节的尾部锚点长度(非追加更新探测)
+    # 超过该大小的文件不再做锚点内容复核(issue #136 review N4): 大归档每次
+    # 请求都多一次 open+seek, 而元数据(ChangeTime/ctime)已覆盖真实写入路径;
+    # 该兜底只针对"同 tick 内等长改写", 对 1MB+ 文件收益不成比例。
+    _ANCHOR_VERIFY_MAX_BYTES = 1 << 20
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None,
                  exempt_uids=None):
@@ -550,6 +560,24 @@ class MohobotData:
             return False
         return True
 
+    def _content_unchanged(self, path: Path, idx: _FileIndex) -> bool:
+        """身份未变时确认内容未变(锚点复核 + 按身份缓存, 大文件跳过)。
+
+        同一身份(含 ChangeTime)下重复读索引时直接复用上次复核结论, 不再
+        为每个请求打开文件 seek 首尾; 超过 _ANCHOR_VERIFY_MAX_BYTES 的文件
+        不做锚点复核。缓存随 reset()/identity 变化失效(issue #136 review N4)。
+        """
+        ident = idx.identity()
+        if idx.verified_identity == ident:
+            return True
+        if idx.size > self._ANCHOR_VERIFY_MAX_BYTES:
+            idx.verified_identity = ident
+            return True
+        if self._anchors_match(path, idx):
+            idx.verified_identity = ident
+            return True
+        return False
+
     def _is_append_only(
         self, idx: _FileIndex, path: Path, size: int, inode: int,
         mtime_ns: int, ctime_ns: int,
@@ -628,7 +656,8 @@ class MohobotData:
             ):
                 # 元数据完全一致时仍用头/尾锚点复核内容: Windows 上保持 mtime
                 # 的等长就地重写没有元数据信号, 只有内容锚点能发现(issue #133)。
-                if self._anchors_match(path, idx):
+                # 复核结论按身份缓存, 大文件跳过(issue #136 review N4)。
+                if self._content_unchanged(path, idx):
                     return idx
 
             rewrite = not self._is_append_only(
@@ -706,6 +735,8 @@ class MohobotData:
             if new_rows or rewrite:
                 idx.generation += 1
                 self._mark_dirty()
+            # 刚读过内容, 当前身份下的锚点复核必然成立 → 记录, 下次请求免复核。
+            idx.verified_identity = idx.identity()
             return idx
 
     def _parse_line(
