@@ -207,12 +207,14 @@ class PendingRoutes:
         *,
         inserted: bool,
         expected_hash: str = "",
-    ) -> None:
+    ) -> bool:
         """审核失败/取消后的补偿：删掉本次写入的图库记录，把文件移回 pending。
 
-        只删除哈希与 pending 行一致的记录，避免在极端并发下误删同名路径的
-        其他数据(issue #132 review)。
+        只处理哈希与 pending 行一致的记录；哈希不匹配说明同名路径已被其他
+        并发写入占用，此时文件与 DB 都保持原样，避免误删他人数据或让图库
+        记录指向被移走的文件(issue #132 review)。返回 False 表示已跳过。
         """
+        skipped = False
         if inserted:
             try:
                 if hasattr(db, "delete_paths"):
@@ -225,11 +227,17 @@ class PendingRoutes:
                         await db.delete_paths([cat_path])
                         await refresh_search_entry(self.plugin, cat_path)
                     else:
-                        logger.error(
-                            f"审核回滚跳过 id={pending_id}: 图库记录哈希已变化, 不删除"
+                        skipped = True
+                        logger.warning(
+                            f"审核回滚跳过 id={pending_id}: 图库记录哈希已变化, "
+                            "不删除记录也不移动文件"
                         )
             except Exception as exc:
                 logger.warning(f"审核回滚删除图库记录失败 id={pending_id}: {exc}")
+        if skipped:
+            # 记录已不属于本次操作: 清掉恢复标记, 但文件/DB 保持不变。
+            self._clear_approve_marker(pending_id)
+            return False
         try:
             if cat_path and os.path.isfile(cat_path) and not os.path.exists(src_path):
                 parent = os.path.dirname(src_path)
@@ -239,6 +247,7 @@ class PendingRoutes:
         except Exception as exc:
             logger.warning(f"审核回滚移动文件失败 id={pending_id}: {exc}")
         self._clear_approve_marker(pending_id)
+        return True
 
     def _find_orphan_by_hash(self, hash_val: str, basename: str) -> str:
         """文件已不在 pending 路径时，按内容哈希在分类目录里找回孤儿文件。"""

@@ -536,9 +536,9 @@ async def test_reject_skips_recovery_when_pending_already_committed(env, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_rollback_skips_record_with_mismatched_hash(env):
-    """回滚只删本次写入的记录; 同名路径哈希已变时不得误删(#132 review)。"""
-    pending_id, _src = await _insert_pending(env)
+async def test_rollback_skips_record_and_files_with_mismatched_hash(env):
+    """哈希不匹配时必须完全跳过: 不删记录、不移动/删除文件(#132 review)。"""
+    pending_id, src = await _insert_pending(env)
     cat_path = _cat_path(env)
     cat_path.parent.mkdir(parents=True, exist_ok=True)
     cat_path.write_bytes(b"pending-bytes")
@@ -546,14 +546,35 @@ async def test_rollback_skips_record_with_mismatched_hash(env):
     entry["hash"] = "someone-elses-hash"
     await env.db.insert_batch([entry])
 
-    await env.api._rollback_approval(
+    skipped = await env.api._rollback_approval(
         env.db,
         pending_id,
-        str(env.cfg.pending_dir / "p.png"),
+        str(src),
         str(cat_path),
         inserted=True,
         expected_hash="expected-hash",
     )
 
+    assert skipped is False, "哈希不匹配应返回 skipped"
     assert env.db.get_emoji(str(cat_path)) is not None, "哈希不匹配时不得删除他人记录"
-    assert cat_path.is_file()
+    assert cat_path.is_file(), "哈希不匹配时不得移动/删除分类目录文件"
+    assert cat_path.read_bytes() == b"pending-bytes"
+    assert src.is_file(), "哈希不匹配时不得移动/删除待审文件"
+    assert src.read_bytes() == b"pending-bytes"
+
+    # 匹配时仍正常回滚: 删记录 + 文件移回 pending
+    src.unlink()
+    entry["hash"] = "expected-hash"
+    await env.db.insert_batch([entry])
+    rolled_back = await env.api._rollback_approval(
+        env.db,
+        pending_id,
+        str(src),
+        str(cat_path),
+        inserted=True,
+        expected_hash="expected-hash",
+    )
+    assert rolled_back is True
+    assert env.db.get_emoji(str(cat_path)) is None
+    assert not cat_path.exists()
+    assert src.is_file(), "匹配回滚后文件应移回 pending 路径"
