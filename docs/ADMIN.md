@@ -72,6 +72,7 @@
 - **`data/persona_ab/` 不包含在聊天备份 ZIP 中**：它是独立 JSON，当前首版**不支持恢复导入**，需要单独备份。
 - **歌曲索引缓存**（`data/cache/song_index`）默认跳过备份，恢复时保留现有缓存；删除该目录等价于下次强制重建。
 - 审核面板使用独立数据库，只读 history；备份/恢复主程序数据不等于备份审核数据。
+- **面板在线备份/恢复（issue #126）**：勾选 `database` 时主数据库（`config.database.folder/file`）通过 SQLite backup API 做一致性快照，恢复前执行 `PRAGMA quick_check` 与必要表校验；校验失败返回 400，不会替换现有数据。恢复 contexts 会重写会话 generation，让在途回复的旧 generation 回写失败。清理接口不支持 `database`，需要时使用 SQL 工具或停机维护。
 - 数据迁移、history 布局转换、同步与清理都是**单独操作**：先停机、备份、读脚本、再执行；相关脚本多数需要显式授权（见 [DEPLOYMENT](DEPLOYMENT.md) 与 [AGENTS](../AGENTS.md)）。
 - 配置、`data/`、`logs/` 与凭据不入库；备份文件本身也应放在受控位置。
 

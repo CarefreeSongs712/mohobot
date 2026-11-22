@@ -12,7 +12,9 @@ Directory layout:
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import time
 import re
 import uuid
@@ -66,6 +68,9 @@ class ContextManager:
         self._sweep_enabled = bool(sweep_enabled)
         self._sweep_interval_minutes = max(1, int(sweep_interval_minutes))
         self._min_interval_hours = max(1, int(min_interval_hours))
+        # 群聊会话 generation 只存在于内存(群聊目录没有会话索引文件); 清空/恢复时
+        # 推进它, 让在途回复捕获的旧 generation 立即失效(issue #126 第 2 点)。
+        self._group_generations: dict[tuple[str, str], str] = {}
 
     def set_summarizer(self, summarizer) -> None:
         """注入总结回调(LLMService.summarize_context)。"""
@@ -178,12 +183,28 @@ class ContextManager:
         """Read an existing index; never create a chat or switch its active session."""
         return await self._read_index_unlocked(bot_id, chat_type, chat_id)
 
+    def _group_generation(self, bot_id: str, chat_id: str) -> str:
+        """群聊会话当前 generation(未推进过时为兼容值 group-main)。"""
+        return self._group_generations.get((bot_id, chat_id), "group-main")
+
+    def bump_group_generations(self, bot_id: str) -> None:
+        """使该 bot 所有群聊会话的在途 generation 失效(恢复 contexts 后调用)。"""
+        base = self._context_base(bot_id, "group")
+        if not base.exists():
+            return
+        for chat_dir in base.iterdir():
+            if chat_dir.is_dir():
+                self._group_generations[(bot_id, chat_dir.name)] = uuid.uuid4().hex
+
     async def _metadata_unlocked(self, bot_id, chat_type, chat_id, session_id=None, generation=None, *, create=False):
         if chat_type == "group":
-            metadata = {"id": "main", "name": "群聊默认会话", "generation": "group-main", "persona_id": ""}
-            if session_id not in (None, "main") or generation not in (None, "group-main"):
+            current_generation = self._group_generation(bot_id, chat_id)
+            if session_id not in (None, "main"):
                 return None
-            return metadata
+            if generation is not None and generation != current_generation:
+                return None
+            return {"id": "main", "name": "群聊默认会话",
+                    "generation": current_generation, "persona_id": ""}
         index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=create)
         if index is None:
             return None
@@ -229,18 +250,43 @@ class ContextManager:
         path = self._session_index_path(bot_id, chat_type, chat_id)
         await json_write(path, data)
 
+    async def _bump_generation_unlocked(
+        self, bot_id: str, chat_type: str, chat_id: str, index: dict, session_id: str
+    ) -> None:
+        """推进单个私聊会话的 generation, 使在途回复写入失效(issue #126 第 2 点)。"""
+        session = next((s for s in index.get("sessions", []) if s.get("id") == session_id), None)
+        if session is None:
+            return
+        session["generation"] = uuid.uuid4().hex
+        await self._save_session_index(bot_id, chat_type, chat_id, index)
+
     # ── Context CRUD ───────────────────────────────────────────
 
     @_chat_locked
     async def load_context(
         self, bot_id: str, chat_type: str, chat_id: str, *,
         session_id: str | None = None, generation: str | None = None,
+        validated_session: dict | None = None,
     ) -> list[dict[str, Any]]:
-        """Read the captured session, or the active session for legacy callers."""
-        metadata = await self._metadata_unlocked(
-            bot_id, chat_type, chat_id, session_id, generation,
-            create=session_id is None and generation is None,
-        )
+        """Read the captured session, or the active session for legacy callers.
+
+        ``validated_session`` is a snapshot returned by :meth:`capture_session`;
+        passing it avoids re-reading ``session_index.json`` (issue #137). Reads
+        are safe to serve from the snapshot because clear/reset empty the file
+        and delete removes the path; the write path still revalidates the
+        generation before appending.
+        """
+        if validated_session is not None:
+            metadata = dict(validated_session)
+            if session_id is not None and metadata.get("id") != session_id:
+                return []
+            if generation is not None and metadata.get("generation") != generation:
+                return []
+        else:
+            metadata = await self._metadata_unlocked(
+                bot_id, chat_type, chat_id, session_id, generation,
+                create=session_id is None and generation is None,
+            )
         if metadata is None:
             return []
         data = await json_read(self._session_file_path(bot_id, chat_type, chat_id, metadata["id"]))
@@ -250,12 +296,22 @@ class ContextManager:
         self, bot_id: str, chat_type: str, chat_id: str,
         entries: list[dict[str, Any]], *,
         session_id: str | None = None, generation: str | None = None,
+        validated_session: dict | None = None,
     ) -> bool:
-        """Append only to the captured generation; deletion never revives files."""
+        """Append only to the captured generation; deletion never revives files.
+
+        ``validated_session`` only supplies the captured id/generation; the
+        generation is still revalidated against the index under the chat lock
+        before write-back, so a stale snapshot cannot resurrect or corrupt a
+        cleared/reset/deleted session (issue #137).
+        """
         async with self.maintenance_lock, self.chat_lock(bot_id, chat_type, chat_id):
+            snapshot = validated_session or {}
+            target_session_id = session_id if session_id is not None else snapshot.get("id")
+            target_generation = generation if generation is not None else snapshot.get("generation")
             metadata = await self._metadata_unlocked(
-                bot_id, chat_type, chat_id, session_id, generation,
-                create=session_id is None and generation is None,
+                bot_id, chat_type, chat_id, target_session_id, target_generation,
+                create=target_session_id is None and target_generation is None,
             )
             if metadata is None:
                 return False
@@ -485,12 +541,16 @@ class ContextManager:
     async def clear_context(
         self, bot_id: str, chat_type: str, chat_id: str
     ) -> None:
-        """Clear the current active session context."""
+        """Clear the current active session context and invalidate in-flight replies."""
         if chat_type == "group":
+            # 群聊 generation 在内存; 先推进再清文件, 在途回复随后 append 会被拒。
+            self._group_generations[(bot_id, chat_id)] = uuid.uuid4().hex
             session_id = "main"
         else:
             index = await self._read_index_unlocked(bot_id, chat_type, chat_id, create=True)
             session_id = index.get("active", "sess_main")
+            await self._bump_generation_unlocked(
+                bot_id, chat_type, chat_id, index, session_id)
 
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
         await json_write(path, [])
@@ -612,19 +672,52 @@ class ContextManager:
         if len(new_sessions) < 1:
             return False  # Must keep at least one session
 
+        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
+        old_index = copy.deepcopy(index)
+
+        # 先把会话文件改名成 tombstone, 再落索引, 最后删 tombstone:
+        # - 索引落盘失败 → 恢复文件名并抛出, 索引/文件都保持原状;
+        # - unlink 失败(Windows 文件被占用) → 回滚索引并恢复文件名, 保证索引与
+        #   文件仍一致, 同时把可重试错误抛给调用方(issue #126 第 4 点)。
+        # tombstone 名字含 ".deleting-", 备份收集时会跳过, 不会进入备份包。
+        tombstone: Path | None = None
+        if path.exists():
+            tombstone = path.with_name(f".{path.name}.deleting-{uuid.uuid4().hex}")
+            try:
+                os.replace(path, tombstone)
+            except OSError as exc:
+                raise OSError(f"删除会话失败(文件被占用)，请重试: {exc}") from exc
+
         index["sessions"] = new_sessions
 
         # If active was deleted, switch to first available
         if index.get("active") == session_id:
             index["active"] = new_sessions[0]["id"]
 
-        await self._save_session_index(bot_id, chat_type, chat_id, index)
+        try:
+            await self._save_session_index(bot_id, chat_type, chat_id, index)
+        except BaseException:
+            if tombstone is not None:
+                try:
+                    os.replace(tombstone, path)
+                except OSError as rollback_exc:
+                    logger.error(
+                        f"删除会话回滚文件失败({chat_type}:{chat_id}/{session_id}): {rollback_exc}")
+            raise
 
-        # Delete the context file
-        path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
-        async with _get_lock(str(path.absolute())):
-            if path.exists():
-                path.unlink()
+        if tombstone is not None:
+            try:
+                tombstone.unlink()
+            except OSError as exc:
+                try:
+                    await self._save_session_index(bot_id, chat_type, chat_id, old_index)
+                    os.replace(tombstone, path)
+                except BaseException as rollback_exc:
+                    logger.error(
+                        f"删除会话回滚索引/文件失败({chat_type}:{chat_id}/{session_id}): {rollback_exc}")
+                    raise OSError(
+                        f"删除会话失败且回滚不完整，请人工检查: {exc}") from exc
+                raise OSError(f"删除会话失败(文件被占用)，请重试: {exc}") from exc
 
         logger.info(f"Deleted session {session_id} for {chat_type}:{chat_id}")
         return True
@@ -711,11 +804,21 @@ class ContextManager:
     async def reset_session(
         self, bot_id: str, chat_type: str, chat_id: str, session_id: str
     ) -> bool:
-        """Reset (clear) a session's messages. Returns True on success."""
+        """Reset (clear) a session's messages. Returns True on success.
+
+        与 clear_context 一样推进 generation: 被重置会话的在途回复不得写回。
+        """
         if await self._metadata_unlocked(bot_id, chat_type, chat_id, session_id) is None:
             return False
         path = self._session_file_path(bot_id, chat_type, chat_id, session_id)
         if not path.exists():
             return False
+        if chat_type == "group":
+            self._group_generations[(bot_id, chat_id)] = uuid.uuid4().hex
+        else:
+            index = await self._read_index_unlocked(bot_id, chat_type, chat_id)
+            if index is not None:
+                await self._bump_generation_unlocked(
+                    bot_id, chat_type, chat_id, index, session_id)
         await json_write(path, [])
         return True

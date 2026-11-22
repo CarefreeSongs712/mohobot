@@ -74,7 +74,7 @@ async def test_handler_uses_emotion_role_without_mutating_history():
         {"role": "emotion", "content": EMOTION},
     ]
     handler._ctx_mgr.load_context.assert_awaited_once_with(
-        "bot_001", "group", "999", session_id="main", generation=7,
+        "bot_001", "group", "999", validated_session={"id": "main", "generation": 7},
     )
     emotion.build_context_block.assert_awaited_once_with("bot_001", event)
 

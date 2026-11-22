@@ -976,6 +976,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - **密钥掩码 + 留空保留**：`GET` 时 `llm/anysearch/tts` 中含 `key|token|secret|password` 的字段返回 `********`；保存时提交空串或掩码则**保留原值**。
 - **路径安全**：所有 `bot_id` 路径参数过 `_safe_id`（`^[A-Za-z0-9_-]{1,128}$`）。
 - 备份/恢复/清理需再次输入账号密码；zip 恢复有 zip-slip 防护。
+- **在线一致性（issue #126）**：备份先在维护协议内（history 屏障冻结 + persona/context 维护锁）复制静态快照，再对快照压缩，不直接打包正在被 append 重写的 contexts；恢复先全量校验 contexts JSON/索引/引用、人设库与 SQLite 快照，校验失败返回 400 且不替换任何现有数据。`database` 范围用 SQLite backup API 做一致性快照。clear/reset 会推进会话 generation，使在途回复持有的旧 generation 回写失败；维护屏障冻结被取消时回滚 frozen 状态。
 - 审计：除登录外所有 POST/PUT/PATCH/DELETE 写 `data/audit/web_admin.jsonl`，敏感 key 递归打码。
 - 板块与端点（实际 11 个，docstring 里写「7 个」已过时）：
 
@@ -989,7 +990,7 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 | 对话数据 | `GET /api/contexts`、`.../{bot}/{type}/{id}`、session 增删切、message 编辑、reset |
 | 实时日志 | `POST /api/logs/ticket`、`GET /api/logs/stream` |
 | 系统设置 | `PUT /api/settings/password`、`POST /api/settings/restart` |
-| 数据管理 | `POST /api/data/{backup,restore,cleanup}`（scope: cache/history/contexts/ban） |
+| 数据管理 | `POST /api/data/{backup,restore,cleanup}`（scope: cache/history/contexts/ban/personas/database；database 用 SQLite 一致性快照，不支持在线清理） |
 | 封禁管理 | `GET /api/ban`、`POST /api/ban/operate` |
 | 情感管理 | `GET /api/emotion/status`（队列/burst/熔断/存储快照）、`GET /api/emotion/states?bot_id=`（按好感降序、跳过零互动用户）、`POST /api/emotion/operate`（action=set_favor/set_intimacy/set_attitude/reset_user/clear_bot）、`GET /api/emotion/memory?bot_id=&user_id=`（只读记忆） |
 
