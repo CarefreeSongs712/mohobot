@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,19 @@ def _write_jsonl(path: Path, rows: list[dict | str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+@contextmanager
+def _patched_attrs(target, **attrs):
+    """临时替换模块/对象属性, 结束后恢复(兼容 tests/_run_all.py 无 fixture 环境)。"""
+    old = {name: getattr(target, name) for name in attrs}
+    try:
+        for name, value in attrs.items():
+            setattr(target, name, value)
+        yield target
+    finally:
+        for name, value in old.items():
+            setattr(target, name, value)
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     return [
         json.loads(line)
@@ -42,6 +56,25 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 # ── migrate_history_layout ────────────────────────────────────────────
+
+
+class _NotATTY:
+    def isatty(self) -> bool:
+        return False
+
+
+def _non_interactive(func):
+    """以非交互 stdin 执行测试(不依赖 pytest monkeypatch fixture)。"""
+
+    def wrapper(tmp_path: Path):
+        old = sys.stdin
+        sys.stdin = _NotATTY()
+        try:
+            return func(tmp_path)
+        finally:
+            sys.stdin = old
+
+    return wrapper
 
 
 def test_migrate_keeps_same_content_in_different_groups(tmp_path: Path):
@@ -121,16 +154,12 @@ def test_migrate_skip_invalid_lines_migrates_valid_rows(tmp_path: Path):
     assert list(data.glob("history_legacy_*")), "成功迁移后来源应进备份目录"
 
 
-def test_migrate_requires_confirmation_in_non_interactive(tmp_path: Path, monkeypatch):
+@_non_interactive
+def test_migrate_requires_confirmation_in_non_interactive(tmp_path: Path):
     data = tmp_path
     src = data / "history" / "bot_001" / "group" / "111.jsonl"
     _write_jsonl(src, [{"time": 100, "message_id": 1, "user_id": 7}])
 
-    class _NotATTY:
-        def isatty(self) -> bool:
-            return False
-
-    monkeypatch.setattr(sys, "stdin", _NotATTY())
     module = _load_script("migrate_history_layout")
     assert module.main(["--data-dir", str(data)]) == 1
     assert src.exists()
@@ -237,17 +266,13 @@ def test_clean_dry_run_does_not_write_or_backup(tmp_path: Path):
     assert not list(tmp_path.glob("*.bak-*"))
 
 
-def test_clean_requires_confirmation_in_non_interactive(tmp_path: Path, monkeypatch):
+@_non_interactive
+def test_clean_requires_confirmation_in_non_interactive(tmp_path: Path):
     db_path = tmp_path / "knowledge_db.db"
     conn = _make_song_db(db_path)
     conn.close()
     before = db_path.read_bytes()
 
-    class _NotATTY:
-        def isatty(self) -> bool:
-            return False
-
-    monkeypatch.setattr(sys, "stdin", _NotATTY())
     module = _load_script("clean_knowledge_db")
     assert module.main(["--db", str(db_path)]) == 1
     assert db_path.read_bytes() == before
@@ -276,27 +301,30 @@ def test_clean_writes_after_backup_and_reports(tmp_path: Path):
 # ── sync_vcpedia ──────────────────────────────────────────────────────
 
 
-def _vcpedia(monkeypatch, result):
+def _vcpedia_exit_code(result: dict) -> int:
     module = _load_script("sync_vcpedia")
-    monkeypatch.setattr(module, "load_music_knowledge_config", lambda: {})
-    monkeypatch.setattr(module, "sync_vcpedia_new_songs", lambda _cfg: result)
-    return module
+    with _patched_attrs(
+        module,
+        load_music_knowledge_config=lambda: {},
+        sync_vcpedia_new_songs=lambda _cfg: result,
+    ):
+        return module.main([])
 
 
-def test_sync_vcpedia_exit_codes(monkeypatch):
-    assert _vcpedia(monkeypatch, {"added": ["a"], "failed": [], "skipped": 1}).main([]) == 0
-    assert _vcpedia(monkeypatch, {"added": ["a"], "failed": ["b"]}).main([]) == 1
-    assert _vcpedia(monkeypatch, {"added": [], "failed": ["b"]}).main([]) == 2
+def test_sync_vcpedia_exit_codes():
+    assert _vcpedia_exit_code({"added": ["a"], "failed": [], "skipped": 1}) == 0
+    assert _vcpedia_exit_code({"added": ["a"], "failed": ["b"]}) == 1
+    assert _vcpedia_exit_code({"added": [], "failed": ["b"]}) == 2
 
 
-def test_sync_vcpedia_config_failure_returns_nonzero(monkeypatch):
+def test_sync_vcpedia_config_failure_returns_nonzero():
     module = _load_script("sync_vcpedia")
 
     def boom():
         raise RuntimeError("config missing")
 
-    monkeypatch.setattr(module, "load_music_knowledge_config", boom)
-    assert module.main([]) == 2
+    with _patched_attrs(module, load_music_knowledge_config=boom):
+        assert module.main([]) == 2
 
 
 # ── sync_songs ────────────────────────────────────────────────────────
@@ -307,15 +335,11 @@ class _Adapter:
         self.name = name
 
 
-def _sync_songs(monkeypatch, sources, *, adapters=None):
+def _sync_songs_exit_code(sources, *, adapters=None, argv=()) -> int:
     module = _load_script("sync_songs")
-    monkeypatch.setattr(module, "load_music_config", lambda: {"sync": {"mode": "new_only"}})
-
     import mohobot.music_knowledge.sync as sync_module
 
     built = adapters if adapters is not None else [_Adapter("a"), _Adapter("b")]
-    monkeypatch.setattr(sync_module, "build_adapters", lambda _cfg: built)
-    monkeypatch.setattr(sync_module, "set_db_location", lambda *_a: None)
 
     class _Report:
         def __init__(self):
@@ -324,8 +348,14 @@ def _sync_songs(monkeypatch, sources, *, adapters=None):
         def summary_text(self) -> str:
             return "report"
 
-    monkeypatch.setattr(sync_module, "sync_all", lambda *_a, **_k: _Report())
-    return module
+    with _patched_attrs(module, load_music_config=lambda: {"sync": {"mode": "new_only"}}):
+        with _patched_attrs(
+            sync_module,
+            build_adapters=lambda _cfg: built,
+            set_db_location=lambda *_a: None,
+            sync_all=lambda *_a, **_k: _Report(),
+        ):
+            return module.main(list(argv))
 
 
 def _stat(source: str, failed: int = 0, aborted: str = ""):
@@ -334,15 +364,14 @@ def _stat(source: str, failed: int = 0, aborted: str = ""):
     return SimpleNamespace(source=source, failed=failed, aborted=aborted)
 
 
-def test_sync_songs_exit_codes(monkeypatch):
+def test_sync_songs_exit_codes():
     ok = [_stat("a"), _stat("b")]
     partial = [_stat("a"), _stat("b", failed=3)]
     failed = [_stat("a", aborted="boom"), _stat("b", failed=1)]
-    assert _sync_songs(monkeypatch, ok).main([]) == 0
-    assert _sync_songs(monkeypatch, partial).main([]) == 1
-    assert _sync_songs(monkeypatch, failed).main([]) == 2
+    assert _sync_songs_exit_code(ok) == 0
+    assert _sync_songs_exit_code(partial) == 1
+    assert _sync_songs_exit_code(failed) == 2
 
 
-def test_sync_songs_no_adapters_is_failure(monkeypatch):
-    module = _sync_songs(monkeypatch, [], adapters=[])
-    assert module.main(["--source", "nope"]) == 2
+def test_sync_songs_no_adapters_is_failure():
+    assert _sync_songs_exit_code([], adapters=[], argv=["--source", "nope"]) == 2

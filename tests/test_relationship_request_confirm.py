@@ -20,7 +20,6 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -248,12 +247,13 @@ class _StaticWS:
         return self.resp
 
 
-@pytest.mark.parametrize("retcode", [0, "0", "+0"])
-async def test_retcode_valid_forms_are_ok(retcode):
-    ws = _StaticWS({"status": "ok", "retcode": retcode, "data": {"x": 1}})
-    result = await api_call_checked(ws, "b", "get_group_info")
-    assert result.ok and result.outcome == OUTCOME_OK
-    assert result.data == {"x": 1}
+async def test_retcode_valid_forms_are_ok():
+    # 不用 pytest 参数化, 兼容 tests/_run_all.py 的无 fixture 执行器。
+    for retcode in (0, "0", "+0"):
+        ws = _StaticWS({"status": "ok", "retcode": retcode, "data": {"x": 1}})
+        result = await api_call_checked(ws, "b", "get_group_info")
+        assert result.ok and result.outcome == OUTCOME_OK, retcode
+        assert result.data == {"x": 1}, retcode
 
 
 async def test_missing_status_is_compatible():
@@ -263,7 +263,7 @@ async def test_missing_status_is_compatible():
     assert await api_call(ws, "b", "get_group_list") == [1, 2]
 
 
-@pytest.mark.parametrize("resp", [
+MALFORMED_RECEIPTS = [
     {"status": "ok", "data": {}},            # 缺 retcode
     {"status": "ok", "retcode": "abc"},      # 无法解析
     {"status": "ok", "retcode": None},       # 无值
@@ -271,12 +271,15 @@ async def test_missing_status_is_compatible():
     {"status": "ok", "retcode": True},       # bool 不是合法 retcode
     {"status": "unknown", "retcode": 0},     # 未知 status
     {"status": "ok", "retcode": "0.5"},      # 数字串但非整数
-])
-async def test_malformed_receipts_are_unconfirmed(resp):
-    result = await api_call_checked(_StaticWS(resp), "b", "x")
-    assert not result.ok
-    assert result.outcome == OUTCOME_UNCONFIRMED
-    assert result.error
+]
+
+
+async def test_malformed_receipts_are_unconfirmed():
+    for resp in MALFORMED_RECEIPTS:
+        result = await api_call_checked(_StaticWS(resp), "b", "x")
+        assert not result.ok, resp
+        assert result.outcome == OUTCOME_UNCONFIRMED, resp
+        assert result.error, resp
 
 
 async def test_explicit_rejection_is_failed_not_unconfirmed():

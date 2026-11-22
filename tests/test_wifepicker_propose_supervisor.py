@@ -12,6 +12,7 @@ supervisor 时本地持有引用并在 ``on_shutdown`` 取消, 同时清理待�
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.util
 import sys
 import tempfile
@@ -106,8 +107,36 @@ def _group_texts(ws):
     return [m for kind, _, m in ws.sent if kind == "group"]
 
 
-async def test_propose_timer_registered_with_supervisor(monkeypatch):
-    monkeypatch.setattr(propose_module, "PROPOSE_RESPONSE_SECONDS", 0.05)
+def _with_propose_seconds(value):
+    """临时覆盖超时秒数, 不依赖 pytest monkeypatch fixture。"""
+
+    def decorator(func):
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def wrapper():
+                old = propose_module.PROPOSE_RESPONSE_SECONDS
+                propose_module.PROPOSE_RESPONSE_SECONDS = value
+                try:
+                    return await func()
+                finally:
+                    propose_module.PROPOSE_RESPONSE_SECONDS = old
+        else:
+            @functools.wraps(func)
+            def wrapper():
+                old = propose_module.PROPOSE_RESPONSE_SECONDS
+                propose_module.PROPOSE_RESPONSE_SECONDS = value
+                try:
+                    return func()
+                finally:
+                    propose_module.PROPOSE_RESPONSE_SECONDS = old
+
+        return wrapper
+
+    return decorator
+
+
+@_with_propose_seconds(0.05)
+async def test_propose_timer_registered_with_supervisor():
     supervisor = TaskSupervisor()
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
@@ -128,9 +157,9 @@ async def test_propose_timer_registered_with_supervisor(monkeypatch):
     await supervisor.shutdown()
 
 
-async def test_disable_cancels_timer_and_does_not_send(monkeypatch):
+@_with_propose_seconds(0.2)
+async def test_disable_cancels_timer_and_does_not_send():
     """PluginSystem 禁用/卸载时按 owner 前缀取消, 计时器不得再发提醒。"""
-    monkeypatch.setattr(propose_module, "PROPOSE_RESPONSE_SECONDS", 0.2)
     supervisor = TaskSupervisor()
     wrapped = _PluginTaskSupervisor(supervisor, "wifepicker")
     with tempfile.TemporaryDirectory() as td:
@@ -145,9 +174,9 @@ async def test_disable_cancels_timer_and_does_not_send(monkeypatch):
     await supervisor.shutdown()
 
 
-async def test_on_shutdown_cancels_fallback_timer(monkeypatch):
+@_with_propose_seconds(0.2)
+async def test_on_shutdown_cancels_fallback_timer():
     """未注入 supervisor 时也必须由 on_shutdown 取消本地计时任务。"""
-    monkeypatch.setattr(propose_module, "PROPOSE_RESPONSE_SECONDS", 0.2)
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(td)  # no supervisor
         await plugin.on_message(BOT, _propose_event(), {})
@@ -162,9 +191,9 @@ async def test_on_shutdown_cancels_fallback_timer(monkeypatch):
         assert _group_texts(plugin._ws_server) == [], plugin._ws_server.sent
 
 
-async def test_spawn_task_when_supervisor_stopping_is_safe(monkeypatch):
+@_with_propose_seconds(0.1)
+async def test_spawn_task_when_supervisor_stopping_is_safe():
     """宿主正在关闭时登记任务不应抛异常, 也不留下会发送的计时器。"""
-    monkeypatch.setattr(propose_module, "PROPOSE_RESPONSE_SECONDS", 0.1)
     supervisor = TaskSupervisor()
     await supervisor.shutdown()  # stopping=True
     with tempfile.TemporaryDirectory() as td:
@@ -181,9 +210,9 @@ async def test_spawn_task_when_supervisor_stopping_is_safe(monkeypatch):
         assert _group_texts(plugin._ws_server) == [], plugin._ws_server.sent
 
 
-async def test_propose_agree_clears_pending_before_timer_fires(monkeypatch):
+@_with_propose_seconds(0.05)
+async def test_propose_agree_clears_pending_before_timer_fires():
     """同意后计时器到点不得再发超时提醒(请求已清除)。"""
-    monkeypatch.setattr(propose_module, "PROPOSE_RESPONSE_SECONDS", 0.05)
     supervisor = TaskSupervisor()
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
