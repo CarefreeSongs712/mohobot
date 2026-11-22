@@ -210,8 +210,15 @@ class ModelGateway:
         except (TypeError, ValueError):
             return 0
 
-    async def embed(self, text: str) -> list[float]:
-        endpoint = self._require("embedding")
+    async def embed(
+        self, text: str, *, endpoint: ModelEndpoint | None = None
+    ) -> list[float]:
+        """调用嵌入接口。
+
+        ``endpoint`` 由调用方捕获时，一律使用该快照，不再重新读取配置；否则
+        配置在请求前后被切换会把另一个服务的向量写进当前代次（issue #129）。
+        """
+        endpoint = endpoint or self._require("embedding")
         kwargs: dict[str, Any] = {"model": endpoint.model, "input": text}
         dims = self._embedding_dimensions()
         if dims:
@@ -224,8 +231,8 @@ class ModelGateway:
             self._embedding_dims[endpoint.signature] = len(vector)
         return vector
 
-    def embedding_dim(self) -> int:
-        endpoint = self.endpoint("embedding")
+    def embedding_dim(self, endpoint: ModelEndpoint | None = None) -> int:
+        endpoint = endpoint or self.endpoint("embedding")
         if endpoint is None:
             return 0
         return self._embedding_dims.get(endpoint.signature) or self._embedding_dimensions()
@@ -244,18 +251,24 @@ class ModelGateway:
 
 
 class EmbeddingProvider:
-    """EmbeddingService 使用的嵌入接口（get_embedding / get_dim）。"""
+    """EmbeddingService 使用的嵌入接口（get_embedding / get_dim）。
+
+    provider 创建时捕获 ``endpoint``，之后嵌入/维度查询都只用这个快照，保证
+    写入向量与 provider 签名属于同一个服务来源；配置热切换后旧 provider 不会
+    改调新端点（issue #129）。
+    """
 
     def __init__(self, gateway: ModelGateway, endpoint: ModelEndpoint) -> None:
         self._gateway = gateway
         self.endpoint = endpoint
+        self.signature = endpoint.signature
         self.provider_config = {"id": endpoint.signature}
 
     async def get_embedding(self, text: str) -> list[float]:
-        return await self._gateway.embed(text)
+        return await self._gateway.embed(text, endpoint=self.endpoint)
 
     def get_dim(self) -> int:
-        return self._gateway.embedding_dim()
+        return self._gateway.embedding_dim(self.endpoint)
 
     async def probe(self) -> int:
         """首次使用前探测向量维度，供维度变化检测。"""

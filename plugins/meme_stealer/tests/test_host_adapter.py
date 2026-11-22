@@ -230,6 +230,43 @@ async def test_embed_passes_dimensions_and_tracks_vector_size():
 
 
 @pytest.mark.asyncio
+async def test_embedding_provider_uses_captured_endpoint_after_config_switch():
+    """provider 创建后配置切到另一服务，旧 provider 仍须调用原端点（issue #129）。"""
+    gw = _gateway(
+        {
+            "embedding_model": "emb-a",
+            "embedding_base_url": "https://a.example/v1",
+            "embedding_api_key": "key-a",
+        }
+    )
+    create = AsyncMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(embedding=[0.5, 1.0])], usage=None)
+    )
+    used = []
+    gw._client = lambda endpoint: (
+        used.append(endpoint.signature)
+        or SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    )
+
+    provider = gw.embedding_provider()
+    assert provider.signature == "emb-a@https://a.example/v1"
+
+    # 运行时配置切到 B（同维度、不同服务来源）
+    config = gw._config_getter()
+    config.embedding_model = "emb-b"
+    config.embedding_base_url = "https://b.example/v1"
+    config.embedding_api_key = "key-b"
+    assert gw.describe("embedding") == "emb-b@https://b.example/v1"
+
+    assert await provider.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs["model"] == "emb-a"
+    assert used == ["emb-a@https://a.example/v1"]
+    # 维度缓存同样按捕获端点查询，不会被 B 的配置串扰
+    assert provider.get_dim() == 2
+    assert gw.embedding_dim() == 0
+
+
+@pytest.mark.asyncio
 async def test_vision_sends_image_as_data_uri_and_records_usage(tmp_path):
     gw = _gateway({"vision_model": "my-vl"})
     recorded = []

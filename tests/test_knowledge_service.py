@@ -288,3 +288,268 @@ async def test_model_label_follows_actual_provider():
                 assert meta2 == "model-v1", meta2
             finally:
                 await svc.close()
+
+
+# ── #129 检索代次 / 快照隔离 ─────────────────────────────────────────
+
+
+class GatedEmbedding(FakeEmbedding):
+    """embed 阻塞到 gate 放开, 用于在 await 期间制造热切换/重建竞态。"""
+
+    def __init__(self, dim: int = 8):
+        super().__init__(dim)
+        self.started = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def embed(self, texts):
+        self.started.set()
+        await self.gate.wait()
+        return await super().embed(texts)
+
+
+async def _prepared_service(tmp: Path, *, dim: int = 8):
+    (tmp / "kb").mkdir(exist_ok=True)
+    _write_kb(tmp / "kb")
+    svc, emb, rerank = _service(tmp)
+    await svc.startup()
+    await svc.reindex()
+    assert svc._state["ready"]
+    return svc, emb, rerank
+
+
+async def test_reindex_same_model_new_endpoint_reembeds_all():
+    """同名模型换服务端点(同维也是不同向量空间) → 全量重嵌并更新指纹。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "kb").mkdir()
+        _write_kb(tmp / "kb")
+        cfg = KnowledgeConfig(
+            enabled=True, source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
+        )
+        emb = FakeEmbedding()
+        emb.model = "shared-model"
+        emb.base_url = "https://a.example/v1"
+        svc = KnowledgeService(cfg, embedding_provider=emb, rerank_provider=FakeRerank())
+        try:
+            await svc.startup()
+            stats1 = await svc.reindex()
+            assert stats1["reembedded_files"] == 3, stats1
+            fp1 = await asyncio.to_thread(svc._store.get_meta, "embedding_fingerprint")
+            assert fp1 == "shared-model@https://a.example/v1", fp1
+
+            emb.base_url = "https://b.example/v1"  # 同名模型换端点
+            stats2 = await svc.reindex()
+            assert stats2["model_changed"] is False, stats2
+            assert stats2["embedding_space_changed"] is True, stats2
+            assert stats2["reembedded_files"] == 3, stats2
+            assert stats2["embedded_chunks"] == 4, stats2
+            fp2 = await asyncio.to_thread(svc._store.get_meta, "embedding_fingerprint")
+            assert fp2 == "shared-model@https://b.example/v1", fp2
+
+            stats3 = await svc.reindex()
+            assert stats3["reembedded_files"] == 0 and stats3["embedded_chunks"] == 0
+        finally:
+            await svc.close()
+
+
+async def test_search_retries_with_new_snapshot_after_hot_swap():
+    """查询 embedding 在途时 provider/矩阵被替换: 丢弃旧查询向量并用新快照重试。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        svc, _emb, _rerank = await _prepared_service(tmp)
+        try:
+            gated = GatedEmbedding()
+            svc._embedding = gated
+            task = asyncio.create_task(svc.search("洛天依", top_n=3))
+            await asyncio.wait_for(gated.started.wait(), 2)
+            # 在 search await 期间模拟热切换 + 全量重建
+            new_emb = FakeEmbedding()
+            svc._embedding = new_emb
+            svc._bump_generation()
+            await svc.reindex(force=True)
+            gated.gate.set()
+            result = await asyncio.wait_for(task, 2)
+            assert "error" not in result, result
+            assert result["total_chunks"] == 4, result
+            # 旧 provider 的结果没有被采用, 新 provider 为查询重新算过向量
+            assert new_emb.calls >= 1, new_emb.calls
+        finally:
+            await svc.close()
+
+
+async def test_search_rejects_cross_space_provider_without_rebuild():
+    """热切换后重建完成前: 拒绝用 B 的查询向量和 A 的矩阵算相似度。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        svc, _emb, _rerank = await _prepared_service(tmp)
+        try:
+            new_emb = FakeEmbedding()
+            new_emb.model = "other-model"
+            new_emb.base_url = "https://other.example/v1"
+            svc._embedding = new_emb
+            svc._bump_generation()
+            result = await svc.search("洛天依")
+            assert "error" in result, result
+            assert result.get("retryable") is True, result
+        finally:
+            await svc.close()
+
+
+async def test_search_inflight_close_returns_error_not_attribute_error():
+    """关闭时在途检索必须返回明确错误, 不能读 None.shape / 旧矩阵。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        svc, _emb, _rerank = await _prepared_service(tmp)
+        gated = GatedEmbedding()
+        svc._embedding = gated
+        gated._service = svc
+        task = asyncio.create_task(svc.search("洛天依"))
+        await asyncio.wait_for(gated.started.wait(), 2)
+        await svc.close()
+        gated.gate.set()
+        result = await asyncio.wait_for(task, 2)
+        assert "error" in result, result
+
+
+async def test_search_inflight_dimension_change_retries():
+    """在途检索期间索引换成不同维度: 重试或可重试错误, 不抛 AttributeError。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        svc, _emb, _rerank = await _prepared_service(tmp)
+        try:
+            gated = GatedEmbedding()
+            svc._embedding = gated
+            task = asyncio.create_task(svc.search("洛天依"))
+            await asyncio.wait_for(gated.started.wait(), 2)
+            new_emb = FakeEmbedding(dim=12)
+            svc._embedding = new_emb
+            svc._bump_generation()
+            await svc.reindex(force=True)
+            gated.gate.set()
+            result = await asyncio.wait_for(task, 2)
+            assert "error" not in result, result
+            assert result["total_chunks"] == 4, result
+        finally:
+            await svc.close()
+
+
+def test_select_top_k_matches_full_sort():
+    """top-k 选择用 argpartition, 结果必须与全排序 top-k 一致(10k 行)。"""
+    rng = np.random.default_rng(7)
+    scores = rng.standard_normal(10_000).astype(np.float32)
+    expected = np.argsort(-scores)[:5].tolist()
+    assert KnowledgeService._select_top_k(scores, 5).tolist() == expected
+    assert KnowledgeService._select_top_k(scores, 10_000).shape[0] == 10_000
+
+
+async def test_sync_config_same_model_new_base_url_triggers_rebuild(monkeypatch):
+    """内置 provider 模式下只看模型名会漏掉"同名换端点"; 指纹变更必须重建。"""
+    import mohobot.knowledge.service as service_mod
+
+    created: list[FakeEmbedding] = []
+
+    def fake_provider(*, base_url, api_key, model, timeout=60.0):
+        provider = FakeEmbedding()
+        provider.model = model
+        provider.base_url = base_url
+        created.append(provider)
+        return provider
+
+    monkeypatch.setattr(service_mod, "EmbeddingProvider", fake_provider)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "kb").mkdir()
+        _write_kb(tmp / "kb")
+
+        def make_cfg(base_url: str) -> KnowledgeConfig:
+            return KnowledgeConfig(
+                enabled=True,
+                source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
+                embedding_model="embed-m", embedding_base_url=base_url,
+                embedding_api_key="k", rerank_model="",
+            )
+
+        svc = KnowledgeService(make_cfg("https://a.example/v1"))
+        try:
+            await svc.startup()
+            stats1 = await svc.reindex()
+            assert stats1["reembedded_files"] == 3, stats1
+            assert created and created[0].base_url == "https://a.example/v1"
+
+            # 同名模型换端点 → 后台重建
+            await svc.sync_config(make_cfg("https://b.example/v1"))
+            fp = ""
+            for _ in range(300):
+                fp = await asyncio.to_thread(
+                    svc._store.get_meta, "embedding_fingerprint",
+                )
+                if fp == "embed-m@https://b.example/v1" and not svc._state["indexing"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert fp == "embed-m@https://b.example/v1", fp
+            stats2 = svc._state["last_stats"]
+            assert stats2["embedding_space_changed"] is True, stats2
+            assert stats2["model_changed"] is False, stats2
+            assert stats2["reembedded_files"] == 3, stats2
+
+            # 配置未再变化 → 不应重复重建
+            await svc.sync_config(make_cfg("https://b.example/v1"))
+            await asyncio.sleep(0.1)
+            assert svc._state["last_stats"] is stats2
+        finally:
+            await svc.close()
+
+
+async def test_retired_providers_are_capped_on_repeated_hot_reload(monkeypatch):
+    """#137: 连续热更新换 provider 时旧客户端有上限, 超出部分延迟关闭且 close 后不泄漏。"""
+    import mohobot.knowledge.service as service_mod
+
+    created: list = []
+
+    class TrackingEmbedding(FakeEmbedding):
+        def __init__(self):
+            super().__init__()
+            self.model = ""
+            self.base_url = ""
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    def fake_provider(*, base_url, api_key, model, timeout=60.0):
+        provider = TrackingEmbedding()
+        provider.model = model
+        provider.base_url = base_url
+        created.append(provider)
+        return provider
+
+    monkeypatch.setattr(service_mod, "EmbeddingProvider", fake_provider)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "kb").mkdir()
+        _write_kb(tmp / "kb")
+
+        def make_cfg(base_url: str) -> KnowledgeConfig:
+            return KnowledgeConfig(
+                enabled=True,
+                source_dir=str(tmp / "kb"), index_dir=str(tmp / "idx"),
+                embedding_model="embed-m", embedding_base_url=base_url,
+                embedding_api_key="k", rerank_model="",
+            )
+
+        svc = KnowledgeService(make_cfg("https://a.example/v1"))
+        try:
+            await svc.startup()
+            await svc.reindex()
+            for i in range(12):
+                await svc.sync_config(make_cfg(f"https://h{i}.example/v1"))
+            assert len(svc._retired_providers) <= service_mod._MAX_RETIRED_PROVIDERS
+            # 超出上限的旧 provider 排队延迟关闭, 不会被无限保留
+            assert len(svc._retired_tasks) >= 1
+        finally:
+            await svc.close()
+
+        assert not svc._retired_tasks
+        assert all(p.closed for p in created), [p.closed for p in created]

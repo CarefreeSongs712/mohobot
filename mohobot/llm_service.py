@@ -33,6 +33,11 @@ from mohobot.utils.llm_diagnostic import LLMDiagnostic
 # 历史符号条目在占位文本里最多复现的原文长度(超出截断)
 _HISTORY_SYMBOL_MAX_CHARS = 40
 
+# 用量明细内存窗口(#137): 只常驻最近 7 天(且不超过 5 万条)的记录。更早的记录
+# 仍完整落在 llm_usage.jsonl, 长范围聚合时流式回读文件, 避免全历史常驻内存。
+_USAGE_RECORD_WINDOW_SECONDS = 7 * 86400
+_USAGE_RECORD_MAX_ENTRIES = 50_000
+
 # 全局语言约束(2026-10 漂移治理): 紧跟人设、先于环境/上下文, 不被长上下文稀释。
 # 措辞用"使用简体中文"而非"禁止英文", 车名/歌名/专有名词的合法使用不受影响。
 # 用户明确要求其它语言/翻译时用放宽版(否则与"翻译成英文"类需求冲突)。
@@ -975,10 +980,85 @@ class LLMService:
             if excluded:
                 new_records = [r for r in new_records if str(r.get("model", "")) not in excluded]
             self._usage_records_cache.extend(new_records)
+            self._trim_usage_cache()
             self._usage_file_state = {
                 "size": size, "mtime_ns": mtime_ns, "offset": new_offset,
             }
             return self._filter_usage_records(self._usage_records_cache)
+
+    def _trim_usage_cache(self) -> None:
+        """裁剪常驻用量明细, 只保留最近窗口 + 条数上限(#137)。
+
+        文件 offset 已推进到末尾, 裁剪只释放内存、不丢文件数据: 更早范围的
+        聚合由 _iter_usage_records 流式回读。记录按写入时间近似有序, 二分
+        定位窗口起点后再向前留 2000 条兜住乱序写入。
+        """
+        records = self._usage_records_cache
+        if len(records) <= 1:
+            return
+        from bisect import bisect_left
+        cutoff = time.time() - _USAGE_RECORD_WINDOW_SECONDS
+        start = bisect_left(records, cutoff, key=lambda r: r.get("time") or 0)
+        start = max(0, start - 2000)
+        if start > 0:
+            del records[:start]
+        overflow = len(records) - _USAGE_RECORD_MAX_ENTRIES
+        if overflow > 0:
+            del records[:overflow]
+
+    async def _iter_usage_records(self, since: float) -> AsyncGenerator[dict, None]:
+        """按时间范围产出用量记录, 内存不常驻全历史(#137)。
+
+        常驻缓存覆盖 since(记录起点早于 since)时直接切片复用; 更长范围
+        (如 30d)则流式回读 llm_usage.jsonl, 逐行解析、逐条产出。
+        """
+        records = await self._load_usage_records()
+        if records and float(records[0].get("time", 0) or 0) <= since:
+            for rec in records[self._usage_range_start(records, since):]:
+                yield rec
+            return
+        async for rec in self._iter_usage_file(since):
+            yield rec
+
+    async def _iter_usage_file(self, since: float) -> AsyncGenerator[dict, None]:
+        """逐行流式读取用量文件(不整体载入), 按 since 与排除模型过滤。"""
+        usage_file = Path(self._cfg.data_dir) / "stats" / "llm_usage.jsonl"
+        excluded = self._usage_excluded()
+        try:
+            async with aiofiles.open(usage_file, "r", encoding="utf-8", errors="replace") as f:
+                async for line in f:
+                    rec = self._parse_usage_line(line)
+                    if rec is None:
+                        continue
+                    if float(rec.get("time", 0) or 0) < since:
+                        continue
+                    if excluded and str(rec.get("model", "")) in excluded:
+                        continue
+                    yield rec
+        except OSError:
+            return
+
+    @staticmethod
+    def _parse_usage_line(line: str) -> dict | None:
+        line = line.strip()
+        if not line:
+            return None
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    @staticmethod
+    def _usage_range_start(records: list[dict], since: float, buffer: int = 2000) -> int:
+        """时间范围聚合的起点下标。
+
+        记录按写入时间近似有序(append-only), 二分定位 time >= since 的起点,
+        再向前多收容 buffer 条兜住写入时刻的轻微乱序; 范围极长时回到全量。
+        """
+        from bisect import bisect_right
+        idx = bisect_right(records, since, key=lambda r: r.get("time") or 0)
+        return max(0, idx - buffer)
 
     async def _cached_usage_agg(self, kind: str, range_key: str, builder) -> dict:
         """聚合结果短缓存(15s): 同一 kind/range 且用量文件未变化时直接复用。
@@ -1046,23 +1126,8 @@ class LLMService:
     async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
 
-    @staticmethod
-    def _usage_range_start(records: list[dict], since: float, buffer: int = 2000) -> int:
-        """时间范围聚合的起点下标。
-
-        记录按写入时间近似有序(append-only), 二分定位 time >= since 的起点,
-        再向前多收容 buffer 条兜住写入时刻的轻微乱序; 范围极长时回到全量。
-        """
-        from bisect import bisect_right
-        idx = bisect_right(records, since, key=lambda r: r.get("time") or 0)
-        return max(0, idx - buffer)
-
-    async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
-        since = self._range_since(range_key)
-
-        records = await self._load_usage_records()
         sessions: dict[tuple[str, str, str], dict] = {}
-        for rec in records[self._usage_range_start(records, since):]:
+        async for rec in self._iter_usage_records(since):
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)
@@ -1114,9 +1179,8 @@ class LLMService:
 
     async def _compute_user_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
-        records = await self._load_usage_records()
         users: dict[str, dict] = {}
-        for rec in records[self._usage_range_start(records, since):]:
+        async for rec in self._iter_usage_records(since):
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)
@@ -1167,9 +1231,8 @@ class LLMService:
 
     async def _compute_module_usage(self, range_key: str) -> dict[str, Any]:
         since = self._range_since(range_key)
-        records = await self._load_usage_records()
         bots: dict[str, dict] = {}
-        for rec in records[self._usage_range_start(records, since):]:
+        async for rec in self._iter_usage_records(since):
             if rec.get("time", 0) < since:
                 continue
             pt = int(rec.get("prompt_tokens", 0) or 0)

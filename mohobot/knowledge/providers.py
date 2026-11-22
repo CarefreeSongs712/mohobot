@@ -23,6 +23,9 @@ class EmbeddingProvider:
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
         from openai import AsyncOpenAI
         self.model = model
+        # 服务来源纳入 provider 身份: 同名模型换端点也是不同向量空间, 必须重建索引。
+        # client 在构造时捕获该地址, 之后全局配置热切换不会把请求改发到新端点。
+        self.base_url = (base_url or "").strip().rstrip("/")
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
