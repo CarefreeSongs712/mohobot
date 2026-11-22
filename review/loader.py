@@ -654,9 +654,12 @@ class MohobotData:
             if idx.mtime_ns >= 0 and self._same_identity(
                 idx, mtime_ns, size, inode, ctime_ns, change_ns,
             ):
-                # 元数据完全一致时仍用头/尾锚点复核内容: Windows 上保持 mtime
-                # 的等长就地重写没有元数据信号, 只有内容锚点能发现(issue #133)。
-                # 复核结论按身份缓存, 大文件跳过(issue #136 review N4)。
+                # 元数据完全一致时, 首次加载/sidecar 载入后先做一次头/尾锚点
+                # 复核(Windows 上保持 mtime 的等长就地重写没有元数据信号);
+                # 复核通过后把当前 identity 记入 verified_identity, 同身份的
+                # 后续读取直接复用结论、不再读锚点(大文件则始终跳过锚点)。
+                # 因此"同一 ChangeTime tick 内、等长且恢复 mtime"的首尾就地
+                # 改写不再被发现, 这是明确接受的取舍(issue #133, #136 N4)。
                 if self._content_unchanged(path, idx):
                     return idx
 
