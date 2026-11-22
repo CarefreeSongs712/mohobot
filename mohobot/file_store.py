@@ -7,6 +7,7 @@ concurrent write corruption while allowing parallel access to different files.
 from __future__ import annotations
 
 import json
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,17 +19,26 @@ import aiofiles.os
 
 # ── Lock Registry ─────────────────────────────────────────────
 
-_file_locks: dict[str, "asyncio.Lock"] = {}
-"""Registry of per-file locks. Keyed by absolute file path."""
+_file_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+"""Registry of per-file locks. Keyed by absolute file path.
+
+弱引用(#137): 没有协程持有/等待、也没有 JSONLWriter 等长生命周期对象
+引用时, 锁随垃圾回收自动释放, 不再按历史唯一路径无界增长; 活跃锁始终
+有强引用(局部变量/实例属性/async with), 互斥与等待语义不变。
+"""
 
 
 def _get_lock(file_path: str) -> "asyncio.Lock":
     """Get or create an asyncio.Lock for the given file path."""
     import asyncio
 
-    if file_path not in _file_locks:
-        _file_locks[file_path] = asyncio.Lock()
-    return _file_locks[file_path]
+    lock = _file_locks.get(file_path)
+    if lock is None:
+        # 先由局部变量持有强引用再登记: WeakValueDictionary 不保留值, 直接
+        # 写入临时对象会在返回前被回收。
+        lock = asyncio.Lock()
+        _file_locks[file_path] = lock
+    return lock
 
 
 # ─── Path helpers ──────────────────────────────────────────────
