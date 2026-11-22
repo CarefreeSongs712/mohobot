@@ -12,6 +12,7 @@ import asyncio
 import hmac
 import json
 import time as time_module
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -38,6 +39,38 @@ _MESSAGE_ACTIONS = {
     "send_group_forward_msg": "group",
 }
 _BLOCKED_GROUP_SEND = object()
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    """一次消息发送的结果(issue #128)。
+
+    status:
+      - "sent": OneBot 回执确认成功(confirmed=True);
+      - "failed": 明确失败(未连接/旧连接/发送异常/回执 retcode 非 0);
+      - "blocked": 被出站保护拦截(外部服务独占群/禁用 bot), 未发出;
+      - "unknown": 已交给传输层但没有回执, 无法确认是否送达。
+
+    调用方只能把 "sent" 与无法确认的 "unknown" 视作"用户可能看到了",
+    "failed"/"blocked" 的内容不得写入对话记忆。
+    """
+
+    status: str = "unknown"
+    confirmed: bool = False
+    response: dict[str, Any] | None = None
+    reason: str = ""
+
+
+def _response_ok(response: dict[str, Any] | None) -> bool:
+    """OneBot 回执是否表示成功(status 允许空/ok/async 且 retcode 为 0)。"""
+    if not isinstance(response, dict):
+        return False
+    status = str(response.get("status", "") or "").lower()
+    try:
+        retcode = int(response.get("retcode", 0) or 0)
+    except (TypeError, ValueError):
+        retcode = 0
+    return retcode == 0 and status in ("", "ok", "async")
 
 
 class WSServer:
@@ -206,6 +239,16 @@ class WSServer:
             logger.debug(f"Ignoring message from unbound connection QQ {instance.qq}: {data.get('post_type') or data.get('action')}")
             return
 
+        # issue #127: 同一 QQ 重连时新连接会替换旧实例; 旧连接的读循环可能
+        # 尚未退出, 重叠窗口内不得再派发事件/响应(否则同一条消息被处理两次)。
+        is_current = getattr(self._bot_manager, "is_current", None)
+        if callable(is_current) and not is_current(instance):
+            logger.debug(
+                f"Ignoring message from stale connection (bot={instance.bot_id}, "
+                f"generation={getattr(instance, 'generation', 0)})"
+            )
+            return
+
         bot_id = instance.bot_id
 
         # API response: has 'status' field (echo may be absent if the request
@@ -336,30 +379,29 @@ class WSServer:
         echo = f"api_{uuid.uuid4().hex}"
         payload["echo"] = echo
         future = self._bot_manager.create_response_future(bot_id, echo)
+        # issue #128: 取消可能发生在 socket send 的 await 中(不只是等回执时),
+        # 统一用 finally 清理 pending 路由并结清 Future, 避免取消后映射/协程泄漏。
         try:
             result = await self._reply_sender.call(
                 bot_id, lambda: self._send_guarded(instance, payload), label=action
             )
-        except Exception:
-            self._bot_manager.remove_response_future(bot_id, echo)
-            raise
-        if result is _BLOCKED_GROUP_SEND:
-            self._bot_manager.remove_response_future(bot_id, echo)
-            future.cancel()
-            return None
-        try:
+            if result is _BLOCKED_GROUP_SEND:
+                return None
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
             return None
         finally:
             self._bot_manager.remove_response_future(bot_id, echo)
+            if not future.done():
+                future.cancel()
 
     async def _send_tracked(
         self, bot_id: str, action: str, params: dict[str, Any],
         chat_type: str, chat_id: int | str,
         wait_response: bool = False, timeout: float = 10.0,
         source: str = "auto",
+        outcome: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Send a message with echo tracking + bot speech archival.
 
@@ -370,14 +412,34 @@ class WSServer:
         - source 标注发言来源("llm"=LLM 生成, "auto"=命令/插件等机械内容),
           写入归档行供审核面板过滤。
         - wait_response=False(流式分段路径): 不等待, 保持发送速度;
-        - wait_response=True: 等待并返回响应 dict(查询语义不变)。
+        - wait_response=True: 等待并返回响应 dict(查询语义不变), 且先拿到
+          真实回执再归档, 避免回执晚于 8s 归档阈值时 history 只剩 local: id。
+        - outcome(可选 dict): 填充 status/reason, 供需要投递状态的调用方
+          (send_message_with_status)使用; 返回值保持旧契约不变(#128)。
         """
         if self._blocks_group_send(action, params):
+            if outcome is not None:
+                outcome.update(status="blocked", reason="external_service_group")
             return None
         import uuid
         instance = self._bot_manager.get(bot_id)
         if not instance:
             logger.warning(f"Cannot send to bot {bot_id}: not connected")
+            if outcome is not None:
+                outcome.update(status="failed", reason="not_connected")
+            return None
+        # issue #131: 出站层统一 enabled 保护 —— 禁用但仍连接的 bot 不得再发消息
+        # (入站事件已被 _dispatch 丢弃, 主动聊天/后台任务不能绕过)。
+        if getattr(instance, "stale", False):
+            logger.warning(f"Cannot send to bot {bot_id}: stale connection")
+            if outcome is not None:
+                outcome.update(status="failed", reason="stale_connection")
+            return None
+        config = getattr(instance, "config", None)
+        if not getattr(config, "enabled", True):
+            logger.info(f"Bot {bot_id} disabled, suppress outbound message ({action})")
+            if outcome is not None:
+                outcome.update(status="blocked", reason="bot_disabled")
             return None
         echo = f"send:{chat_type}:{chat_id}:{uuid.uuid4().hex}"
         self._bot_manager._pending_sent[echo] = (bot_id, chat_type, str(chat_id))
@@ -399,6 +461,8 @@ class WSServer:
             # 这里清掉追踪即可; 已派发时消息可能已经发出, 归档所有权必须转交
             # 后台(等 echo 或 8s 兜底) —— 否则 history 与真实投递不一致,
             # pending/回执 future 也会永久残留。
+            if outcome is not None:
+                outcome.update(status="failed", reason="cancelled")
             if attempt.dispatched:
                 self._spawn_archive_task(self._archive_sent_message(
                     bot_id, chat_type, chat_id, action, params, future, echo, source,
@@ -410,32 +474,54 @@ class WSServer:
                 self._bot_manager.remove_response_future(bot_id, echo)
                 future.cancel()
             raise
-        except Exception:
+        except Exception as e:
             # Send failed — don't leave the tracked entry dangling
+            if outcome is not None:
+                outcome.update(status="failed", reason=f"send_error: {e}")
             self._release_sent_signature(claimed)
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
         if result is _BLOCKED_GROUP_SEND:
+            if outcome is not None:
+                outcome.update(status="blocked", reason="external_service_group")
             self._release_sent_signature(claimed)
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             future.cancel()
             return None  # Not sent: no reply tracking, timeout, or speech archive.
-        self._spawn_archive_task(self._archive_sent_message(
-            bot_id, chat_type, chat_id, action, params, future, echo, source,
-            owns_response=not wait_response,
-        ))
         if not wait_response:
+            # 不等待回执: 后台等 echo(或 8s 兜底)写归档, 调用方无法确认送达。
+            if outcome is not None:
+                outcome.update(status="unknown", reason="not_waited")
+            self._spawn_archive_task(self._archive_sent_message(
+                bot_id, chat_type, chat_id, action, params, future, echo, source,
+                owns_response=True,
+            ))
             return None
+        # issue #128: 先拿到真实回执再归档。旧实现在发送后立刻起后台归档,
+        # 8s 内没回执就写 local: id; 调用方等待更久拿到了成功回执时 history
+        # 已经写错。现在等待与归档串行, 回执晚到也能归档真实 message_id。
+        response: dict[str, Any] | None = None
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+            response = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"API response timeout for {action} (bot {bot_id})")
-            return None
         finally:
             self._bot_manager.remove_response_future(bot_id, echo)
             self._bot_manager.drop_pending_sent(echo)
+        if outcome is not None:
+            if response is None:
+                outcome.update(status="unknown", reason="ack_timeout")
+            elif _response_ok(response):
+                outcome.update(status="sent", reason="")
+            else:
+                outcome.update(status="failed", reason="negative_ack")
+        await self._archive_sent_message(
+            bot_id, chat_type, chat_id, action, params, None, echo, source,
+            owns_response=False, response=response,
+        )
+        return response
 
     def _spawn_archive_task(self, coro) -> None:
         """派发归档后台任务(supervisor 优先, 关闭中回退裸 task)。"""
@@ -483,39 +569,37 @@ class WSServer:
     async def _archive_sent_message(
         self, bot_id: str, chat_type: str, chat_id: int | str,
         action: str, params: dict[str, Any],
-        future: asyncio.Future, echo: str, source: str = "auto", *, owns_response: bool = True,
+        future: asyncio.Future | None = None, echo: str = "", source: str = "auto",
+        *, owns_response: bool = True, response: dict[str, Any] | None = None,
     ) -> None:
         """把一条 bot 发言以 message_sent 事件写入 history JSONL。
 
         - message_id 优先取 echo 响应返回值(稳定身份, 审核结论不失联);
           超时/未返回时用本地标记兜底(仍唯一, 但不会被"引用 bot 消息"命中)。
         - 客户端明确返回失败(retcode 非成功)说明消息未发出, 不归档。
+        - 调用方已拿到回执(wait_response=True)时传 response, 不再等待 future,
+          避免归档与调用方超时竞争导致 history 写入 local: id (#128)。
         """
-        try:
-            resp = await asyncio.wait_for(
-                asyncio.shield(future), timeout=self._ARCHIVE_ECHO_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            resp = None
-        except Exception:
-            return  # 发送链路失败(连接断开等), 不归档
-        finally:
-            # A confirmed-delivery caller owns routing until its longer timeout.
-            # The archive timeout must not steal a later (e.g. 9s) success echo.
-            if owns_response:
-                self._bot_manager.remove_response_future(bot_id, echo)
-                self._bot_manager.drop_pending_sent(echo)
-
-        if resp is not None:
-            status = str(resp.get("status", "") or "").lower()
+        if response is None and future is not None:
             try:
-                retcode = int(resp.get("retcode", 0) or 0)
-            except (TypeError, ValueError):
-                retcode = 0
-            if retcode != 0 or status not in ("", "ok", "async"):
-                return  # 客户端明确失败, 消息未发出
+                response = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self._ARCHIVE_ECHO_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                response = None
+            except Exception:
+                return  # 发送链路失败(连接断开等), 不归档
+            finally:
+                # A confirmed-delivery caller owns routing until its longer timeout.
+                # The archive timeout must not steal a later (e.g. 9s) success echo.
+                if owns_response:
+                    self._bot_manager.remove_response_future(bot_id, echo)
+                    self._bot_manager.drop_pending_sent(echo)
 
-        data = (resp or {}).get("data") or {}
+        if response is not None and not _response_ok(response):
+            return  # 客户端明确失败, 消息未发出
+
+        data = (response or {}).get("data") or {}
         mid = data.get("message_id")
         if mid is not None and str(mid).strip():
             message_id = str(mid)
@@ -658,15 +742,63 @@ class WSServer:
         """Compatible fire-and-forget by default; tracked callers get explicit delivery status."""
         if wait_response and not self._bot_manager.get(bot_id):
             return {"delivery_status": "failed"}
+        outcome: dict[str, Any] = {}
         response = await self._send_tracked(
             bot_id, "send_private_msg",
             {"user_id": int(user_id), "message": message},
             "private", user_id, source=source, wait_response=wait_response,
+            outcome=outcome,
         )
-        if wait_response:
+        if not wait_response:
+            return response
+        payload = dict(response or {})
+        result_status = str(outcome.get("status") or "")
+        if result_status:
+            payload["delivery_status"] = {
+                "sent": "success", "failed": "failed", "blocked": "failed",
+            }.get(result_status, "unknown")
+        else:
+            # 兼容测试/外部 patch(未提供 outcome)时按旧响应语义推断
             from mohobot.services.persona_ab import delivery_status
-            return dict(response or {}, delivery_status=delivery_status(response))
-        return response
+            payload["delivery_status"] = delivery_status(response)
+        return payload
+
+    async def send_message_with_status(
+        self, bot_id: str, chat_type: str, chat_id: int | str,
+        message: str | list[dict[str, Any]], *, source: str = "llm",
+        ack_timeout: float = 5.0,
+    ) -> DeliveryResult:
+        """发送消息并返回投递结果(issue #128)。
+
+        与 send_group_msg/send_private_msg 的旧契约(返回 None)并存: 需要
+        判断"这条内容是否真的发出"的主链使用本方法; 只有 "sent" 与无法确认
+        的 "unknown" 可以写入对话记忆, "failed"/"blocked" 不得写入。
+        """
+        if chat_type == "group":
+            action = "send_group_msg"
+            params: dict[str, Any] = {"group_id": int(chat_id), "message": message}
+        else:
+            action = "send_private_msg"
+            params = {"user_id": int(chat_id), "message": message}
+        outcome: dict[str, Any] = {}
+        try:
+            response = await self._send_tracked(
+                bot_id, action, params, chat_type, chat_id,
+                wait_response=True, timeout=ack_timeout, source=source,
+                outcome=outcome,
+            )
+        except Exception as e:  # noqa: BLE001 - 发送异常要显式反馈给调用方
+            logger.warning(
+                f"发送消息失败(bot={bot_id} {chat_type}:{chat_id}): {e}"
+            )
+            return DeliveryResult(status="failed", reason=f"send_error: {e}")
+        status = str(outcome.get("status") or "unknown")
+        if status == "sent":
+            return DeliveryResult(status="sent", confirmed=True, response=response)
+        return DeliveryResult(
+            status=status, response=response,
+            reason=str(outcome.get("reason") or ""),
+        )
 
     async def send_image(
         self, bot_id: str, chat_type: str, chat_id: int | str, image_path: str

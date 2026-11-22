@@ -33,6 +33,11 @@ from mohobot.utils.llm_diagnostic import LLMDiagnostic
 # 历史符号条目在占位文本里最多复现的原文长度(超出截断)
 _HISTORY_SYMBOL_MAX_CHARS = 40
 
+# 图片转述总预算(issue #128): 下载 + phash 去重 + 视觉描述整体有界;
+# 视觉回调本身 30s 超时, 这里覆盖下载/排队等前置等待, 防止一条坏图把
+# 整轮对话无限期挂起。
+_IMAGE_DESCRIBE_TIMEOUT = 75.0
+
 # 全局语言约束(2026-10 漂移治理): 紧跟人设、先于环境/上下文, 不被长上下文稀释。
 # 措辞用"使用简体中文"而非"禁止英文", 车名/歌名/专有名词的合法使用不受影响。
 # 用户明确要求其它语言/翻译时用放宽版(否则与"翻译成英文"类需求冲突)。
@@ -1788,10 +1793,27 @@ class LLMService:
             return ""
         if self._image_cache is not None:
             try:
-                _, description = await self._image_cache.get_or_describe(
-                    url, vision_callback=self._vision_callback(bot_config),
+                _, description = await asyncio.wait_for(
+                    self._image_cache.get_or_describe(
+                        url, vision_callback=self._vision_callback(bot_config),
+                    ),
+                    timeout=_IMAGE_DESCRIBE_TIMEOUT,
                 )
                 return description or ""
+            except asyncio.TimeoutError:
+                # 迟到结果不阻塞本轮对话: 共享识别任务仍在后台继续, 之后
+                # 的同图请求会命中其缓存结果(issue #128)。
+                logger.warning(
+                    f"ImageCache describe timeout after "
+                    f"{_IMAGE_DESCRIBE_TIMEOUT:.0f}s: {url[:120]}"
+                )
+                peek = getattr(self._image_cache, "peek_description", None)
+                if callable(peek):
+                    try:
+                        return peek(url) or ""
+                    except Exception:  # noqa: BLE001 - 降级路径不掩盖主流程
+                        pass
+                return ""
             except Exception as e:
                 logger.warning(f"ImageCache failed in _build_messages: {e}")
                 return ""

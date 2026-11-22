@@ -328,11 +328,17 @@ class ProactiveEngine:
 
             bot_manager = self._ref("bot_manager")
             instance = bot_manager.get(bot_id) if bot_manager else None
-            if instance is None:
+            # issue #131: 禁用/已被重连替换的连接不得再生成主动消息(禁用 bot
+            # 的入站事件会被丢弃, 但主动聊天是独立定时器, 必须自己查开关)。
+            if (
+                instance is None
+                or getattr(instance, "stale", False)
+                or not self._bot_enabled(instance)
+            ):
                 # bot 离线: 顺延而不是反复消耗窗口, 避免重连后过期补发
                 overdue = now - entry["next_trigger_time"]
                 if overdue > _OFFLINE_POSTPONE_SECONDS:
-                    logger.info(f"[主动消息] {key} bot 未连接, 顺延 {_OFFLINE_POSTPONE_SECONDS}s")
+                    logger.info(f"[主动消息] {key} bot 未连接/已停用, 顺延 {_OFFLINE_POSTPONE_SECONDS}s")
                     await self._mutate_state(_set_next_trigger(key, now + _OFFLINE_POSTPONE_SECONDS))
                 return
 
@@ -450,6 +456,27 @@ class ProactiveEngine:
                         logger.info(f"[主动消息] {key} 模型判断对方不希望被打扰, 暂停主动消息(对方回复后恢复)")
                     return
                 reply = reply_after_marker or reply
+
+            # issue #131: 生成/决策是长等待, 期间 bot 可能被禁用、插件可能被
+            # 关闭、用户可能被封禁。实际发送前必须重验, 否则停用后仍会发出
+            # 生成中的主动消息, 绕过开关与封禁策略。
+            if not self._cfg().get("enable", True):
+                logger.info(f"[主动消息] {key} 插件生成期间已停用, 丢弃本次主动消息")
+                return
+            current_manager = self._ref("bot_manager")
+            current_instance = current_manager.get(bot_id) if current_manager else None
+            if (
+                current_instance is None
+                or getattr(current_instance, "stale", False)
+                or not self._bot_enabled(current_instance)
+            ):
+                logger.info(f"[主动消息] {key} bot 生成期间离线/被停用, 丢弃本次主动消息")
+                return
+            if await self._is_banned_key(key):
+                await self._mutate_state(
+                    lambda st: st.get("sessions", {}).pop(key, None))
+                logger.info(f"[主动消息] {key} 发送前检测到封禁, 丢弃本次主动消息")
+                return
 
             display = await self._send(bot_id, user_id, event, reply)
             if not display:
@@ -668,6 +695,12 @@ class ProactiveEngine:
             return kind, remaining  # 标记附带正文: 按正文发送
         return kind, ""
 
+    @staticmethod
+    def _bot_enabled(instance: Any) -> bool:
+        """bot 配置开关(config.enabled); 实例/配置缺失时保守视为不可发送。"""
+        config = getattr(instance, "config", None)
+        return config is not None and bool(getattr(config, "enabled", True))
+
     async def _is_banned_key(self, key: str) -> bool:
         """该会话键是否对应已被全局封禁的用户/群(未注入 BanStore 时返回 False)。"""
         store = self._ref("ban_store")
@@ -685,9 +718,11 @@ class ProactiveEngine:
             scope, target = "private", parts[-1]
         try:
             banned, _reason = await store.is_banned(f"{scope}:{target}", str(target))
-        except Exception as exc:  # noqa: BLE001 - 查询失败不阻断发送
-            logger.debug(f"[主动消息] 封禁检查失败({key}): {exc}")
-            return False
+        except Exception as exc:  # noqa: BLE001 - 查询失败时保守跳过
+            # issue #131: 封禁状态未知时 fail-closed(旧实现 fail-open 会
+            # 绕过封禁继续发送), 并升为 warning 便于发现 BanStore 故障。
+            logger.warning(f"[主动消息] 封禁检查失败, 保守跳过({key}): {exc}")
+            return True
         return bool(banned)
 
     async def _send(self, bot_id: str, user_id: str, event: PrivateMessageEvent,
@@ -702,6 +737,13 @@ class ProactiveEngine:
                 return ""
         ws_server = self._ref("ws_server")
         if ws_server is None:
+            return ""
+        # issue #131: 兜底 WS 直发也必须过统一 enabled 保护, 否则插件/handler
+        # 装配异常时会绕过 bot 开关向已停用账号发消息。
+        bot_manager = self._ref("bot_manager")
+        instance = bot_manager.get(bot_id) if bot_manager else None
+        if instance is None or getattr(instance, "stale", False) or not self._bot_enabled(instance):
+            logger.info(f"[主动消息] {bot_id}:{user_id} bot 未连接/已停用, 兜底发送跳过")
             return ""
         # 已知缺口: 兜底 WS 直发不经过 MessageHandler 的 OOC 三防。仅当
         # message_handler 未注入或没有 send_proactive_reply 时走到这里;
