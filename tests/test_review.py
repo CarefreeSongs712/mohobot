@@ -582,7 +582,7 @@ def test_store_delete_abnormal_reverts_status():
         assert store.list_abnormal() == []
         assert store.statuses_by_session().get(sk, {}) == {}
         assert store.counts_by_session().get(sk, (0, 0)) == (0, 0)
-        assert any(l["action"] == "abnormal_delete" for l in store.recent_log())
+        assert any(line["action"] == "abnormal_delete" for line in store.recent_log())
         # 幂等: 再删返回 None
         assert store.delete_abnormal(rid, "bob") is None
         # 结论已是 normal 的陈旧记录: 只删记录, 不动结论(避免把已审好的消息打回待审)
@@ -615,8 +615,8 @@ def test_store_delete_abnormal_mark_normal():
         assert st["status"] == "normal" and st["reviewer"] == "bob"
         assert store.counts_by_session()[sk] == (1, 0)
         logs = store.recent_log(10)
-        assert any(l["action"] == "rejudge" and l["fingerprint"] == "mid:A" for l in logs)
-        assert any(l["action"] == "abnormal_delete" and "改判正常" in l["detail"] for l in logs)
+        assert any(line["action"] == "rejudge" and line["fingerprint"] == "mid:A" for line in logs)
+        assert any(line["action"] == "abnormal_delete" and "改判正常" in line["detail"] for line in logs)
 
         # 另一个连接从库里重建, 看到的也是 normal
         other = ReviewStore(Path(td) / "review.db")
@@ -629,7 +629,7 @@ def test_store_delete_abnormal_mark_normal():
         assert store.statuses_by_session()[sk]["mid:B"]["status"] == "normal"
         assert store.counts_by_session()[sk] == (2, 0)
         # N4: 无结论的补判记 judge(区别于 abnormal→normal 的 rejudge)
-        assert any(l["action"] == "judge" and l["fingerprint"] == "mid:B" for l in store.recent_log(20))
+        assert any(line["action"] == "judge" and line["fingerprint"] == "mid:B" for line in store.recent_log(20))
         store.close()
 
 
@@ -656,9 +656,9 @@ def test_store_delete_all_abnormal_mark_normal():
         assert sts[sk1]["mid:B"]["reviewer"] == "alice", "已是 normal 的不应被改写"
         assert store.counts_by_session()[sk1] == (2, 0)
         assert sts[sk2]["mid:C"]["status"] == "abnormal", "过滤范围外不受影响"
-        assert sum(1 for l in store.recent_log(50)
-                   if l["action"] in ("judge", "rejudge") and l["fingerprint"] == "mid:A"
-                   and l["reviewer"] == "admin") == 1, "同一消息两条记录只改判一次"
+        assert sum(1 for line in store.recent_log(50)
+                   if line["action"] in ("judge", "rejudge") and line["fingerprint"] == "mid:A"
+                   and line["reviewer"] == "admin") == 1, "同一消息两条记录只改判一次"
         store.close()
 
 
@@ -694,7 +694,7 @@ def test_store_delete_all_abnormal():
         # 空跑: 0 条
         assert store.delete_all_abnormal(reviewer="admin") == 0
         # 留痕: 两次批量各写一条(空跑不写)
-        assert sum(1 for l in store.recent_log(50) if l["action"] == "abnormal_delete") == 2
+        assert sum(1 for line in store.recent_log(50) if line["action"] == "abnormal_delete") == 2
         store.close()
 
 
@@ -1017,6 +1017,272 @@ def test_api_bad_inputs():
         finally:
             store.close()
 
+
+# ── issue #136: 明细分页增量组装 / 待审计数缓存 / 导出线程化 ──────────
+
+
+def _write_large_private_history(root: Path, count: int = 130) -> str:
+    """构造一个较大的私聊会话(用户消息 + 部分 bot 回复), 返回 session_key。"""
+    hist = root / "history" / "bot_001" / "private" / "30001.jsonl"
+    events: list[dict] = []
+    for i in range(count):
+        events.append({
+            "post_type": "message", "message_type": "private",
+            "time": 1700001000 + i, "self_id": 111, "user_id": 10001,
+            "message_id": f"M-3{i:04d}",
+            "sender": {"user_id": 10001, "nickname": "张三"},
+            "message": [{"type": "text", "data": {"text": f"消息{i:04d}"}}],
+        })
+        if i % 4 == 0:
+            events.append({
+                "post_type": "message_sent", "message_type": "private",
+                "time": 1700001000 + i, "self_id": 111, "user_id": 111,
+                "message_id": f"MB3-{i:04d}",
+                "sender": {"user_id": 111, "nickname": "天依"},
+                "message": [{"type": "text", "data": {"text": f"回复{i:04d}"}}],
+            })
+    _write_jsonl(hist, events)
+    return session_key("bot_001", "private", "30001")
+
+
+def test_session_detail_pagination_matches_full_enrichment():
+    """分页明细只组装当前页, 但内容/计数必须与全量组装一致(#136)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        sk = _write_large_private_history(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            full = client.get(
+                f"/api/session/{sk}?page=1&page_size=500", headers=_auth(tok),
+            )
+            assert full.status_code == 200, full.text
+            full_body = full.json()
+            full_entries = full_body["entries"]
+            total = full_body["total"]
+            assert total == len(full_entries) == 130 + 33, total
+
+            first = client.get(
+                f"/api/session/{sk}?page=1&page_size=25", headers=_auth(tok),
+            ).json()
+            assert first["total"] == total
+            assert first["pages"] == 7, first
+            assert first["entries"] == full_entries[:25]
+
+            for page in (1, 2, 3, 7):
+                r = client.get(
+                    f"/api/session/{sk}?page={page}&page_size=25",
+                    headers=_auth(tok),
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["total"] == total
+                assert body["pages"] == 7
+                assert body["unreviewed"] == first["unreviewed"]
+                expect = full_entries[(page - 1) * 25: page * 25]
+                assert body["entries"] == expect, (
+                    f"page {page} 内容与全量切片不一致: "
+                    f"{len(body['entries'])} vs {len(expect)}"
+                )
+
+            # 越界页夹紧到最后一页
+            last = client.get(
+                f"/api/session/{sk}?page=99&page_size=25", headers=_auth(tok),
+            ).json()
+            assert last["page"] == 7
+            assert last["entries"] == full_entries[150:]
+        finally:
+            store.close()
+
+
+def test_session_detail_abnormal_status_and_anchor():
+    """异常页标注/计数按当前页组装, page<=0 锚定首个待审页(#136)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        sk = _write_large_private_history(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            full_entries = client.get(
+                f"/api/session/{sk}?page=1&page_size=500", headers=_auth(tok),
+            ).json()["entries"]
+
+            # 把第 31 条标为异常见到 → 属于第 2 页(page_size=25)
+            target = full_entries[30]
+            r = client.post("/api/review", headers=_auth(tok), json={
+                "session_key": sk, "action": "abnormal",
+                "fingerprints": [target["fingerprint"]],
+                "tags": ["色情"], "note": "测试异常",
+            })
+            assert r.status_code == 200, r.text
+            assert r.json()["changed"] == 1
+            # 剩余待审数应基于当前状态重算
+            assert r.json()["remaining_unreviewed"] == len(full_entries) - 1
+
+            page2 = client.get(
+                f"/api/session/{sk}?page=2&page_size=25", headers=_auth(tok),
+            ).json()
+            marked = [e for e in page2["entries"] if e["fingerprint"] == target["fingerprint"]]
+            assert marked and marked[0]["status"] == "abnormal"
+            assert marked[0]["abnormal"]["tags"] == ["色情"]
+            assert page2["abnormal_count"] == 1
+            assert page2["abnormal_pages"] == [2]
+            assert page2["unreviewed"] == len(full_entries) - 1
+
+            # 前 26 条判 normal → page<=0 锚定首个待审条目(第 2 页)
+            fps = [e["fingerprint"] for e in full_entries[:26]]
+            r = client.post("/api/review", headers=_auth(tok), json={
+                "session_key": sk, "action": "normal", "fingerprints": fps,
+            })
+            assert r.status_code == 200, r.text
+            assert r.json()["changed"] == 26
+            anchor = client.get(
+                f"/api/session/{sk}?page=0&page_size=25", headers=_auth(tok),
+            ).json()
+            assert anchor["page"] == 2, anchor["page"]
+        finally:
+            store.close()
+
+
+def test_session_list_counts_refresh_after_judgement():
+    """列表待审计数缓存按 store 修订号失效, 判定后立即可见(#136)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            before = client.get("/api/sessions", headers=_auth(tok)).json()["sessions"]
+            priv = next(s for s in before
+                        if s["session_key"] == "bot_001/private/10001")
+            assert priv["unreviewed"] == 4, priv  # 2 条用户 + 2 条 bot 发言
+
+            entries = client.get(
+                "/api/session/bot_001/private/10001?page=1&page_size=50",
+                headers=_auth(tok),
+            ).json()["entries"]
+            fp = entries[0]["fingerprint"]
+            r = client.post("/api/review", headers=_auth(tok), json={
+                "session_key": "bot_001/private/10001", "action": "normal",
+                "fingerprints": [fp],
+            })
+            assert r.status_code == 200, r.text
+            assert r.json()["remaining_unreviewed"] == 3
+
+            after = client.get("/api/sessions", headers=_auth(tok)).json()["sessions"]
+            priv2 = next(s for s in after
+                         if s["session_key"] == "bot_001/private/10001")
+            assert priv2["unreviewed"] == 3, priv2
+            assert priv2["normal"] == 1, priv2
+        finally:
+            store.close()
+
+
+def test_abnormal_lookup_is_scoped_to_session():
+    """明细异常查询按 session_key 过滤, 不再整表组装后再筛(#136)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            sk_priv = "bot_001/private/10001"
+            sk_grp = "_merged/group/20002"
+            entries = client.get(
+                f"/api/session/{sk_priv}?page=1&page_size=50", headers=_auth(tok),
+            ).json()["entries"]
+            fp = entries[0]["fingerprint"]
+            r = client.post("/api/review", headers=_auth(tok), json={
+                "session_key": sk_priv, "action": "abnormal",
+                "fingerprints": [fp], "tags": ["其他"], "note": "会话内",
+            })
+            assert r.status_code == 200, r.text
+
+            scoped = store.abnormal_by_fingerprint(sk_priv)
+            assert fp in scoped and len(scoped) == 1, scoped
+            assert store.abnormal_by_fingerprint(sk_grp) == {}
+            everything = store.abnormal_by_fingerprint()
+            assert fp in everything, "无参调用仍需返回全表(兼容脚本)"
+
+            # 群会话明细不应出现这个私聊异常
+            grp = client.get(
+                f"/api/session/{sk_grp}?page=1&page_size=50", headers=_auth(tok),
+            ).json()
+            assert grp["abnormal_count"] == 0
+            assert all(e["status"] != "abnormal" for e in grp["entries"])
+        finally:
+            store.close()
+
+
+def test_unreviewed_counts_cache_keyed_by_identity_and_revision():
+    """待审计数缓存: 同修订号命中; 修订号/文件变化都必须重新扫描(#136)。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        data = MohobotData(root)
+        sk = session_key("bot_001", "private", "10001")
+        base = data.unreviewed_counts({}, 0)
+        assert base[sk] == 4, base
+
+        entries = data.enrich_entries(sk, {}, {})
+        fp = next(e["fingerprint"] for e in entries if e["status"] == "unreviewed")
+        statuses = {sk: {fp: {"status": "normal"}}}
+
+        # 同一文件/状态快照 → 命中缓存, 结果稳定
+        assert data.unreviewed_counts(statuses, 0)[sk] == base[sk] - 1
+        assert data.unreviewed_counts(statuses, 0)[sk] == base[sk] - 1
+        # 状态快照变化(判定数不同) → 缓存键变化, 必须重新扫描
+        assert data.unreviewed_counts({}, 0)[sk] == base[sk]
+        # 不传修订号 → 总是实时计算(兼容旧调用)
+        assert data.unreviewed_counts(statuses, None)[sk] == base[sk] - 1
+
+        # 文件追加(身份变化) → 即使修订号不变也必须失效
+        hist = root / "history" / "bot_001" / "private" / "10001.jsonl"
+        with hist.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "post_type": "message", "message_type": "private",
+                "time": 1700000099, "self_id": 111, "user_id": 10002,
+                "message_id": "M-NEW",
+                "sender": {"user_id": 10002, "nickname": "李四"},
+                "message": [{"type": "text", "data": {"text": "新增一条"}}],
+            }, ensure_ascii=False) + "\n")
+        data.list_sessions(force=True)
+        # 文件身份变化 → 即使状态快照与修订号不变也要重新扫描
+        assert data.unreviewed_counts(statuses, 0)[sk] == base[sk]
+
+
+def test_export_offloads_csv_build_to_thread(monkeypatch):
+    """CSV 导出必须走 asyncio.to_thread, 不能阻塞事件循环(#136)。"""
+    import asyncio
+    import threading
+
+    calls: list[tuple[str, str]] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func, *args, **kwargs):
+        calls.append((getattr(func, "__name__", "?"),
+                      threading.current_thread().name))
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _build_fake_data(root)
+        client, store = _make_client(root)
+        try:
+            tok = _login(client, "admin", "pw123")
+            r = client.get("/api/export", headers=_auth(tok))
+            assert r.status_code == 200, r.text
+            assert r.headers["content-type"].startswith("text/csv")
+            assert r.text  # 非空(示例数据可能没有异常记录 → 仅表头也算)
+        finally:
+            store.close()
+    assert any(name == "_export_sync" for name, _ in calls), calls
+    # 在请求线程以外执行 → 不占事件循环
+    export_threads = [t for name, t in calls if name == "_export_sync"]
+    assert export_threads, calls
 
 if __name__ == "__main__":
     _failed = 0

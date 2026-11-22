@@ -176,6 +176,8 @@ async def json_update(
 
 # ── JSONL Reader (read-only, lock-protected) ──────────────────
 
+_TAIL_READ_CHUNK = 64 * 1024  # jsonl_read_tail 反向分块读取的块大小(字节)
+
 
 async def jsonl_read_all(file_path: str | Path) -> list[dict[str, Any]]:
     """Read all lines from a JSONL file with lock protection."""
@@ -197,19 +199,39 @@ async def jsonl_read_all(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, Any]]:
-    """Read the last N lines from a JSONL file efficiently."""
+    """Read the last N lines from a JSONL file without loading the whole file.
+
+    Reads backwards in fixed-size chunks (issue #136: the old implementation
+    did `await f.read()` on the whole file, which for a 15MB group archive cost
+    ~128ms/59MB per call inside the event loop). Chunk boundaries may cut a
+    multi-byte UTF-8 character, but that only affects the first (discarded)
+    line of the buffer, so a replacement-character decode there is harmless.
+    Semantics are kept identical to the previous full-read version: same
+    per-path lock, blank lines skipped, malformed JSON lines skipped, the last
+    line is returned even without a trailing newline.
+    """
     path = Path(file_path)
+    if n <= 0:
+        return []
     lock = _get_lock(str(path.absolute()))
     async with lock:
         if not await aiofiles.os.path.exists(path):
             return []
 
-        async with aiofiles.open(path, "r", encoding="utf-8") as f:
-            # 注: 当前实现为整文件读入后取尾部(不是 seek); 大文件场景
-            # 调用方(chat_manager)应优先用 review loader 的增量索引。
-            content = await f.read()
+        async with aiofiles.open(path, "rb") as f:
+            await f.seek(0, 2)
+            pos = await f.tell()
+            data = b""
+            # 多读一个换行, 保证缓冲区首行是可能被截断的半行时, 取尾 n 行
+            # 依然完整; 文件不足一个 chunk 时一次读完(等价旧行为)。
+            while pos > 0 and data.count(b"\n") <= n:
+                step = min(_TAIL_READ_CHUNK, pos)
+                pos -= step
+                await f.seek(pos)
+                data = await f.read(step) + data
+            text = data.decode("utf-8", "replace")
 
-    lines = [line.strip() for line in content.split("\n") if line.strip()]
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
     tail = lines[-n:]
     result: list[dict[str, Any]] = []
     for line in tail:

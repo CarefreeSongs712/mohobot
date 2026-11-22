@@ -80,6 +80,9 @@ class ReviewStore:
         self._statuses_cache: dict[str, dict[str, dict[str, Any]]] | None = None
         self._counts_cache: dict[str, tuple[int, int]] | None = None
         self._statuses_stamp: tuple = ()
+        # 审核状态修订号: 每次缓存重建/本地判定/撤销自增。供 loader 的
+        # 待审计数缓存判断"审核结论是否变化"(issue #136), 避免全量重扫。
+        self._revision: int = 0
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
@@ -112,6 +115,7 @@ class ReviewStore:
         self._statuses_cache = result
         self._counts_cache = {k: (v[0], v[1]) for k, v in counts.items()}
         self._statuses_stamp = self._db_stamp()
+        self._revision += 1
         return result
 
     def _ensure_statuses_locked(self) -> dict[str, dict[str, dict[str, Any]]]:
@@ -119,6 +123,13 @@ class ReviewStore:
                 and self._db_stamp() == self._statuses_stamp):
             return self._statuses_cache
         return self._build_statuses_locked()
+
+    @property
+    def revision(self) -> int:
+        """审核状态修订号(判定/撤销/外部 DB 重建时自增, 只增不减)。"""
+        with self._lock:
+            self._ensure_statuses_locked()
+            return self._revision
 
     def close(self) -> None:
         with self._lock:
@@ -206,6 +217,7 @@ class ReviewStore:
         if counts is not None and self._counts_cache is not None:
             self._counts_cache[session_key] = (counts[0], counts[1])
         self._statuses_stamp = self._db_stamp()
+        self._revision += 1
 
     def skip(self, session_key: str, reviewer: str, detail: str = "") -> None:
         """跳过: 只留痕, 不改任何审核状态。"""
@@ -236,16 +248,27 @@ class ReviewStore:
             self._ensure_statuses_locked()
             return dict(self._counts_cache or {})
 
-    def abnormal_by_fingerprint(self) -> dict[str, dict[str, Any]]:
+    def abnormal_by_fingerprint(
+        self, session_key: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """{fingerprint: 最新一条异常记录} — 会话明细里给 abnormal 条目附带标签/备注。
 
         tags 必须解析成数组(前端按列表渲染; 原始行里是 JSON 文本, 直接透传
         会让前端 .map 抛错 → 整个会话渲染失败, 表现为"会话打不开")。
+
+        session_key 传入时只查该会话(走 idx_abnormal_session), 避免会话明细
+        每次把整张异常表读进内存(issue #136)。
         """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM abnormal_records ORDER BY id ASC"
-            ).fetchall()
+            if session_key is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM abnormal_records ORDER BY id ASC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM abnormal_records WHERE session_key=? ORDER BY id ASC",
+                    (session_key,),
+                ).fetchall()
         result: dict[str, dict[str, Any]] = {}
         for r in rows:
             item = dict(r)

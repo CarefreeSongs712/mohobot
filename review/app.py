@@ -67,7 +67,10 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         计数来自 store 的进程内缓存(与 statuses_by_session 同一次构建),
         管理员免检条目从待审中扣除; loader/DB 的重调用都走线程。
         """
-        all_statuses = await asyncio.to_thread(store.statuses_by_session)
+        def _status_snapshot():
+            return store.statuses_by_session(), store.revision
+
+        all_statuses, revision = await asyncio.to_thread(_status_snapshot)
         counts = await asyncio.to_thread(store.counts_by_session)
         # 待审计数必须对"当前文件里的有效消息"求交, 不能拿 total 相减:
         # 恢复较短备份后 total 变小而 DB 仍有旧判定记录, 相减会得到负数/0
@@ -75,7 +78,10 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         # 注意顺序: 先 force 重扫刷新文件索引, 再基于最新索引求交 —— 否则
         # 新追加的消息还没进索引, 会算成 0 待审。
         sessions = await asyncio.to_thread(data.list_sessions, True)
-        pending = await asyncio.to_thread(data.unreviewed_counts, all_statuses)
+        # revision 让 loader 的待审计数缓存感知判定/撤销(issue #136)。
+        pending = await asyncio.to_thread(
+            data.unreviewed_counts, all_statuses, revision,
+        )
         items = []
         for s in sessions:
             sk = s["session_key"]
@@ -96,21 +102,16 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         done = sorted((x for x in items if x["unreviewed"] == 0), key=lambda x: x["mtime"])
         return pending + done
 
-    def _unreviewed_fps(sk: str, entries: list[dict[str, Any]]) -> list[str]:
-        return [e["fingerprint"] for e in entries if e["status"] == "unreviewed"]
+    def _session_statuses(sk: str) -> dict[str, dict[str, Any]]:
+        return store.statuses_by_session().get(sk, {})
 
-    def _remaining_after(entries: list[dict[str, Any]], judged: list[str]) -> int:
-        """在已取到的 entries 上算剩余待审(判定后调用, 免去重新加载+重新 enrich)。"""
-        done = set(judged)
-        return sum(1 for e in entries
-                   if e["status"] == "unreviewed" and e["fingerprint"] not in done)
+    def _session_abnormal(sk: str) -> dict[str, dict[str, Any]]:
+        return store.abnormal_by_fingerprint(sk)
 
-    def _enrich_sync(sk: str) -> list[dict[str, Any]]:
-        """会话明细组装(含状态/异常读取) — 整体在线程里跑, 不阻塞事件循环。"""
-        return data.enrich_entries(
-            sk,
-            store.statuses_by_session().get(sk, {}),
-            store.abnormal_by_fingerprint(),
+    def _page_sync(sk: str, page: int, page_size: int) -> dict[str, Any] | None:
+        """会话明细分页: 只 enrich 当前窗口 — 整体在线程里跑(issue #136)。"""
+        return data.page_entries(
+            sk, _session_statuses(sk), _session_abnormal(sk), page, page_size,
         )
 
     # ── Auth ─────────────────────────────────────────────────
@@ -255,31 +256,16 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         """
         _auth(request)
         sk = _loader.session_key(bot_id, chat_type, chat_id)
-        entries = await asyncio.to_thread(_enrich_sync, sk)
-        if not entries:
+        # issue #136: 只按页组装当前窗口; total/待审/异常页仍按整会话统计,
+        # 但不再为所有历史行构造展示 dict(50k 行规模下省掉 ~2s/30MiB)。
+        result = await asyncio.to_thread(_page_sync, sk, page, page_size)
+        if not result:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
         sessions = await asyncio.to_thread(data.list_sessions)
         info = next(
             (s for s in sessions if s["session_key"] == sk), None
         )
         nicknames = await asyncio.to_thread(data.bot_nicknames)
-        total = len(entries)
-        unreviewed = sum(1 for e in entries if e["status"] == "unreviewed")
-        page_size = max(1, min(int(page_size or 100), 500))
-        pages = max(1, (total + page_size - 1) // page_size)
-        if page <= 0:
-            first_pend = next(
-                (i for i, e in enumerate(entries) if e["status"] == "unreviewed"),
-                None,
-            )
-            page = (first_pend // page_size + 1) if first_pend is not None else pages
-        page = min(max(page, 1), pages)
-        window = entries[(page - 1) * page_size: page * page_size]
-        # 异常条目所在页(前端可一键跳转, 避免异常条目落在别的页看不到)
-        abnormal_pages = sorted({
-            i // page_size + 1
-            for i, e in enumerate(entries) if e["status"] == "abnormal"
-        })
         return {
             "session_key": sk,
             "bot_id": bot_id,
@@ -289,14 +275,14 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
             "chat_id": chat_id,
             "display_name": info["display_name"] if info else chat_id,
             "mtime": info["mtime"] if info else 0,
-            "unreviewed": unreviewed,
-            "abnormal_count": sum(1 for e in entries if e["status"] == "abnormal"),
-            "abnormal_pages": abnormal_pages,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "pages": pages,
-            "entries": window,
+            "unreviewed": result["unreviewed"],
+            "abnormal_count": result["abnormal_count"],
+            "abnormal_pages": result["abnormal_pages"],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+            "pages": result["pages"],
+            "entries": result["entries"],
         }
 
     # ── 浏览/搜索 ────────────────────────────────────────────
@@ -330,32 +316,46 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         except ValueError:
             raise HTTPException(status_code=400, detail="bad session_key")
 
-        entries = await asyncio.to_thread(_enrich_sync, sk)
-        if entries is None or not entries:
+        # issue #136: 只读会话行/状态, 不再为整会话构造展示 dict。
+        rows = await asyncio.to_thread(data.filtered_rows, sk)
+        if not rows:
             raise HTTPException(status_code=404, detail="会话不存在或为空")
+        statuses = await asyncio.to_thread(_session_statuses, sk)
 
         if action == "skip":
             store.skip(sk, user, detail=str(body.get("detail", "")))
+            remaining = await asyncio.to_thread(
+                data.unreviewed_count_session, sk, statuses,
+            )
             return {"ok": True, "action": "skip",
-                    "remaining_unreviewed": _remaining_after(entries, [])}
+                    "remaining_unreviewed": remaining}
 
         # 未指定指纹 → 默认当前全部待审
         if not fps:
-            fps = _unreviewed_fps(sk, entries)
+            fps = await asyncio.to_thread(
+                data.unreviewed_fingerprints, sk, statuses,
+            )
         if not fps:
             return {"ok": True, "action": action, "remaining_unreviewed": 0}
-
-        by_fp = {e["fingerprint"]: e for e in entries}
 
         if action == "normal":
             changed = store.judge(sk, fps, "normal", user)
             logger.info(f"[review] {user}: {sk} 正常 {changed} 条")
+            statuses_after = await asyncio.to_thread(_session_statuses, sk)
+            remaining = await asyncio.to_thread(
+                data.unreviewed_count_session, sk, statuses_after,
+            )
             return {"ok": True, "action": "normal", "changed": changed,
-                    "remaining_unreviewed": _remaining_after(entries, fps)}
+                    "remaining_unreviewed": remaining}
 
         if action == "abnormal":
             tags = [str(t) for t in (body.get("tags") or []) if t in TAG_OPTIONS]
             note = str(body.get("note", "")).strip()
+            abnormal_map = await asyncio.to_thread(_session_abnormal, sk)
+            entries = await asyncio.to_thread(
+                data.entries_by_fingerprints, sk, statuses, abnormal_map, fps,
+            )
+            by_fp = {e["fingerprint"]: e for e in entries}
             # 判定批量一次写入(避免逐条 judge 各自扫一遍本会话结论)
             marked = [fp for fp in fps if fp in by_fp]
             store.judge(sk, marked, "abnormal", user)
@@ -366,8 +366,12 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
                     e["content"], e["message_id"], tags, note, user,
                 )
             logger.info(f"[review] {user}: {sk} 异常 {len(marked)} 条 (tags={tags})")
+            statuses_after = await asyncio.to_thread(_session_statuses, sk)
+            remaining = await asyncio.to_thread(
+                data.unreviewed_count_session, sk, statuses_after,
+            )
             return {"ok": True, "action": "abnormal", "changed": len(marked),
-                    "remaining_unreviewed": _remaining_after(entries, marked)}
+                    "remaining_unreviewed": remaining}
 
         raise HTTPException(status_code=400, detail=f"未知操作: {action}")
 
@@ -435,12 +439,11 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         )
         return {"ok": True, "deleted": deleted, "mark_normal": mark_normal}
 
-    @app.get("/api/export")
-    async def export(request: Request, bot: str = "", tag: str = ""):
-        _auth(request)
+    def _export_sync(bot: str, tag: str) -> bytes:
+        """构建 CSV 导出(读库 + 会话名 + 序列化) — 整体在线程里跑(issue #136)。"""
         records = store.list_abnormal(bot=bot, tag=tag)
-        nicknames = await asyncio.to_thread(data.bot_nicknames)
-        name_map = {s["session_key"]: s["display_name"] for s in await asyncio.to_thread(data.list_sessions)}
+        nicknames = data.bot_nicknames()
+        name_map = {s["session_key"]: s["display_name"] for s in data.list_sessions()}
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -461,7 +464,14 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
                 r.get("note", ""),
                 r.get("reviewer", ""),
             ])
-        content = buf.getvalue().encode("utf-8-sig")
+        return buf.getvalue().encode("utf-8-sig")
+
+    @app.get("/api/export")
+    async def export(request: Request, bot: str = "", tag: str = ""):
+        _auth(request)
+        # 导出在 10k 行规模下同步构建会阻塞事件循环近 1s(issue #136),
+        # 整体放到线程池: 记录读取 + 会话名 + CSV 序列化都不占事件循环。
+        content = await asyncio.to_thread(_export_sync, bot, tag)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         return Response(
             content=content,
