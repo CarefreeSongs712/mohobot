@@ -127,9 +127,17 @@ class MemeSearchEngine:
             current_sig = self._compute_bm25_signature(
                 target, prefer_db_signature=idx is None
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[BM25] 代次/签名校验失败, 暂按未过期处理: {e}")
             return False
-        return bool(current_sig and current_sig != self._bm25_signature)
+        if not current_sig:
+            return False
+        if current_sig == self._bm25_signature:
+            # 代次变了但语料签名未变(如 move 后描述字段相同): 对齐代次,
+            # 避免每次搜索都重算 O(n) 签名(#129 review)。
+            self._bm25_generation = generation if generation is not None else -1
+            return False
+        return True
 
     async def _build_bm25_index(self, idx: dict | None = None) -> None:
         if BM25 is None:

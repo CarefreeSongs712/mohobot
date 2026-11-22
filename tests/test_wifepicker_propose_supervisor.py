@@ -115,7 +115,7 @@ async def test_propose_timer_registered_with_supervisor(monkeypatch):
         assert handled and "发起了求婚" in reply, reply
 
         owners = list(supervisor._owners)
-        assert any(o.startswith("plugin:wifepicker") for o in owners), owners 
+        assert any(o.startswith("plugin:wifepicker") for o in owners), owners
         assert any(
             task.get_name().startswith("wifepicker:propose-timeout:")
             for tasks in supervisor._owners.values() for task in tasks
@@ -170,7 +170,11 @@ async def test_spawn_task_when_supervisor_stopping_is_safe(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
         handled, reply = await plugin.on_message(BOT, _propose_event(), {})
-        assert handled and "发起了求婚" in reply, reply
+        assert handled, reply
+        # 任务无法登记时不能告诉用户"求婚已发起", 也不能留下待处理请求。
+        assert "发起了求婚" not in reply, reply
+        assert "未生效" in reply, reply
+        assert plugin._propose_requests == {}
         assert not plugin._background_tasks
 
         await asyncio.sleep(0.25)

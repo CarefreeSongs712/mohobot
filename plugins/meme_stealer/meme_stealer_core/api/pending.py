@@ -108,11 +108,16 @@ class PendingRoutes:
         marker_dir = self._approve_marker_dir()
         return os.path.join(marker_dir, f"{int(pending_id)}.json") if marker_dir else ""
 
-    def _write_approve_marker(self, pending_id: int, src_path: str, cat_path: str) -> None:
-        """写恢复标记。文件移动与 DB 提交之间进程中断时靠它恢复/回滚。"""
+    def _write_approve_marker(self, pending_id: int, src_path: str, cat_path: str) -> bool:
+        """写恢复标记。文件移动与 DB 提交之间进程中断时靠它恢复/回滚。
+
+        返回 False 时调用方不得继续移动文件/写库：没有标记就无法在崩溃
+        后恢复，宁可不审批也不能制造不一致(issue #132 review)。
+        """
         marker_path = self._approve_marker_path(pending_id)
         if not marker_path:
-            return
+            logger.error(f"写审核恢复标记失败 id={pending_id}: 未配置 cache_dir")
+            return False
         try:
             os.makedirs(os.path.dirname(marker_path), exist_ok=True)
             tmp_path = marker_path + ".tmp"
@@ -129,7 +134,14 @@ class PendingRoutes:
                 )
             os.replace(tmp_path, marker_path)
         except Exception as exc:
-            logger.warning(f"写审核恢复标记失败 id={pending_id}: {exc}")
+            try:
+                if os.path.isfile(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            logger.error(f"写审核恢复标记失败 id={pending_id}, 已中止本次审核: {exc}")
+            return False
+        return True
 
     def _read_approve_marker(self, pending_id: int) -> dict[str, Any] | None:
         marker_path = self._approve_marker_path(pending_id)
@@ -187,14 +199,35 @@ class PendingRoutes:
         return future.result(), cancelled, None
 
     async def _rollback_approval(
-        self, db, pending_id: int, src_path: str, cat_path: str, *, inserted: bool
+        self,
+        db,
+        pending_id: int,
+        src_path: str,
+        cat_path: str,
+        *,
+        inserted: bool,
+        expected_hash: str = "",
     ) -> None:
-        """审核失败/取消后的补偿：删掉已写图库记录，把文件移回 pending。"""
+        """审核失败/取消后的补偿：删掉本次写入的图库记录，把文件移回 pending。
+
+        只删除哈希与 pending 行一致的记录，避免在极端并发下误删同名路径的
+        其他数据(issue #132 review)。
+        """
         if inserted:
             try:
                 if hasattr(db, "delete_paths"):
-                    await db.delete_paths([cat_path])
-                await refresh_search_entry(self.plugin, cat_path)
+                    current_hash = ""
+                    if expected_hash and hasattr(db, "get_emoji"):
+                        emoji = db.get_emoji(cat_path)
+                        if emoji:
+                            current_hash = str(emoji.get("hash", "") or "")
+                    if not expected_hash or not current_hash or current_hash == expected_hash:
+                        await db.delete_paths([cat_path])
+                        await refresh_search_entry(self.plugin, cat_path)
+                    else:
+                        logger.error(
+                            f"审核回滚跳过 id={pending_id}: 图库记录哈希已变化, 不删除"
+                        )
             except Exception as exc:
                 logger.warning(f"审核回滚删除图库记录失败 id={pending_id}: {exc}")
         try:
@@ -280,7 +313,28 @@ class PendingRoutes:
         if not marker:
             return
         cat_path = str(marker.get("cat") or "")
+        row = db.get_pending(pending_id) if hasattr(db, "get_pending") else None
+        if hasattr(db, "get_pending") and row is None:
+            # pending 行已删除说明上次审核已提交，不能再按"拒绝"删除图库记录。
+            logger.warning(f"拒绝恢复跳过 id={pending_id}: pending 行已不存在(审核已提交)")
+            self._clear_approve_marker(pending_id)
+            return
+        expected_hash = str((row or {}).get("hash", "") or "")
         if cat_path and os.path.isfile(cat_path):
+            current_hash = ""
+            if hasattr(db, "get_emoji"):
+                try:
+                    emoji = db.get_emoji(cat_path)
+                except Exception:
+                    emoji = None
+                if emoji:
+                    current_hash = str(emoji.get("hash", "") or "")
+            if expected_hash and current_hash and current_hash != expected_hash:
+                logger.error(
+                    f"拒绝恢复跳过 id={pending_id}: 图库记录哈希不匹配, 不删除他人数据"
+                )
+                self._clear_approve_marker(pending_id)
+                return
             try:
                 if hasattr(db, "delete_paths"):
                     await db.delete_paths([cat_path])
@@ -347,7 +401,8 @@ class PendingRoutes:
         inserted = False
         committed = False
         cancelled_any = False
-        self._write_approve_marker(pending_id, src_path, cat_path)
+        if not self._write_approve_marker(pending_id, src_path, cat_path):
+            return False, "无法写入审核恢复标记，本次审核未做任何修改"
         try:
             if os.path.abspath(src_path) != os.path.abspath(cat_path):
                 _, cancelled, error = await self._run_step(
@@ -425,7 +480,8 @@ class PendingRoutes:
             if not committed:
                 await self._run_step(
                     self._rollback_approval(
-                        db, pending_id, src_path, cat_path, inserted=inserted
+                        db, pending_id, src_path, cat_path, inserted=inserted,
+                        expected_hash=str(row.get("hash", "") or ""),
                     )
                 )
             raise
@@ -433,7 +489,8 @@ class PendingRoutes:
             if not committed:
                 await self._run_step(
                     self._rollback_approval(
-                        db, pending_id, src_path, cat_path, inserted=inserted
+                        db, pending_id, src_path, cat_path, inserted=inserted,
+                        expected_hash=str(row.get("hash", "") or ""),
                     )
                 )
             logger.error(f"审核通过失败 id={pending_id}: {e}", exc_info=True)

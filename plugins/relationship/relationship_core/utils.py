@@ -87,9 +87,10 @@ async def api_call_checked(ws_server, bot_id: str, action: str, params: dict | N
 
     判定规则:
     - 协议端明确失败: status 为 failed/error/fail, 或 retcode 非 0;
-    - 畸形回执: 非 dict、未知 status、缺失/无法解析的 retcode、非整数 retcode;
-    - 未取得确认: WebSocket 未就绪、调用异常/超时、响应为 None(断连或等待超时)。
-      这类结果不能当成功, 也不能当"协议端拒绝", 上层需如实提示未确认。
+    - 未取得确认: WebSocket 未就绪、调用异常/超时、响应为 None(断连或等待超时),
+      以及畸形回执(非 dict、未知 status、缺失/无法解析的 retcode)。
+      畸形回执说明本地无法判断协议端是否已执行(可能已生效但回执不合规),
+      因此不能判成"明确失败"去诱导重复人工处理, 只能要求人工确认。
     """
     if ws_server is None:
         return ApiCallResult(False, None, "WebSocket 未就绪", OUTCOME_UNCONFIRMED)
@@ -109,13 +110,20 @@ async def api_call_checked(ws_server, bot_id: str, action: str, params: dict | N
         logger.warning(f"API {action} 返回错误: {err}")
         return ApiCallResult(False, None, err, OUTCOME_FAILED)
 
+    def _unconfirmed(text: str) -> ApiCallResult:
+        err = summarize_error(text)
+        logger.warning(f"API {action} 回执无法确认结果: {err}")
+        return ApiCallResult(False, None, err, OUTCOME_UNCONFIRMED)
+
     if resp is None:
         return ApiCallResult(
             False, None, "未取得协议端确认（等待响应超时或连接已断开）",
             OUTCOME_UNCONFIRMED,
         )
     if not isinstance(resp, dict):
-        return _fail(f"回执非法：响应不是 JSON 对象({type(resp).__name__})")
+        return _unconfirmed(
+            f"回执异常：响应不是 JSON 对象({type(resp).__name__})，无法确认协议端是否已执行"
+        )
 
     def _err_text(fallback: str) -> str:
         return str(resp.get("wording") or resp.get("message") or fallback)
@@ -127,14 +135,18 @@ async def api_call_checked(ws_server, bot_id: str, action: str, params: dict | N
         if status in _FAILED_STATUSES:
             return _fail(_err_text("请求被协议端拒绝"))
         if status and status not in _OK_STATUSES:
-            return _fail(f"回执非法：未知 status={summarize_error(status_raw)}")
+            return _unconfirmed(
+                f"回执异常：未知 status={summarize_error(status_raw)}，无法确认协议端是否已执行"
+            )
 
     raw_retcode = resp.get("retcode", _MISSING)
     if raw_retcode is _MISSING:
-        return _fail("回执非法：缺少 retcode")
+        return _unconfirmed("回执异常：缺少 retcode，无法确认协议端是否已执行")
     retcode = _parse_retcode(raw_retcode)
     if retcode is None:
-        return _fail(f"回执非法：retcode 无法解析({summarize_error(raw_retcode)!r})")
+        return _unconfirmed(
+            f"回执异常：retcode 无法解析({summarize_error(raw_retcode)!r})，无法确认协议端是否已执行"
+        )
     if retcode != 0:
         return _fail(_err_text(f"retcode={retcode}"))
 

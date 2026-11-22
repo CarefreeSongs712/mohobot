@@ -223,3 +223,91 @@ def test_search_images_builds_bm25_once_across_calls(env, monkeypatch):
     import asyncio
 
     asyncio.run(run())
+
+
+def test_move_path_bumps_generation_and_stale_detects(env):
+    """直接调用 DatabaseService.move_path 也必须推进代次(#129 review)。"""
+    db, _plugin, engine = env
+
+    async def run():
+        await db.insert_batch([_entry("/old.gif")])
+        idx = db.get_index_cache_readonly()
+        await engine._build_bm25_index(idx)
+        assert engine.bm25_index_stale(idx) is False
+
+        before = db.get_index_generation()
+        assert await db.move_path("/old.gif", "/new.gif", "happy") is True
+        assert db.get_index_generation() > before, "move_path 成功必须推进语料代次"
+
+        # 调用方漏了 invalidate: 仅靠代次也要发现旧路径
+        assert engine._bm25_dirty is False
+        assert engine.bm25_index_stale(db.get_index_cache_readonly()) is True
+
+        # 失败的 move 不推进代次
+        gen = db.get_index_generation()
+        assert await db.move_path("/missing.gif", "/x.gif", "happy") is False
+        assert db.get_index_generation() == gen
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+def test_sync_index_bumps_generation_only_when_changed(env):
+    """sync_index 有实际变更才推进代次, 无变化不得反复失效缓存(#129 review)。"""
+    db, _plugin, _engine = env
+
+    async def run():
+        idx = {"/s.gif": {"path": "/s.gif", "hash": "h1", "category": "happy", "desc": "开心"}}
+        before = db.get_index_generation()
+        assert await db.sync_index(idx), "首次同步应新增路径"
+        assert db.get_index_generation() > before
+
+        gen = db.get_index_generation()
+        assert await db.sync_index(idx) == []
+        assert db.get_index_generation() == gen, "无变化时不应推进代次"
+
+        changed = {
+            "/s.gif": {
+                "path": "/s.gif",
+                "hash": "h1",
+                "category": "happy",
+                "desc": "新描述",
+            }
+        }
+        assert await db.sync_index(changed)
+        assert db.get_index_generation() > gen
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+def test_generation_advance_without_signature_change_aligns_cache(env, monkeypatch):
+    """代次变了但签名相同时对齐代次, 避免每次搜索重算 O(n) 签名(#129 review)。"""
+    db, _plugin, engine = env
+
+    async def run():
+        await db.insert_batch([_entry("/a.gif")])
+        idx = db.get_index_cache_readonly()
+        await engine._build_bm25_index(idx)
+
+        db._bump_index_generation()  # 代次推进, 语料签名不变
+        calls = {"n": 0}
+        original = engine._compute_bm25_signature
+
+        def counting(idx_arg, **kwargs):
+            calls["n"] += 1
+            return original(idx_arg, **kwargs)
+
+        monkeypatch.setattr(engine, "_compute_bm25_signature", counting)
+        assert engine.bm25_index_stale(idx) is False
+        assert calls["n"] == 1, "代次不一致时应做一次签名比对"
+        assert engine._bm25_generation == db.get_index_generation(), "签名相同需对齐代次"
+
+        assert engine.bm25_index_stale(idx) is False
+        assert calls["n"] == 1, "对齐后应恢复 O(1) 判定"
+
+    import asyncio
+
+    asyncio.run(run())

@@ -678,9 +678,13 @@ class DatabaseService(
         if not old_path or not new_path or old_path == new_path:
             return False
         async with self._write_lock:
-            return await asyncio.to_thread(
+            moved = await asyncio.to_thread(
                 self._move_path_sync, old_path, new_path, category, updates or {}
             )
+        if moved:
+            # 路径/元数据变化会影响 BM25 文档语料, 必须让缓存代次失效(#129)。
+            self._bump_index_generation()
+        return moved
 
     def _move_path_sync(
         self, old_path: str, new_path: str, category: str, updates: dict[str, Any]
@@ -885,7 +889,11 @@ class DatabaseService(
         避免并发 on_message 时误删其他消息刚入库的条目。
         """
         async with self._write_lock:
-            return await asyncio.to_thread(self._sync_index_sync, idx)
+            changed = await asyncio.to_thread(self._sync_index_sync, idx)
+        if changed:
+            # 索引同步有新增/变更时同样推进代次, 避免 BM25 复用旧语料(#129)。
+            self._bump_index_generation()
+        return changed
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> list[str]:
         desired_index = {

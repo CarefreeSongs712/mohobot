@@ -195,7 +195,7 @@ async def test_auto_approve_confirmed_still_sends_completion():
 
 # ── 2. 手动审批回执判定 ─────────────────────────────────────
 
-async def test_manual_malformed_receipt_is_failure_and_no_blacklist():
+async def test_manual_malformed_receipt_is_unconfirmed_and_no_blacklist():
     with tempfile.TemporaryDirectory() as td:
         ws = _WS()
         _, plugin = _prepare(td, ws)
@@ -204,8 +204,9 @@ async def test_manual_malformed_receipt_is_failure_and_no_blacklist():
 
         _, reply = await plugin.on_message("bot_001", _approve_event(mid, "/拉黑"), {})
 
-        assert reply and reply.startswith("❌ 审批失败"), reply
-        assert "回执非法" in reply, reply
+        # 畸形回执不能断定协议端拒绝(可能已执行), 只能要求人工确认(#151 review)。
+        assert reply and reply.startswith("❌ 审批未确认"), reply
+        assert "回执异常" in reply, reply
         assert "已拉黑" not in reply, reply
         data = Path(td) / "plugins_config" / "relationship.json"
         assert not data.exists() or "1102231856" not in data.read_text(encoding="utf-8")
@@ -271,10 +272,10 @@ async def test_missing_status_is_compatible():
     {"status": "unknown", "retcode": 0},     # 未知 status
     {"status": "ok", "retcode": "0.5"},      # 数字串但非整数
 ])
-async def test_malformed_receipts_fail_closed(resp):
+async def test_malformed_receipts_are_unconfirmed(resp):
     result = await api_call_checked(_StaticWS(resp), "b", "x")
     assert not result.ok
-    assert result.outcome == OUTCOME_FAILED
+    assert result.outcome == OUTCOME_UNCONFIRMED
     assert result.error
 
 
@@ -293,10 +294,10 @@ async def test_timeout_and_missing_ws_are_unconfirmed():
     assert "未取得协议端确认" in result.error
 
 
-async def test_non_dict_receipt_is_malformed_failure():
+async def test_non_dict_receipt_is_unconfirmed():
     result = await api_call_checked(_StaticWS([1, 2]), "b", "x")
-    assert result.outcome == OUTCOME_FAILED
-    assert "回执非法" in result.error
+    assert result.outcome == OUTCOME_UNCONFIRMED
+    assert "回执异常" in result.error
 
 
 def test_error_text_is_limited_and_single_line():

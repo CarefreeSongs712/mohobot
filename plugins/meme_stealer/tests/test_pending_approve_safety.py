@@ -487,3 +487,73 @@ def test_scope_local_requires_valid_origin(env):
     )
     # 非 local 不受来源限制
     assert service._is_entry_allowed_for_event({"scope_mode": "public"}, event)
+
+
+# ── 7. 恢复标记写失败 / 已提交行 / 回滚哈希保护 ─────────────
+
+
+@pytest.mark.asyncio
+async def test_marker_write_failure_aborts_before_any_change(env, monkeypatch):
+    """无法写恢复标记时宁可不审批: 不移动文件、不写库、pending 行保留(#132 review)。"""
+    pending_id, src = await _insert_pending(env)
+
+    def broken_replace(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pending_module.os, "replace", broken_replace)
+
+    ok, msg = await env.api._approve_one(env.db, pending_id)
+
+    assert ok is False
+    assert "恢复标记" in msg
+    cat_path = _cat_path(env)
+    assert src.is_file(), "标记失败不得移动待审文件"
+    assert not cat_path.exists()
+    assert env.db.get_pending(pending_id) is not None
+    assert env.db.get_emoji(str(cat_path)) is None
+    marker_dir = env.cfg.cache_dir / "pending_approve"
+    assert not list(marker_dir.glob("*.json")), "失败后不能残留恢复标记"
+    assert not list(marker_dir.glob("*.tmp")), "失败后不能残留临时文件"
+
+
+@pytest.mark.asyncio
+async def test_reject_skips_recovery_when_pending_already_committed(env, monkeypatch):
+    """审核已提交但崩溃残留标记时, 拒绝不能反删已入库的图库记录(#132 review)。"""
+    pending_id, src = await _insert_pending(env)
+    ok, _msg = await env.api._approve_one(env.db, pending_id)
+    assert ok
+    cat_path = _cat_path(env)
+    # 模拟提交点后清标记前崩溃
+    env.api._write_approve_marker(pending_id, str(src), str(cat_path))
+    _patch_http(monkeypatch, {"id": pending_id})
+
+    payload = await env.api.handle_pending_reject()
+
+    assert payload["success"] is True
+    assert env.db.get_emoji(str(cat_path)) is not None, "已提交记录不能被拒绝路径删除"
+    assert cat_path.is_file(), "已提交文件不能被拒绝路径删除"
+    assert not env.api._read_approve_marker(pending_id)
+
+
+@pytest.mark.asyncio
+async def test_rollback_skips_record_with_mismatched_hash(env):
+    """回滚只删本次写入的记录; 同名路径哈希已变时不得误删(#132 review)。"""
+    pending_id, _src = await _insert_pending(env)
+    cat_path = _cat_path(env)
+    cat_path.parent.mkdir(parents=True, exist_ok=True)
+    cat_path.write_bytes(b"pending-bytes")
+    entry = _emoji_entry(env, cat_path)
+    entry["hash"] = "someone-elses-hash"
+    await env.db.insert_batch([entry])
+
+    await env.api._rollback_approval(
+        env.db,
+        pending_id,
+        str(env.cfg.pending_dir / "p.png"),
+        str(cat_path),
+        inserted=True,
+        expected_hash="expected-hash",
+    )
+
+    assert env.db.get_emoji(str(cat_path)) is not None, "哈希不匹配时不得删除他人记录"
+    assert cat_path.is_file()
