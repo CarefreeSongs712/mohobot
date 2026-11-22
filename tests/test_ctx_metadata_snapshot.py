@@ -13,6 +13,19 @@ import pytest
 
 from mohobot.context_manager import ContextManager
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _patch_attr(obj, name, value):
+    """临时替换属性(不依赖 pytest monkeypatch, 项目自研 runner 无 fixture)。"""
+    original = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, original)
+
 BOT = "bot_001"
 CHAT = "1001"
 
@@ -21,7 +34,7 @@ def make_cm(tmp_path: Path) -> ContextManager:
     return ContextManager(data_dir=str(tmp_path))
 
 
-async def test_load_uses_validated_snapshot_without_reading_index(tmp_path, monkeypatch):
+async def test_load_uses_validated_snapshot_without_reading_index(tmp_path):
     cm = make_cm(tmp_path)
     await cm.append_context(BOT, "private", CHAT, [{"role": "user", "content": "hi"}])
     session = await cm.capture_session(BOT, "private", CHAT)
@@ -29,15 +42,15 @@ async def test_load_uses_validated_snapshot_without_reading_index(tmp_path, monk
     async def _fail(*args, **kwargs):
         raise AssertionError("load_context 不应再读 session_index.json")
 
-    monkeypatch.setattr(cm, "_read_index_unlocked", _fail)
-    context = await cm.load_context(BOT, "private", CHAT, validated_session=session)
-    assert context == [{"role": "user", "content": "hi"}]
-    # 写回路径必须保留一次 generation 校验(仍读索引), 快照本身不能作为写入凭据。
-    with pytest.raises(AssertionError, match="session_index"):
-        await cm.append_context(
-            BOT, "private", CHAT, [{"role": "assistant", "content": "x"}],
-            validated_session=session,
-        )
+    with _patch_attr(cm, "_read_index_unlocked", _fail):
+        context = await cm.load_context(BOT, "private", CHAT, validated_session=session)
+        assert context == [{"role": "user", "content": "hi"}]
+        # 写回路径必须保留一次 generation 校验(仍读索引), 快照不能作为写入凭据。
+        with pytest.raises(AssertionError, match="session_index"):
+            await cm.append_context(
+                BOT, "private", CHAT, [{"role": "assistant", "content": "x"}],
+                validated_session=session,
+            )
 
 
 async def test_stale_snapshot_rejected_after_clear_and_reset(tmp_path):

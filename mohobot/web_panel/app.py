@@ -1724,7 +1724,8 @@ class WebPanel:
                     status_code=400,
                     detail="未选择任何数据范围(cache/history/contexts/ban/personas/database)",
                 )
-            if bot_list == [] and not (dir_set & {"personas", "cache", "ban"}):
+            # personas/cache/ban/database 属于全局范围, 不需要 Bot 选择。
+            if bot_list == [] and not (dir_set & {"personas", "cache", "ban", "database"}):
                 raise HTTPException(status_code=400, detail="未选择任何 Bot")
             return bot_list, dir_set
 
@@ -1913,8 +1914,9 @@ class WebPanel:
                         raise ValueError(
                             f"备份会话文件格式非法，拒绝恢复: {chat_dir.name}/{sid}.json")
                 else:
-                    # 索引引用的会话文件缺失: 补空会话, 保证恢复后索引/文件一致。
-                    file_path.write_text("[]", encoding="utf-8")
+                    # 索引引用的会话文件缺失属于损坏备份: 拒绝恢复, 不静默补空会话。
+                    raise ValueError(
+                        f"备份会话文件缺失，拒绝恢复: {chat_dir.name}/{sid}.json")
                 # 恢复即视为新一代: 在途回复持有的旧 generation 必须失效。
                 session["generation"] = secrets.token_hex(16)
             for extra in chat_dir.glob("*.json"):
@@ -1928,11 +1930,10 @@ class WebPanel:
 
         def _validate_group_chat_context(chat_dir: Path) -> None:
             main_path = chat_dir / "main.json"
+            # 群聊 main.json 可能从未创建(空会话), 缺失是合法状态, 不补写空文件。
             if main_path.is_file():
                 if not isinstance(_read_backup_json(main_path, "群聊会话文件"), list):
                     raise ValueError(f"备份群聊会话文件格式非法，拒绝恢复: {chat_dir.name}")
-            else:
-                main_path.write_text("[]", encoding="utf-8")
             for extra in chat_dir.glob("*.json"):
                 if extra.name in ("main.json", "session_index.json"):
                     continue
@@ -1986,6 +1987,11 @@ class WebPanel:
                 validate_sqlite(candidates[0], ("users", "conversations"))
 
         def _restore_database_from(tmp_dir: Path) -> None:
+            """把备份快照写回运行中的库。
+
+            SQLite backup API 会在目标库上取得写事务, 因此恢复窗口内其他写入
+            会等待/重试; 建议在低峰或停写窗口执行(见 docs/ADMIN.md)。
+            """
             from mohobot.db.sqlite_snapshot import restore_sqlite
             db_path = _database_path()
             if db_path is None:
@@ -2181,6 +2187,16 @@ class WebPanel:
                     status_code=400,
                     detail="数据库不能在线批量清理；请使用 SQL 工具或停机维护",
                 )
+            # contexts 被清理时: 先记录受影响的 bot, 清理后推进群聊内存 generation,
+            # 避免清理前捕获的在途回复用旧 generation 重建群聊上下文(issue #126)。
+            cleaned_context_bots: list[str] = []
+            if "contexts" in dir_set:
+                context_root = self._data_dir / "contexts"
+                if context_root.exists():
+                    cleaned_context_bots = sorted(
+                        p.name for p in context_root.iterdir()
+                        if p.is_dir() and (bot_list is None or p.name in bot_list)
+                    )
             # history 被清理时: 先冻结写入并关闭活跃 writer, 避免它们继续写已被
             # unlink 的旧 inode(issue #8 第 1 点)。
             barrier = self._history_barrier if "history" in dir_set else None
@@ -2194,6 +2210,11 @@ class WebPanel:
                             removed = self._cleanup_data(bot_list, dir_set)
                     else:
                         removed = self._cleanup_data(bot_list, dir_set)
+                    bump_generations = getattr(
+                        self._context_manager, "bump_group_generations", None)
+                    if cleaned_context_bots and callable(bump_generations):
+                        for bot_id in cleaned_context_bots:
+                            bump_generations(bot_id)
                 finally:
                     if barrier is not None:
                         await barrier.thaw()

@@ -19,7 +19,6 @@ import json
 import secrets
 import sqlite3
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -27,6 +26,19 @@ import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _patch_attr(obj, name, value):
+    """临时替换属性(不依赖 pytest monkeypatch, 项目自研 runner 无 fixture)。"""
+    original = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, original)
 
 PASSWORD = "secret123"
 
@@ -244,6 +256,7 @@ async def test_restore_rejects_corrupted_contexts_backup(tmp_path):
             "session_index.json": json.dumps(good_index),
             "sess_main.json": "[{\"role\":",
         },
+        "session file missing": {"session_index.json": json.dumps(good_index)},
     }
 
     async with _client(panel) as client:
@@ -261,6 +274,39 @@ async def test_restore_rejects_corrupted_contexts_backup(tmp_path):
     assert json.loads((chat_dir / "session_index.json").read_text(encoding="utf-8"))
     assert json.loads((chat_dir / "sess_main.json").read_text(encoding="utf-8")) == [
         {"role": "user", "content": "keep"}]
+
+
+async def test_cleanup_contexts_advances_group_generation(tmp_path):
+    """清理 contexts 后, 清理前捕获的群聊在途回复不得重建上下文。"""
+    from mohobot.context_manager import ContextManager
+
+    data_dir = tmp_path / "data"
+    _write_private_chat(data_dir)
+    cm = ContextManager(data_dir=str(data_dir))
+    cap = await cm.capture_session("bot_001", "group", "999")
+    assert await cm.append_context(
+        "bot_001", "group", "999", [{"role": "user", "content": "before"}],
+        session_id=cap["id"], generation=cap["generation"]) is True
+
+    panel, _ = _build_panel(tmp_path, context_manager=cm)
+    async with _client(panel) as client:
+        auth = await _login(client)
+        r = await client.post(
+            "/api/data/cleanup",
+            json={"data": {"password": PASSWORD,
+                           "scope": {"bots": "all", "dirs": ["contexts"]}}},
+            headers=auth,
+        )
+        assert r.status_code == 200, r.text
+
+    assert await cm.append_context(
+        "bot_001", "group", "999", [{"role": "user", "content": "stale"}],
+        session_id=cap["id"], generation=cap["generation"]) is False
+    fresh = await cm.capture_session("bot_001", "group", "999")
+    assert fresh["generation"] != cap["generation"]
+    assert await cm.append_context(
+        "bot_001", "group", "999", [{"role": "assistant", "content": "new"}],
+        session_id=fresh["id"], generation=fresh["generation"]) is True
 
 
 # ── 3. clear/reset 推进 generation ─────────────────────────────
@@ -367,7 +413,7 @@ async def test_freeze_cancellation_rolls_back_frozen_state():
 # ── 5. 删除会话的 unlink 失败回滚 + tombstone 不进备份 ────────
 
 
-async def test_delete_session_unlink_failure_rolls_back(tmp_path, monkeypatch):
+async def test_delete_session_unlink_failure_rolls_back(tmp_path):
     from mohobot.context_manager import ContextManager
 
     data_dir = tmp_path / "data"
@@ -389,13 +435,11 @@ async def test_delete_session_unlink_failure_rolls_back(tmp_path, monkeypatch):
             raise PermissionError("文件被占用")
         return real_unlink(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", failing_unlink)
-    with pytest.raises(OSError) as excinfo:
-        await cm.delete_session("bot_x", "private", "u1", sid)
+    with _patch_attr(Path, "unlink", failing_unlink):
+        with pytest.raises(OSError) as excinfo:
+            await cm.delete_session("bot_x", "private", "u1", sid)
     assert "重试" in str(excinfo.value)
     assert calls["failed"] == 1
-
-    monkeypatch.setattr(Path, "unlink", real_unlink)
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert sid in [s["id"] for s in index["sessions"]], "回滚后索引必须仍包含该会话"
     assert session_path.exists(), "回滚后会话文件必须恢复"
@@ -408,7 +452,7 @@ async def test_delete_session_unlink_failure_rolls_back(tmp_path, monkeypatch):
     assert not session_path.exists()
 
 
-async def test_delete_endpoint_returns_409_and_retry_succeeds(tmp_path, monkeypatch):
+async def test_delete_endpoint_returns_409_and_retry_succeeds(tmp_path):
     from mohobot.context_manager import ContextManager
 
     data_dir = tmp_path / "data"
@@ -424,14 +468,13 @@ async def test_delete_endpoint_returns_409_and_retry_succeeds(tmp_path, monkeypa
             raise PermissionError("文件被占用")
         return real_unlink(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", failing_unlink)
     async with _client(panel) as client:
         auth = await _login(client)
-        r = await client.delete(
-            f"/api/contexts/bot_x/private/u1/session/{sid}", headers=auth)
+        with _patch_attr(Path, "unlink", failing_unlink):
+            r = await client.delete(
+                f"/api/contexts/bot_x/private/u1/session/{sid}", headers=auth)
         assert r.status_code == 409, r.text
         assert "重试" in r.json()["detail"]
-        monkeypatch.setattr(Path, "unlink", real_unlink)
         r = await client.delete(
             f"/api/contexts/bot_x/private/u1/session/{sid}", headers=auth)
         assert r.status_code == 200, r.text
@@ -501,6 +544,11 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
                 snapshot = zf.read("database/mohobot.db")
             assert _sqlite_reader(snapshot, tmp_path) == ["wal-live"]
 
+            # database 是全局范围: 不选 Bot(bots=[]) 也能备份
+            payload_global = await _backup(client, auth, ["database"], bots=[])
+            with zipfile.ZipFile(io.BytesIO(payload_global)) as zf:
+                assert zf.namelist() == ["database/mohobot.db"]
+
             # 恢复前再写入一行, 恢复后应回到备份时的状态
             live.execute("INSERT INTO users(name) VALUES (?)", ("after-backup",))
             live.commit()
@@ -542,5 +590,12 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
                                "scope": {"bots": "all", "dirs": ["database"]}}},
                 headers=auth)
             assert r.status_code == 400, r.text
+
+            # 组合范围: contexts + database, restored 计数同时包含两者
+            _write_private_chat(tmp_path / "data")
+            combo = await _backup(client, auth, ["contexts", "database"])
+            r = await _restore(client, auth, combo, ["contexts", "database"])
+            assert r.status_code == 200, r.text
+            assert r.json()["restored"] == 3
     finally:
         live.close()

@@ -1199,7 +1199,6 @@ class MessageHandler:
     @staticmethod
     def _is_ping_text(event) -> bool:
         """去除首尾空白后完全匹配 ping(忽略大小写)。"""
-        from mohobot.utils.cq_code import extract_plain_text as _ept
         text = ""
         if isinstance(event.message, str):
             text = event.message

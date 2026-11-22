@@ -185,10 +185,21 @@ class ContextManager:
 
     def _group_generation(self, bot_id: str, chat_id: str) -> str:
         """群聊会话当前 generation(未推进过时为兼容值 group-main)。"""
-        return self._group_generations.get((bot_id, chat_id), "group-main")
+        return (self._group_generations.get((bot_id, chat_id))
+                or self._group_generations.get((bot_id, ""))
+                or "group-main")
 
     def bump_group_generations(self, bot_id: str) -> None:
-        """使该 bot 所有群聊会话的在途 generation 失效(恢复 contexts 后调用)。"""
+        """使该 bot 所有群聊会话的在途 generation 失效(恢复/清理 contexts 后调用)。
+
+        除了磁盘上仍存在的群聊目录, 还要覆盖只在内存中捕获过、目录已被清理的
+        会话: 用 (bot_id, "") 作为该 bot 的默认 generation 兜底。
+        """
+        default = uuid.uuid4().hex
+        self._group_generations[(bot_id, "")] = default
+        for key in list(self._group_generations):
+            if key[0] == bot_id and key[1]:
+                self._group_generations[key] = uuid.uuid4().hex
         base = self._context_base(bot_id, "group")
         if not base.exists():
             return
