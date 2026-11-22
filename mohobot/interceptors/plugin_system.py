@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -44,6 +44,9 @@ from mohobot.plugins.manifest import (
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
 from mohobot.api import api_version as PLUGIN_API_VERSION
+
+if TYPE_CHECKING:
+    from mohobot.services.llm_tools import PluginToolStage
 
 
 class _PluginTaskSupervisor:
@@ -264,12 +267,17 @@ class PluginSystem(Interceptor):
             "manifest": manifest,
             "module_name": self._module_name(plugin_name),
         }
+        from mohobot.services.llm_tools import registry
+
+        registry.set_owner_state_path(plugin_name, self._state_file)
         if not meta["enabled"]:
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
 
         module_name = meta["module_name"]
         module = None
+        tool_stage = registry.new_plugin_stage(plugin_name, self._state_file)
+        meta["_llm_tool_stage"] = tool_stage
         try:
             if not entry_dir:
                 spec = importlib.util.spec_from_file_location(module_name, entry_path)
@@ -288,37 +296,39 @@ class PluginSystem(Interceptor):
                 raise ManifestError("spec load failed")
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            with registry.registration_scope(tool_stage):
+                spec.loader.exec_module(module)
+            with registry.registration_scope(tool_stage):
+                plugin_instance = None
+                for name, cls in inspect.getmembers(module, inspect.isclass):
+                    if name == "Plugin" and cls.__module__ == module.__name__:
+                        plugin_instance = cls()
+                        break
+                if plugin_instance is None:
+                    raise ManifestError("no Plugin class found")
+                self._validate_plugin(plugin_instance)
 
-            plugin_instance = None
-            for name, cls in inspect.getmembers(module, inspect.isclass):
-                if name == "Plugin" and cls.__module__ == module.__name__:
-                    plugin_instance = cls()
-                    break
-            if plugin_instance is None:
-                raise ManifestError("no Plugin class found")
-            self._validate_plugin(plugin_instance)
+                meta["instance"] = plugin_instance
+                meta["loaded"] = True
+                meta["loaded_at"] = time.time()
+                meta["info"] = {
+                    "description": inspect.getdoc(plugin_instance.__class__) or "",
+                }
+                if manifest is not None:
+                    meta["info"]["display_name"] = manifest.display_name
+                    meta["info"]["version"] = manifest.version
+                cls_info = getattr(plugin_instance.__class__, "info", None)
+                if isinstance(cls_info, dict):
+                    meta["info"].update(cls_info)
 
-            meta["instance"] = plugin_instance
-            meta["loaded"] = True
-            meta["loaded_at"] = time.time()
-            meta["info"] = {
-                "description": inspect.getdoc(plugin_instance.__class__) or "",
-            }
-            if manifest is not None:
-                meta["info"]["display_name"] = manifest.display_name
-                meta["info"]["version"] = manifest.version
-            cls_info = getattr(plugin_instance.__class__, "info", None)
-            if isinstance(cls_info, dict):
-                meta["info"].update(cls_info)
-
-            schema = self._load_config_schema(entry_path.parent)
-            if schema:
-                meta["config_schema"] = schema
-                meta["config"] = self._load_plugin_config(plugin_name, schema)
-                self._inject_config(plugin_instance, meta["config"])
-            logger.info(f"Loaded plugin: {plugin_name}")
+                schema = self._load_config_schema(entry_path.parent)
+                if schema:
+                    meta["config_schema"] = schema
+                    meta["config"] = self._load_plugin_config(plugin_name, schema)
+                    self._inject_config(plugin_instance, meta["config"])
+                logger.info(f"Loaded plugin: {plugin_name}")
         except Exception as e:
+            registry.discard_plugin_stage(tool_stage)
             if module is not None:
                 for loaded_name in list(sys.modules):
                     if loaded_name == module_name or loaded_name.startswith(module_name + "."):
@@ -408,6 +418,13 @@ class PluginSystem(Interceptor):
         }
 
     async def _load_all_unlocked(self) -> int:
+        from mohobot.services.llm_tools import registry
+
+        owners = list(dict.fromkeys(str(meta.get("name", "")) for meta in self._plugins))
+        await registry.deactivate_owners(owners)
+        await self._wait_for_dispatches()
+        for owner in owners:
+            registry.unregister_owner(owner)
         await self.stop_tick_tasks_async()
         self._unload_all_plugins()
         self._plugins = []
@@ -496,6 +513,10 @@ class PluginSystem(Interceptor):
                     logger.warning(f"Failed to remove stale staging directory {path}: {e}")
 
     async def _shutdown_unlocked(self) -> None:
+        from mohobot.services.llm_tools import registry
+
+        owners = list(dict.fromkeys(str(meta.get("name", "")) for meta in self._plugins))
+        await registry.deactivate_owners(owners)
         await self._wait_for_dispatches()
         await self.stop_tick_tasks_async()
         if self._task_supervisor is not None:
@@ -506,6 +527,8 @@ class PluginSystem(Interceptor):
                 await self._call_hook(meta, "on_shutdown")
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
+        for owner in owners:
+            registry.unregister_owner(owner)
         self._unload_all_plugins()
 
     async def _reload_unlocked(self) -> int:
@@ -541,24 +564,59 @@ class PluginSystem(Interceptor):
                 f"Plugin dispatch barrier timed out with {self._active_dispatches} active handler(s)"
             )
 
-    async def _call_hook(self, meta: dict[str, Any], hook_name: str) -> None:
+    async def _call_hook(
+        self,
+        meta: dict[str, Any],
+        hook_name: str,
+        registration_stage: PluginToolStage | None = None,
+    ) -> bool:
         """调用可选生命周期 hook, 同步/异步实现均可且互不影响。"""
         plugin = meta.get("instance")
         hook = getattr(plugin, hook_name, None) if plugin is not None else None
         if not callable(hook):
-            return
+            return True
         try:
-            result = hook()
-            if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=self._hook_timeout)
+            if registration_stage is None:
+                result = hook()
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=self._hook_timeout)
+            else:
+                from mohobot.services.llm_tools import registry
+
+                with registry.registration_scope(registration_stage):
+                    result = hook()
+                    if inspect.isawaitable(result):
+                        await asyncio.wait_for(result, timeout=self._hook_timeout)
+            return True
         except Exception as e:
             logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
+            return False
+
+    async def _start_plugin(self, meta: dict[str, Any]) -> bool:
+        from mohobot.services.llm_tools import registry
+
+        stage = meta.get("_llm_tool_stage")
+        if stage is None:
+            stage = registry.new_plugin_stage(str(meta.get("name", "")), self._state_file)
+            meta["_llm_tool_stage"] = stage
+        success = await self._call_hook(meta, "on_startup", stage)
+        try:
+            if success:
+                registry.commit_plugin_stage(stage)
+            else:
+                registry.discard_plugin_stage(stage)
+        except Exception as e:
+            registry.discard_plugin_stage(stage)
+            logger.error(f"Plugin {meta.get('name', '?')} LLM tool registration failed: {e}")
+            success = False
+        meta["_llm_tool_stage"] = None
+        return success
 
     async def startup_plugins(self) -> None:
         """运行已加载插件的可选 on_startup hook。"""
         for meta in list(self._plugins):
             if meta.get("enabled") and meta.get("loaded"):
-                await self._call_hook(meta, "on_startup")
+                await self._start_plugin(meta)
 
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
@@ -959,6 +1017,9 @@ class PluginSystem(Interceptor):
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False
+            from mohobot.services.llm_tools import registry
+
+            await registry.deactivate_owner(name)
             await self._wait_for_dispatches()
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
@@ -967,6 +1028,7 @@ class PluginSystem(Interceptor):
                 await self._call_hook(meta, "on_shutdown")
             if self._task_supervisor is not None:
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
+            registry.unregister_owner(name)
             self._unload_plugin(meta)
             self._plugins.remove(meta)
             return True
@@ -979,6 +1041,9 @@ class PluginSystem(Interceptor):
                 await self._reload_unlocked()
                 meta = next((m for m in self._plugins if m["name"] == name), None)
                 return bool(meta and meta.get("loaded"))
+            from mohobot.services.llm_tools import registry
+
+            await registry.deactivate_owner(name)
             await self._wait_for_dispatches()
             index = self._plugins.index(meta)
             old_meta = dict(meta)
@@ -1006,6 +1071,7 @@ class PluginSystem(Interceptor):
             self._unload_plugin(meta)
             entry = next((item for item in self._iter_entries() if item[1] == name), None)
             if entry is None:
+                registry.unregister_owner(name)
                 self._plugins.pop(index)
                 return False
             module_name = self._module_name(entry[1])
@@ -1028,11 +1094,22 @@ class PluginSystem(Interceptor):
 
             sources = await load_sources(self._data_dir)
             new_meta["source_record"] = sources.get(new_meta.get("name", ""))
-            if (
-                not new_meta.get("loaded")
-                and new_meta.get("enabled", True)
-                and old_meta.get("loaded")
-            ):
+            self._plugins[index] = new_meta
+            started = False
+            if new_meta.get("loaded"):
+                try:
+                    self.apply_injections()
+                except Exception as e:
+                    logger.error(f"Plugin injection failed after reload: {e}")
+                started = await self._start_plugin(new_meta)
+
+            if not started and new_meta.get("loaded"):
+                await self._call_hook(new_meta, "on_shutdown")
+                self._unload_plugin(new_meta)
+                new_meta["error"] = new_meta.get("error") or "on_startup failed"
+                new_meta["loaded"] = False
+
+            if not started and new_meta.get("enabled", True) and old_meta.get("loaded"):
                 sys.modules.update(old_modules)
                 if old_path:
                     if old_path not in sys.path:
@@ -1040,6 +1117,7 @@ class PluginSystem(Interceptor):
                     self._plugin_sys_paths[name] = old_path
                     self._loaded_sys_paths.add(old_path)
                 self._plugins[index] = old_meta
+                registry.activate_owner(name)
                 try:
                     self.apply_injections()
                 except Exception as e:
@@ -1050,15 +1128,12 @@ class PluginSystem(Interceptor):
                     f"Plugin {name} reload failed, kept previous instance: {new_meta.get('error')}"
                 )
                 return False
-            self._plugins[index] = new_meta
-            if new_meta.get("loaded"):
-                try:
-                    self.apply_injections()
-                except Exception as e:
-                    logger.error(f"Plugin injection failed after reload: {e}")
-                await self._call_hook(new_meta, "on_startup")
-                self._start_tick_for(new_meta)
-            return bool(new_meta.get("loaded"))
+            if not started:
+                registry.unregister_owner(name)
+                self._plugins[index] = new_meta
+                return False
+            self._start_tick_for(new_meta)
+            return True
 
     # ── Plugin State (enable/disable) ─────────────────────────
 
@@ -1102,7 +1177,7 @@ class PluginSystem(Interceptor):
         """Return plugin metadata (without instances) for the web panel."""
         result = []
         for meta in tuple(self._plugins):
-            item = {k: v for k, v in meta.items() if k != "instance"}
+            item = {k: v for k, v in meta.items() if k != "instance" and not k.startswith("_")}
             result.append(item)
         return result
 
