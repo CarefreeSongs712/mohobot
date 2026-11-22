@@ -12,6 +12,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -282,6 +283,9 @@ async def test_send_to_bot_cancel_cleans_pending_future():
 # ── 3) wait 路径归档使用真实回执 ──────────────────────────────
 
 
+# 换行符: 用 chr 构造真实换行, 避免补丁/脚本层的转义歧义。
+_NL_SEP = chr(10)
+
 def _history_lines(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -396,6 +400,164 @@ async def test_image_cache_follower_cancel_keeps_shared_task():
         assert await asyncio.wait_for(leader, timeout=2.0) == ("/tmp/img.jpg", "一只橘猫")
         assert await asyncio.wait_for(late, timeout=2.0) == ("/tmp/img.jpg", "一只橘猫")
         assert describe.calls == 1, describe.calls
+
+
+
+# ── 5) review: 慢回执不得把分段回复串成 "每段一个 5s 窗口" ──────────
+
+
+class _SlowAckSock:
+    """socket 发送很快, 但回执延迟; 记录 bot 发出的每条 payload。"""
+
+    def __init__(self, manager, bot_id, delay=0.3):
+        self._manager = manager
+        self._bot_id = bot_id
+        self.delay = delay
+        self.sent: list[dict] = []
+        self.tasks: set[asyncio.Task] = set()
+
+    async def send(self, payload: str):
+        data = json.loads(payload)
+        self.sent.append(data)
+        self.tasks.add(asyncio.create_task(self._ack(data)))
+
+    async def _ack(self, data: dict):
+        await asyncio.sleep(self.delay)
+        await self._manager.handle_api_response(self._bot_id, {
+            "status": "ok",
+            "retcode": 0,
+            "data": {"message_id": 900 + len(self.sent)},
+            "echo": data["echo"],
+        })
+
+    async def close(self):
+        pass
+
+
+def _seg_handler(ws):
+    h = MessageHandler.__new__(MessageHandler)
+    h._ws = ws
+    h._segment_reply = True
+    h._reply_quote = False
+    h._seg_min_len = 4
+    h._seg_max_len = 60
+    h._seg_delay_min = h._seg_delay_max = 0
+    h._strip_english_fillers = False
+    h._ooc_guard = False
+    h._bot_config = lambda bot_id: BotConfig(bot_id=bot_id)
+    return h
+
+
+async def _ws_with_sock(td, *, delay=0.3, archive_timeout=1.0):
+    bm = BotManager(data_dir=td)
+    sock = _SlowAckSock(bm, "bot_001", delay=delay)
+    inst = BotInstance("bot_001", sock, BotConfig(bot_id="bot_001", qq=111, nickname="A"))
+    bm._bots["bot_001"] = inst
+    ws = WSServer(bot_manager=bm, data_dir=td, outbound_interval=0.0)
+    ws._ARCHIVE_ECHO_TIMEOUT = archive_timeout
+    return bm, sock, ws
+
+
+async def test_segmented_delivery_is_pipelined_not_per_segment():
+    """慢回执下分段发送不得逐段阻塞: 3 段总耗时远小于 3×回执延迟, 且归档拿真实 ID。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(td, delay=0.3, archive_timeout=1.0)
+        try:
+            handler = _seg_handler(ws)
+            started = time.monotonic()
+            sent = await handler._send_full_text(
+                "bot_001", _event(),
+                "第一段内容。" + _NL_SEP + _NL_SEP + "第二段内容。"
+                + _NL_SEP + _NL_SEP + "第三段内容。", collected=[])
+            elapsed = time.monotonic() - started
+
+            assert sent is True
+            # 旧实现每段同步等 5s(此处 0.3s) → 至少 0.9s; 流水线应远小于此。
+            assert elapsed < 0.2, elapsed
+            await asyncio.sleep(0.5)  # 等后台归档收齐真实回执
+
+            lines = _history_lines(
+                Path(td) / "history" / "bot_001" / "private" / "3001.jsonl")
+            assert len(lines) == 3, lines
+            for line in lines:
+                mid = str(line["message_id"])
+                assert mid.isdigit(), (mid, lines)
+                assert not mid.startswith("local:"), (mid, lines)
+        finally:
+            await ws.stop()
+
+
+async def test_caller_ack_timeout_is_not_archived_as_local_id():
+    """caller 等回执超时(unknown)后, 后台归档仍要用随后到达的真实 message_id。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(td, delay=0.15, archive_timeout=0.5)
+        try:
+            result = await ws.send_message_with_status(
+                "bot_001", "group", 500,
+                [{"type": "text", "data": {"text": "hi"}}],
+                source="llm", ack_timeout=0.05)
+            assert result.status == "unknown", result
+            assert result.confirmed is False, result
+            assert result.reason == "ack_timeout", result
+
+            await asyncio.sleep(0.3)
+            lines = _history_lines(Path(td) / "history" / "group" / "500.jsonl")
+            assert len(lines) == 1, lines
+            assert str(lines[0]["message_id"]).isdigit(), lines
+        finally:
+            await ws.stop()
+
+
+async def test_cancel_while_waiting_ack_still_archives_dispatched_message():
+    """已 dispatch 的消息在等回执时取消: 必须后台归档(不能丢 history), pending 清空。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(td, delay=0.3, archive_timeout=1.0)
+        try:
+            task = asyncio.create_task(ws.send_message_with_status(
+                "bot_001", "group", 500,
+                [{"type": "text", "data": {"text": "cancel me"}}],
+                source="llm", ack_timeout=5.0))
+            for _ in range(200):
+                if sock.sent:
+                    break
+                await asyncio.sleep(0.01)
+            assert sock.sent, "消息未派发"
+
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+            await asyncio.sleep(0.5)  # 等后台归档 + 回执
+            lines = _history_lines(Path(td) / "history" / "group" / "500.jsonl")
+            assert len(lines) == 1, lines
+            assert str(lines[0]["message_id"]).isdigit(), lines
+            assert bm._pending_responses == {}, bm._pending_responses
+            assert bm._pending_sent == {}, bm._pending_sent
+        finally:
+            await ws.stop()
+
+
+
+async def test_fire_and_forget_status_is_explicit_unknown_with_real_archive_id():
+    """流水线模式: 派发即返回并显式记 unknown(不假装 sent), 后台归档仍写真实 ID。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(td, delay=0.15, archive_timeout=0.5)
+        try:
+            result = await ws.send_message_with_status(
+                "bot_001", "group", 500,
+                [{"type": "text", "data": {"text": "pipeline"}}],
+                source="llm", ack_timeout=0.0)
+            assert result.status == "unknown", result
+            assert result.confirmed is False, result
+
+            await asyncio.sleep(0.3)
+            lines = _history_lines(Path(td) / "history" / "group" / "500.jsonl")
+            assert len(lines) == 1, lines
+            assert str(lines[0]["message_id"]).isdigit(), lines
+        finally:
+            await ws.stop()
 
 
 def main() -> None:

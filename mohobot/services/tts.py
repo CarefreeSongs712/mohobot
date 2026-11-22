@@ -113,11 +113,11 @@ class HttpTTSClient:
             await self._client.aclose()
 
 
-def _build_client(cfg):
-    """按 cfg.backend 构造合成客户端。"""
+def _build_client(cfg, task_supervisor=None):
+    """按 cfg.backend 构造合成客户端; supervisor 供客户端登记异步关闭任务。"""
     if cfg.backend == "minimax":
         from mohobot.services.minimax_tts import MinimaxTTSClient
-        return MinimaxTTSClient(
+        client: Any = MinimaxTTSClient(
             cfg.base_url,
             cfg.api_key,
             model=cfg.model,
@@ -130,7 +130,14 @@ def _build_client(cfg):
             format=cfg.format,
             timeout=float(cfg.timeout),
         )
-    return HttpTTSClient(cfg.base_url, cfg.api_key, timeout=float(cfg.timeout))
+    else:
+        client = HttpTTSClient(cfg.base_url, cfg.api_key, timeout=float(cfg.timeout))
+    if task_supervisor is not None:
+        try:
+            client.task_supervisor = task_supervisor
+        except Exception:  # noqa: BLE001 - 客户端不支持 supervisor 时忽略
+            pass
+    return client
 
 
 def _client_signature(cfg) -> tuple:
@@ -185,7 +192,7 @@ class TTSService:
         # config: TTSConfig(models/config.py) — 与 main 持有的 GlobalConfig.tts
         # 是同一对象, sync_config 原位更新字段即全框架热生效
         self.cfg = config
-        self._client = _build_client(config)
+        self._client = _build_client(config, task_supervisor)
         self._backend = config.backend
         # 影响客户端构造的参数快照 + 配置代次(issue #131):
         # 代次变化后, 旧代次入队的任务在 worker 中直接丢弃, 不再发送。
@@ -222,14 +229,21 @@ class TTSService:
         每次热同步都推进配置代次, 旧代次入队的语音任务不再发送(issue #131)。
         """
         import dataclasses
+        old_enabled = bool(getattr(self.cfg, "enabled", False))
         for f in dataclasses.fields(cfg):
             setattr(self.cfg, f.name, getattr(cfg, f.name))
-        self._config_generation += 1
         new_signature = _client_signature(self.cfg)
         if new_signature != self._client_signature:
+            # 构造参数(timeout/backend/base_url/...)变化: 重建客户端, 旧代次
+            # 入队的任务作废, 避免用旧 transport 参数继续发送。
+            self._config_generation += 1
             self._rebuild_client()
             self._client_signature = _client_signature(self.cfg)
         else:
+            # 仅 enabled 变化才需要作废旧队列任务; voice/bitrate 等纯请求
+            # 参数变化由 client.sync_config 热生效, 不推进代次(review)。
+            if bool(getattr(self.cfg, "enabled", False)) != old_enabled:
+                self._config_generation += 1
             self._client.sync_config(self.cfg)
         if self.cfg.backend != "minimax":
             self._ffmpeg_ok = None  # 后端/转码配置变了, 重探 ffmpeg
@@ -260,7 +274,7 @@ class TTSService:
     def _rebuild_client(self) -> None:
         old = self._client
         try:
-            new_client = _build_client(self.cfg)
+            new_client = _build_client(self.cfg, getattr(self, "_supervisor", None))
         except Exception as e:
             logger.error(f"TTS 后端切换失败(保留原后端 {self._backend}): {e}")
             # 回滚内存配置中的 backend, 与实际客户端保持一致

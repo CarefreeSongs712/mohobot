@@ -124,8 +124,8 @@ async def test_claim_global_command_is_stable_across_accounts():
         bm.note_group_message("bot_002", "500")
 
         fingerprint = "1001:1700:同一个物理消息"
-        owner_first = bm.claim_global_command("500", fingerprint, "bot_001")
-        owner_second = bm.claim_global_command("500", fingerprint, "bot_002")
+        owner_first = bm.claim_global_command("500", fingerprint)
+        owner_second = bm.claim_global_command("500", fingerprint)
 
         assert owner_first in ("bot_001", "bot_002"), owner_first
         assert owner_first == owner_second, (owner_first, owner_second)

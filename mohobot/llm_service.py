@@ -22,7 +22,6 @@ from mohobot.models.config import GlobalConfig, BotConfig, LLMConfig
 from mohobot.models.onebot import (
     GroupMessageEvent,
     MessageEvent,
-    MessageSegment,
     PrivateMessageEvent,
 )
 from mohobot.utils.cq_code import extract_plain_text, extract_image_urls
@@ -1047,9 +1046,6 @@ class LLMService:
         """
         return await self._cached_usage_agg("session", range_key,
                                             lambda: self._compute_session_usage(range_key))
-
-    async def _compute_session_usage(self, range_key: str) -> dict[str, Any]:
-        since = self._range_since(range_key)
 
     @staticmethod
     def _usage_range_start(records: list[dict], since: float, buffer: int = 2000) -> int:

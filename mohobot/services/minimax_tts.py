@@ -77,9 +77,25 @@ class MinimaxTTSClient:
             # 跟随字段更新; 丢弃旧客户端, 下次调用按新超时重建。
             old, self._client = self._client, None
             try:
-                asyncio.get_running_loop().create_task(old.aclose())
+                loop = asyncio.get_running_loop()
             except RuntimeError:
-                pass
+                loop = None
+            if loop is not None:
+                async def _close_old() -> None:
+                    try:
+                        await old.aclose()
+                    except Exception as e:  # noqa: BLE001 - 关闭失败不影响新客户端
+                        logger.debug(f"MiniMax 旧客户端关闭失败: {e}")
+
+                scheduler = getattr(self, "task_supervisor", None)
+                if scheduler is not None:
+                    try:
+                        scheduler.create_task(
+                            _close_old(), name="minimax-client-close", owner="tts")
+                    except Exception:  # noqa: BLE001 - supervisor 关闭时降级裸 task
+                        loop.create_task(_close_old())
+                else:
+                    loop.create_task(_close_old())
         self._base_url = (cfg.base_url or "https://api.minimax.cn").rstrip("/")
         if cfg.api_key:
             self._api_key = cfg.api_key

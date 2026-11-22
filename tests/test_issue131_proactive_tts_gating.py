@@ -15,7 +15,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "proactive_chat"))
 
-from mohobot.file_store import json_read, json_write  # noqa: E402
+from mohobot.file_store import json_read  # noqa: E402
 from mohobot.services.tts import HttpTTSClient, TTSJob, TTSService  # noqa: E402
 from mohobot.models.config import TTSConfig  # noqa: E402
 from proactive_chat_core.engine import ProactiveEngine, session_key  # noqa: E402

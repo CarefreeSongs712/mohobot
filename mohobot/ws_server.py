@@ -61,16 +61,29 @@ class DeliveryResult:
     reason: str = ""
 
 
-def _response_ok(response: dict[str, Any] | None) -> bool:
-    """OneBot 回执是否表示成功(status 允许空/ok/async 且 retcode 为 0)。"""
+def _classify_response(response: dict[str, Any] | None) -> str:
+    """OneBot 回执分类: "sent" / "failed" / "unknown"(issue #128 review)。
+
+    旧实现把缺失 retcode 当作 0, 于是 status 缺省的空回执也被当成成功;
+    这里要求显式 retcode 才能判定 sent —— 无法确认时必须返回 unknown,
+    不能假装成功(归档/记忆写入策略据此区分)。
+    """
     if not isinstance(response, dict):
-        return False
-    status = str(response.get("status", "") or "").lower()
+        return "unknown"
+    status_raw = response.get("status")
+    status = str(status_raw).lower() if status_raw is not None else ""
+    retcode_raw = response.get("retcode")
+    if retcode_raw is None:
+        return "failed" if status == "failed" else "unknown"
     try:
-        retcode = int(response.get("retcode", 0) or 0)
+        retcode = int(retcode_raw)
     except (TypeError, ValueError):
-        retcode = 0
-    return retcode == 0 and status in ("", "ok", "async")
+        return "unknown"
+    if status == "failed":
+        return "failed"
+    if status not in ("", "ok", "async"):
+        return "failed" if retcode != 0 else "unknown"
+    return "sent" if retcode == 0 else "failed"
 
 
 class WSServer:
@@ -499,24 +512,53 @@ class WSServer:
                 owns_response=True,
             ))
             return None
-        # issue #128: 先拿到真实回执再归档。旧实现在发送后立刻起后台归档,
-        # 8s 内没回执就写 local: id; 调用方等待更久拿到了成功回执时 history
-        # 已经写错。现在等待与归档串行, 回执晚到也能归档真实 message_id。
+        # issue #128: 先拿到真实回执再归档, 避免回执晚于归档阈值时 history
+        # 只剩 local: id。调用方等待窗口(默认 5s)短于归档兜底窗口(8s)时:
+        # - 5~8s 的慢回执: 把 future 交给后台归档继续等满兜底窗口, 拿到真实
+        #   message_id 再落行(review: 不能把慢回执当成超时写 local:);
+        # - 超过兜底窗口仍无回执: 后台按 local: id 归档(与旧行为一致), 状态
+        #   显式记 unknown, 不假装成功;
+        # - 等待中被取消且消息已 dispatch: 同样先交后台归档再 re-raise,
+        #   不能因为调用方取消就丢掉这次真实发送的 history 记录。
         response: dict[str, Any] | None = None
         try:
             response = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning(f"API response timeout for {action} (bot {bot_id})")
-        finally:
-            self._bot_manager.remove_response_future(bot_id, echo)
-            self._bot_manager.drop_pending_sent(echo)
-        if outcome is not None:
-            if response is None:
-                outcome.update(status="unknown", reason="ack_timeout")
-            elif _response_ok(response):
-                outcome.update(status="sent", reason="")
+        except asyncio.CancelledError:
+            if outcome is not None:
+                outcome.update(status="unknown", reason="cancelled")
+            if attempt.dispatched:
+                self._spawn_archive_task(self._archive_sent_message(
+                    bot_id, chat_type, chat_id, action, params, future, echo, source,
+                    owns_response=True,
+                ))
             else:
+                self._release_sent_signature(claimed)
+                self._bot_manager.drop_pending_sent(echo)
+                self._bot_manager.remove_response_future(bot_id, echo)
+                future.cancel()
+            raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"API response timeout for {action} (bot {bot_id}); "
+                "handing echo routing to archive task for late ack"
+            )
+            if outcome is not None:
+                outcome.update(status="unknown", reason="ack_timeout")
+            self._spawn_archive_task(self._archive_sent_message(
+                bot_id, chat_type, chat_id, action, params, future, echo, source,
+                owns_response=True,
+            ))
+            return None
+        self._bot_manager.remove_response_future(bot_id, echo)
+        self._bot_manager.drop_pending_sent(echo)
+        if outcome is not None:
+            verdict = _classify_response(response)
+            if verdict == "sent":
+                outcome.update(status="sent", reason="")
+            elif verdict == "failed":
                 outcome.update(status="failed", reason="negative_ack")
+            else:
+                outcome.update(status="unknown", reason="unconfirmed_ack")
         await self._archive_sent_message(
             bot_id, chat_type, chat_id, action, params, None, echo, source,
             owns_response=False, response=response,
@@ -596,7 +638,7 @@ class WSServer:
                     self._bot_manager.remove_response_future(bot_id, echo)
                     self._bot_manager.drop_pending_sent(echo)
 
-        if response is not None and not _response_ok(response):
+        if response is not None and _classify_response(response) == "failed":
             return  # 客户端明确失败, 消息未发出
 
         data = (response or {}).get("data") or {}
@@ -771,8 +813,9 @@ class WSServer:
         """发送消息并返回投递结果(issue #128)。
 
         与 send_group_msg/send_private_msg 的旧契约(返回 None)并存: 需要
-        判断"这条内容是否真的发出"的主链使用本方法; 只有 "sent" 与无法确认
-        的 "unknown" 可以写入对话记忆, "failed"/"blocked" 不得写入。
+        判断"这条内容是否真的发出"的主链使用本方法。返回 "sent" 表示收到
+        成功回执; "unknown" 表示已派发但回执未确认(不得当作 sent 记成功);
+        "failed"/"blocked" 表示确定未发出, 不得写入对话记忆。
         """
         if chat_type == "group":
             action = "send_group_msg"
@@ -781,6 +824,25 @@ class WSServer:
             action = "send_private_msg"
             params = {"user_id": int(chat_id), "message": message}
         outcome: dict[str, Any] = {}
+        if ack_timeout <= 0:
+            # 流水线模式(issue #128 review): 流式分段发送逐段同步等回执会把
+            # 慢适配器串成 ack_timeout/段; 这里只负责派发, 回执由后台归档
+            # 继续等(见 _send_tracked wait_response=False), 状态显式记 unknown。
+            try:
+                await self._send_tracked(
+                    bot_id, action, params, chat_type, chat_id,
+                    wait_response=False, source=source, outcome=outcome,
+                )
+            except Exception as e:  # noqa: BLE001 - 发送异常要显式反馈给调用方
+                logger.warning(
+                    f"发送消息失败(bot={bot_id} {chat_type}:{chat_id}): {e}"
+                )
+                return DeliveryResult(status="failed", reason=f"send_error: {e}")
+            return DeliveryResult(
+                status=str(outcome.get("status") or "unknown"),
+                confirmed=False,
+                reason=str(outcome.get("reason") or ""),
+            )
         try:
             response = await self._send_tracked(
                 bot_id, action, params, chat_type, chat_id,

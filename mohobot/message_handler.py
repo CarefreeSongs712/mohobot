@@ -987,10 +987,13 @@ class MessageHandler:
         """
         sender = str(getattr(event, "user_id", "") or "")
         ts = str(getattr(event, "time", "") or "")
+        message = getattr(event, "message", None)
         try:
-            signature = message_signature(getattr(event, "message", None))
+            signature = message_signature(message)
         except Exception:
-            signature = str(getattr(event, "raw_message", "") or "")
+            # 解析失败时同时带上原始消息内容, 降低不同消息退化成同一
+            # raw_message 占位符时的碰撞概率(仍只用于抽签/认领, 不落库)。
+            signature = f"{getattr(event, 'raw_message', '') or ''}|{message!r}"
         return f"{sender}:{ts}:{signature}"
 
     def _cache_quote(
@@ -1217,7 +1220,6 @@ class MessageHandler:
     @staticmethod
     def _is_ping_text(event) -> bool:
         """去除首尾空白后完全匹配 ping(忽略大小写)。"""
-        from mohobot.utils.cq_code import extract_plain_text as _ept
         text = ""
         if isinstance(event.message, str):
             text = event.message
@@ -2425,12 +2427,17 @@ class MessageHandler:
         """
         sender = getattr(self._ws, "send_message_with_status", None)
         if callable(sender):
+            # ack_timeout=0: 派发即返回, 回执由传输层后台等 echo(≤8s)后归档
+            # 真实 message_id; 主链不再逐段阻塞一个默认 5s 的等待窗口
+            # (issue #128 review: 慢适配器会把流式回复串成 5s/段)。
             if isinstance(event, PrivateMessageEvent):
                 result = await sender(
-                    bot_id, "private", event.user_id, message, source=source)
+                    bot_id, "private", event.user_id, message,
+                    source=source, ack_timeout=0.0)
             elif isinstance(event, GroupMessageEvent):
                 result = await sender(
-                    bot_id, "group", event.group_id, message, source=source)
+                    bot_id, "group", event.group_id, message,
+                    source=source, ack_timeout=0.0)
             else:
                 return "unknown"
             return str(getattr(result, "status", None) or "unknown")
@@ -2525,7 +2532,7 @@ class MessageHandler:
         fingerprint = self._group_message_fingerprint(event)
         claim = getattr(bm, "claim_global_command", None)
         if claim is not None:
-            chosen = claim(str(event.group_id), fingerprint, bot_id)
+            chosen = claim(str(event.group_id), fingerprint)
         else:  # 兼容旧 BotManager / 测试替身
             chosen = bm.pick_bot_for_group(str(event.group_id), fingerprint)
         if chosen is None or chosen == bot_id:

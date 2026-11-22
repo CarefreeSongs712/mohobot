@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import websockets  # 类型注解用(运行时只做注解, 不直接调用)
+
 from loguru import logger
 
 from mohobot.models.config import BotConfig
@@ -360,7 +362,7 @@ class BotManager:
         ]
 
     def claim_global_command(
-        self, group_id: int | str, fingerprint: str, bot_id: str | None = None,
+        self, group_id: int | str, fingerprint: str,
     ) -> str | None:
         """跨账号原子认领一条全局指令消息, 返回该消息唯一 owner bot_id。
 
@@ -380,10 +382,15 @@ class BotManager:
             and now - cached[1] < self._COMMAND_CLAIM_TTL
             and cached[0] in candidates
         ):
+            # 认领命中时同步刷新抽签缓存, 保证后续按指纹 pick 也拿到同一 owner。
+            self._group_pick_cache[key] = (cached[0], now)
             return cached[0]
         owner = self.pick_bot_for_group(group_id, str(fingerprint))
         if owner not in candidates:
+            # pick 的缓存可能已被禁用/离线失效; 兜底重选后回写抽签缓存,
+            # 否则同一指纹的后续调用会再次走到这里(每次重新随机)。
             owner = random.choice(candidates)
+            self._group_pick_cache[key] = (owner, now)
         # 惰性清理过期认领, 防止无限增长
         if len(self._command_claims) > 2000:
             for k in [k for k, (_, ts) in self._command_claims.items()
