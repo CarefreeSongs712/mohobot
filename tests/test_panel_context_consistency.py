@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import secrets
+import shutil
 import sqlite3
 import sys
 import zipfile
@@ -307,6 +308,65 @@ async def test_cleanup_contexts_advances_group_generation(tmp_path):
     assert await cm.append_context(
         "bot_001", "group", "999", [{"role": "assistant", "content": "new"}],
         session_id=fresh["id"], generation=fresh["generation"]) is True
+
+
+async def test_cleanup_failure_still_advances_generations(tmp_path):
+    """清理中途失败(部分 bot 已删)时, 清理前记录的 bot generation 仍须推进。
+
+    清理前记录受影响 bot(磁盘目录 + 内存中的群聊), 在 finally 推进 generation;
+    模拟第一个 bot 清理成功、第二个 bot 抛异常, 断言异常继续抛出且两个 bot 的
+    旧 generation 都已失效。
+    """
+    from mohobot.context_manager import ContextManager
+    from mohobot.web_panel.app import WebPanel
+
+    data_dir = tmp_path / "data"
+    _write_private_chat(data_dir, bot_id="bot_001")
+    _write_private_chat(data_dir, bot_id="bot_002")
+    cm = ContextManager(data_dir=str(data_dir))
+    caps = {}
+    for bot_id in ("bot_001", "bot_002"):
+        cap = await cm.capture_session(bot_id, "group", "999")
+        assert await cm.append_context(
+            bot_id, "group", "999", [{"role": "user", "content": f"{bot_id}-before"}],
+            session_id=cap["id"], generation=cap["generation"]) is True
+        caps[bot_id] = cap
+
+    # bot_003 只在内存中有群聊 generation(没有 contexts 目录), 也必须失效。
+    cm.bump_group_generations("bot_003")
+    cap_003 = await cm.capture_session("bot_003", "group", "1")
+    assert cap_003["generation"] != "group-main"
+
+    panel, _ = _build_panel(tmp_path, context_manager=cm)
+
+    def partial_cleanup(panel_self, bot_list, dir_set):
+        # 第一个 bot 目录清理成功, 第二个 bot 清理时抛错(模拟部分完成)。
+        context_root = panel_self._data_dir / "contexts"
+        dirs = sorted(p for p in context_root.iterdir() if p.is_dir())
+        assert len(dirs) == 2, dirs
+        shutil.rmtree(dirs[0])
+        raise RuntimeError("第二个 bot 清理失败")
+
+    async with _client(panel) as client:
+        auth = await _login(client)
+        with _patch_attr(WebPanel, "_cleanup_data", partial_cleanup):
+            with pytest.raises(RuntimeError, match="第二个 bot 清理失败"):
+                await client.post(
+                    "/api/data/cleanup",
+                    json={"data": {"password": PASSWORD,
+                                   "scope": {"bots": "all", "dirs": ["contexts"]}}},
+                    headers=auth,
+                )
+
+    # 异常继续抛出, 但清理前记录的 bot 旧 generation 都已失效。
+    for bot_id, cap in caps.items():
+        assert await cm.append_context(
+            bot_id, "group", "999", [{"role": "user", "content": "stale"}],
+            session_id=cap["id"], generation=cap["generation"]) is False, bot_id
+        fresh = await cm.capture_session(bot_id, "group", "999")
+        assert fresh["generation"] != cap["generation"], bot_id
+    assert (await cm.capture_session("bot_003", "group", "1"))["generation"] !=         cap_003["generation"], "内存中的群聊 generation 也必须推进"
+
 
 
 # ── 3. clear/reset 推进 generation ─────────────────────────────

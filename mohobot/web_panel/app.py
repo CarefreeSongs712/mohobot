@@ -2187,16 +2187,26 @@ class WebPanel:
                     status_code=400,
                     detail="数据库不能在线批量清理；请使用 SQL 工具或停机维护",
                 )
-            # contexts 被清理时: 先记录受影响的 bot, 清理后推进群聊内存 generation,
+            # contexts 被清理时: 清理前记录受影响的 bot(磁盘目录 + 内存中捕获过
+            # 的群聊), 无论清理成功还是中途失败都在 finally 推进群聊 generation,
             # 避免清理前捕获的在途回复用旧 generation 重建群聊上下文(issue #126)。
             cleaned_context_bots: list[str] = []
             if "contexts" in dir_set:
+                candidates: set[str] = set()
                 context_root = self._data_dir / "contexts"
                 if context_root.exists():
-                    cleaned_context_bots = sorted(
-                        p.name for p in context_root.iterdir()
-                        if p.is_dir() and (bot_list is None or p.name in bot_list)
-                    )
+                    candidates.update(
+                        p.name for p in context_root.iterdir() if p.is_dir())
+                known_bots = getattr(
+                    self._context_manager, "known_group_bots", None)
+                if callable(known_bots):
+                    try:
+                        candidates.update(known_bots())
+                    except Exception as e:
+                        logger.warning(f"读取内存群聊 generation 失败: {e}")
+                if bot_list is not None:
+                    candidates &= set(bot_list)
+                cleaned_context_bots = sorted(candidates)
             # history 被清理时: 先冻结写入并关闭活跃 writer, 避免它们继续写已被
             # unlink 的旧 inode(issue #8 第 1 点)。
             barrier = self._history_barrier if "history" in dir_set else None
@@ -2210,12 +2220,19 @@ class WebPanel:
                             removed = self._cleanup_data(bot_list, dir_set)
                     else:
                         removed = self._cleanup_data(bot_list, dir_set)
+                finally:
+                    # 无论清理成功还是中途失败, 都要让清理前记录的 bot 旧 generation
+                    # 失效(失败时可能有目录/内存上下文已部分清掉)。bump 自身异常只
+                    # 记日志, 不覆盖清理抛出的异常。
                     bump_generations = getattr(
                         self._context_manager, "bump_group_generations", None)
                     if cleaned_context_bots and callable(bump_generations):
                         for bot_id in cleaned_context_bots:
-                            bump_generations(bot_id)
-                finally:
+                            try:
+                                bump_generations(bot_id)
+                            except Exception as e:
+                                logger.warning(
+                                    f"清理后推进群聊 generation 失败({bot_id}): {e}")
                     if barrier is not None:
                         await barrier.thaw()
             if "contexts" in dir_set and self._persona_service is not None:

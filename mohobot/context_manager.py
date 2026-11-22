@@ -189,6 +189,10 @@ class ContextManager:
                 or self._group_generations.get((bot_id, ""))
                 or "group-main")
 
+    def known_group_bots(self) -> list[str]:
+        """返回内存中记录过群聊 generation 的 bot(数据管理失败路径也要失效)。"""
+        return sorted({bot for bot, _chat in self._group_generations})
+
     def bump_group_generations(self, bot_id: str) -> None:
         """使该 bot 所有群聊会话的在途 generation 失效(恢复/清理 contexts 后调用)。
 
