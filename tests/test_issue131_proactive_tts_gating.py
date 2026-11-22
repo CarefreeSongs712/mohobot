@@ -423,6 +423,44 @@ async def test_tts_submit_stamps_generation_and_sync_advances():
         await svc.stop()
 
 
+
+async def test_tts_rebuild_failure_keeps_signature_and_retries():
+    """重建失败时不认领新签名, 下次 sync_config 以相同参数再次尝试重建。"""
+    import dataclasses
+    from mohobot.services import tts as tts_module
+
+    with tempfile.TemporaryDirectory():
+        svc, ws = _make_service(timeout=60)
+        old_signature = svc._client_signature
+        old_client = svc._client
+        calls: list[int] = []
+        real_build = tts_module._build_client
+
+        def flaky_build(cfg, supervisor=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("build boom")
+            return real_build(cfg, supervisor)
+
+        tts_module._build_client = flaky_build
+        try:
+            new_cfg = dataclasses.replace(svc.cfg, timeout=2.0)
+            svc.sync_config(new_cfg)
+
+            assert len(calls) == 1, calls
+            assert svc._client is old_client, "失败时必须保留旧客户端"
+            assert svc._client_signature == old_signature, "失败不得认领新签名"
+
+            # 相同配置再次 sync: 因签名未更新而重试重建, 这次成功。
+            svc.sync_config(dataclasses.replace(svc.cfg, timeout=2.0))
+            assert len(calls) == 2, calls
+            assert getattr(svc._client, "_timeout", None) == 2.0, svc._client
+            assert svc._config_generation == 2, svc._config_generation
+        finally:
+            tts_module._build_client = real_build
+            await svc.stop()
+
+
 def main() -> None:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

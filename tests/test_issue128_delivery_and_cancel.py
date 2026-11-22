@@ -406,32 +406,44 @@ async def test_image_cache_follower_cancel_keeps_shared_task():
 # ── 5) review: 慢回执不得把分段回复串成 "每段一个 5s 窗口" ──────────
 
 
-class _SlowAckSock:
-    """socket 发送很快, 但回执延迟; 记录 bot 发出的每条 payload。"""
+class _AckSock:
+    """socket 发送很快, 回执按 delay 返回; 可配置负 ack, 记录 bot 发出的 payload。"""
 
-    def __init__(self, manager, bot_id, delay=0.3):
+    def __init__(self, manager, bot_id, delay=0.3, *,
+                 status="ok", retcode=0):
         self._manager = manager
         self._bot_id = bot_id
         self.delay = delay
+        self.status = status
+        self.retcode = retcode
         self.sent: list[dict] = []
         self.tasks: set[asyncio.Task] = set()
 
     async def send(self, payload: str):
         data = json.loads(payload)
         self.sent.append(data)
-        self.tasks.add(asyncio.create_task(self._ack(data)))
+        if self.delay <= 0:
+            await self._ack(data)
+        else:
+            self.tasks.add(asyncio.create_task(self._ack(data)))
 
     async def _ack(self, data: dict):
-        await asyncio.sleep(self.delay)
+        if self.delay > 0:
+            await asyncio.sleep(self.delay)
         await self._manager.handle_api_response(self._bot_id, {
-            "status": "ok",
-            "retcode": 0,
+            "status": self.status,
+            "retcode": self.retcode,
             "data": {"message_id": 900 + len(self.sent)},
             "echo": data["echo"],
         })
 
     async def close(self):
         pass
+
+
+# 旧名字保留: 既有慢回执用例继续使用
+_SlowAckSock = _AckSock
+
 
 
 def _seg_handler(ws):
@@ -448,13 +460,16 @@ def _seg_handler(ws):
     return h
 
 
-async def _ws_with_sock(td, *, delay=0.3, archive_timeout=1.0):
+async def _ws_with_sock(td, *, delay=0.3, archive_timeout=1.0,
+                        sock_status="ok", sock_retcode=0):
     bm = BotManager(data_dir=td)
-    sock = _SlowAckSock(bm, "bot_001", delay=delay)
+    sock = _AckSock(bm, "bot_001", delay=delay,
+                    status=sock_status, retcode=sock_retcode)
     inst = BotInstance("bot_001", sock, BotConfig(bot_id="bot_001", qq=111, nickname="A"))
     bm._bots["bot_001"] = inst
     ws = WSServer(bot_manager=bm, data_dir=td, outbound_interval=0.0)
     ws._ARCHIVE_ECHO_TIMEOUT = archive_timeout
+    ws._QUICK_ACK_WINDOW = 0.01  # 单元测试不引入真实 0.25s 等待窗口
     return bm, sock, ws
 
 
@@ -554,6 +569,86 @@ async def test_fire_and_forget_status_is_explicit_unknown_with_real_archive_id()
 
             await asyncio.sleep(0.3)
             lines = _history_lines(Path(td) / "history" / "group" / "500.jsonl")
+            assert len(lines) == 1, lines
+            assert str(lines[0]["message_id"]).isdigit(), lines
+        finally:
+            await ws.stop()
+
+
+
+# ── 6) review: 流水线路径必须捕获"快速负 ack" ─────────────────
+
+
+async def test_pipeline_catches_fast_negative_retcode():
+    """协议端立即返回 retcode!=0: 该段判 failed, 不计发送成功/不落记忆。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(
+            td, delay=0.0, archive_timeout=0.5,
+            sock_status="ok", sock_retcode=1200)
+        ws._QUICK_ACK_WINDOW = 0.1
+        try:
+            handler = _seg_handler(ws)
+            collected: list[str] = []
+            outcome: dict = {}
+            sent = await handler._send_full_text(
+                "bot_001", _event(), "这段没有真正发出。",
+                collected=collected, outcome=outcome)
+
+            assert sent is False, sent
+            assert collected == [], collected
+            assert outcome.get("failed") is True, outcome
+            assert outcome.get("status") == "failed", outcome
+            assert _history_lines(
+                Path(td) / "history" / "bot_001" / "private" / "3001.jsonl") == []
+        finally:
+            await ws.stop()
+
+
+async def test_pipeline_catches_fast_status_failed():
+    """协议端立即返回 status=failed: 同样判 failed, 不写记忆。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(
+            td, delay=0.0, archive_timeout=0.5,
+            sock_status="failed", sock_retcode=0)
+        ws._QUICK_ACK_WINDOW = 0.1
+        try:
+            handler = _seg_handler(ws)
+            collected: list[str] = []
+            outcome: dict = {}
+            sent = await handler._send_full_text(
+                "bot_001", _event(), "这段发送被拒绝。",
+                collected=collected, outcome=outcome)
+
+            assert sent is False, sent
+            assert collected == [], collected
+            assert outcome.get("failed") is True, outcome
+            assert outcome.get("status") == "failed", outcome
+            assert _history_lines(
+                Path(td) / "history" / "bot_001" / "private" / "3001.jsonl") == []
+        finally:
+            await ws.stop()
+
+
+async def test_slow_ack_after_quick_window_is_not_marked_failed():
+    """慢回执超出快速窗口: 该段按已发出计数, 后台归档写真实 message_id, 不算失败。"""
+    with tempfile.TemporaryDirectory() as td:
+        bm, sock, ws = await _ws_with_sock(td, delay=0.2, archive_timeout=0.5)
+        ws._QUICK_ACK_WINDOW = 0.05
+        try:
+            handler = _seg_handler(ws)
+            collected: list[str] = []
+            outcome: dict = {}
+            sent = await handler._send_full_text(
+                "bot_001", _event(), "慢回执内容。",
+                collected=collected, outcome=outcome)
+
+            assert sent is True, sent
+            assert collected == ["慢回执内容。"], collected
+            assert outcome.get("failed") is False, outcome
+
+            await asyncio.sleep(0.4)
+            lines = _history_lines(
+                Path(td) / "history" / "bot_001" / "private" / "3001.jsonl")
             assert len(lines) == 1, lines
             assert str(lines[0]["message_id"]).isdigit(), lines
         finally:

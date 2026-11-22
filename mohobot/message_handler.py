@@ -1951,6 +1951,8 @@ class MessageHandler:
             note = f"{note} (delivery failed)"
         if outcome is not None:
             outcome["failed"] = bool(delivery.get("failed"))
+            # 失败原因(sent 时为空): 调用方/日志据此区分 failed 与 blocked。
+            outcome["status"] = str(delivery.get("status") or "")
             outcome["sent_count"] = sent_counter[0]
             outcome["sent_text"] = "\n".join(collected or [])
         self._log_reply(
@@ -2053,6 +2055,7 @@ class MessageHandler:
         if not seg:
             return first_sent  # Empty after strip — skip
 
+        was_sent = first_sent
         if first_sent:
             # Random delay between consecutive messages (config-driven)
             await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
@@ -2077,7 +2080,8 @@ class MessageHandler:
             if delivery is not None:
                 delivery["failed"] = True
                 delivery["status"] = status
-            return first_sent
+            # 该段没发出: 返回发送前的状态, 不能把首段失败当成"已发出首条"。
+            return was_sent
         if collected is not None:
             collected.append(seg)
         if sent_counter is not None:

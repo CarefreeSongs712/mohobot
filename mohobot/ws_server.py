@@ -415,6 +415,7 @@ class WSServer:
         wait_response: bool = False, timeout: float = 10.0,
         source: str = "auto",
         outcome: dict[str, Any] | None = None,
+        quick_ack_timeout: float = 0.0,
     ) -> dict[str, Any] | None:
         """Send a message with echo tracking + bot speech archival.
 
@@ -504,13 +505,38 @@ class WSServer:
             future.cancel()
             return None  # Not sent: no reply tracking, timeout, or speech archive.
         if not wait_response:
-            # 不等待回执: 后台等 echo(或 8s 兜底)写归档, 调用方无法确认送达。
+            # 不等待回执: 后台等 echo(或 8s 兜底)写归档, 默认无法确认送达。
             if outcome is not None:
                 outcome.update(status="unknown", reason="not_waited")
             self._spawn_archive_task(self._archive_sent_message(
                 bot_id, chat_type, chat_id, action, params, future, echo, source,
                 owns_response=True,
             ))
+            if quick_ack_timeout <= 0:
+                return None
+            # 流水线路径的"快速负 ack"窗口(review): ack_timeout=0 后协议端的
+            # retcode!=0/status=failed 不再被 5s 等待捕获, 但主链必须知道该段
+            # 其实没发出去。短暂等首条回执, 明确失败就反馈 failed; 明确成功
+            # 也可反馈 sent; 窗口内无回执仍记 unknown, 由后台归档继续等。
+            try:
+                quick_response = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=quick_ack_timeout)
+            except asyncio.TimeoutError:
+                return None
+            except asyncio.CancelledError:
+                # 归档任务已 owns_response=True, 会结清 future 与 pending;
+                # 这里只把状态记清楚再向上传播取消。
+                if outcome is not None:
+                    outcome.update(status="unknown", reason="cancelled")
+                raise
+            if outcome is not None and quick_response is not None:
+                verdict = _classify_response(quick_response)
+                if verdict == "sent":
+                    outcome.update(status="sent", reason="")
+                elif verdict == "failed":
+                    outcome.update(status="failed", reason="negative_ack")
+                else:
+                    outcome.update(status="unknown", reason="unconfirmed_ack")
             return None
         # issue #128: 先拿到真实回执再归档, 避免回执晚于归档阈值时 history
         # 只剩 local: id。调用方等待窗口(默认 5s)短于归档兜底窗口(8s)时:
@@ -606,6 +632,9 @@ class WSServer:
             claims.release(*claimed)
 
     # 归档等待 echo 响应的超时(秒); 超时用本地标记 id 兜底
+    # 流水线发送时等待"快速负 ack"的窗口(issue #128 review): 只捕获协议端
+    # 立即返回的 retcode!=0/status=failed; 超过该窗口仍记 unknown 并交后台归档。
+    _QUICK_ACK_WINDOW = 0.25
     _ARCHIVE_ECHO_TIMEOUT = 8.0
 
     async def _archive_sent_message(
@@ -815,7 +844,8 @@ class WSServer:
         与 send_group_msg/send_private_msg 的旧契约(返回 None)并存: 需要
         判断"这条内容是否真的发出"的主链使用本方法。返回 "sent" 表示收到
         成功回执; "unknown" 表示已派发但回执未确认(不得当作 sent 记成功);
-        "failed"/"blocked" 表示确定未发出, 不得写入对话记忆。
+        "failed"/"blocked" 表示确定未发出, 不得写入对话记忆。流水线模式
+        (ack_timeout<=0) 仍会等 _QUICK_ACK_WINDOW 捕获快速负 ack。
         """
         if chat_type == "group":
             action = "send_group_msg"
@@ -826,20 +856,26 @@ class WSServer:
         outcome: dict[str, Any] = {}
         if ack_timeout <= 0:
             # 流水线模式(issue #128 review): 流式分段发送逐段同步等回执会把
-            # 慢适配器串成 ack_timeout/段; 这里只负责派发, 回执由后台归档
-            # 继续等(见 _send_tracked wait_response=False), 状态显式记 unknown。
+            # 慢适配器串成 ack_timeout/段; 这里只负责派发, 但额外等一个很短的
+            # "快速负 ack"窗口(见 _QUICK_ACK_WINDOW), 让协议端立即返回的
+            # failed/retcode!=0 仍能把该段判为未发出。窗口内无回执记 unknown,
+            # 回执与归档由后台继续等(见 _send_tracked wait_response=False)。
             try:
                 await self._send_tracked(
                     bot_id, action, params, chat_type, chat_id,
                     wait_response=False, source=source, outcome=outcome,
+                    quick_ack_timeout=self._QUICK_ACK_WINDOW,
                 )
             except Exception as e:  # noqa: BLE001 - 发送异常要显式反馈给调用方
                 logger.warning(
                     f"发送消息失败(bot={bot_id} {chat_type}:{chat_id}): {e}"
                 )
                 return DeliveryResult(status="failed", reason=f"send_error: {e}")
+            status = str(outcome.get("status") or "unknown")
+            if status == "sent":
+                return DeliveryResult(status="sent", confirmed=True, reason="")
             return DeliveryResult(
-                status=str(outcome.get("status") or "unknown"),
+                status=status,
                 confirmed=False,
                 reason=str(outcome.get("reason") or ""),
             )

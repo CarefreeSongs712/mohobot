@@ -225,8 +225,10 @@ class TTSService:
         self.cfg 与 main 的 GlobalConfig.tts 为同一对象, 原位 setattr 后
         message_handler._tts_active / CommandHandler._cmd_tts 读到的即新值;
         仅 queue_maxsize(队列构造固定)不生效, 需重启。
-        backend/timeout 等构造参数变化时重建合成客户端(关旧开新, 立即切换);
-        每次热同步都推进配置代次, 旧代次入队的语音任务不再发送(issue #131)。
+        backend/timeout 等构造参数变化时重建合成客户端(关旧开新, 立即切换)。
+        只有构造参数或 enabled 变化才推进配置代次, 旧代次入队的语音任务不再
+        发送(issue #131); voice/bitrate 等纯请求参数由客户端热生效, 不推进代次。
+        重建失败时保留旧客户端与旧签名, 下次 sync_config 会再次尝试重建。
         """
         import dataclasses
         old_enabled = bool(getattr(self.cfg, "enabled", False))
@@ -237,8 +239,8 @@ class TTSService:
             # 构造参数(timeout/backend/base_url/...)变化: 重建客户端, 旧代次
             # 入队的任务作废, 避免用旧 transport 参数继续发送。
             self._config_generation += 1
-            self._rebuild_client()
-            self._client_signature = _client_signature(self.cfg)
+            if self._rebuild_client():
+                self._client_signature = _client_signature(self.cfg)
         else:
             # 仅 enabled 变化才需要作废旧队列任务; voice/bitrate 等纯请求
             # 参数变化由 client.sync_config 热生效, 不推进代次(review)。
@@ -271,19 +273,22 @@ class TTSService:
         self._retiring.add(task)
         task.add_done_callback(self._retiring.discard)
 
-    def _rebuild_client(self) -> None:
+    def _rebuild_client(self) -> bool:
+        """按当前 cfg 重建合成客户端; 成功返回 True, 失败保留旧客户端并返回 False。"""
         old = self._client
         try:
             new_client = _build_client(self.cfg, getattr(self, "_supervisor", None))
         except Exception as e:
             logger.error(f"TTS 后端切换失败(保留原后端 {self._backend}): {e}")
-            # 回滚内存配置中的 backend, 与实际客户端保持一致
+            # 回滚内存配置中的 backend, 与实际客户端保持一致; 调用方不更新
+            # _client_signature, 下次 sync_config 以相同参数重试重建。
             self.cfg.backend = self._backend
-            return
+            return False
         self._client = new_client
         self._backend = self.cfg.backend
         self._retire_client(old)
         logger.info(f"TTS 合成客户端已重建: backend={self.cfg.backend}")
+        return True
 
     # ── 生命周期(mohobot 侧 worker) ──────────────────────────
 
