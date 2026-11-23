@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
+from mohobot.interceptors.plugin_system import PluginNamespaceConflict
 from mohobot.web_panel.app import WebPanel
 
 
@@ -87,6 +89,22 @@ def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
         json={"name": "missing", "enabled": False},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("endpoint, method, payload", [
+    ("reload", "reload_plugins", None),
+    ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
+])
+def test_plugin_namespace_conflict_returns_409(tmp_path, monkeypatch, endpoint, method, payload):
+    async def conflict(*args):
+        raise PluginNamespaceConflict("fixture namespace conflict")
+
+    monkeypatch.setattr(_FakePluginSystem, method, conflict)
+    client, headers = _client(tmp_path)
+    kwargs = {"json": payload} if payload is not None else {}
+    response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "fixture namespace conflict"
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:
