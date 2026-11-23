@@ -2455,7 +2455,7 @@ async function uninstallPlugin(name) {
 }
 
 // ── 插件配置 (schema 驱动表单) ────────────────────────────────
-let pluginConfigCache = { name: '', schema: {}, config: {} };
+let pluginConfigCache = { name: '', schema: {}, initial: {} };
 
 // 递归渲染 schema 字段
 function renderSchemaFields(schema, config, prefix = '') {
@@ -2496,38 +2496,55 @@ function renderSchemaFields(schema, config, prefix = '') {
 
 // 递归收集表单值
 function collectSchemaFields(schema, prefix = '') {
-  const out = {};
+  const out = Object.create(null);
   for (const [key, spec] of Object.entries(schema || {})) {
     if (!spec || typeof spec !== 'object' || spec.invisible) continue;
     const id = prefix + key;
     if (spec.type === 'object') {
-      out[key] = collectSchemaFields(spec.items || {}, id + '.');
-    } else if (spec.type === 'bool') {
-      out[key] = document.getElementById('pcf-' + id)?.checked ?? false;
+      const branch = collectSchemaFields(spec.items || {}, id + '.');
+      if (Object.keys(branch).length) out[key] = branch;
+      continue;
+    }
+    const control = document.getElementById('pcf-' + id);
+    if (!control) continue;
+    if (spec.type === 'bool') {
+      out[key] = control.checked;
     } else if (spec.type === 'list') {
-      out[key] = (document.getElementById('pcf-' + id)?.value || '')
-        .split(',').map(s => s.trim()).filter(Boolean);
-    } else if (spec.type === 'int') {
-      const v = parseInt(document.getElementById('pcf-' + id)?.value, 10);
-      out[key] = isNaN(v) ? (spec.default ?? 0) : v;
-    } else if (spec.type === 'float') {
-      const v = parseFloat(document.getElementById('pcf-' + id)?.value);
-      out[key] = isNaN(v) ? (spec.default ?? 0) : v;
-    } else if (spec.type === 'text') {
-      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
+      out[key] = control.value.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (spec.type === 'int' || spec.type === 'float') {
+      const v = spec.type === 'int' ? parseInt(control.value, 10) : parseFloat(control.value);
+      out[key] = Number.isFinite(v) ? v : (spec.default ?? 0);
     } else {
-      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
+      out[key] = control.value;
     }
   }
   return out;
 }
 
+function diffPluginConfigFields(current, initial) {
+  const edits = Object.create(null);
+  for (const [key, value] of Object.entries(current)) {
+    const before = initial[key];
+    if (Array.isArray(value)) {
+      if (!Array.isArray(before) || value.length !== before.length || value.some((v, i) => v !== before[i])) {
+        edits[key] = value;
+      }
+    } else if (value !== null && typeof value === 'object') {
+      const branch = diffPluginConfigFields(value, before || {});
+      if (Object.keys(branch).length) edits[key] = branch;
+    } else if (value !== before) {
+      edits[key] = value;
+    }
+  }
+  return edits;
+}
+
 async function openPluginConfig(name) {
   try {
-    const r = await apiJSON(`/api/plugins/${name}/config`);
-    pluginConfigCache = { name, schema: r.schema, config: r.config };
+    const r = await apiJSON(`/api/plugins/${encodeURIComponent(name)}/config`);
     document.getElementById('plugin-config-title').textContent = `⚙️ ${name} 配置`;
     document.getElementById('plugin-config-form').innerHTML = renderSchemaFields(r.schema, r.config);
+    pluginConfigCache = { name, schema: r.schema, initial: collectSchemaFields(r.schema) };
     document.getElementById('plugin-config-modal').classList.remove('hidden');
   } catch (e) { showToast('加载配置失败: ' + e.message, false); }
 }
@@ -2537,10 +2554,20 @@ function closePluginConfig() {
 }
 
 async function savePluginConfig() {
-  const data = collectSchemaFields(pluginConfigCache.schema);
+  const { name, schema, initial } = pluginConfigCache;
+  const data = diffPluginConfigFields(collectSchemaFields(schema), initial);
+  if (!Object.keys(data).length) {
+    showToast('配置无改动');
+    closePluginConfig();
+    return;
+  }
   try {
-    await apiJSON(`/api/plugins/${pluginConfigCache.name}/config`, { method: 'POST', body: { data } });
-    showToast('配置已保存(热生效)');
+    const result = await apiJSON(`/api/plugins/${encodeURIComponent(name)}/config`, { method: 'POST', body: { data } });
+    if (result.application === 'applied') showToast('配置已保存（热生效）');
+    else if (result.application === 'not_running') showToast('配置已保存（未热应用）');
+    else if (result.application === 'apply_failed') showToast('配置已保存，但热应用失败', false);
+    else if (result.application === 'unchanged') showToast('配置无改动');
+    else showToast('配置已保存');
     closePluginConfig();
     loadPlugins();
   } catch (e) { showToast('保存失败: ' + e.message, false); }

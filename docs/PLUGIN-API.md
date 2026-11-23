@@ -73,6 +73,14 @@ logo: logo.png                # 可选
 
 `inject_plugin_data_dir` 传入 `data/plugins_data/{name}/`，插件私有数据写这里。配置仍然通过 `plugin_config` 读取，存档在 `data/plugins_config/{name}.json`。
 
+## 配置保存与热应用
+
+面板只提交实际改动的字段。宿主按 schema 过滤和转换，再把明确提交的叶子合并到最新存档；省略的字段和存档中未声明的键保持不变。启动和面板读取使用同一份规则生成生效视图（schema 默认值加转换后的存档字段），普通读取不重写存档。
+
+保存和重载、启停共用生命周期锁。写盘成功后，宿主原地更新活动插件的 `plugin_config` 顶层字典并将其传给同步的 `on_config_update(config)`；嵌套引用不保证保留。回调异常不会撤回已完成的磁盘写入。插件自行维护派生缓存时应在回调里刷新；插件自己的读改写使用 `json_update`，不要在持文件锁时调用宿主生命周期接口。
+
+`POST /api/plugins/{name}/config` 仍接收 `{ "data": { ... } }`。成功响应包含 `status: "ok"`、生效快照 `config` 和应用状态 `application`：`applied` 已热应用，`not_running` 已保存但未热应用，`apply_failed` 已保存但回调失败，`unchanged` 无可写字段且未写盘。宿主停止接纳时返回 409。
+
 ## 热重载
 
 `PluginSystem.reload_plugins()` 全量重载，`reload_plugin(name)` 只重载一个插件。重载会：

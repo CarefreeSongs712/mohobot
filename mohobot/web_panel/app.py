@@ -30,7 +30,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from mohobot.interceptors.plugin_system import PluginNamespaceConflict
+from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystemRetired
 
 
 def _valid_usage_range(range_key: str) -> bool:
@@ -1502,11 +1502,10 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            config = self._plugin_system.get_plugin_config(name)
-            schema = self._plugin_system.get_config_schema(name)
-            if config is None or schema is None:
+            view = await self._plugin_system.read_plugin_config(name)
+            if view is None:
                 raise HTTPException(status_code=404, detail=f"插件 {name} 无配置")
-            return {"schema": schema, "config": config}
+            return view
 
         @app.post("/api/plugins/{name}/config")
         async def save_plugin_config(name: str, request: Request, body: ConfigUpdateRequest):
@@ -1514,11 +1513,15 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            ok = await self._plugin_system.save_plugin_config(name, body.data or {})
-            if not ok:
+            try:
+                result = await self._plugin_system.commit_plugin_config(name, body.data)
+            except PluginSystemRetired:
+                raise HTTPException(status_code=409, detail="插件系统已停止接收配置保存") from None
+            except Exception:
+                raise HTTPException(status_code=500, detail="插件配置保存失败") from None
+            if result is None:
                 raise HTTPException(status_code=404, detail=f"插件 {name} 无配置或不存在")
-            logger.info(f"Web panel: plugin {name} config updated (hot)")
-            return {"status": "ok", "config": self._plugin_system.get_plugin_config(name)}
+            return {"status": "ok", **result}
 
         # ── 5. Conversations (对话数据) ──────────────────────
 
