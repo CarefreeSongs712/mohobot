@@ -12,6 +12,7 @@ from typing import Any
 _METADATA_SEPARATOR_RE = re.compile(r"[,，、;；\n\t]+")
 _CSV_SEPARATOR_RE = re.compile(r",")
 _CATEGORY_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,47}$")
+_ORIGIN_TARGET_RE = re.compile(r"^(?:group|user):\S+$")
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 )
@@ -47,6 +48,15 @@ def normalize_scope_mode(
     if raw in _LOCAL_SCOPE_ALIASES:
         return "local"
     return default
+
+
+def is_valid_origin_target(value: object) -> bool:
+    """判断来源标记是否为合法的 ``group:<id>`` / ``user:<id>``。
+
+    local 作用域的表情包只对来源会话可见，没有可验证来源时不能持久化，
+    否则会在任意群/私聊中被检索到（issue #132）。
+    """
+    return bool(_ORIGIN_TARGET_RE.match(str(value or "").strip()))
 
 
 def normalize_character_key(value: object) -> str:

@@ -63,6 +63,17 @@ class DatabaseService(
         # 异步锁，保护并发写入
         self._write_lock = asyncio.Lock()
 
+        # 语料代次：每次 emoji 写入成功 +1。BM25 签名计算成本 O(n)，
+        # 搜图路径据此做代次校验，代次未变时无需重算签名(issue #129)。
+        self._index_generation = 0
+
+    def get_index_generation(self) -> int:
+        """返回当前 emoji 语料代次(只读, 供 BM25 签名缓存校验)。"""
+        return self._index_generation
+
+    def _bump_index_generation(self) -> None:
+        self._index_generation += 1
+
     def _ensure_db_dir(self) -> None:
         """确保数据库目录存在。"""
         try:
@@ -576,7 +587,10 @@ class DatabaseService(
         if not clean_paths:
             return 0
         async with self._write_lock:
-            return await asyncio.to_thread(self._delete_paths_sync, clean_paths)
+            deleted = await asyncio.to_thread(self._delete_paths_sync, clean_paths)
+        if deleted:
+            self._bump_index_generation()
+        return deleted
 
     def _delete_paths_sync(self, paths: list[str]) -> int:
         deleted = 0
@@ -599,7 +613,10 @@ class DatabaseService(
         if not path or not updates:
             return False
         async with self._write_lock:
-            return await asyncio.to_thread(self._update_path_sync, path, updates)
+            updated = await asyncio.to_thread(self._update_path_sync, path, updates)
+        if updated:
+            self._bump_index_generation()
+        return updated
 
     def _update_path_sync(self, path: str, updates: dict[str, Any]) -> bool:
         scalar_fields = self._EMOJI_SCALAR_COLUMNS
@@ -661,9 +678,13 @@ class DatabaseService(
         if not old_path or not new_path or old_path == new_path:
             return False
         async with self._write_lock:
-            return await asyncio.to_thread(
+            moved = await asyncio.to_thread(
                 self._move_path_sync, old_path, new_path, category, updates or {}
             )
+        if moved:
+            # 路径/元数据变化会影响 BM25 文档语料, 必须让缓存代次失效(#129)。
+            self._bump_index_generation()
+        return moved
 
     def _move_path_sync(
         self, old_path: str, new_path: str, category: str, updates: dict[str, Any]
@@ -758,10 +779,12 @@ class DatabaseService(
         async with self._write_lock:
             try:
                 count = await asyncio.to_thread(self._insert_batch_sync, emojis)
-                return count
             except Exception as e:
                 logger.error(f"[DB] 批量插入失败: {e}")
                 return 0
+        if count:
+            self._bump_index_generation()
+        return count
 
     def _insert_batch_sync(self, emojis: list[dict[str, Any]]) -> int:
         """同步批量插入。"""
@@ -866,7 +889,11 @@ class DatabaseService(
         避免并发 on_message 时误删其他消息刚入库的条目。
         """
         async with self._write_lock:
-            return await asyncio.to_thread(self._sync_index_sync, idx)
+            changed = await asyncio.to_thread(self._sync_index_sync, idx)
+        if changed:
+            # 索引同步有新增/变更时同样推进代次, 避免 BM25 复用旧语料(#129)。
+            self._bump_index_generation()
+        return changed
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> list[str]:
         desired_index = {
@@ -963,6 +990,8 @@ class DatabaseService(
                 await asyncio.to_thread(self._clear_all_sync)
             except Exception as e:
                 logger.error(f"[DB] 清空数据失败: {e}")
+                return
+        self._bump_index_generation()
 
     def _clear_all_sync(self) -> None:
         """同步清空所有数据。"""

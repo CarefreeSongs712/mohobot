@@ -5,10 +5,60 @@ OneBot API 通过 ws_server.send_to_bot(bot_id, action, params, wait_response=Tr
 
 from __future__ import annotations
 
+import asyncio
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
+
+# 回执判定结果(issue #151): 成功 / 协议端明确失败 / 未取得确认。
+OUTCOME_OK = "ok"
+OUTCOME_FAILED = "failed"
+OUTCOME_UNCONFIRMED = "unconfirmed"
+
+# 回执错误文本限长与单行化, 避免把协议端长文本原样回给聊天窗口。
+ERROR_TEXT_LIMIT = 200
+
+_MISSING = object()
+_FAILED_STATUSES = frozenset({"failed", "error", "fail"})
+# OneBot v11 正常回执 status: ok / async; 未知 status 一律按畸形回执处理。
+_OK_STATUSES = frozenset({"ok", "async"})
+_RETCODE_RE = re.compile(r"^[+-]?\d+$")
+
+
+@dataclass(frozen=True)
+class ApiCallResult:
+    """OneBot API 调用结果。
+
+    ``outcome`` 区分三种状态: 协议端确认成功、协议端明确失败、无法确认
+    (超时/断连/未就绪)。上层据此决定是否发完成文案、是否提示"未确认"。
+    """
+
+    ok: bool
+    data: Any = None
+    error: str = ""
+    outcome: str = OUTCOME_UNCONFIRMED
+
+
+def summarize_error(value: Any) -> str:
+    """把错误信息压成单行纯文本摘要并限长(详细诊断留在日志里)。"""
+    text = str(value if value is not None else "")
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    if len(text) > ERROR_TEXT_LIMIT:
+        text = text[: ERROR_TEXT_LIMIT - 1] + "…"
+    return text
+
+
+def _parse_retcode(value: Any) -> int | None:
+    """严格解析 retcode: 接受 int 与十进制数字串, 其余(含 float/bool)判非法。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and _RETCODE_RE.fullmatch(value.strip()):
+        return int(value.strip())
+    return None
 
 
 def convert_duration_advanced(duration: int) -> str:
@@ -31,42 +81,87 @@ def convert_duration_advanced(duration: int) -> str:
     return "".join(f"{value}{label}" for value, label in non_zero)
 
 
+async def api_call_checked(ws_server, bot_id: str, action: str, params: dict | None = None,
+                           timeout: float = 10.0) -> ApiCallResult:
+    """调用 OneBot API 并严格判定回执, 返回三态结果(issue #151)。
+
+    判定规则:
+    - 协议端明确失败: status 为 failed/error/fail, 或 retcode 非 0;
+    - 未取得确认: WebSocket 未就绪、调用异常/超时、响应为 None(断连或等待超时),
+      以及畸形回执(非 dict、未知 status、缺失/无法解析的 retcode)。
+      畸形回执说明本地无法判断协议端是否已执行(可能已生效但回执不合规),
+      因此不能判成"明确失败"去诱导重复人工处理, 只能要求人工确认。
+    """
+    if ws_server is None:
+        return ApiCallResult(False, None, "WebSocket 未就绪", OUTCOME_UNCONFIRMED)
+    try:
+        resp = await ws_server.send_to_bot(
+            bot_id, action, params or {}, wait_response=True, timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 超时/断连等统一按未确认处理
+        err = summarize_error(f"{type(e).__name__}: {e}")
+        logger.warning(f"API {action} 调用失败: {err}")
+        return ApiCallResult(False, None, err, OUTCOME_UNCONFIRMED)
+
+    def _fail(text: str) -> ApiCallResult:
+        err = summarize_error(text)
+        logger.warning(f"API {action} 返回错误: {err}")
+        return ApiCallResult(False, None, err, OUTCOME_FAILED)
+
+    def _unconfirmed(text: str) -> ApiCallResult:
+        err = summarize_error(text)
+        logger.warning(f"API {action} 回执无法确认结果: {err}")
+        return ApiCallResult(False, None, err, OUTCOME_UNCONFIRMED)
+
+    if resp is None:
+        return ApiCallResult(
+            False, None, "未取得协议端确认（等待响应超时或连接已断开）",
+            OUTCOME_UNCONFIRMED,
+        )
+    if not isinstance(resp, dict):
+        return _unconfirmed(
+            f"回执异常：响应不是 JSON 对象({type(resp).__name__})，无法确认协议端是否已执行"
+        )
+
+    def _err_text(fallback: str) -> str:
+        return str(resp.get("wording") or resp.get("message") or fallback)
+
+    # status: 允许缺失(兼容不返回 status 的实现), 但非空且未知时按畸形回执处理。
+    status_raw = resp.get("status", _MISSING)
+    if status_raw is not _MISSING and status_raw is not None:
+        status = str(status_raw).strip().lower()
+        if status in _FAILED_STATUSES:
+            return _fail(_err_text("请求被协议端拒绝"))
+        if status and status not in _OK_STATUSES:
+            return _unconfirmed(
+                f"回执异常：未知 status={summarize_error(status_raw)}，无法确认协议端是否已执行"
+            )
+
+    raw_retcode = resp.get("retcode", _MISSING)
+    if raw_retcode is _MISSING:
+        return _unconfirmed("回执异常：缺少 retcode，无法确认协议端是否已执行")
+    retcode = _parse_retcode(raw_retcode)
+    if retcode is None:
+        return _unconfirmed(
+            f"回执异常：retcode 无法解析({summarize_error(raw_retcode)!r})，无法确认协议端是否已执行"
+        )
+    if retcode != 0:
+        return _fail(_err_text(f"retcode={retcode}"))
+
+    return ApiCallResult(True, resp.get("data"), "", OUTCOME_OK)
+
+
 async def api_call_ex(ws_server, bot_id: str, action: str, params: dict | None = None,
                       timeout: float = 10.0) -> tuple[bool, Any, str]:
     """调用 OneBot API, 返回 (是否成功, data, 错误文本)。
 
     失败时错误文本可用于回给审批人; api_call 只在内部丢弃它。
+    需要区分"明确失败"与"未取得确认"时用 api_call_checked。
     """
-    if ws_server is None:
-        return False, None, "WebSocket 未就绪"
-    try:
-        resp = await ws_server.send_to_bot(
-            bot_id, action, params or {}, wait_response=True, timeout=timeout,
-        )
-    except Exception as e:
-        logger.warning(f"API {action} 调用失败: {e}")
-        return False, None, str(e) or type(e).__name__
-    if not isinstance(resp, dict):
-        return False, None, "响应格式异常"
-
-    def _err_text(fallback: str) -> str:
-        return str(resp.get("wording") or resp.get("message") or fallback)
-
-    # 失败判定: status 显式为 failed/error, 或 retcode 非 0(兼容字符串)
-    status = str(resp.get("status", "")).lower()
-    if status in ("failed", "error", "fail"):
-        err = _err_text("请求被协议端拒绝")
-        logger.warning(f"API {action} 返回错误: {err}")
-        return False, None, err
-    try:
-        retcode = int(resp.get("retcode", 0))
-    except (TypeError, ValueError):
-        retcode = 0
-    if retcode != 0:
-        err = _err_text(f"retcode={retcode}")
-        logger.warning(f"API {action} 返回错误: {err}")
-        return False, None, err
-    return True, resp.get("data"), ""
+    result = await api_call_checked(ws_server, bot_id, action, params, timeout)
+    return result.ok, result.data, result.error
 
 
 async def api_call(ws_server, bot_id: str, action: str, params: dict | None = None,
@@ -75,8 +170,8 @@ async def api_call(ws_server, bot_id: str, action: str, params: dict | None = No
 
     兼容不同实现的 retcode 类型(str/int)与缺失 status 的情况。
     """
-    ok, data, _ = await api_call_ex(ws_server, bot_id, action, params, timeout)
-    return data if ok else None
+    result = await api_call_checked(ws_server, bot_id, action, params, timeout)
+    return result.data if result.ok else None
 
 
 async def get_nickname(ws_server, bot_id: str, group_id: str | int, user_id: str | int) -> str:

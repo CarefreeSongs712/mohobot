@@ -4,7 +4,7 @@ from typing import Any
 
 from ...host import StealerEvent
 
-from ..util.normalization import canonicalize_path, normalize_scope_mode
+from ..util.normalization import canonicalize_path, is_valid_origin_target, normalize_scope_mode
 
 
 class MemeScopeService:
@@ -50,8 +50,10 @@ class MemeScopeService:
 
         origin_target = str(data.get("origin_target", "") or "").strip()
         current_target = self._get_event_target_entry(event)
-        if not origin_target or not current_target:
-            return True
+        # fail-closed：local 没有有效来源、或当前会话无法确定目标时都不能放行，
+        # 否则无来源的 local 表情包会在任意群/私聊中可见（issue #132）。
+        if not is_valid_origin_target(origin_target) or not current_target:
+            return False
         return origin_target == current_target
 
     def is_path_allowed_for_event(self, path: str, event: StealerEvent | None) -> bool:

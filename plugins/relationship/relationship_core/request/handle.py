@@ -13,7 +13,11 @@ from loguru import logger
 from relationship_core.config import PluginConfig
 from relationship_core.request.decision import RequestDecision
 from relationship_core.request.model import BaseRequest, FriendRequest, GroupRequest
-from relationship_core.utils import api_call_ex, get_reply_text
+from relationship_core.utils import (
+    OUTCOME_UNCONFIRMED,
+    api_call_checked,
+    get_reply_text,
+)
 
 
 class RequestHandle:
@@ -46,8 +50,11 @@ class RequestHandle:
         ).decide(approve=approve, extra=extra, block=block)
 
         if result.approve is not None:
-            ok, err = await self._do_approve(bot_id, req, result.approve)
+            ok, err, outcome = await self._do_approve(bot_id, req, result.approve)
             if not ok:
+                # 明确失败与未取得确认分开提示, 不得让操作者误以为已执行(issue #151)。
+                if outcome == OUTCOME_UNCONFIRMED:
+                    return f"❌ 审批未确认：{err}"
                 return f"❌ 审批失败：{err}"
 
         # 黑名单状态同步(必须在 event_reply 返回前执行, 否则 /拉黑 不会生效)
@@ -69,11 +76,23 @@ class RequestHandle:
             self.cfg.ws_server, bot_id, req, self.cfg,
         ).decide()
 
-        # 执行自动同意/拒绝
+        # 执行自动同意/拒绝, 并且只在协议端确认成功后才发完成文案。
         if result.approve is not None:
-            ok, err = await self._do_approve(bot_id, req, result.approve)
-            if not ok:
+            ok, err, outcome = await self._do_approve(bot_id, req, result.approve)
+            if ok:
+                if result.auto_note:
+                    result.admin_reply += f"\n自动处理：{result.auto_note}"
+            else:
                 logger.error(f"自动审批失败: {err}")
+                # 不重试、不补发完成文案; 明确失败转人工, 未确认如实提示(issue #151)。
+                if outcome == OUTCOME_UNCONFIRMED:
+                    result.user_reply = "自动处理结果未确认，请稍后重试或联系管理员"
+                    failure_note = f"自动处理结果未确认：{err}"
+                else:
+                    result.user_reply = "自动处理失败，已转人工审核，请耐心等待"
+                    failure_note = f"自动处理失败：{err}"
+                result.admin_reply += f"\n{failure_note}\n请人工复核并手动处理"
+                result.approve = None
 
         # 回复申请人(好友申请/群邀请方)
         if result.user_reply:
@@ -95,7 +114,10 @@ class RequestHandle:
             elif result.block_user:
                 await self.cfg.add_block_user(req.user_id)
 
-    async def _do_approve(self, bot_id: str, req: BaseRequest, approve: bool) -> tuple[bool, str]:
+    async def _do_approve(
+        self, bot_id: str, req: BaseRequest, approve: bool,
+    ) -> tuple[bool, str, str]:
+        """调用协议端审批, 返回 (是否成功, 错误文本, 三态结果)。"""
         if isinstance(req, FriendRequest):
             action = "set_friend_add_request"
             params = {"flag": req.flag, "approve": approve}
@@ -103,11 +125,11 @@ class RequestHandle:
             action = "set_group_add_request"
             params = {"flag": req.flag, "sub_type": "invite", "approve": approve}
         else:
-            return False, "未知申请类型"
-        ok, _, err = await api_call_ex(self.cfg.ws_server, bot_id, action, params)
-        if not ok:
-            logger.error(f"审批失败({action}): {err}")
-        return ok, err
+            return False, "未知申请类型", "failed"
+        result = await api_call_checked(self.cfg.ws_server, bot_id, action, params)
+        if not result.ok:
+            logger.error(f"审批失败({action}): {result.error}")
+        return result.ok, result.error, result.outcome
 
     async def _send_user_reply(self, bot_id: str, req: BaseRequest, text: str) -> None:
         """给申请人发私聊(失败则放弃, 避免暴露错误)。"""

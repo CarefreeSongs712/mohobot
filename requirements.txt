@@ -2,7 +2,9 @@
 # OneBot v11 Reverse WebSocket
 
 # Async & Networking
-websockets>=12.0
+# websockets>=13 是硬下限: mohobot/ws_server.py 导入 websockets.asyncio.server,
+# 该模块从 13.0 才提供; 12.x 会启动即 ImportError(issue #134)。
+websockets>=13.0
 aiofiles>=23.0
 
 # Database (history)
