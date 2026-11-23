@@ -90,7 +90,6 @@ async def test_admin_injection() -> None:
 
 async def test_relationship_commands() -> None:
     """关系插件命令: 权限门控 + 命令分发。"""
-    import sys as _sys
     sys.path.insert(0, "plugins/relationship")
     from mohobot.interceptors.plugin_system import PluginSystem
     from mohobot.models.onebot import GroupMessageEvent, Sender
@@ -167,7 +166,6 @@ async def test_relationship_commands() -> None:
 
 async def test_request_dispatch() -> None:
     """message_handler._handle_request 先交给插件。"""
-    import mohobot.message_handler as mh
     from mohobot.message_handler import MessageHandler
     from mohobot.context_manager import ContextManager
 
@@ -282,7 +280,6 @@ async def test_schema_coercion() -> None:
 
 async def test_admin_hot_update() -> None:
     """admin 热更新即时生效(无需重启/重载插件)。"""
-    import sys as _sys
     sys.path.insert(0, "plugins/relationship")
     from mohobot.interceptors.plugin_system import PluginSystem
 
@@ -310,7 +307,6 @@ async def test_admin_hot_update() -> None:
 
 async def test_api_call_retcode_string() -> None:
     """api_call 兼容字符串 retcode("0") 与缺失 status。"""
-    import sys as _sys
     sys.path.insert(0, "plugins/relationship")
     from relationship_core.utils import api_call
 
@@ -341,7 +337,6 @@ async def test_api_call_retcode_string() -> None:
 
 async def test_empty_command_no_crash() -> None:
     """单独 "/" 不崩溃。"""
-    import sys as _sys
     sys.path.insert(0, "plugins/relationship")
     from mohobot.interceptors.plugin_system import PluginSystem
     from mohobot.models.onebot import GroupMessageEvent, Sender
