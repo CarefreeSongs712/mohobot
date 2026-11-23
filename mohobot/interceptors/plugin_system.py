@@ -627,6 +627,8 @@ class PluginSystem(Interceptor):
             return True
         except Exception as e:
             logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
+            if hook_name == "on_startup":
+                meta["error"] = str(e)
             return False
 
     async def _start_plugin(self, meta: dict[str, Any]) -> bool:
@@ -647,13 +649,19 @@ class PluginSystem(Interceptor):
             logger.error(f"Plugin {meta.get('name', '?')} LLM tool registration failed: {e}")
             success = False
         meta["_llm_tool_stage"] = None
+        if success:
+            meta["error"] = None
         return success
 
     async def startup_plugins(self) -> None:
         """运行已加载插件的可选 on_startup hook。"""
         for meta in list(self._plugins):
             if meta.get("enabled") and meta.get("loaded"):
-                await self._start_plugin(meta)
+                if await self._start_plugin(meta):
+                    continue
+                # 冷启动激活失败必须对面板可见；否则安装/重载结果会被误报成成功。
+                # 实例仍保持 loaded（可由 startup_plugins 重试），错误单独记录。
+                meta["error"] = meta.get("error") or "on_startup failed"
 
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""

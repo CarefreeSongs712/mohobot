@@ -2310,8 +2310,8 @@ async function loadPlugins() {
     document.getElementById('plugins-table-body').innerHTML = plugins.map(p => `
       <tr>
         <td><b>${escapeHtml(p.name)}</b><div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.file)}</div></td>
-        <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
-        <td style="color:var(--text-dim)">${escapeHtml(p.info?.description || p.error || '—')}</td>
+        <td><span class="badge ${p.loaded ? 'enabled' : 'disabled'}">${p.loaded ? '已启用' : p.error ? '加载失败' : p.enabled ? '未就绪' : '已禁用'}</span></td>
+        <td style="color:var(--text-dim)">${escapeHtml(p.error || p.info?.description || '—')}</td>
         <td>
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
@@ -2387,10 +2387,13 @@ async function installMarketPlugin(pluginId, sourceId) {
   showToast('正在下载并安装…');
   try {
     const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId, source_id: sourceId || 'official' } });
-    showToast(`已安装 ${r.name}`);
+    showToast(`已安装 ${r.name}${r.activation === 'disabled' ? '（保持停用）' : ''}`);
     await loadPlugins();
     switchPluginTab('installed');
-  } catch (e) { showToast('安装失败: ' + e.message, false); }
+  } catch (e) {
+    showToast(e.message, false);
+    await loadPlugins();
+  }
 }
 
 function openPluginSourceModal() {

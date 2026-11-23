@@ -67,7 +67,7 @@ logo: logo.png                # 可选
 
 ## 注入
 
-在插件类上声明以下 `@classmethod`，框架在加载和热重载后调用：
+在插件类上声明以下 `@classmethod`。冷启动与热重载均在 `on_startup` 前注入宿主引用；冷启动在 WebSocket 开始监听前完成插件激活。未启用的可选服务不会注入，此时插件仍需处理缺失引用。有 WebSocket 服务的引用不代表已有 Bot 连接。`on_startup` 失败的候选不会接收事件或启动周期任务，错误会保留在插件状态中。
 
 `inject_ws_server`、`inject_bot_manager`、`inject_data_dir`、`inject_plugin_data_dir`、`inject_anysearch_client`、`inject_llm_service`、`inject_emotion_manager`、`inject_context_manager`、`inject_persona_service`、`inject_message_handler`、`inject_task_supervisor`、`inject_song_matcher`、`inject_admin_ids`。
 

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from textwrap import dedent
 from types import SimpleNamespace
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
+from mohobot.interceptors.plugin_system import PluginSystem
 from mohobot.web_panel.app import WebPanel
 
 
@@ -63,7 +68,7 @@ class _FakePluginSystem:
         return name == "demo"
 
     def list_plugins(self):
-        return []
+        return [{"name": "demo", "source": "installed", "enabled": True, "loaded": True, "error": None}]
 
 
 def _client(tmp_path: Path) -> tuple[TestClient, dict[str, str]]:
@@ -112,6 +117,86 @@ def test_market_install_endpoint(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json()["name"] == "demo"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled, fails", [(True, True), (False, True), (True, False)])
+async def test_market_install_reports_target_activation(tmp_path, enabled, fails):
+    data = tmp_path / "data"
+    data.mkdir()
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    # The unrelated plugin stays loaded even when the newly installed one fails.
+    (builtin / "cold_install_peer.py").write_text("class Plugin: pass\n", encoding="utf-8")
+    name = "cold_install_target"
+    destination = data / "plugins" / name
+    state = json.dumps({name: {"enabled": False}})
+    if not enabled:
+        (data / "plugins_state.json").write_text(state, encoding="utf-8")
+
+    class Market(_FakeMarket):
+        async def install(self, plugin_id, *, source_id):
+            destination.mkdir(parents=True)
+            (destination / "metadata.yaml").write_text(dedent(f"""\
+                name: {name}
+                author: TestFixture
+                display_name: Offline market install fixture
+                version: 1.0.0
+                description: Check startup result
+                repo: https://github.com/TestFixture/offline-install
+                license: MIT
+                api_version: 1
+            """), encoding="utf-8")
+            (destination / "main.py").write_text(dedent(f"""\
+                class Plugin:
+                    async def on_startup(self):
+                        if {fails!r}:
+                            raise RuntimeError("fixture startup rejected")
+            """), encoding="utf-8")
+            return name, destination
+
+    plugins = PluginSystem(str(builtin), str(data))
+    panel = WebPanel(
+        password_hash=WebPanel._hash_password("test-password"),
+        data_dir=str(data),
+        plugin_system=plugins,
+        plugin_market=Market(),
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=panel._app),
+                                     base_url="http://test") as client:
+            login = await client.post("/api/login", json={"username": "admin", "password": "test-password"})
+            assert login.status_code == 200
+            response = await client.post(
+                "/api/plugins/market/install",
+                headers={"Authorization": f"Bearer {login.json()['token']}"},
+                json={"plugin_id": "TestFixture/cold_install_target"},
+            )
+        items = {item["name"]: item for item in plugins.list_plugins()}
+        assert items["cold_install_peer"]["loaded"] is True
+        assert items[name]["enabled"] is enabled
+        # loaded 语义随生命周期修复变化（#149/#130）：失败候选可能保持实例但未就绪。
+        # 这里只断言两种实现都成立的可观察结果。
+        if enabled and fails:
+            assert items[name]["error"] == "fixture startup rejected"
+        else:
+            assert items[name]["loaded"] is enabled
+            assert items[name]["error"] is None
+        assert destination.is_dir()
+        if enabled and fails:
+            assert items[name]["error"] == "fixture startup rejected"
+            assert response.status_code == 400, response.text
+            assert "fixture startup rejected" in response.json()["detail"]
+            assert "已安装" in response.json()["detail"]
+        else:
+            assert items[name]["error"] is None
+            assert response.status_code == 200, response.text
+            assert response.json()["activation"] == ("active" if enabled else "disabled")
+            if not enabled:
+                assert (data / "plugins_state.json").read_text(encoding="utf-8") == state
+    finally:
+        await plugins.shutdown_plugins()
+        await panel.stop()
 
 
 def test_market_update_endpoint(tmp_path: Path) -> None:
