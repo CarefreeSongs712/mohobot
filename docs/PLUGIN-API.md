@@ -2,7 +2,9 @@
 
 ## 目录约定
 
-内置插件放在主仓库 `plugins/`，从市场安装的插件放在 `data/plugins/{name}/`。内置目录支持单文件插件与目录插件；市场安装统一使用目录形态，必须包含 `metadata.yaml` 与 `main.py`，入口类字面名为 `Plugin`。
+内置插件放在主仓库 `plugins/`，从市场安装的插件放在 `data/plugins/{name}/`。内置插件支持单文件和目录两种形态；市场安装统一使用目录形态，包根必须包含 `metadata.yaml`（或 `metadata.yml`）。入口类字面名为 `Plugin`，默认入口是包根下的 `main.py`，也可在清单中指定 `entry: src/worker.py` 这样的包根相对路径。
+
+目录插件从包根读取 `_conf_schema.json`，不会读取嵌套入口目录里的同名清单或 schema。插件自身模块的导入根仍是包根。内置单文件插件不读取同级清单；若有同级 `_conf_schema.json`，仍从同级读取。
 
 外置插件仓库推荐结构：
 
@@ -38,7 +40,7 @@ logo: logo.png                # 可选
 - `author` 必须是 GitHub 登录名；`plugin_id` 为 `author/name`。
 - `api_version` 与宿主 `mohobot.api.api_version` 必须相同。
 - `repo` 只接受 `https://github.com/{owner}/{repo}`。
-- 已安装插件缺少 `metadata.yaml` 会直接加载失败。
+- 已安装插件的包根缺少清单，或安装目录名与清单 `name` 不一致，都会在执行入口前拒绝加载。
 
 ## 导入边界
 
