@@ -260,7 +260,13 @@ class PersonaServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.contexts.reset_session(self.bot.bot_id, "private", "123", capture["id"]))
         session = await self.contexts.get_session(self.bot.bot_id, "private", "123")
         self.assertEqual(session["persona_id"], DEFAULT_PERSONA_ID)
-        self.assertEqual(session["generation"], capture["generation"])
+        # issue #126: 清空/重置必须推进 generation, 阻止在途回写把旧回复写回已清空的会话。
+        self.assertNotEqual(session["generation"], capture["generation"])
+        self.assertFalse(await self.contexts.append_context(
+            self.bot.bot_id, "private", "123", [{"content": "stale"}],
+            session_id=capture["id"], generation=capture["generation"],
+        ))
+        self.assertEqual(await self.contexts.load_context(self.bot.bot_id, "private", "123"), [])
         group = await self.contexts.capture_session(self.bot.bot_id, "group", "789")
         self.assertEqual(group, {"id": "main", "generation": "group-main", "persona_id": ""})
         self.assertTrue(await self.contexts.append_context(self.bot.bot_id, "group", "789", [{"content": "group"}], session_id=group["id"], generation=group["generation"]))

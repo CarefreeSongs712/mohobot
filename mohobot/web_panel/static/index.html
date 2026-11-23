@@ -3128,8 +3128,9 @@ async function renderDataScope() {
     '<label style="margin-right:10px"><input type="checkbox" id="ds-history" checked> 聊天历史(history)</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-contexts" checked> 会话上下文(contexts)</label>' +
     '<label style="margin-right:10px"><input type="checkbox" id="ds-personas" checked> 人设库(personas，全局共享)</label>' +
-    '<label><input type="checkbox" id="ds-ban" checked> 封禁名单(ban)</label></div>' +
-    '<div class="hint">人设支持全局备份；清理会保留人设库，请在管理页逐个删除。恢复人设须校验引用。</div>' +
+    '<label style="margin-right:10px"><input type="checkbox" id="ds-ban" checked> 封禁名单(ban)</label>' +
+    '<label><input type="checkbox" id="ds-database"> 主数据库(database)</label></div>' +
+    '<div class="hint">人设支持全局备份；清理会保留人设库，请在管理页逐个删除。恢复人设须校验引用。主数据库(database)使用 SQLite 一致性快照备份，恢复前会校验完整性；不支持在线批量清理。</div>' +
     (bots.length
       ? `<div class="form-row"><label>Bot 范围</label>
          <label style="margin-right:10px"><input type="checkbox" id="ds-all" checked onchange="dsToggleAll(this)"> 全部</label>` +
@@ -3149,6 +3150,7 @@ function dsScope() {
   if (document.getElementById('ds-contexts')?.checked) dirs.push('contexts');
   if (document.getElementById('ds-personas')?.checked) dirs.push('personas');
   if (document.getElementById('ds-ban')?.checked) dirs.push('ban');
+  if (document.getElementById('ds-database')?.checked) dirs.push('database');
   let bots = 'all';
   const allBtn = document.getElementById('ds-all');
   if (allBtn && !allBtn.checked) {
@@ -3200,14 +3202,17 @@ async function restoreData() {
 async function cleanupData() {
   const scope = dsScope();
   const preservedPersonas = scope.dirs.includes('personas');
-  scope.dirs = scope.dirs.filter(dir => dir !== 'personas');
-  if (!scope.dirs.length) { showToast('人设库不能批量清理，请在人设管理页逐个删除', false); return; }
-  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！' + (preservedPersonas ? '\n人设库将保留，不会清理。' : ''))) return;
+  const preservedDatabase = scope.dirs.includes('database');
+  scope.dirs = scope.dirs.filter(dir => dir !== 'personas' && dir !== 'database');
+  if (!scope.dirs.length) { showToast('人设库与数据库不能批量清理，请在人设管理页逐个删除或使用 SQL 工具', false); return; }
+  if (!confirm('确定清理所选范围的数据吗？此操作不可恢复！' +
+      (preservedPersonas ? '\n人设库将保留，不会清理。' : '') +
+      (preservedDatabase ? '\n数据库将保留，不会清理。' : ''))) return;
   const pwd = prompt('输入管理员密码确认清理:');
   if (pwd === null) return;
   try {
     const r = await apiJSON('/api/data/cleanup', { method: 'POST', body: { data: { password: pwd, scope } } });
-    showToast(`清理完成: 移除 ${r.removed} 个文件${preservedPersonas ? '；人设库已保留' : ''}`);
+    showToast(`清理完成: 移除 ${r.removed} 个文件${preservedPersonas ? '；人设库已保留' : ''}${preservedDatabase ? '；数据库已保留' : ''}`);
   } catch (e) { showToast('清理失败: ' + e.message, false); }
 }
 

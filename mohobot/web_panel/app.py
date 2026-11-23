@@ -232,6 +232,9 @@ class WebPanel:
         self._start_time = time.time()
         # 登录防爆破: 全局串行化 + 每次尝试固定 0.5s 硬延迟
         self._login_lock = asyncio.Lock()
+        # 数据管理(备份/恢复/清理)互斥: 同一时刻只允许一个维护操作,
+        # 快照与替换不能与另一个维护窗口交错(issue #126)。
+        self._data_maintenance_lock = asyncio.Lock()
         # framework 统计: history 目录百万行级, 全量逐行计数约 14s。
         # 改为文件级增量 —— 记录每个 history 文件的 (size, mtime, 行数),
         # 只重新计数发生变化的文件; 基线落盘 data/stats/history_counts.json,
@@ -1570,9 +1573,13 @@ class WebPanel:
             await _require_auth(request)
             if not self._context_manager:
                 raise HTTPException(status_code=500, detail="会话管理器不可用")
-            ok = await self._context_manager.delete_session(
-                bot_id, chat_type, chat_id, session_id
-            )
+            try:
+                ok = await self._context_manager.delete_session(
+                    bot_id, chat_type, chat_id, session_id
+                )
+            except OSError as exc:
+                # 文件被占用等可重试错误: 会话索引与文件已回滚, 明确告诉前端重试。
+                raise HTTPException(status_code=409, detail=str(exc))
             if not ok:
                 raise HTTPException(status_code=400, detail="无法删除该会话")
             if self._persona_service is not None:
@@ -1695,7 +1702,7 @@ class WebPanel:
 
         # ── 8. Data management (数据管理: 备份/恢复/清理) ──────
 
-        DATA_SCOPES = {"cache", "history", "contexts", "ban", "personas"}
+        DATA_SCOPES = {"cache", "history", "contexts", "ban", "personas", "database"}
 
         def _parse_data_scope(scope: Any) -> tuple[list[str] | None, set[str]]:
             """解析范围: 返回 (bots 列表或 None=全部, dirs 集合)。"""
@@ -1713,8 +1720,12 @@ class WebPanel:
                 raise HTTPException(status_code=400, detail="dirs 参数无效")
             dir_set = {str(d) for d in dirs_raw} & DATA_SCOPES
             if not dir_set:
-                raise HTTPException(status_code=400, detail="未选择任何数据范围(cache/history/contexts/ban/personas)")
-            if bot_list == [] and not (dir_set & {"personas", "cache", "ban"}):
+                raise HTTPException(
+                    status_code=400,
+                    detail="未选择任何数据范围(cache/history/contexts/ban/personas/database)",
+                )
+            # personas/cache/ban/database 属于全局范围, 不需要 Bot 选择。
+            if bot_list == [] and not (dir_set & {"personas", "cache", "ban", "database"}):
                 raise HTTPException(status_code=400, detail="未选择任何 Bot")
             return bot_list, dir_set
 
@@ -1775,29 +1786,275 @@ class WebPanel:
                                 f"{d}/{bot_dir.name}/{f.relative_to(bot_dir).as_posix()}",
                                 f,
                             ))
-            return files
+            # 删除中的会话文件(tombstone)不属于任何会话, 绝不能进备份包。
+            return [(arcname, path) for arcname, path in files
+                    if ".deleting-" not in path.name]
+
+        # ── 备份/恢复一致性辅助 (issue #126) ────────────────
+
+        def _database_path() -> Path | None:
+            """按全局配置解析主数据库文件路径; 配置不可用时返回 None。"""
+            from mohobot.models.config import GlobalConfig
+            try:
+                cfg = GlobalConfig.load(self._config_path)
+                return Path(cfg.database.folder) / cfg.database.file
+            except Exception as e:  # noqa: BLE001 - 备份时降级为"无数据库"
+                logger.warning(f"读取数据库配置失败: {e}")
+                return None
+
+        def _copy_scope_snapshot(
+            bot_list: list[str] | None, dir_set: set[str], snapshot_dir: Path,
+        ) -> int:
+            """在维护协议内把选定范围复制成一份静态快照(之后才允许压缩打包)。"""
+            copied = 0
+            for arcname, path in _collect_data_files(bot_list, dir_set):
+                dst = snapshot_dir / arcname
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(path, dst)
+                except FileNotFoundError:
+                    # history/contexts/personas 是权威数据, 快照期间消失说明状态
+                    # 异常; cache/ban 是可重建数据, 允许跳过。
+                    if arcname.startswith(("history/", "contexts/", "personas/")):
+                        raise ValueError(f"备份源文件在快照期间消失: {arcname}")
+                    logger.warning(f"备份跳过已消失的文件: {arcname}")
+                    continue
+                copied += 1
+            return copied
+
+        def _snapshot_database_to(snapshot_dir: Path) -> int:
+            """把在线 SQLite 一致性快照写入快照目录(backup API, WAL 安全)。"""
+            from mohobot.db.sqlite_snapshot import snapshot_sqlite
+            db_path = _database_path()
+            if db_path is None or not db_path.is_file():
+                raise ValueError("数据库文件不存在，无法备份数据库")
+            snapshot_sqlite(db_path, snapshot_dir / "database" / db_path.name)
+            return 1
+
+        async def _snapshot_for_backup(
+            bot_list: list[str] | None, dir_set: set[str], snapshot_dir: Path,
+        ) -> int:
+            """维护协议内创建备份快照: 冻结 history 写入 + 串行化 contexts/personas。
+
+            备份不再直接 ``zf.write`` 正在被 append 重写的文件, 而是先在同一维护
+            屏障/锁下复制出静态快照, 再对快照压缩打包。
+            """
+            barrier = self._history_barrier if "history" in dir_set else None
+            persona = (self._persona_service
+                       if "personas" in dir_set and self._persona_service is not None else None)
+            context_manager = self._context_manager if "contexts" in dir_set else None
+            copied = 0
+            async with self._data_maintenance_lock:
+                if persona is not None:
+                    await persona.lock.acquire()
+                try:
+                    if barrier is not None:
+                        await barrier.freeze()
+                    try:
+                        if context_manager is not None:
+                            async with context_manager.maintenance_lock:
+                                copied = _copy_scope_snapshot(bot_list, dir_set, snapshot_dir)
+                        else:
+                            copied = _copy_scope_snapshot(bot_list, dir_set, snapshot_dir)
+                    finally:
+                        if barrier is not None:
+                            await barrier.thaw()
+                finally:
+                    if persona is not None:
+                        persona.lock.release()
+                if "database" in dir_set:
+                    copied += await asyncio.to_thread(_snapshot_database_to, snapshot_dir)
+            return copied
+
+        def _read_backup_json(path: Path, what: str) -> Any:
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise ValueError(f"备份{what}损坏，拒绝恢复: {path.name} ({e})") from e
+
+        def _validate_private_chat_context(chat_dir: Path) -> None:
+            index_path = chat_dir / "session_index.json"
+            if not index_path.is_file():
+                raise ValueError(
+                    f"备份缺少会话索引，拒绝恢复: {chat_dir.parent.parent.name}/{chat_dir.name}")
+            index = _read_backup_json(index_path, "会话索引")
+            if not isinstance(index, dict) or not isinstance(index.get("sessions"), list):
+                raise ValueError(f"备份会话索引格式非法，拒绝恢复: {chat_dir.name}")
+            sessions = index["sessions"]
+            if not sessions:
+                raise ValueError(f"备份会话索引为空，拒绝恢复: {chat_dir.name}")
+            seen: set[str] = set()
+            for session in sessions:
+                if not isinstance(session, dict):
+                    raise ValueError(f"备份会话索引含非法会话，拒绝恢复: {chat_dir.name}")
+                sid = session.get("id")
+                if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+                    raise ValueError(f"备份会话索引含非法会话ID，拒绝恢复: {chat_dir.name}")
+                if sid in seen:
+                    raise ValueError(f"备份会话索引含重复会话ID，拒绝恢复: {chat_dir.name}")
+                seen.add(sid)
+                persona_id = session.get("persona_id", "")
+                if not isinstance(persona_id, str) or (
+                        persona_id and not re.fullmatch(r"persona_[0-9]{3,}", persona_id)):
+                    raise ValueError(f"备份会话人设引用格式非法，拒绝恢复: {chat_dir.name}")
+                generation = session.get("generation")
+                if generation is not None and (
+                        not isinstance(generation, str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", generation)):
+                    raise ValueError(f"备份会话generation格式非法，拒绝恢复: {chat_dir.name}")
+            active = index.get("active")
+            if not isinstance(active, str) or active not in seen:
+                raise ValueError(f"备份会话索引active不存在，拒绝恢复: {chat_dir.name}")
+            for session in sessions:
+                sid = session["id"]
+                file_path = chat_dir / f"{sid}.json"
+                if file_path.is_file():
+                    data = _read_backup_json(file_path, "会话文件")
+                    if not isinstance(data, list):
+                        raise ValueError(
+                            f"备份会话文件格式非法，拒绝恢复: {chat_dir.name}/{sid}.json")
+                else:
+                    # 索引引用的会话文件缺失属于损坏备份: 拒绝恢复, 不静默补空会话。
+                    raise ValueError(
+                        f"备份会话文件缺失，拒绝恢复: {chat_dir.name}/{sid}.json")
+                # 恢复即视为新一代: 在途回复持有的旧 generation 必须失效。
+                session["generation"] = secrets.token_hex(16)
+            for extra in chat_dir.glob("*.json"):
+                if extra.name == "session_index.json" or extra.stem in seen:
+                    continue
+                if not isinstance(_read_backup_json(extra, "会话文件"), list):
+                    raise ValueError(
+                        f"备份会话文件格式非法，拒绝恢复: {chat_dir.name}/{extra.name}")
+            index_path.write_text(
+                json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        def _validate_group_chat_context(chat_dir: Path) -> None:
+            main_path = chat_dir / "main.json"
+            # 群聊 main.json 可能从未创建(空会话), 缺失是合法状态, 不补写空文件。
+            if main_path.is_file():
+                if not isinstance(_read_backup_json(main_path, "群聊会话文件"), list):
+                    raise ValueError(f"备份群聊会话文件格式非法，拒绝恢复: {chat_dir.name}")
+            for extra in chat_dir.glob("*.json"):
+                if extra.name in ("main.json", "session_index.json"):
+                    continue
+                if not isinstance(_read_backup_json(extra, "群聊会话文件"), list):
+                    raise ValueError(
+                        f"备份群聊会话文件格式非法，拒绝恢复: {chat_dir.name}/{extra.name}")
+
+        def _validate_restore_contexts(tmp_dir: Path, bot_list: list[str] | None) -> None:
+            context_root = tmp_dir / "contexts"
+            if not context_root.exists():
+                return
+            for bot_dir in sorted(context_root.iterdir()):
+                if not bot_dir.is_dir():
+                    continue
+                if bot_list is not None and bot_dir.name not in bot_list:
+                    continue
+                for chat_type, validator in (
+                    ("private", _validate_private_chat_context),
+                    ("group", _validate_group_chat_context),
+                ):
+                    type_dir = bot_dir / chat_type
+                    if not type_dir.exists():
+                        continue
+                    for chat_dir in sorted(type_dir.iterdir()):
+                        if chat_dir.is_dir():
+                            validator(chat_dir)
+
+        def _validate_restore_payload(
+            tmp_dir: Path, bot_list: list[str] | None, dir_set: set[str],
+        ) -> None:
+            """恢复前全量校验: contexts JSON/索引/引用、人设库、SQLite 快照。
+
+            任何校验失败都在替换现有数据之前抛出(→ 400), 现有数据保持原样。
+            """
+            if "contexts" in dir_set:
+                _validate_restore_contexts(tmp_dir, bot_list)
+            if "personas" in dir_set:
+                source = tmp_dir / "personas" / "personas.json"
+                if not source.is_file():
+                    raise ValueError("备份缺少人设库文件，拒绝恢复")
+                library = _read_backup_json(source, "人设库")
+                if not isinstance(library, dict) or not isinstance(library.get("personas"), list):
+                    raise ValueError("备份人设库格式非法，拒绝恢复")
+            if "database" in dir_set:
+                from mohobot.db.sqlite_snapshot import validate_sqlite
+                db_dir = tmp_dir / "database"
+                candidates = (sorted(p for p in db_dir.iterdir() if p.is_file())
+                              if db_dir.exists() else [])
+                if len(candidates) != 1:
+                    raise ValueError("备份缺少数据库文件，拒绝恢复")
+                validate_sqlite(candidates[0], ("users", "conversations"))
+
+        def _restore_database_from(tmp_dir: Path) -> None:
+            """把备份快照写回运行中的库。
+
+            SQLite backup API 会在目标库上取得写事务, 因此恢复窗口内其他写入
+            会等待/重试; 建议在低峰或停写窗口执行(见 docs/ADMIN.md)。
+            """
+            from mohobot.db.sqlite_snapshot import restore_sqlite
+            db_path = _database_path()
+            if db_path is None:
+                raise ValueError("数据库配置不可用，无法恢复数据库")
+            db_dir = tmp_dir / "database"
+            candidates = (sorted(p for p in db_dir.iterdir() if p.is_file())
+                          if db_dir.exists() else [])
+            if len(candidates) != 1:
+                raise ValueError("备份缺少数据库文件，拒绝恢复")
+            restore_sqlite(candidates[0], db_path)
+
+        def _apply_database_snapshot(snapshot: Path) -> None:
+            from mohobot.db.sqlite_snapshot import restore_sqlite
+            db_path = _database_path()
+            if db_path is None:
+                raise ValueError("数据库配置不可用，无法回滚数据库")
+            restore_sqlite(snapshot, db_path)
+
+        def _snapshot_database_rollback(tmp_dir: Path) -> Path | None:
+            """恢复数据库前先给当前库拍一致性快照, 失败时用于回滚。"""
+            from mohobot.db.sqlite_snapshot import snapshot_sqlite
+            db_path = _database_path()
+            if db_path is None or not db_path.is_file():
+                return None
+            dst = tmp_dir / "database_rollback" / db_path.name
+            snapshot_sqlite(db_path, dst)
+            return dst
 
         @app.post("/api/data/backup")
         async def backup_data(request: Request, body: ConfigUpdateRequest):
-            """按选定范围打包下载 zip 备份。"""
+            """按选定范围创建一致性快照后打包下载 zip 备份。"""
             await _require_auth(request)
             bot_list, dir_set = _parse_data_scope(body.data)
-            files = _collect_data_files(bot_list, dir_set)
-            if not files:
-                raise HTTPException(status_code=400, detail="所选范围没有数据")
 
+            snapshot_dir = Path(tempfile.mkdtemp(prefix="mohobot_backup_snapshot_"))
             tmp_path = tempfile.NamedTemporaryFile(suffix=".zip", delete=False).name
+            keep_zip = False
             try:
+                file_count = await _snapshot_for_backup(bot_list, dir_set, snapshot_dir)
+                if file_count == 0:
+                    raise HTTPException(status_code=400, detail="所选范围没有数据")
                 with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for arcname, path in files:
-                        zf.write(path, arcname)
+                    for path in sorted(snapshot_dir.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, path.relative_to(snapshot_dir).as_posix())
+                keep_zip = True
+            except HTTPException:
+                raise
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"备份失败: {e}")
             except Exception as e:
-                os.remove(tmp_path)
                 raise HTTPException(status_code=500, detail=f"备份失败: {e}")
+            finally:
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
+                if not keep_zip:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
 
             from mohobot.utils.time_utils import format_utc8
             fname = f"mohobot_backup_{format_utc8('%Y%m%d_%H%M%S')}.zip"
-            logger.info(f"Web panel: 备份完成 ({len(files)} 个文件, 范围={sorted(dir_set)})")
+            logger.info(f"Web panel: 备份完成 ({file_count} 个文件, 范围={sorted(dir_set)})")
             return FileResponse(
                 tmp_path,
                 media_type="application/zip",
@@ -1826,29 +2083,75 @@ class WebPanel:
             content = await upload.read()
 
             tmp_dir = Path(tempfile.mkdtemp(prefix="mohobot_restore_"))
+            restored = 0
             try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    # zip slip 防护: 拒绝包含绝对路径/.. 的成员
-                    for member in zf.namelist():
-                        target = (tmp_dir / member).resolve()
-                        try:
-                            target.relative_to(tmp_dir.resolve())
-                        except ValueError:
-                            raise HTTPException(status_code=400, detail="备份文件包含非法路径")
-                        if ".." in member.replace("\\", "/").split("/"):
-                            raise HTTPException(status_code=400, detail="备份文件包含非法路径")
-                    zf.extractall(tmp_dir)
+                try:
+                    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                        # zip slip 防护: 拒绝包含绝对路径/.. 的成员
+                        for member in zf.namelist():
+                            target = (tmp_dir / member).resolve()
+                            try:
+                                target.relative_to(tmp_dir.resolve())
+                            except ValueError:
+                                raise HTTPException(status_code=400, detail="备份文件包含非法路径")
+                            if ".." in member.replace("\\", "/").split("/"):
+                                raise HTTPException(status_code=400, detail="备份文件包含非法路径")
+                        zf.extractall(tmp_dir)
+                except zipfile.BadZipFile as e:
+                    raise HTTPException(status_code=400, detail=f"备份文件不是有效的 zip: {e}")
+
+                # 恢复前全量校验: contexts JSON/索引/引用、人设库、SQLite 快照。
+                # 校验失败直接 400, 现有数据一个字节都不会被替换(issue #126 第 1 点)。
+                _validate_restore_payload(tmp_dir, bot_list, dir_set)
+
+                restored_context_bots: set[str] = set()
+                contexts_root = tmp_dir / "contexts"
+                if "contexts" in dir_set and contexts_root.exists():
+                    restored_context_bots = {
+                        p.name for p in contexts_root.iterdir() if p.is_dir()
+                        and (bot_list is None or p.name in bot_list)
+                    }
 
                 # history 被替换时: 冻结写入并关闭活跃 writer, 恢复后重新打开
                 # 新文件, 避免继续写已被删除/替换的旧 inode(issue #8)。
                 barrier = self._history_barrier if "history" in dir_set else None
-                if barrier is not None:
-                    await barrier.freeze()
-                try:
-                    restored = await self._restore_persona_data(tmp_dir, bot_list, dir_set)
-                finally:
+                async with self._data_maintenance_lock:
                     if barrier is not None:
-                        await barrier.thaw()
+                        await barrier.freeze()
+                    try:
+                        db_rollback: Path | None = None
+                        if "database" in dir_set:
+                            db_rollback = await asyncio.to_thread(
+                                _snapshot_database_rollback, tmp_dir)
+                        try:
+                            # 先恢复数据库(快照校验已在替换前完成), 再替换文件
+                            # 目录: 目录恢复失败时还能用恢复前快照回滚数据库。
+                            if "database" in dir_set:
+                                await asyncio.to_thread(_restore_database_from, tmp_dir)
+                                restored += 1
+                            if dir_set - {"database"}:
+                                restored += await self._restore_persona_data(
+                                    tmp_dir, bot_list, dir_set)
+                        except BaseException:
+                            # 多范围恢复失败: 数据目录已由 _restore_persona_data 内部
+                            # 回滚, 这里再回滚数据库, 保证不会留下"半恢复"状态。
+                            if db_rollback is not None:
+                                try:
+                                    await asyncio.to_thread(
+                                        _apply_database_snapshot, db_rollback)
+                                    logger.warning("数据库恢复失败，已回滚到恢复前快照")
+                                except Exception as rollback_exc:  # noqa: BLE001
+                                    logger.error(f"数据库回滚失败: {rollback_exc}")
+                            raise
+                    finally:
+                        if barrier is not None:
+                            await barrier.thaw()
+                    # contexts 文件已换成备份内容: 群聊内存 generation 同步推进,
+                    # 让恢复前捕获的在途回复不能写进恢复后的会话。
+                    bump_generations = getattr(self._context_manager, "bump_group_generations", None)
+                    if restored_context_bots and callable(bump_generations):
+                        for bot_id in sorted(restored_context_bots):
+                            bump_generations(bot_id)
                 if "contexts" in dir_set and self._persona_service is not None:
                     self._persona_service.invalidate_references()
             except HTTPException:
@@ -1879,20 +2182,59 @@ class WebPanel:
             if not self._verify_password(password, self._password_hash):
                 raise HTTPException(status_code=400, detail="密码错误")
             bot_list, dir_set = _parse_data_scope(data.get("scope", {}))
+            if "database" in dir_set:
+                raise HTTPException(
+                    status_code=400,
+                    detail="数据库不能在线批量清理；请使用 SQL 工具或停机维护",
+                )
+            # contexts 被清理时: 清理前记录受影响的 bot(磁盘目录 + 内存中捕获过
+            # 的群聊), 无论清理成功还是中途失败都在 finally 推进群聊 generation,
+            # 避免清理前捕获的在途回复用旧 generation 重建群聊上下文(issue #126)。
+            cleaned_context_bots: list[str] = []
+            if "contexts" in dir_set:
+                candidates: set[str] = set()
+                context_root = self._data_dir / "contexts"
+                if context_root.exists():
+                    candidates.update(
+                        p.name for p in context_root.iterdir() if p.is_dir())
+                known_bots = getattr(
+                    self._context_manager, "known_group_bots", None)
+                if callable(known_bots):
+                    try:
+                        candidates.update(known_bots())
+                    except Exception as e:
+                        logger.warning(f"读取内存群聊 generation 失败: {e}")
+                if bot_list is not None:
+                    candidates &= set(bot_list)
+                cleaned_context_bots = sorted(candidates)
             # history 被清理时: 先冻结写入并关闭活跃 writer, 避免它们继续写已被
             # unlink 的旧 inode(issue #8 第 1 点)。
             barrier = self._history_barrier if "history" in dir_set else None
-            if barrier is not None:
-                await barrier.freeze()
-            try:
-                if "contexts" in dir_set and self._context_manager is not None and self._persona_service is not None:
-                    async with self._persona_service.lock, self._context_manager.maintenance_lock:
-                        removed = self._cleanup_data(bot_list, dir_set)
-                else:
-                    removed = self._cleanup_data(bot_list, dir_set)
-            finally:
+            async with self._data_maintenance_lock:
                 if barrier is not None:
-                    await barrier.thaw()
+                    await barrier.freeze()
+                try:
+                    if ("contexts" in dir_set and self._context_manager is not None
+                            and self._persona_service is not None):
+                        async with self._persona_service.lock, self._context_manager.maintenance_lock:
+                            removed = self._cleanup_data(bot_list, dir_set)
+                    else:
+                        removed = self._cleanup_data(bot_list, dir_set)
+                finally:
+                    # 无论清理成功还是中途失败, 都要让清理前记录的 bot 旧 generation
+                    # 失效(失败时可能有目录/内存上下文已部分清掉)。bump 自身异常只
+                    # 记日志, 不覆盖清理抛出的异常。
+                    bump_generations = getattr(
+                        self._context_manager, "bump_group_generations", None)
+                    if cleaned_context_bots and callable(bump_generations):
+                        for bot_id in cleaned_context_bots:
+                            try:
+                                bump_generations(bot_id)
+                            except Exception as e:
+                                logger.warning(
+                                    f"清理后推进群聊 generation 失败({bot_id}): {e}")
+                    if barrier is not None:
+                        await barrier.thaw()
             if "contexts" in dir_set and self._persona_service is not None:
                 self._persona_service.invalidate_references()
             # 清理封禁数据后同步刷新拦截器缓存
