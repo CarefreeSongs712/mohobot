@@ -4,14 +4,37 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mohobot.music_knowledge import get_song_detail, get_song_lyrics, init_song_db
+from sqlalchemy.orm import Session
+
+from mohobot.music_knowledge import get_song_detail, get_song_lyrics
 from mohobot.music_knowledge.knowledge_service import search_songs_by_lyrics
-from mohobot.music_knowledge.pool import ensure_init, get_session
+from mohobot.music_knowledge.pool import ensure_init, get_session, get_session_if_initialized
+from mohobot.music_knowledge.sync_worker import try_reserve
 from mohobot.services.llm_tools import LLMTool, registry, tool_schema
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _read_session() -> Session:
+    # Use the host's current database without reconfiguring it. The legacy
+    # default is only for a standalone tool call before any pool is initialized.
+    db = get_session_if_initialized()
+    if db is not None:
+        return db
+    reservation = try_reserve()
+    if reservation is None:
+        raise RuntimeError("歌曲库正在初始化，请稍后重试")
+    try:
+        # A sync could have initialized the pool and finished before we reserved.
+        db = get_session_if_initialized()
+        if db is not None:
+            return db
+        ensure_init("./data/song_knowledge", "knowledge_db.db")
+        return get_session()
+    finally:
+        reservation.release_if_unsubmitted()
 
 
 def song_search(query: str, limit: int = 5) -> str:
@@ -20,8 +43,7 @@ def song_search(query: str, limit: int = 5) -> str:
     limit = max(1, min(int(limit or 5), 10))
     if len(query) < 2:
         return _json({"error": "query 至少需要 2 个字符"})
-    ensure_init("./data/song_knowledge", "knowledge_db.db")
-    db = get_session()
+    db = _read_session()
     try:
         # 歌名查询优先，再补歌词命中，去重后返回简短结果。
         from mohobot.music_knowledge.song_database import Song
@@ -38,8 +60,7 @@ def song_get_detail(song_name: str) -> str:
     name = str(song_name or "").strip()
     if not name:
         return _json({"error": "song_name 不能为空"})
-    ensure_init("./data/song_knowledge", "knowledge_db.db")
-    db = get_session()
+    db = _read_session()
     try:
         detail = get_song_detail(db, name)
         if not detail:
@@ -55,8 +76,7 @@ def song_get_lyrics(song_name: str) -> str:
     name = str(song_name or "").strip()
     if not name:
         return _json({"error": "song_name 不能为空"})
-    ensure_init("./data/song_knowledge", "knowledge_db.db")
-    db = get_session()
+    db = _read_session()
     try:
         lyrics = get_song_lyrics(db, name)
         if not lyrics:
