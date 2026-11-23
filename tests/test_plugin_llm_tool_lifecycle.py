@@ -251,6 +251,252 @@ class Plugin:
     asyncio.run(run())
 
 
+def test_unload_timeout_restores_tool_admission(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "drain_timeout_probe"
+        tool_name = "drain_timeout_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            f'''import asyncio
+from mohobot.api import LLMTool, registry, tool_schema
+
+first_started = asyncio.Event()
+second_started = asyncio.Event()
+release = asyncio.Event()
+calls = 0
+
+async def handle():
+    global calls
+    calls += 1
+    (first_started if calls == 1 else second_started).set()
+    await release.wait()
+    return "done"
+
+registry.register(LLMTool(tool_schema({tool_name!r}, "probe", {{}}, []), handle))
+
+class Plugin:
+    pass
+''',
+        )
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        calls: list[asyncio.Task[str]] = []
+        module = None
+        previous_timeout = registry._owner_drain_timeout
+        registry._owner_drain_timeout = 0.2
+        try:
+            await system.load_plugins()
+            module_name = next(
+                meta["module_name"] for meta in system._plugins if meta["name"] == plugin_name
+            )
+            module = sys.modules[module_name]
+            calls.append(asyncio.create_task(registry.execute(tool_name, {})))
+            await module.first_started.wait()
+
+            assert await system.unload_plugin(plugin_name) is False
+            assert system.list_plugins()[0]["loaded"] is True
+
+            calls.append(asyncio.create_task(registry.execute(tool_name, {})))
+            await asyncio.wait_for(module.second_started.wait(), timeout=0.5)
+            module.release.set()
+            assert await asyncio.gather(*calls) == ["done", "done"]
+        finally:
+            if module is not None:
+                module.release.set()
+            if calls:
+                await asyncio.gather(*calls, return_exceptions=True)
+            registry.unregister(tool_name)
+            try:
+                await system.shutdown_plugins()
+            finally:
+                registry._owner_drain_timeout = previous_timeout
+
+    asyncio.run(run())
+
+
+def test_cancelled_unload_restores_tool_admission(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "drain_cancel_probe"
+        tool_name = "drain_cancel_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            f'''import asyncio
+from mohobot.api import LLMTool, registry, tool_schema
+
+first_started = asyncio.Event()
+second_started = asyncio.Event()
+release = asyncio.Event()
+calls = 0
+
+async def handle():
+    global calls
+    calls += 1
+    (first_started if calls == 1 else second_started).set()
+    await release.wait()
+    return "done"
+
+registry.register(LLMTool(tool_schema({tool_name!r}, "probe", {{}}, []), handle))
+
+class Plugin:
+    pass
+''',
+        )
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        calls: list[asyncio.Task[str]] = []
+        module = None
+        try:
+            await system.load_plugins()
+            module_name = next(
+                meta["module_name"] for meta in system._plugins if meta["name"] == plugin_name
+            )
+            module = sys.modules[module_name]
+            call = asyncio.create_task(registry.execute(tool_name, {}))
+            calls.append(call)
+            await module.first_started.wait()
+
+            unload = asyncio.create_task(system.unload_plugin(plugin_name))
+            for _ in range(10):
+                if plugin_name in registry._inactive_owners:
+                    break
+                await asyncio.sleep(0)
+            assert plugin_name in registry._inactive_owners
+            unload.cancel()
+            try:
+                await unload
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("cancelled unload unexpectedly completed")
+
+            second_call = asyncio.create_task(registry.execute(tool_name, {}))
+            calls.append(second_call)
+            await asyncio.wait_for(module.second_started.wait(), timeout=0.5)
+            module.release.set()
+            assert await asyncio.gather(*calls) == ["done", "done"]
+        finally:
+            if module is not None:
+                module.release.set()
+            for task in calls:
+                if not task.done():
+                    task.cancel()
+            if calls:
+                await asyncio.gather(*calls, return_exceptions=True)
+            registry.unregister(tool_name)
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_shutdown_cancels_stalled_tool_before_plugin_hook(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "shutdown_drain_probe"
+        tool_name = "shutdown_drain_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            f'''import asyncio
+from mohobot.api import LLMTool, registry, tool_schema
+
+started = asyncio.Event()
+finished = asyncio.Event()
+shutdown_saw_finished = False
+
+async def handle():
+    started.set()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        finished.set()
+
+registry.register(LLMTool(tool_schema({tool_name!r}, "probe", {{}}, []), handle))
+
+class Plugin:
+    async def on_shutdown(self):
+        global shutdown_saw_finished
+        shutdown_saw_finished = finished.is_set()
+''',
+        )
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        previous_timeout = registry._owner_drain_timeout
+        registry._owner_drain_timeout = 0.2
+        call = None
+        module = None
+        shutdown = False
+        try:
+            await system.load_plugins()
+            module_name = next(
+                meta["module_name"] for meta in system._plugins if meta["name"] == plugin_name
+            )
+            module = sys.modules[module_name]
+            call = asyncio.create_task(registry.execute(tool_name, {}))
+            await module.started.wait()
+
+            await asyncio.wait_for(system.shutdown_plugins(), timeout=1.0)
+            shutdown = True
+            assert call.cancelled()
+            assert module.finished.is_set()
+            assert module.shutdown_saw_finished is True
+            assert tool_name not in _schema_names()
+        finally:
+            if call is not None and not call.done():
+                call.cancel()
+            if call is not None:
+                await asyncio.gather(call, return_exceptions=True)
+            registry.unregister(tool_name)
+            try:
+                if not shutdown:
+                    await system.shutdown_plugins()
+            finally:
+                registry._owner_drain_timeout = previous_timeout
+
+    asyncio.run(run())
+
+
+def test_failed_reload_restores_tools_removed_by_old_shutdown(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "reload_unregister_probe"
+        tool_name = "reload_unregister_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        entry = _write_plugin(
+            plugins_dir,
+            plugin_name,
+            f'''from mohobot.api import LLMTool, registry, tool_schema
+
+def handle():
+    return "old"
+
+registry.register(LLMTool(tool_schema({tool_name!r}, "probe", {{}}, []), handle))
+
+class Plugin:
+    def on_shutdown(self):
+        registry.unregister({tool_name!r})
+''',
+        )
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        try:
+            await system.load_plugins()
+            assert await registry.execute(tool_name, {}) == "old"
+
+            entry.write_text("invalid Python !\n", encoding="utf-8")
+            assert await system.reload_plugin(plugin_name) is False
+            assert _schema_names().count(tool_name) == 1
+            assert registry._owners[tool_name] == plugin_name
+            assert await registry.execute(tool_name, {}) == "old"
+
+            assert await system.unload_plugin(plugin_name) is True
+            assert tool_name not in _schema_names()
+            assert tool_name not in registry._owners
+        finally:
+            registry.unregister(tool_name)
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
 def test_constructor_tool_registration_is_staged_and_failed_construction_discards_tools(
     tmp_path: Path,
 ) -> None:

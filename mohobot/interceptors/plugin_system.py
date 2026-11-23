@@ -12,6 +12,7 @@ Plugins can be enabled/disabled via data/plugins_state.json (managed by the web 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import asyncio
 import importlib
 import importlib.util
@@ -117,6 +118,8 @@ class PluginSystem(Interceptor):
         self._active_dispatches = 0
         self._dispatch_drained = asyncio.Event()
         self._dispatch_drained.set()
+        self._dispatch_tasks: dict[asyncio.Task[Any], int] = {}
+        self._dispatch_drain_timeout = 5.0
         self._hook_timeout = 30.0
 
     @property
@@ -421,8 +424,14 @@ class PluginSystem(Interceptor):
         from mohobot.services.llm_tools import registry
 
         owners = list(dict.fromkeys(str(meta.get("name", "")) for meta in self._plugins))
-        await registry.deactivate_owners(owners)
-        await self._wait_for_dispatches()
+        owner_states = await registry.deactivate_owners(
+            owners, cancel_on_timeout=True
+        )
+        try:
+            await self._wait_for_dispatches(cancel_on_timeout=True)
+        except BaseException:
+            registry.restore_owner_activity(owner_states)
+            raise
         for owner in owners:
             registry.unregister_owner(owner)
         await self.stop_tick_tasks_async()
@@ -516,8 +525,14 @@ class PluginSystem(Interceptor):
         from mohobot.services.llm_tools import registry
 
         owners = list(dict.fromkeys(str(meta.get("name", "")) for meta in self._plugins))
-        await registry.deactivate_owners(owners)
-        await self._wait_for_dispatches()
+        owner_states = await registry.deactivate_owners(
+            owners, cancel_on_timeout=True
+        )
+        try:
+            await self._wait_for_dispatches(cancel_on_timeout=True)
+        except BaseException:
+            registry.restore_owner_activity(owner_states)
+            raise
         await self.stop_tick_tasks_async()
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
@@ -544,24 +559,46 @@ class PluginSystem(Interceptor):
         """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
         self._task_supervisor = supervisor
 
-    async def _run_plugin_handler(self, handler, *args):
+    async def _run_plugin_handler(
+        self, handler: Callable[..., Any], *args: Any
+    ) -> Any:
+        task = asyncio.current_task()
         self._active_dispatches += 1
         self._dispatch_drained.clear()
+        if task is not None:
+            self._dispatch_tasks[task] = self._dispatch_tasks.get(task, 0) + 1
         try:
             return await handler(*args)
         finally:
             self._active_dispatches -= 1
             if self._active_dispatches <= 0:
                 self._dispatch_drained.set()
+            if task is not None:
+                task_count = self._dispatch_tasks.get(task, 0) - 1
+                if task_count <= 0:
+                    self._dispatch_tasks.pop(task, None)
+                else:
+                    self._dispatch_tasks[task] = task_count
 
-    async def _wait_for_dispatches(self) -> None:
+    async def _wait_for_dispatches(self, *, cancel_on_timeout: bool = False) -> None:
         if self._active_dispatches <= 0:
             return
         try:
-            await asyncio.wait_for(self._dispatch_drained.wait(), timeout=5.0)
+            await asyncio.wait_for(
+                self._dispatch_drained.wait(), timeout=self._dispatch_drain_timeout
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 f"Plugin dispatch barrier timed out with {self._active_dispatches} active handler(s)"
+            )
+            if not cancel_on_timeout:
+                raise
+            current_task = asyncio.current_task()
+            for task in tuple(self._dispatch_tasks):
+                if task is not current_task and not task.done():
+                    task.cancel()
+            await asyncio.wait_for(
+                self._dispatch_drained.wait(), timeout=self._dispatch_drain_timeout
             )
 
     async def _call_hook(
@@ -1019,8 +1056,20 @@ class PluginSystem(Interceptor):
                 return False
             from mohobot.services.llm_tools import registry
 
-            await registry.deactivate_owner(name)
-            await self._wait_for_dispatches()
+            owner_states = None
+            try:
+                was_inactive = await registry.deactivate_owner(name)
+                owner_states = {name: was_inactive}
+                await self._wait_for_dispatches()
+            except asyncio.TimeoutError:
+                if owner_states is not None:
+                    registry.restore_owner_activity(owner_states)
+                logger.warning(f"Plugin {name} unload timed out before teardown")
+                return False
+            except BaseException:
+                if owner_states is not None:
+                    registry.restore_owner_activity(owner_states)
+                raise
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
@@ -1043,8 +1092,21 @@ class PluginSystem(Interceptor):
                 return bool(meta and meta.get("loaded"))
             from mohobot.services.llm_tools import registry
 
-            await registry.deactivate_owner(name)
-            await self._wait_for_dispatches()
+            owner_states = None
+            try:
+                was_inactive = await registry.deactivate_owner(name)
+                owner_states = {name: was_inactive}
+                await self._wait_for_dispatches()
+            except asyncio.TimeoutError:
+                if owner_states is not None:
+                    registry.restore_owner_activity(owner_states)
+                logger.warning(f"Plugin {name} reload timed out before teardown")
+                return False
+            except BaseException:
+                if owner_states is not None:
+                    registry.restore_owner_activity(owner_states)
+                raise
+            old_tool_snapshot = registry.snapshot_owner_tools(name)
             index = self._plugins.index(meta)
             old_meta = dict(meta)
             old_module_name = str(meta.get("module_name") or "")
@@ -1117,13 +1179,24 @@ class PluginSystem(Interceptor):
                     self._plugin_sys_paths[name] = old_path
                     self._loaded_sys_paths.add(old_path)
                 self._plugins[index] = old_meta
-                registry.activate_owner(name)
                 try:
                     self.apply_injections()
                 except Exception as e:
                     logger.error(f"Plugin injection failed after reload rollback: {e}")
-                await self._call_hook(old_meta, "on_startup")
-                self._start_tick_for(old_meta)
+                rollback_started = await self._start_plugin(old_meta)
+                if rollback_started:
+                    try:
+                        registry.restore_owner_tools(name, old_tool_snapshot)
+                    except Exception as e:
+                        logger.error(f"Plugin {name} tool rollback failed: {e}")
+                        rollback_started = False
+                if rollback_started:
+                    registry.restore_owner_activity(owner_states or {})
+                    self._start_tick_for(old_meta)
+                else:
+                    registry.unregister_owner(name)
+                    old_meta["loaded"] = False
+                    old_meta["error"] = "previous plugin failed to restart after reload"
                 logger.error(
                     f"Plugin {name} reload failed, kept previous instance: {new_meta.get('error')}"
                 )
