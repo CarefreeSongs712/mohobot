@@ -22,6 +22,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +44,7 @@ from mohobot.plugins.manifest import (
     find_manifest,
     parse_manifest,
 )
+from mohobot.services.task_supervisor import TaskSupervisorClosed
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
 from mohobot.api import api_version as PLUGIN_API_VERSION
@@ -51,37 +53,48 @@ if TYPE_CHECKING:
     from mohobot.services.llm_tools import PluginToolStage
 
 
-class PluginNamespaceConflict(ManifestError):
-    """A rescan cannot proceed without displacing an existing module."""
+class PluginNamespaceConflict(ValueError):
+    """A plugin operation would overwrite an occupied import namespace."""
 
 
 class _PluginTaskSupervisor:
     """把插件显式使用的 owner="plugins" 映射为按插件隔离的 owner。"""
 
-    def __init__(self, supervisor: Any, plugin_name: str) -> None:
+    def __init__(
+        self, supervisor: Any, key: str, admission_closed: Callable[[], bool],
+        in_hook: Callable[[], bool],
+    ) -> None:
         self._supervisor = supervisor
-        self._plugin_name = plugin_name
+        self._key = key
+        self._admission_closed = admission_closed
+        self._in_hook = in_hook
 
     @property
     def stopping(self) -> bool:
-        return bool(getattr(self._supervisor, "stopping", False))
+        return (self._admission_closed() and not self._in_hook()) or bool(self._supervisor.stopping)
 
     def _owner(self, owner: str) -> str:
-        prefix = f"plugin:{self._plugin_name}"
         if not owner or owner == "plugins":
-            return prefix
-        if owner.startswith("plugin:"):
-            return f"{prefix}:{owner[7:]}"
-        return f"{prefix}:{owner}"
+            return self._key
+        return f"{self._key}:{owner.removeprefix('plugin:')}"
 
     def create_task(self, coro: Any, *, name: str, owner: str = "application") -> Any:
+        if self._admission_closed() and not self._in_hook():
+            coro.close()
+            raise TaskSupervisorClosed("plugin instance is not accepting background tasks")
         return self._supervisor.create_task(coro, name=name, owner=self._owner(owner))
 
     async def cancel_owner(self, owner: str, timeout: float = 5.0) -> None:
         await self._supervisor.cancel_owner(self._owner(owner), timeout)
 
     async def cancel_owner_prefix(self, prefix: str, timeout: float = 5.0) -> None:
-        await self._supervisor.cancel_owner_prefix(self._owner(prefix), timeout)
+        owner = self._owner(prefix)
+        if owner == self._key:
+            await self._supervisor.cancel_owner_tree(owner, timeout)
+        else:
+            await self._supervisor.cancel_owner_prefix(owner, timeout)
+
+
 class PluginSystem(Interceptor):
     """Loads and manages plugins from a designated directory."""
 
@@ -114,15 +127,18 @@ class PluginSystem(Interceptor):
         # 周期任务(插件声明 interval_sec + async def on_tick): 后台循环
         self._tick_tasks: list[Any] = []
         self._tick_tasks_by_name: dict[str, Any] = {}
+        self._stopping_tick_tasks: set[asyncio.Task[Any]] = set()
         self._task_supervisor = None
         self._matcher = None
         self._reload_lock: asyncio.Lock | None = None
+        self._admission_closed = False
         self._plugin_api_version = PLUGIN_API_VERSION
         self._active_dispatches = 0
         self._dispatch_drained = asyncio.Event()
         self._dispatch_drained.set()
         self._dispatch_tasks: dict[asyncio.Task[Any], int] = {}
         self._dispatch_drain_timeout = 5.0
+        self._drain_timeout = 5.0
         self._hook_timeout = 30.0
 
     @property
@@ -164,9 +180,8 @@ class PluginSystem(Interceptor):
         name = meta.get("name", "")
         entry_dir = meta.get("entry_dir") or ""
         imports = meta.pop("_imports", None)
-        if imports is None:
-            return
-        imports.detach()
+        if imports is not None:
+            imports.detach()
         if entry_dir:
             for cache_dir in Path(entry_dir).rglob("__pycache__"):
                 try:
@@ -182,10 +197,6 @@ class PluginSystem(Interceptor):
         importlib.invalidate_caches()
         meta["instance"] = None
         meta["loaded"] = False
-
-    def _unload_all_plugins(self) -> None:
-        for meta in tuple(self._plugins):
-            self._unload_plugin(meta)
 
     @staticmethod
     def _validate_plugin(instance: Any) -> None:
@@ -304,6 +315,7 @@ class PluginSystem(Interceptor):
                 self._validate_plugin(plugin_instance)
 
                 meta["instance"] = plugin_instance
+                meta["_ready"] = False
                 meta["loaded"] = True
                 meta["loaded_at"] = time.time()
                 meta["info"] = {
@@ -424,7 +436,6 @@ class PluginSystem(Interceptor):
         for owner in owners:
             registry.unregister_owner(owner)
         await self.stop_tick_tasks_async()
-        self._unload_all_plugins()
         self._plugins = []
         for directory in (self._plugins_dir, self._installed_dir):
             if not directory.exists():
@@ -436,7 +447,6 @@ class PluginSystem(Interceptor):
         from mohobot.plugins.sources import load_sources
 
         sources = await load_sources(self._data_dir)
-        count = 0
         seen: set[str] = set()
         for entry_path, plugin_name, entry_dir, source in self._iter_entries():
             if plugin_name in seen:
@@ -465,9 +475,7 @@ class PluginSystem(Interceptor):
                 continue
             seen.add(plugin_name)
             module_name = self._module_name(plugin_name)
-            previous = None
-            if state.get(plugin_name, {}).get("enabled", True):
-                previous = self._module_name_conflict(module_name)
+            previous = self._module_name_conflict(module_name)
             if previous is not None:
                 logger.error(f"插件模块名冲突: {plugin_name} 与 {previous}")
                 meta = self._error_meta(
@@ -484,16 +492,10 @@ class PluginSystem(Interceptor):
             if record:
                 meta["source_record"] = record
             self._plugins.append(meta)
-            if meta.get("loaded"):
-                count += 1
 
+        await self._startup_plugins_unlocked()
+        count = sum(self._can_dispatch(meta) for meta in self._plugins)
         logger.info(f"Plugin system loaded {count} plugin(s)")
-        try:
-            self.apply_injections()
-        except Exception as e:
-            logger.error(f"Plugin injection failed: {e}")
-        await self.startup_plugins()
-        self.start_tick_tasks()
         return count
 
     def _cleanup_stale_staging(self) -> None:
@@ -515,12 +517,11 @@ class PluginSystem(Interceptor):
     async def _shutdown_unlocked(self) -> None:
         from mohobot.services.llm_tools import registry
 
+        targets = tuple(meta for meta in self._plugins if meta.get("loaded"))
         owners = list(dict.fromkeys(str(meta.get("name", "")) for meta in self._plugins))
-        owner_states = await registry.deactivate_owners(
-            owners, cancel_on_timeout=True
-        )
+        owner_states = await registry.deactivate_owners(owners, cancel_on_timeout=True)
         try:
-            await self._wait_for_dispatches(cancel_on_timeout=True)
+            await self._pause_dispatches(targets)
         except BaseException:
             registry.restore_owner_activity(owner_states)
             raise
@@ -528,22 +529,59 @@ class PluginSystem(Interceptor):
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
             await self._task_supervisor.cancel_owner_prefix("plugin:")
-        for meta in reversed(tuple(self._plugins)):
-            if meta.get("loaded"):
-                await self._call_hook(meta, "on_shutdown")
+        for meta in reversed(targets):
+            await self._retire_plugin(meta)
+            self._unload_plugin(meta)
+            meta.pop("_rollback", None)
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
-        for owner in owners:
-            registry.unregister_owner(owner)
-        self._unload_all_plugins()
 
-    async def _reload_unlocked(self, *, enabled_update: dict[str, Any] | None = None) -> int:
-        state = self._load_state()
-        if enabled_update is not None:
-            state.update(enabled_update)
-        self._check_reload_namespaces(state)
-        if enabled_update is not None:
-            await self._save_state(enabled_update)
+    @staticmethod
+    def _owner_key(meta: dict[str, Any]) -> str:
+        # Escape the delimiter and the escape character in legacy names.
+        name = meta["name"].replace("%", "%25").replace(":", "%3A")
+        return f"plugin:{name}"
+
+    async def _drain_plugin_tasks(self, meta: dict[str, Any]) -> None:
+        if self._task_supervisor is not None:
+            pending = await self._task_supervisor.cancel_owner_tree(
+                self._owner_key(meta), timeout=self._drain_timeout,
+            )
+            if pending:
+                raise TimeoutError(f"plugin {meta['name']} still owns background tasks")
+
+    async def _retire_plugin(self, meta: dict[str, Any]) -> None:
+        # Admission and events must already be drained before this point. Never
+        # reopen an instance after beginning cancellation or its shutdown hook.
+        from mohobot.services.llm_tools import registry
+
+        meta["_retiring"] = True
+        await self._stop_tick_for(meta["name"])
+        if meta.get("_hook_name") == "on_startup":
+            task = meta["_hook_task"]
+            if not task.done():
+                done, _ = await asyncio.wait({task}, timeout=self._drain_timeout)
+                if not done:
+                    raise TimeoutError(f"plugin {meta['name']} startup is still active")
+            if not task.cancelled():
+                task.exception()
+            meta.pop("_hook_task")
+            meta.pop("_hook_name")
+        if not meta.get("_shutdown_done"):
+            # A previous waiter may have cancelled the hook. Once it has
+            # actually exited, drain its children before retrying shutdown.
+            if meta.get("_hook_name") == "on_shutdown" and meta["_hook_task"].cancelled():
+                meta.pop("_hook_task")
+                meta.pop("_hook_name")
+            if meta.get("_hook_name") != "on_shutdown":
+                await self._drain_plugin_tasks(meta)
+            await self._call_hook(meta, "on_shutdown")
+            meta["_shutdown_done"] = True
+        await self._drain_plugin_tasks(meta)
+        registry.unregister_owner(str(meta.get("name", "")))
+
+    async def _reload_unlocked(self) -> int:
+        self._check_reload_namespaces(self._load_state())
         await self._shutdown_unlocked()
         return await self._load_all_unlocked()
 
@@ -575,18 +613,34 @@ class PluginSystem(Interceptor):
         """注入应用级后台任务监督器(可选, 便于统一关闭插件任务)。"""
         self._task_supervisor = supervisor
 
-    async def _run_plugin_handler(
-        self, handler: Callable[..., Any], *args: Any
-    ) -> Any:
+    def _can_dispatch(self, meta: dict[str, Any]) -> bool:
+        return (
+            not self._admission_closed
+            and meta.get("enabled", False)
+            and meta.get("loaded", False)
+            and meta.get("_ready", True)
+        )
+
+    async def _run_plugin_handler(self, meta, handler, *args, default=None):
+        if not self._can_dispatch(meta):
+            return default
         task = asyncio.current_task()
+        drained = meta.get("_dispatch_drained")
+        if drained is None:
+            drained = meta["_dispatch_drained"] = asyncio.Event()
+        meta["_active_dispatches"] = meta.get("_active_dispatches", 0) + 1
         self._active_dispatches += 1
         self._dispatch_drained.clear()
+        drained.clear()
         if task is not None:
             self._dispatch_tasks[task] = self._dispatch_tasks.get(task, 0) + 1
         try:
             return await handler(*args)
         finally:
             self._active_dispatches -= 1
+            meta["_active_dispatches"] = max(0, meta.get("_active_dispatches", 1) - 1)
+            if meta["_active_dispatches"] <= 0:
+                drained.set()
             if self._active_dispatches <= 0:
                 self._dispatch_drained.set()
             if task is not None:
@@ -617,59 +671,146 @@ class PluginSystem(Interceptor):
                 self._dispatch_drained.wait(), timeout=self._dispatch_drain_timeout
             )
 
+    async def _pause_dispatches(self, targets: tuple[dict[str, Any], ...]) -> None:
+        ready = [meta for meta in targets if meta.get("_ready", True)]
+        for meta in targets:
+            meta["_ready"] = False
+        try:
+            # A target cannot admit another callback while these counters drain.
+            async with asyncio.timeout(self._drain_timeout):
+                for meta in targets:
+                    if meta.get("_active_dispatches"):
+                        await meta["_dispatch_drained"].wait()
+        except BaseException:
+            if not self._admission_closed:
+                for meta in ready:
+                    meta["_ready"] = True
+            raise
+
     async def _call_hook(
         self,
         meta: dict[str, Any],
         hook_name: str,
         registration_stage: PluginToolStage | None = None,
     ) -> bool:
-        """调用可选生命周期 hook, 同步/异步实现均可且互不影响。"""
-        plugin = meta.get("instance")
-        hook = getattr(plugin, hook_name, None) if plugin is not None else None
-        if not callable(hook):
-            return True
-        try:
-            if registration_stage is None:
-                result = hook()
-                if inspect.isawaitable(result):
-                    await asyncio.wait_for(result, timeout=self._hook_timeout)
-            else:
-                from mohobot.services.llm_tools import registry
+        """Keep a timed-out or cancelled hook owned until it actually exits.
 
-                with registry.registration_scope(registration_stage):
+        Returns False for an ordinary hook failure; ownership failures
+        (timeout / cancellation) still raise so the hook stays tracked.
+        """
+        task = meta.get("_hook_task")
+        if task is None:
+            plugin = meta.get("instance")
+            hook = getattr(plugin, hook_name, None)
+            if not callable(hook):
+                return True
+
+            async def invoke():
+                if registration_stage is None:
                     result = hook()
                     if inspect.isawaitable(result):
-                        await asyncio.wait_for(result, timeout=self._hook_timeout)
-            return True
-        except Exception as e:
-            logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {e}")
-            return False
+                        await result
+                else:
+                    from mohobot.services.llm_tools import registry
 
-    async def _start_plugin(self, meta: dict[str, Any]) -> bool:
+                    with registry.registration_scope(registration_stage):
+                        result = hook()
+                        if inspect.isawaitable(result):
+                            await result
+
+            task = asyncio.create_task(invoke(), name=f"plugin:{meta['name']}:{hook_name}")
+            meta["_hook_task"] = task
+            meta["_hook_name"] = hook_name
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self._hook_timeout)
+        except asyncio.CancelledError:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+            raise
+        if not done:
+            if not task.cancelling():
+                task.cancel()
+            raise TimeoutError(f"plugin {meta['name']} {hook_name} is still active")
+        meta.pop("_hook_task")
+        meta.pop("_hook_name")
+        if task.cancelled():
+            raise RuntimeError(f"plugin {meta['name']} {hook_name} was cancelled")
+        try:
+            task.result()
+        except Exception as exc:
+            logger.error(f"Plugin {meta.get('name', '?')} {hook_name} failed: {exc}")
+            if hook_name == "on_startup":
+                meta["error"] = str(exc)
+            return False
+        return True
+
+    async def _activate_plugin(self, meta: dict[str, Any], *, persist_enable: bool = False) -> bool:
         from mohobot.services.llm_tools import registry
 
         stage = meta.get("_llm_tool_stage")
         if stage is None:
             stage = registry.new_plugin_stage(str(meta.get("name", "")), self._state_file)
             meta["_llm_tool_stage"] = stage
-        success = await self._call_hook(meta, "on_startup", stage)
+        cancelled = None
         try:
-            if success:
+            self._inject_runtime(meta)
+            if not await self._call_hook(meta, "on_startup", stage):
+                raise RuntimeError(meta.get("error") or "on_startup failed")
+            try:
                 registry.commit_plugin_stage(stage)
-            else:
-                registry.discard_plugin_stage(stage)
-        except Exception as e:
+            except Exception as exc:
+                raise RuntimeError(f"LLM tool registration failed: {exc}") from exc
+            if persist_enable:
+                cancelled = await self._save_enabled(meta["name"], True)
+        except asyncio.CancelledError:
             registry.discard_plugin_stage(stage)
-            logger.error(f"Plugin {meta.get('name', '?')} LLM tool registration failed: {e}")
-            success = False
+            meta["_llm_tool_stage"] = None
+            meta["_retiring"] = True
+            meta["error"] = "activation cancelled"
+            raise
+        except Exception as exc:
+            registry.discard_plugin_stage(stage)
+            meta["_llm_tool_stage"] = None
+            meta["error"] = str(exc)
+            logger.error(f"Plugin {meta['name']} activation failed: {exc}")
+            await self._retire_plugin(meta)
+            self._unload_plugin(meta)
+            return False
         meta["_llm_tool_stage"] = None
-        return success
+        if persist_enable:
+            meta["enabled"] = True
+        meta["_ready"] = True
+        meta["error"] = None
+        self._start_tick_for(meta)
+        if cancelled is not None:
+            raise cancelled
+        return True
+
+    async def _start_plugin(self, meta: dict[str, Any]) -> bool:
+        """Start one loaded candidate; kept as the single-plugin entry point."""
+        return await self._activate_plugin(meta)
 
     async def startup_plugins(self) -> None:
-        """运行已加载插件的可选 on_startup hook。"""
-        for meta in list(self._plugins):
-            if meta.get("enabled") and meta.get("loaded"):
-                await self._start_plugin(meta)
+        """Start candidates that have not yet been activated."""
+        async with self._lock():
+            self._require_admission()
+            await self._startup_plugins_unlocked()
+
+    async def _startup_plugins_unlocked(self) -> None:
+        for meta in tuple(self._plugins):
+            if (
+                meta.get("enabled") and meta.get("loaded")
+                and not meta.get("_ready", True) and not meta.get("_retiring")
+            ):
+                await self._activate_plugin(meta)
+
+    def close_admission(self) -> None:
+        """Retire this plugin system before the application drains it."""
+        self._admission_closed = True
+
+    def _require_admission(self) -> None:
+        if self._admission_closed:
+            raise RuntimeError("plugin system is retired")
 
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
@@ -684,13 +825,11 @@ class PluginSystem(Interceptor):
         每个插件一个循环: 每 interval_sec 秒(每次循环前读取, 配置热更新即时生效)
         调用一次插件 on_tick()。热重载前需先 stop_tick_tasks()。
         """
-        self.stop_tick_tasks()
-
         for meta in tuple(self._plugins):
             self._start_tick_for(meta)
 
     def _start_tick_for(self, meta: dict[str, Any]) -> None:
-        if not meta.get("enabled") or not meta.get("loaded"):
+        if not self._can_dispatch(meta):
             return
         plugin = meta.get("instance")
         if plugin is None:
@@ -704,11 +843,14 @@ class PluginSystem(Interceptor):
             return
 
         async def _loop(inst=plugin, plugin_name=name):
-            while True:
+            current = asyncio.current_task()
+            while current not in self._stopping_tick_tasks:
                 try:
                     secs = max(1, int(getattr(inst, "interval_sec", 60)))
                     await asyncio.sleep(secs)
-                    await self._run_plugin_handler(inst.on_tick)
+                    if self._admission_closed or not meta.get("loaded"):
+                        break
+                    await self._run_plugin_handler(meta, inst.on_tick)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -717,7 +859,7 @@ class PluginSystem(Interceptor):
         task_name = f"plugin-tick:{name}"
         if self._task_supervisor is not None:
             task = self._task_supervisor.create_task(
-                _loop(), name=task_name, owner="plugins"
+                _loop(), name=task_name, owner=f"{self._owner_key(meta)}:tick"
             )
         else:
             task = asyncio.create_task(_loop(), name=task_name)
@@ -725,8 +867,11 @@ class PluginSystem(Interceptor):
         self._tick_tasks_by_name[name] = task
 
         def _forget(done: asyncio.Task) -> None:
+            self._stopping_tick_tasks.discard(done)
             if self._tick_tasks_by_name.get(name) is done:
                 self._tick_tasks_by_name.pop(name, None)
+            if done in self._tick_tasks:
+                self._tick_tasks.remove(done)
 
         task.add_done_callback(_forget)
         logger.info(f"插件周期任务已启动: {name}")
@@ -734,28 +879,35 @@ class PluginSystem(Interceptor):
     def stop_tick_tasks(self) -> None:
         """同步兼容包装器: 发出取消请求；异步调用者应使用 stop_tick_tasks_async。"""
         for task in self._tick_tasks:
-            if not task.done():
-                task.cancel()
-        self._tick_tasks_by_name.clear()
+            self._request_tick_stop(task)
+
+    def _request_tick_stop(self, task: asyncio.Task[Any]) -> None:
+        if task.done() or task in self._stopping_tick_tasks:
+            return
+        # A tick may catch CancelledError; stop the loop after that callback exits.
+        self._stopping_tick_tasks.add(task)
+        if not task.cancelling():
+            task.cancel()
 
     async def _stop_tick_for(self, name: str) -> None:
-        task = self._tick_tasks_by_name.pop(name, None)
-        if task is None:
+        task = self._tick_tasks_by_name.get(name)
+        if task is None or task.done():
             return
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if task in self._tick_tasks:
-            self._tick_tasks.remove(task)
+        if task is asyncio.current_task():
+            raise TimeoutError(f"plugin {name} cannot stop its own tick task")
+        self._request_tick_stop(task)
+        done, _ = await asyncio.wait({task}, timeout=self._drain_timeout)
+        if not done:
+            raise TimeoutError(f"plugin {name} tick task is still active")
 
     async def stop_tick_tasks_async(self) -> None:
         """取消全部插件周期任务并等待其真正退出。"""
-        tasks = list(self._tick_tasks)
+        tasks = {task for task in self._tick_tasks if not task.done()}
         self.stop_tick_tasks()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tick_tasks.clear()
-        self._tick_tasks_by_name.clear()
+            _, pending = await asyncio.wait(tasks, timeout=self._drain_timeout)
+            if pending:
+                raise TimeoutError("plugin tick tasks are still active")
 
     # ── 管理员注入 ─────────────────────────────────────────────
 
@@ -806,63 +958,48 @@ class PluginSystem(Interceptor):
         通过实例的类注入(classmethod), 避免 re-import 产生第二份模块对象。
         """
         for meta in tuple(self._plugins):
-            inst = meta.get("instance")
-            if inst is None:
-                continue
-            if self._ws_server is not None:
-                injector = getattr(inst.__class__, "inject_ws_server", None)
-                if injector:
-                    injector(self._ws_server)
-            if self._bot_manager is not None:
-                injector = getattr(inst.__class__, "inject_bot_manager", None)
-                if injector:
-                    injector(self._bot_manager)
-            injector = getattr(inst.__class__, "inject_data_dir", None)
-            if injector:
-                injector(str(self._data_dir))
-            plugin_data_dir = self._data_dir / "plugins_data" / str(meta.get("name", ""))
-            injector = getattr(inst.__class__, "inject_plugin_data_dir", None)
-            if injector:
-                plugin_data_dir.mkdir(parents=True, exist_ok=True)
-                injector(str(plugin_data_dir))
-            if self._anysearch_client is not None:
-                injector = getattr(inst.__class__, "inject_anysearch_client", None)
-                if injector:
-                    injector(self._anysearch_client)
-            if self._llm_service is not None:
-                injector = getattr(inst.__class__, "inject_llm_service", None)
-                if injector:
-                    injector(self._llm_service)
-            if self._emotion_manager is not None:
-                injector = getattr(inst.__class__, "inject_emotion_manager", None)
-                if injector:
-                    injector(self._emotion_manager)
-            if self._context_manager is not None:
-                injector = getattr(inst.__class__, "inject_context_manager", None)
-                if injector:
-                    injector(self._context_manager)
-            if self._persona_service is not None:
-                injector = getattr(inst.__class__, "inject_persona_service", None)
-                if injector:
-                    injector(self._persona_service)
-            if self._message_handler is not None:
-                injector = getattr(inst.__class__, "inject_message_handler", None)
-                if injector:
-                    injector(self._message_handler)
-            if self._task_supervisor is not None:
-                injector = getattr(inst.__class__, "inject_task_supervisor", None)
-                if injector:
-                    injector(_PluginTaskSupervisor(self._task_supervisor, meta["name"]))
-            if self._matcher is not None:
-                injector = getattr(inst.__class__, "inject_song_matcher", None)
-                if injector:
-                    injector(self._matcher)
-        # 管理员注入(类级)
-        self.apply_admin_injection()
+            if self._can_dispatch(meta):
+                self._inject_runtime(meta)
+
+    def _inject_runtime(self, meta: dict[str, Any]) -> None:
+        inst = meta.get("instance")
+        if inst is None:
+            return
+        cls = type(inst)
+        for key, value in (
+            ("ws_server", self._ws_server),
+            ("bot_manager", self._bot_manager),
+            ("data_dir", str(self._data_dir)),
+            ("anysearch_client", self._anysearch_client),
+            ("llm_service", self._llm_service),
+            ("emotion_manager", self._emotion_manager),
+            ("context_manager", self._context_manager),
+            ("persona_service", self._persona_service),
+            ("message_handler", self._message_handler),
+            ("song_matcher", self._matcher),
+            ("admin_ids", list(self._admin_ids)),
+        ):
+            injector = getattr(cls, f"inject_{key}", None)
+            if injector and value is not None:
+                injector(value)
+        injector = getattr(cls, "inject_plugin_data_dir", None)
+        if injector:
+            plugin_data_dir = self._data_dir / "plugins_data" / meta["name"]
+            plugin_data_dir.mkdir(parents=True, exist_ok=True)
+            injector(str(plugin_data_dir))
+        injector = getattr(cls, "inject_task_supervisor", None)
+        if injector and self._task_supervisor is not None:
+            injector(_PluginTaskSupervisor(
+                self._task_supervisor,
+                self._owner_key(meta),
+                lambda: not self._can_dispatch(meta),
+                lambda: meta.get("_hook_task") is asyncio.current_task(),
+            ))
 
     async def load_plugins(self) -> int:
         """扫描并加载插件; 与热重载共用同一把锁, 避免并发替换注册表。"""
         async with self._lock():
+            self._require_admission()
             if self._plugins:
                 return await self._reload_unlocked()
             return await self._load_all_unlocked()
@@ -1060,6 +1197,7 @@ class PluginSystem(Interceptor):
         """热重载: 重新扫描 plugins/ 目录并加载全部插件。"""
         logger.info("Hot-reloading plugins...")
         async with self._lock():
+            self._require_admission()
             count = await self._reload_unlocked()
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
         return count
@@ -1067,6 +1205,7 @@ class PluginSystem(Interceptor):
     async def unload_plugin(self, name: str) -> bool:
         """卸载单个已加载插件; 文件移除前先停任务并执行 on_shutdown。"""
         async with self._lock():
+            self._require_admission()
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False
@@ -1076,7 +1215,8 @@ class PluginSystem(Interceptor):
             try:
                 was_inactive = await registry.deactivate_owner(name)
                 owner_states = {name: was_inactive}
-                await self._wait_for_dispatches()
+                await self._pause_dispatches((meta,))
+                await self._retire_plugin(meta)
             except asyncio.TimeoutError:
                 if owner_states is not None:
                     registry.restore_owner_activity(owner_states)
@@ -1086,14 +1226,6 @@ class PluginSystem(Interceptor):
                 if owner_states is not None:
                     registry.restore_owner_activity(owner_states)
                 raise
-            await self._stop_tick_for(name)
-            if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
-            if meta.get("loaded"):
-                await self._call_hook(meta, "on_shutdown")
-            if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
-            registry.unregister_owner(name)
             self._unload_plugin(meta)
             self._plugins.remove(meta)
             return True
@@ -1101,111 +1233,103 @@ class PluginSystem(Interceptor):
     async def reload_plugin(self, name: str) -> bool:
         """只重载一个插件, 其余插件实例与周期任务保持不变。"""
         async with self._lock():
-            meta = next((m for m in self._plugins if m["name"] == name), None)
-            if meta is None:
-                await self._reload_unlocked()
-                meta = next((m for m in self._plugins if m["name"] == name), None)
-                return bool(meta and meta.get("loaded"))
-            from mohobot.services.llm_tools import registry
+            self._require_admission()
+            return await self._reload_one_unlocked(name)
 
-            entry = next((item for item in self._iter_entries() if item[1] == name), None)
-            if entry is not None:
-                previous = self._module_name_conflict(self._module_name(name), exclude_name=name)
-                if previous is not None:
-                    logger.error(f"插件模块名冲突: {name} 与 {previous}")
-                    return False
-            owner_states = None
-            try:
-                was_inactive = await registry.deactivate_owner(name)
-                owner_states = {name: was_inactive}
-                await self._wait_for_dispatches()
-            except asyncio.TimeoutError:
-                if owner_states is not None:
-                    registry.restore_owner_activity(owner_states)
-                logger.warning(f"Plugin {name} reload timed out before teardown")
-                return False
-            except BaseException:
-                if owner_states is not None:
-                    registry.restore_owner_activity(owner_states)
-                raise
-            old_tool_snapshot = registry.snapshot_owner_tools(name)
-            index = self._plugins.index(meta)
-            old_meta = dict(meta)
-            old_imports = old_meta.get("_imports")
-            await self._stop_tick_for(name)
-            if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
-            if meta.get("loaded"):
-                await self._call_hook(meta, "on_shutdown")
-            if self._task_supervisor is not None:
-                await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
+    async def _reload_one_unlocked(self, name: str, *, enable: bool = False) -> bool:
+        from mohobot.plugins.sources import load_sources
+
+        from mohobot.services.llm_tools import registry
+
+        meta = next((m for m in self._plugins if m["name"] == name), None)
+        if meta is not None and "_rollback" in meta:
+            # Finish the interrupted replacement before reconsidering files on disk.
+            await self._rollback_reload(meta, self._plugins.index(meta))
+            return False
+        entry = next((item for item in self._iter_entries() if item[1] == name), None)
+        if entry is None:
+            return False
+        module_name = self._module_name(name)
+        previous = self._module_name_conflict(module_name, exclude_name=name)
+        if previous is not None:
+            logger.error(f"插件模块名冲突: {name} 与 {previous}")
+            return False
+        sources = await load_sources(self._data_dir)
+        state = self._load_state()
+        was_enabled = state.get(name, {}).get("enabled", True)
+        if enable:
+            state[name] = {"enabled": True}
+
+        index = self._plugins.index(meta) if meta is not None else len(self._plugins)
+        old_instance = None
+        old_imports = None
+        old_tools: dict[str, Any] = {}
+        if meta is not None and meta.get("loaded"):
+            can_restore = self._can_dispatch(meta)
+            old_tools = registry.snapshot_owner_tools(name)
+            await self._pause_dispatches((meta,))
+            await self._retire_plugin(meta)
+            if can_restore:
+                old_instance = meta.get("instance")
+                old_imports = meta.get("_imports")
             self._unload_plugin(meta)
-            if entry is None:
-                registry.unregister_owner(name)
-                self._plugins.pop(index)
-                return False
+        entry_path, _, entry_dir, source = entry
+        try:
+            candidate = self._load_one(entry_path, name, entry_dir, state, source)
+        except Exception as exc:
+            candidate = self._error_meta(entry_path, name, entry_dir, source, exc)
+        candidate["source_record"] = sources.get(name)
+        if enable:
+            # Expose the saved setting until startup and the enable write succeed.
+            candidate["enabled"] = was_enabled
+        # Keep the snapshot reachable while the candidate still owns resources.
+        if old_instance is not None:
+            candidate["_rollback"] = (meta, old_instance, old_imports, old_tools)
+        self._plugins[index:index + 1] = [candidate]
+        try:
+            if candidate.get("loaded") and await self._activate_plugin(candidate, persist_enable=enable):
+                candidate.pop("_rollback", None)
+                return True
+        except asyncio.CancelledError:
+            if candidate.get("_ready"):
+                # An enable write committed despite cancellation of its waiter.
+                candidate.pop("_rollback", None)
+            elif "_rollback" in candidate:
+                try:
+                    await self._rollback_reload(candidate, index)
+                except Exception as exc:
+                    logger.error(f"Plugin {name} rollback interrupted during cleanup: {exc}")
+            raise
+        if "_rollback" in candidate and candidate.get("error"):
+            await self._rollback_reload(candidate, index)
+        else:
+            candidate.pop("_rollback", None)
+        return False
+
+    async def _rollback_reload(self, candidate: dict[str, Any], index: int) -> None:
+        from mohobot.services.llm_tools import registry
+
+        if candidate.get("loaded"):
+            await self._retire_plugin(candidate)
+            self._unload_plugin(candidate)
+
+        meta, instance, imports, old_tools = candidate.pop("_rollback")
+        name = meta["name"]
+        if not imports.restore():
+            candidate["error"] = f"{candidate['error']}; previous plugin modules are occupied"
+            logger.error(f"Plugin {name} rollback failed: {candidate['error']}")
+            return
+        meta.update(
+            instance=instance, loaded=True, _imports=imports, _ready=False,
+            _retiring=False, _shutdown_done=False,
+        )
+        self._plugins[index] = meta
+        if await self._activate_plugin(meta):
             try:
-                new_meta = self._load_one(
-                    entry[0], entry[1], entry[2], self._load_state(), entry[3]
-                )
-            except Exception as e:
-                new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
-                logger.error(f"Failed to reload plugin {entry[1]}: {e}")
-                # A load error still permits restoring the old enabled instance.
-                new_meta["enabled"] = old_meta["enabled"]
-            from mohobot.plugins.sources import load_sources
-
-            sources = await load_sources(self._data_dir)
-            new_meta["source_record"] = sources.get(new_meta.get("name", ""))
-            self._plugins[index] = new_meta
-            started = False
-            if new_meta.get("loaded"):
-                try:
-                    self.apply_injections()
-                except Exception as e:
-                    logger.error(f"Plugin injection failed after reload: {e}")
-                started = await self._start_plugin(new_meta)
-
-            if not started and new_meta.get("loaded"):
-                await self._call_hook(new_meta, "on_shutdown")
-                self._unload_plugin(new_meta)
-                new_meta["error"] = new_meta.get("error") or "on_startup failed"
-                new_meta["loaded"] = False
-
-            if not started and new_meta.get("enabled", True) and old_meta.get("loaded"):
-                if old_imports is not None and not old_imports.restore():
-                    new_meta["error"] = f"{new_meta['error']}; previous plugin modules are occupied"
-                    logger.error(f"Plugin {name} rollback failed: {new_meta['error']}")
-                    return False
-                self._plugins[index] = old_meta
-                try:
-                    self.apply_injections()
-                except Exception as e:
-                    logger.error(f"Plugin injection failed after reload rollback: {e}")
-                rollback_started = await self._start_plugin(old_meta)
-                if rollback_started:
-                    try:
-                        registry.restore_owner_tools(name, old_tool_snapshot)
-                    except Exception as e:
-                        logger.error(f"Plugin {name} tool rollback failed: {e}")
-                        rollback_started = False
-                if rollback_started:
-                    registry.restore_owner_activity(owner_states or {})
-                    self._start_tick_for(old_meta)
-                else:
-                    registry.unregister_owner(name)
-                    old_meta["loaded"] = False
-                    old_meta["error"] = "previous plugin failed to restart after reload"
-                logger.error(
-                    f"Plugin {name} reload failed, kept previous instance: {new_meta.get('error')}"
-                )
-                return False
-            if not started:
-                registry.unregister_owner(name)
-                self._plugins[index] = new_meta
-                return False
-            self._start_tick_for(new_meta)
-            return True
+                registry.restore_owner_tools(name, old_tools)
+            except Exception as exc:
+                logger.error(f"Plugin {name} tool rollback failed: {exc}")
+            logger.error(f"Plugin {name} reload failed, restored previous instance: {candidate['error']}")
 
     # ── Plugin State (enable/disable) ─────────────────────────
 
@@ -1218,39 +1342,64 @@ class PluginSystem(Interceptor):
             logger.error(f"Failed to load plugin state: {e}")
         return {}
 
-    async def _save_state(self, state: dict[str, Any]) -> None:
-        """原子合并写入插件启停状态。"""
+    async def _save_enabled(self, name: str, enabled: bool) -> asyncio.CancelledError | None:
+        """Finish the write with the lifecycle lock held, even if the waiter cancels."""
         from mohobot.file_store import json_update
 
-        try:
-            await json_update(
-                self._state_file,
-                lambda current: {**(current if isinstance(current, dict) else {}), **state},
-                default=state,
-            )
-        except Exception as e:
-            logger.error(f"Failed to save plugin state: {e}")
+        def merge(current):
+            state = dict(current) if isinstance(current, dict) else {}
+            entry = state.get(name)
+            state[name] = {**(entry if isinstance(entry, dict) else {}), "enabled": enabled}
+            return state
+
+        write = asyncio.create_task(json_update(self._state_file, merge), name=f"plugin-state:{name}")
+        cancelled = None
+        while not write.done():
+            try:
+                # wait() doesn't forward cancellation to the JSON writer.
+                await asyncio.wait({write})
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        write.result()
+        # The caller publishes the committed state before re-raising cancellation.
+        return cancelled
 
     async def set_enabled(self, name: str, enabled: bool) -> bool:
         """启用/禁用插件, 立即生效(无需重启)。"""
         async with self._lock():
+            self._require_admission()
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False
-            update = {name: {"enabled": enabled}}
-            if not enabled or not meta.get("loaded"):
-                await self._reload_unlocked(enabled_update=update)
-            else:
-                await self._save_state(update)
-                meta["enabled"] = enabled
-        logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (热生效)")
-        return True
+            if enabled and self._can_dispatch(meta):
+                return True
+            if enabled:
+                state = self._load_state()
+                state[name] = {"enabled": True}
+                self._check_reload_namespaces(state)
+                return await self._reload_one_unlocked(name, enable=True)
+            if meta.get("loaded"):
+                await self._pause_dispatches((meta,))
+                await self._retire_plugin(meta)
+                self._unload_plugin(meta)
+            meta.pop("_rollback", None)
+            try:
+                cancelled = await self._save_enabled(name, False)
+            except Exception as exc:
+                meta["error"] = str(exc)
+                raise
+            meta["enabled"] = False
+            meta["error"] = None
+            if cancelled is not None:
+                raise cancelled
+            return True
 
     def list_plugins(self) -> list[dict[str, Any]]:
         """Return plugin metadata (without instances) for the web panel."""
         result = []
         for meta in tuple(self._plugins):
             item = {k: v for k, v in meta.items() if k != "instance" and not k.startswith("_")}
+            item["loaded"] = self._can_dispatch(meta)
             result.append(item)
         return result
 
@@ -1273,7 +1422,7 @@ class PluginSystem(Interceptor):
     async def dispatch_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Dispatch a notice event to all enabled plugins."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1281,14 +1430,14 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_notice", None)
                 if handler:
-                    await self._run_plugin_handler(handler, bot_id, event, raw)
+                    await self._run_plugin_handler(meta, handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} notice handler error: {e}")
 
     async def dispatch_meta(self, bot_id: str, event: MetaEvent, raw: dict) -> None:
         """Dispatch a meta event to all enabled plugins."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1296,7 +1445,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_meta", None)
                 if handler:
-                    await self._run_plugin_handler(handler, bot_id, event, raw)
+                    await self._run_plugin_handler(meta, handler, bot_id, event, raw)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} meta handler error: {e}")
 
@@ -1308,7 +1457,7 @@ class PluginSystem(Interceptor):
         Returns True if a plugin handled the request (框架不再自动同意)。
         """
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1316,7 +1465,7 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_request", None)
                 if handler:
-                    handled = await self._run_plugin_handler(handler, bot_id, event, raw)
+                    handled = await self._run_plugin_handler(meta, handler, bot_id, event, raw)
                     if handled:
                         return True
             except Exception as e:
@@ -1335,7 +1484,7 @@ class PluginSystem(Interceptor):
         返回 (是否消费, 回复); 不消费时消息继续走正常流程(gate → 拦截链 → LLM)。
         """
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1343,11 +1492,15 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message_observed", None)
                 if handler:
-                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw)
+                    handled, response = await self._run_plugin_handler(
+                        meta, handler, bot_id, event, raw, default=(False, None),
+                    )
                     if handled:
                         return (True, response)
             except Exception as e:
                 logger.error(f"Plugin {meta['name']} observe handler error: {e}")
+            if not self._can_dispatch(meta):
+                continue
             # 无前缀命令触发: 插件声明 no_prefix_triggers 后, 消息文本精确匹配
             # 集合中的词(群聊无需 @, 私聊直接) → 调用插件 on_message 处理
             try:
@@ -1362,7 +1515,7 @@ class PluginSystem(Interceptor):
                         msg_handler = getattr(plugin, "on_message", None)
                         if msg_handler:
                             handled, response = await self._run_plugin_handler(
-                                msg_handler, bot_id, event, raw
+                                meta, msg_handler, bot_id, event, raw, default=(False, None),
                             )
                             if handled:
                                 return (True, response)
@@ -1413,7 +1566,7 @@ class PluginSystem(Interceptor):
         """
         parts: list[str] = []
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1422,7 +1575,7 @@ class PluginSystem(Interceptor):
                 handler = getattr(plugin, "on_perception", None)
                 if not handler:
                     continue
-                text = await self._run_plugin_handler(handler, bot_id, event, raw)
+                text = await self._run_plugin_handler(meta, handler, bot_id, event, raw)
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
             except Exception as e:
@@ -1437,7 +1590,7 @@ class PluginSystem(Interceptor):
     ) -> tuple[bool, str | list[dict[str, Any]] | None]:
         """Give plugins a chance to intercept messages."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._can_dispatch(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1445,7 +1598,9 @@ class PluginSystem(Interceptor):
             try:
                 handler = getattr(plugin, "on_message", None)
                 if handler:
-                    handled, response = await self._run_plugin_handler(handler, bot_id, event, raw_event)
+                    handled, response = await self._run_plugin_handler(
+                        meta, handler, bot_id, event, raw_event, default=(False, None),
+                    )
                     if handled:
                         return (True, response)
             except Exception as e:
