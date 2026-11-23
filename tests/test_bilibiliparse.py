@@ -269,12 +269,15 @@ async def test_config_injection():
 
     ps = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp())
     await ps.load_plugins()
-    meta = next((m for m in ps._plugins if m["name"] == "bilibiliparse"), None)
-    assert meta and meta["loaded"], "bilibiliparse 应加载成功"
-    assert meta["config_schema"], "应有配置 schema"
-    inst = meta["instance"]
-    assert inst.plugin_config.get("api_url") == "http://114.134.188.188:3003"
-    assert inst.plugin_config.get("accept_quality") == 80
+    try:
+        meta = next((m for m in ps._plugins if m["name"] == "bilibiliparse"), None)
+        assert meta and meta["loaded"], "bilibiliparse 应加载成功"
+        assert meta["config_schema"], "应有配置 schema"
+        inst = meta["instance"]
+        assert inst.plugin_config.get("api_url") == "http://114.134.188.188:3003"
+        assert inst.plugin_config.get("accept_quality") == 80
+    finally:
+        await ps.shutdown_plugins()
     print("[+] 配置注入 OK")
 
 
