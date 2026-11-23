@@ -6,7 +6,8 @@ import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 from loguru import logger
 
@@ -19,11 +20,23 @@ DEFAULT_INDEX_URL = (
 
 
 @dataclass(frozen=True)
+class RegistryIdentity:
+    id: str
+    url: str
+    generation: str
+
+
+@dataclass(frozen=True)
 class RegistrySource:
     id: str
     name: str
     url: str
     official: bool = False
+    generation: str = "legacy-v1"
+
+    @property
+    def identity(self) -> RegistryIdentity:
+        return RegistryIdentity(self.id, self.url, self.generation)
 
 
 def _source_file(data_dir: str | Path) -> Path:
@@ -37,19 +50,33 @@ def default_sources() -> list[RegistrySource]:
             name="官方插件源",
             url=DEFAULT_INDEX_URL,
             official=True,
+            generation="official-v1",
         )
     ]
 
 
-def validate_source_url(url: str) -> str:
-    parsed = urlparse(url)
+def normalize_source_url(url: str) -> str:
+    parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("插件源只支持 http/https")
     if not parsed.hostname:
         raise ValueError("插件源缺少主机名")
-    if parsed.username or parsed.password:
+    if parsed.username is not None or parsed.password is not None:
         raise ValueError("插件源 URL 不允许携带凭据")
-    host = parsed.hostname.lower()
+    # urlsplit preserves the case of an IPv6 zone identifier.
+    host = parsed.hostname
+    authority = f"[{host}]" if ":" in host else host
+    if parsed.port is not None and parsed.port != {"http": 80, "https": 443}[parsed.scheme]:
+        authority += f":{parsed.port}"
+    # Preserve even an explicitly empty query; fragments are not sent to the server.
+    query = f"?{parsed.query}" if "?" in url.partition("#")[0] else ""
+    return f"{parsed.scheme}://{authority}{parsed.path}{query}"
+
+
+def validate_source_url(url: str) -> str:
+    url = normalize_source_url(url)
+    host = urlsplit(url).hostname
+    assert host is not None
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
         raise ValueError("插件源不能指向本机")
     try:
@@ -101,28 +128,33 @@ async def load_registry_sources(data_dir: str | Path) -> list[RegistrySource]:
     raw = data.get("sources")
     if not isinstance(raw, list):
         return default_sources()
-    result: list[RegistrySource] = []
+    result = default_sources()
+    seen = {DEFAULT_SOURCE_ID}
     for item in raw:
-        if not isinstance(item, dict):
-            continue
         try:
-            source_id = str(item["id"])
-            if not re.fullmatch(r"[a-z0-9_-]{1,64}", source_id):
-                continue
-            source = RegistrySource(
-                id=source_id,
-                name=str(item["name"]),
-                url=await asyncio.to_thread(validate_source_url, str(item["url"])),
-                official=bool(item.get("official", False)),
-            )
-        except (KeyError, ValueError):
+            source = _parse_custom_source(item)
+        except (KeyError, ValueError, TypeError):
             continue
-        if source.official and source.id != DEFAULT_SOURCE_ID:
-            source = RegistrySource(source.id, source.name, source.url, False)
-        result.append(source)
-    if not any(source.official for source in result):
-        result.insert(0, default_sources()[0])
+        if source.id not in seen:
+            result.append(source)
+            seen.add(source.id)
     return result
+
+
+def _check_custom_id(source_id: str) -> None:
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", source_id):
+        raise ValueError("插件源 id 只能包含小写字母、数字、下划线和连字符")
+    if source_id == DEFAULT_SOURCE_ID:
+        raise ValueError("不能覆盖官方源")
+
+
+def _parse_custom_source(item: dict) -> RegistrySource:
+    source_id = item["id"]
+    _check_custom_id(source_id)
+    generation = item.get("generation", "legacy-v1")
+    if not isinstance(generation, str) or not re.fullmatch(r"(?:legacy-v1|[0-9a-f]{32})", generation):
+        raise ValueError("插件源代次无效")
+    return RegistrySource(source_id, str(item["name"]), normalize_source_url(str(item["url"])), generation=generation)
 
 
 async def add_registry_source(
@@ -132,27 +164,42 @@ async def add_registry_source(
     name: str,
     url: str,
 ) -> RegistrySource:
-    if not re.fullmatch(r"[a-z0-9_-]{1,64}", id):
-        raise ValueError("插件源 id 只能包含小写字母、数字、下划线和连字符")
-    if id == DEFAULT_SOURCE_ID:
-        raise ValueError("不能覆盖官方源")
+    _check_custom_id(id)
     validated = await asyncio.to_thread(validate_source_url, url)
-    source = RegistrySource(id=id, name=name, url=validated, official=False)
-    path = _source_file(data_dir)
+    return await save_registry_source(data_dir, source_id=id, name=name, validated_url=validated)
+
+
+async def save_registry_source(
+    data_dir: str | Path, *, source_id: str, name: str, validated_url: str,
+) -> RegistrySource:
+    """Store an already validated URL without performing DNS inside a commit lock."""
+    _check_custom_id(source_id)
+    source = RegistrySource(source_id, name, normalize_source_url(validated_url), generation=uuid4().hex)
 
     def merge(current):
+        nonlocal source
         data = current if isinstance(current, dict) else {}
-        sources = [
-            item
-            for item in data.get("sources", [])
-            if isinstance(item, dict) and item.get("id") != id
-        ]
-        sources.append(
-            {"id": source.id, "name": source.name, "url": source.url, "official": False}
-        )
+        sources = []
+        prior_seen = False
+        for item in data.get("sources", []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("id") != source_id:
+                sources.append(item)
+                continue
+            if not prior_seen:
+                prior_seen = True
+                try:
+                    old = _parse_custom_source(item)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if old.url == source.url:
+                    source = RegistrySource(source_id, name, source.url, generation=old.generation)
+        sources.append({"id": source.id, "name": source.name, "url": source.url,
+                        "official": False, "generation": source.generation})
         return {"schema_version": 1, "sources": sources}
 
-    await json_update(path, merge, default={"schema_version": 1, "sources": []})
+    await json_update(_source_file(data_dir), merge, default={"schema_version": 1, "sources": []})
     return source
 
 

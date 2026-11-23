@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystem
+from mohobot.plugin_market.service import MarketService
 from mohobot.web_panel.app import WebPanel
 
 
@@ -31,10 +32,18 @@ class _FakeMarket:
             api_version=1,
             license="MIT",
             tags=("demo",),
+            source_id="official",
+            source_generation="official-v1",
         )
+
+    async def ensure_indexes(self) -> None:
+        return None
 
     async def refresh(self) -> None:
         return None
+
+    def source_status(self, source_id):
+        return {"status": "fresh", "last_success_at": 123.0}
 
     async def reload_sources(self):
         self.reload_count += 1
@@ -43,7 +52,7 @@ class _FakeMarket:
     def entries(self):
         return [self._entry]
 
-    async def install(self, plugin_id: str, *, source_id: str = "official"):
+    async def install(self, plugin_id: str, *, source_id: str = "official", source_generation=None):
         return "demo", Path("demo")
 
     async def update(self, plugin_id: str, *, source_id: str = "official", before_replace=None):
@@ -151,7 +160,7 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
         (data / "plugins_state.json").write_text(state, encoding="utf-8")
 
     class Market(_FakeMarket):
-        async def install(self, plugin_id, *, source_id):
+        async def install(self, plugin_id, *, source_id, source_generation=None):
             destination.mkdir(parents=True)
             (destination / "metadata.yaml").write_text(dedent(f"""\
                 name: {name}
@@ -226,25 +235,46 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-def test_add_source_refreshes_market_sources(tmp_path: Path) -> None:
-    market = _FakeMarket()
+def test_source_listing_does_not_prevent_market_first_fetch(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("mohobot.plugin_market.sources.socket.getaddrinfo", lambda *args: [])
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        name = "official_demo" if "raw.githubusercontent.com" in url else "demo"
+        return {"$meta": {"schema_version": 1, "name": "fixture"}, "plugins": {f"TestFixture/{name}": {
+            "author": "TestFixture", "name": name, "description": "offline fixture", "version": "1.0.0",
+            "repo": "https://github.com/TestFixture/offline-market", "sha256": "a" * 64, "api_version": 1,
+        }}}
+
+    market = MarketService(tmp_path, tmp_path / "plugins", fetcher=fetch)
     panel = WebPanel(
         password_hash=WebPanel._hash_password("test-password"),
         data_dir=str(tmp_path),
         plugin_system=_FakePluginSystem(),
         plugin_market=market,
     )
-    client = TestClient(panel._app)
-    token = client.post(
-        "/api/login", json={"username": "admin", "password": "test-password"}
-    ).json()["token"]
-    response = client.post(
-        "/api/plugin-sources",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"id": "custom", "name": "自定义", "url": "https://example.com/index.json"},
-    )
-    assert response.status_code == 200
-    assert market.reload_count == 1
+    with TestClient(panel._app) as client:
+        token = client.post(
+            "/api/login", json={"username": "admin", "password": "test-password"}
+        ).json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        source = {"id": "custom", "name": "自定义", "url": "https://example.com/index.json"}
+        assert client.post("/api/plugin-sources", headers=headers, json=source).status_code == 200
+        assert client.get("/api/plugin-sources", headers=headers).json()[1]["status"] == "unattempted"
+        assert not calls
+        listing = client.get("/api/plugins/market", headers=headers)
+        assert listing.status_code == 200
+        assert len(calls) == 2
+        assert all(item["status"] == "fresh" and item["last_success_at"] for item in listing.json()["sources"])
+        generation = next(item["source_generation"] for item in listing.json()["plugins"] if item["source_id"] == "custom")
+        source["url"] += "?changed=1"
+        assert client.post("/api/plugin-sources", headers=headers, json=source).status_code == 200
+        result = client.post("/api/plugins/market/install", headers=headers, json={
+            "plugin_id": "TestFixture/demo", "source_id": "custom", "source_generation": generation,
+        })
+        assert result.status_code == 409
+        assert not (tmp_path / "plugins" / "demo").exists()
 
 
 def test_source_list_reloads_from_disk(tmp_path: Path) -> None:

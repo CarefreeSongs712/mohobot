@@ -7,11 +7,16 @@ from unittest.mock import patch
 
 import pytest
 
-from mohobot.plugin_market.service import MarketService
-from mohobot.plugin_market.sources import add_registry_source
+from mohobot.plugin_market.service import MarketService, MarketSourceChanged
+from mohobot.plugin_market.sources import DEFAULT_INDEX_URL, add_registry_source
 from mohobot.file_store import json_write
 from mohobot.plugins.installer import InstallError, sha256_file
 from mohobot.plugins.sources import load_sources, save_source
+
+
+@pytest.fixture(autouse=True)
+def _offline_registry_dns(monkeypatch):
+    monkeypatch.setattr("mohobot.plugin_market.sources.socket.getaddrinfo", lambda *args: [])
 
 
 def _entry(name: str, archive: Path | None = None) -> dict:
@@ -178,7 +183,7 @@ def test_market_checks_actual_archive_before_replacing_target(tmp_path, monkeypa
         service = MarketService(data, data / "plugins", fetcher=lambda url: payload)
         target = service.plugins_dir / "demo"
         entry_id = "CarefreeSongs712/demo"
-        record = {"install_method": "market", "plugin_id": entry_id, "version": "1.0.0"}
+        record = {"install_method": "market", "registry_id": "official", "plugin_id": entry_id, "version": "1.0.0"}
         want_version = "2.0.0" if operation == "update" else "1.0.0"
         old_metadata = (
             "name: demo\nauthor: CarefreeSongs712\ndisplay_name: Demo\nversion: 1.0.0\n"
@@ -234,6 +239,234 @@ def test_market_checks_actual_archive_before_replacing_target(tmp_path, monkeypa
             assert (target / "main.py").read_bytes() == b"# old bytes\n"
         else:
             assert not target.exists()
+
+    asyncio.run(run())
+
+
+def test_refresh_cannot_publish_after_newer_refresh(tmp_path):
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.create_future()
+        release = threading.Event()
+        calls = 0
+
+        def fetch(url):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                loop.call_soon_threadsafe(started.set_result, None)
+                assert release.wait(5)
+                return _payload("stale")
+            return _payload("latest")
+
+        data = tmp_path / "data"
+        service = MarketService(data, data / "plugins", fetcher=fetch)
+        old = asyncio.create_task(service.refresh())
+        try:
+            await asyncio.wait_for(started, 5)
+            await service.refresh()
+        finally:
+            release.set()
+            await old
+        assert [entry.name for entry in service.entries()] == ["latest"]
+        assert service.source_status("official")["status"] == "fresh"
+
+        def offline(url):
+            raise OSError("offline fixture")
+
+        restarted = MarketService(data, data / "plugins", fetcher=offline)
+        await restarted.refresh()
+        assert [entry.name for entry in restarted.entries()] == ["latest"]
+        assert restarted.source_status("official")["status"] == "cached"
+        assert restarted.source_status("official")["last_success_at"] == service.source_status("official")["last_success_at"]
+
+    asyncio.run(run())
+
+
+def test_source_list_does_not_skip_initial_index_or_proxy_fallback(tmp_path):
+    async def run():
+        requests = []
+
+        def fetch(url):
+            requests.append(url)
+            if url != DEFAULT_INDEX_URL:
+                raise OSError("proxy fixture unavailable")
+            return _payload("official")
+
+        service = MarketService(tmp_path / "data", tmp_path / "plugins", proxy="https://proxy.example.test", fetcher=fetch)
+        await service.reload_sources()
+        assert requests == []
+        assert service.entries() == []
+        assert service.source_status("official") == {"status": "unattempted", "last_success_at": None}
+        await service.ensure_indexes()
+        await service.ensure_indexes()
+        assert requests == ["https://proxy.example.test/" + DEFAULT_INDEX_URL, DEFAULT_INDEX_URL]
+        assert [entry.name for entry in service.entries()] == ["official"]
+        assert service.source_status("official")["status"] == "fresh"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutation", ["url", "recreate"])
+def test_old_source_refresh_and_cache_are_invalidated(tmp_path, mutation):
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.create_future()
+        release = threading.Event()
+        custom_calls = 0
+        url = "https://registry.example.test/index.json"
+
+        def fetch(request_url):
+            nonlocal custom_calls
+            if request_url == DEFAULT_INDEX_URL:
+                return _payload("official")
+            custom_calls += 1
+            if custom_calls == 1:
+                return _payload("cached_old")
+            if custom_calls == 2:
+                loop.call_soon_threadsafe(started.set_result, None)
+                assert release.wait(5)
+                return _payload("late_old")
+            raise OSError("offline new identity")
+
+        service = MarketService(tmp_path / "data", tmp_path / "plugins", fetcher=fetch)
+        await service.add_source(source_id="custom", name="old", url=url)
+        await service.refresh()
+        assert [entry.name for entry in service.entries("custom")] == ["cached_old"]
+        await service.add_source(source_id="custom", name="renamed", url=url)
+        assert service.source_status("custom")["status"] == "fresh"
+        old = asyncio.create_task(service.refresh())
+        try:
+            await asyncio.wait_for(started, 5)
+            if mutation == "recreate":
+                await service.remove_source("custom")
+            await service.add_source(source_id="custom", name="new", url=url if mutation == "recreate" else url + "?new=1")
+            assert service.entries("custom") == []
+            assert service.source_status("custom")["status"] == "unattempted"
+            await service.ensure_indexes()
+        finally:
+            release.set()
+            await old
+        assert service.entries("custom") == []
+        assert service.source_status("custom") == {"status": "failed", "last_success_at": None}
+
+    asyncio.run(run())
+
+
+def test_corrupt_identity_cache_is_not_reused(tmp_path):
+    async def run():
+        def offline(url):
+            raise OSError("offline fixture")
+
+        service = MarketService(tmp_path, tmp_path / "plugins", fetcher=lambda url: _payload("demo"))
+        await service.refresh()
+        cache, = (tmp_path / "cache" / "plugin_market").glob("*.json")
+        cache.write_text('{"index":', encoding="utf-8")
+        restarted = MarketService(tmp_path, tmp_path / "plugins", fetcher=offline)
+        await restarted.refresh()
+        assert restarted.entries() == []
+        assert restarted.source_status("official") == {"status": "failed", "last_success_at": None}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutation", ["rename", "url", "recreate"])
+def test_install_rechecks_frozen_source_after_download(tmp_path, monkeypatch, mutation):
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.create_future()
+        release = threading.Event()
+        archive = _archive(tmp_path, "demo")
+        plugin_id = "CarefreeSongs712/demo"
+        url = "https://registry.example.test/index.json"
+        payload = {"$meta": {"schema_version": 1}, "plugins": {plugin_id: _entry("demo", archive)}}
+        service = MarketService(tmp_path / "data", tmp_path / "plugins", fetcher=lambda _: payload)
+        original = await service.add_source(source_id="custom", name="original", url=url)
+
+        def download(download_url, destination):
+            loop.call_soon_threadsafe(started.set_result, download_url)
+            assert release.wait(5)
+            shutil.copyfile(archive, destination)
+
+        monkeypatch.setattr("mohobot.plugin_market.service.download_file", download)
+        installing = asyncio.create_task(service.install(plugin_id, source_id="custom"))
+        try:
+            used_url = await asyncio.wait_for(started, 5)
+            if mutation == "recreate":
+                await service.remove_source("custom")
+            changed = await service.add_source(source_id="custom", name="changed", url=url + ("?changed=1" if mutation == "url" else ""))
+        finally:
+            release.set()
+        if mutation == "rename":
+            _, dest = await installing
+            assert dest.is_dir()
+            record = (await load_sources(service.data_dir))["demo"]
+            assert record["registry_id"] == "custom"
+            assert record["registry_url"] == original.url
+            assert record["registry_generation"] == original.generation == changed.generation
+            assert record["download_url"] == used_url
+        else:
+            with pytest.raises(MarketSourceChanged):
+                await installing
+            assert not (service.plugins_dir / "demo").exists()
+            assert await load_sources(service.data_dir) == {}
+        assert not list(service.plugins_dir.glob(".market-prepare-*"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("record_identity, expected", [
+    ("wrong_url", MarketSourceChanged),
+    ("wrong_generation", MarketSourceChanged),
+    ("no_url", None),
+    ("normalized_url", None),
+])
+def test_update_never_rebinds_recorded_source_and_backfills_legacy(tmp_path, monkeypatch, record_identity, expected):
+    async def run():
+        plugin_id = "CarefreeSongs712/demo"
+        _archive(tmp_path, "demo")
+        archive_v2 = _archive(tmp_path, "demo", "2.0.0")
+        entry = _entry("demo", archive_v2)
+        entry["version"] = "2.0.0"
+        payload = {"$meta": {"schema_version": 1}, "plugins": {plugin_id: entry}}
+        data = tmp_path / "data"
+        service = MarketService(data, data / "plugins", fetcher=lambda _: payload)
+        source = await service.add_source(source_id="custom", name="fixture", url="https://registry.example.test/i")
+        destination = service.plugins_dir / "demo"
+        destination.parent.mkdir(parents=True)
+        shutil.copytree(tmp_path / "src-1.0.0" / "demo", destination)
+        record = {"install_method": "market", "registry_id": "custom", "plugin_id": plugin_id}
+        if record_identity == "wrong_url":
+            record["registry_url"] = "https://other.example.test/i"
+        elif record_identity == "wrong_generation":
+            record.update(registry_url=source.url, registry_generation="0" * 32)
+        elif record_identity == "normalized_url":
+            record["registry_url"] = "HTTPS://Registry.Example.Test:443/i"
+        await save_source(data, "demo", record)
+        downloads = []
+        stopped = []
+
+        def download(url, dest):
+            downloads.append(url)
+            shutil.copyfile(archive_v2, dest)
+
+        async def before_replace(name):
+            stopped.append(name)
+
+        monkeypatch.setattr("mohobot.plugin_market.service.download_file", download)
+        if expected:
+            with pytest.raises(expected):
+                await service.update(plugin_id, before_replace=before_replace)
+            assert not downloads and not stopped
+            assert (await load_sources(data))["demo"] == {**record, "schema_version": 1}
+            assert "version: 1.0.0" in (destination / "metadata.yaml").read_text()
+        else:
+            await service.update(plugin_id, before_replace=before_replace)
+            assert len(downloads) == 1 and stopped == ["demo"]
+            updated = (await load_sources(data))["demo"]
+            assert updated["registry_url"] == source.url
+            assert updated["registry_generation"] == source.generation
+            assert updated["version"] == "2.0.0"
 
     asyncio.run(run())
 

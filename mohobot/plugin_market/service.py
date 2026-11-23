@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import tempfile
-from dataclasses import replace
 import time
 import urllib.request
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any, Callable, Literal
 from zipfile import BadZipFile
-from typing import Any, Callable
 
 from loguru import logger
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -18,8 +20,14 @@ from packaging.version import InvalidVersion, Version
 from mohobot import __version__ as MOHOBOT_VERSION
 from mohobot.api import api_version as PLUGIN_API_VERSION
 from mohobot.plugin_market.sources import (
+    DEFAULT_SOURCE_ID,
+    RegistryIdentity,
     RegistrySource,
     load_registry_sources,
+    normalize_source_url,
+    remove_registry_source,
+    save_registry_source,
+    validate_source_url,
 )
 from mohobot.plugins.installer import (
     InstallError,
@@ -100,9 +108,9 @@ def _installed_manifest(destination: Path, entry: MarketEntry) -> PluginManifest
     return manifest
 
 
-async def _thread_until_done(func, /, *args):
-    """Do not let task cancellation release a thread's paths before it exits."""
-    worker = asyncio.create_task(asyncio.to_thread(func, *args))
+async def _finish_task(work):
+    """Keep ownership of the work until it settles, then propagate cancellation."""
+    worker = asyncio.create_task(work)
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -118,9 +126,64 @@ async def _thread_until_done(func, /, *args):
         raise
 
 
-def _cache_path(data_dir: Path, url: str) -> Path:
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    return data_dir / "cache" / "plugin_market" / f"{digest}.json"
+async def _thread_until_done(func, /, *args):
+    return await _finish_task(asyncio.to_thread(func, *args))
+
+
+@dataclass(frozen=True)
+class _IndexState:
+    status: Literal["fresh", "cached", "failed", "unattempted"]
+    index: MarketIndex | None = None
+    last_success_at: float | None = None
+
+
+class MarketSourceChanged(InstallError):
+    """The selected registry no longer has its original identity."""
+
+
+def _cache_path(data_dir: Path, identity: RegistryIdentity) -> Path:
+    digest = hashlib.sha256(json.dumps(asdict(identity), sort_keys=True).encode()).hexdigest()
+    return data_dir / "cache" / "plugin_market" / f"registry-v1-{digest}.json"
+
+
+def _read_index_cache(data_dir: Path, identity: RegistryIdentity) -> _IndexState:
+    cache = _cache_path(data_dir, identity)
+    try:
+        with cache.open("rb") as handle:
+            raw = handle.read(MAX_INDEX_BYTES + 4097)
+        if len(raw) > MAX_INDEX_BYTES + 4096:
+            raise ValueError("缓存索引超过大小限制")
+        doc = json.loads(raw)
+        if not isinstance(doc, dict) or doc.get("registry") != asdict(identity):
+            raise ValueError("缓存身份与当前插件源不符")
+        ts = doc.get("last_success_at")
+        if type(ts) not in (int, float) or not math.isfinite(ts) or ts <= 0:
+            raise ValueError("缓存时间无效")
+        return _IndexState("cached", parse_market_index(doc.get("index")), ts)
+    except FileNotFoundError:
+        return _IndexState("failed")
+    except (OSError, ValueError, InstallError, OverflowError, RecursionError) as exc:
+        logger.warning(f"插件源 {identity.id} 缓存不可用: {exc}")
+        return _IndexState("failed")
+
+
+def _write_index_cache(data_dir: Path, identity: RegistryIdentity, payload: dict, ts: float) -> None:
+    cache = _cache_path(data_dir, identity)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    # Bound the serialized index too: escaped input can expand on re-serialization.
+    data = json.dumps({"registry": asdict(identity), "last_success_at": ts, "index": payload},
+                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(data) > MAX_INDEX_BYTES + 4096:
+        raise ValueError("缓存索引超过大小限制")
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=cache.parent, prefix=".index-", delete=False) as handle:
+            temp = Path(handle.name)
+            handle.write(data)
+        temp.replace(cache)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
@@ -148,59 +211,129 @@ class MarketService:
         self.plugins_dir = Path(plugins_dir)
         self.proxy = proxy
         self._fetcher = fetcher or fetch_json
-        self._indexes: dict[str, MarketIndex] = {}
-        self._sources: list[RegistrySource] = []
+        self._indexes: dict[RegistryIdentity, _IndexState] = {}
+        self._sources: dict[str, RegistrySource] = {}
+        self._refresh_order: dict[RegistryIdentity, int] = {}
+        self._refresh_sequence = 0
+        self._index_init_lock = asyncio.Lock()
         self._op_lock = asyncio.Lock()
 
     @property
     def sources(self) -> list[RegistrySource]:
-        return list(self._sources)
+        return list(self._sources.values())
+
+    async def _reload_sources_locked(self) -> None:
+        sources = await load_registry_sources(self.data_dir)
+        self._sources = {source.id: source for source in sources}
+        current = {source.identity for source in sources}
+        self._indexes = {key: value for key, value in self._indexes.items() if key in current}
+        self._refresh_order = {key: order for key, order in self._refresh_order.items() if key in current}
 
     async def reload_sources(self) -> list[RegistrySource]:
-        self._sources = await load_registry_sources(self.data_dir)
-        return self.sources
+        async with self._op_lock:
+            await self._reload_sources_locked()
+            return self.sources
+
+    async def add_source(self, *, source_id: str, name: str, url: str) -> RegistrySource:
+        validated = await asyncio.to_thread(validate_source_url, url)
+
+        async def commit():
+            source = await save_registry_source(self.data_dir, source_id=source_id, name=name, validated_url=validated)
+            await self._reload_sources_locked()
+            return source
+
+        async with self._op_lock:
+            return await _finish_task(commit())
+
+    async def remove_source(self, source_id: str) -> None:
+        async def commit():
+            await remove_registry_source(self.data_dir, source_id)
+            await self._reload_sources_locked()
+
+        async with self._op_lock:
+            await _finish_task(commit())
+
+    def source_status(self, source_id: str) -> dict[str, str | float | None]:
+        source = self._sources.get(source_id)
+        state = self._indexes.get(source.identity) if source is not None else None
+        return {"status": state.status if state else "unattempted",
+                "last_success_at": state.last_success_at if state else None}
+
+    async def ensure_indexes(self) -> None:
+        # Deduplicate concurrent first queries without blocking explicit refreshes.
+        async with self._index_init_lock:
+            await self._refresh(only_unattempted=True)
 
     async def refresh(self) -> list[RegistrySource]:
-        self._sources = await load_registry_sources(self.data_dir)
-        for source in self._sources:
-            try:
-                payload = await asyncio.to_thread(
-                    self._fetcher, with_proxy(source.url, self.proxy)
-                )
-                index = parse_market_index(payload)
-                self._indexes[source.id] = index
-                cache = _cache_path(self.data_dir, source.url)
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(
-                    json.dumps(payload, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                logger.warning(f"插件源 {source.id} 刷新失败: {exc}")
-                cache = _cache_path(self.data_dir, source.url)
-                if cache.is_file():
-                    try:
-                        self._indexes[source.id] = parse_market_index(
-                            json.loads(cache.read_text(encoding="utf-8"))
-                        )
-                    except Exception:
-                        pass
+        return await self._refresh(only_unattempted=False)
+
+    async def _refresh(self, *, only_unattempted: bool) -> list[RegistrySource]:
+        async with self._op_lock:
+            await self._reload_sources_locked()
+            self._refresh_sequence += 1
+            order = self._refresh_sequence
+            identities = [source.identity for source in self._sources.values()
+                          if not only_unattempted or source.identity not in self._indexes]
+            for identity in identities:
+                self._refresh_order[identity] = order
+        for identity in identities:
+            await self._refresh_index(identity, order)
         return self.sources
+
+    def _fetch_index(self, identity: RegistryIdentity) -> tuple[dict, MarketIndex]:
+        # Keep URL validation on the network path, outside the operation lock.
+        url = identity.url if identity.id == DEFAULT_SOURCE_ID else validate_source_url(identity.url)
+        if self.proxy:
+            try:
+                payload = self._fetcher(with_proxy(url, self.proxy))
+                return payload, parse_market_index(payload)
+            except Exception as exc:
+                logger.warning(f"插件源 {identity.id} 代理刷新失败，尝试直连: {exc}")
+        payload = self._fetcher(url)
+        return payload, parse_market_index(payload)
+
+    async def _refresh_index(self, identity: RegistryIdentity, order: int) -> None:
+        payload = None
+        try:
+            payload, index = await asyncio.to_thread(self._fetch_index, identity)
+            state = _IndexState("fresh", index, time.time())
+        except Exception as exc:
+            logger.warning(f"插件源 {identity.id} 刷新失败: {exc}")
+            state = await asyncio.to_thread(_read_index_cache, self.data_dir, identity)
+        async def publish():
+            published = state
+            prior = self._indexes.get(identity)
+            if payload is not None:
+                try:
+                    await asyncio.to_thread(_write_index_cache, self.data_dir, identity, payload, state.last_success_at)
+                except (OSError, ValueError, TypeError, RecursionError) as exc:
+                    logger.warning(f"插件源 {identity.id} 缓存写入失败: {exc}")
+            elif prior is not None and prior.last_success_at is not None and (
+                state.last_success_at is None or prior.last_success_at >= state.last_success_at
+            ):
+                published = replace(prior, status="cached")
+            self._indexes[identity] = published
+
+        async with self._op_lock:
+            await self._reload_sources_locked()
+            if self._refresh_order.get(identity) == order:
+                await _finish_task(publish())
 
     def entries(self, source_id: str | None = None) -> list[MarketEntry]:
         seen: set[str] = set()
         result: list[MarketEntry] = []
-        for source in self._sources:
+        for source in self._sources.values():
             if source_id is not None and source.id != source_id:
                 continue
-            index = self._indexes.get(source.id)
-            if index is None:
+            state = self._indexes.get(source.identity)
+            if state is None or state.index is None:
                 continue
-            for entry in index.plugins.values():
+            for entry in state.index.plugins.values():
                 if entry.plugin_id in seen:
                     continue
                 seen.add(entry.plugin_id)
-                result.append(replace(entry, source_id=source.id))
+                result.append(replace(entry, source_id=source.id, source_url=source.url,
+                                      source_generation=source.generation))
         return result
 
     def find(self, plugin_id: str, source_id: str | None = None) -> MarketEntry | None:
@@ -220,56 +353,73 @@ class MarketService:
                 raise
             await _thread_until_done(download_file, url, target)
 
-    async def install_from_entry(
-        self,
-        entry: MarketEntry,
-        *,
-        source_id: str = "official",
-    ) -> tuple[str, Path]:
-        async with self._op_lock:
-            return await self._install_from_entry_unlocked(entry, source_id=source_id)
-
-    async def _install_from_entry_unlocked(
-        self,
-        entry: MarketEntry,
-        *,
-        source_id: str = "official",
-    ) -> tuple[str, Path]:
+    @asynccontextmanager
+    async def _prepare_package(self, entry: MarketEntry):
         _check_entry_compatibility(entry)
-        source_id = entry.source_id or source_id
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".market-prepare-", dir=self.plugins_dir) as temp:
             staging = Path(temp)
             archive = staging / "plugin.zip"
             await self._download_entry(entry, archive)
             manifest, root = await _thread_until_done(_extract_market_package, archive, staging / "extract", entry)
+            yield manifest, root, staging
+
+    def _check_current_source(self, entry: MarketEntry) -> None:
+        source = self._sources.get(entry.source_id)
+        if source is None or source.identity != RegistryIdentity(entry.source_id, entry.source_url, entry.source_generation):
+            raise MarketSourceChanged(f"插件源 {entry.source_id} 已变更或删除，请刷新市场后重试")
+
+    @staticmethod
+    def _source_record(entry: MarketEntry, manifest: PluginManifest) -> dict:
+        return {
+            "install_method": "market",
+            "registry_id": entry.source_id,
+            "registry_url": entry.source_url,
+            "registry_generation": entry.source_generation,
+            "plugin_id": manifest.plugin_id,
+            "repo": entry.repo,
+            "download_url": entry_download_url(entry),
+            "sha256": entry.sha256,
+            "version": manifest.version,
+            "installed_at": time.time(),
+        }
+
+    async def install_from_entry(
+        self,
+        entry: MarketEntry,
+        *,
+        source_id: str = "official",
+    ) -> tuple[str, Path]:
+        # Direct callers must either pass a frozen selection or match the current index.
+        if not entry.source_generation:
+            await self.ensure_indexes()
+            found = self.find(entry.plugin_id, entry.source_id or source_id)
+            if found is None or replace(found, source_id=entry.source_id, source_url=entry.source_url,
+                                         source_generation="") != entry:
+                raise MarketSourceChanged("市场条目已变更，请刷新后重试")
+            entry = found
+        async with self._prepare_package(entry) as (manifest, root, _):
             destination = self.plugins_dir / manifest.name
-            if destination.exists() or destination.is_symlink():
-                raise InstallError(f"插件已安装: {manifest.name}")
-            root.rename(destination)
-        registry_url = next(
-            (source.url for source in self._sources if source.id == source_id), ""
-        )
-        await save_source(
-            self.data_dir,
-            manifest.name,
-            {
-                "install_method": "market",
-                "registry_id": source_id,
-                "registry_url": registry_url,
-                "plugin_id": entry.plugin_id,
-                "repo": entry.repo,
-                "download_url": entry.download_url,
-                "sha256": entry.sha256,
-                "version": manifest.version,
-                "installed_at": time.time(),
-            },
-        )
+
+            async def commit():
+                if destination.exists() or destination.is_symlink():
+                    raise InstallError(f"插件已安装: {manifest.name}")
+                root.rename(destination)
+                await save_source(self.data_dir, manifest.name, self._source_record(entry, manifest))
+
+            async with self._op_lock:
+                await self._reload_sources_locked()
+                self._check_current_source(entry)
+                await _finish_task(commit())
         return manifest.name, destination
 
-    async def install(self, plugin_id: str, *, source_id: str = "official") -> tuple[str, Path]:
-        if not self._sources:
-            await self.refresh()
+    async def install(
+        self, plugin_id: str, *, source_id: str = "official", source_generation: str | None = None,
+    ) -> tuple[str, Path]:
+        await self.ensure_indexes()
+        source = self._sources.get(source_id)
+        if source_generation is not None and (source is None or source.generation != source_generation):
+            raise MarketSourceChanged("插件源已变更，请刷新市场后重试")
         entry = self.find(plugin_id, source_id)
         if entry is None:
             raise InstallError(f"插件不存在: {plugin_id}")
@@ -308,63 +458,49 @@ class MarketService:
         source_id: str = "official",
         before_replace=None,
     ) -> tuple[str, Path]:
-        async with self._op_lock:
-            return await self._update_unlocked(
-                plugin_id, source_id=source_id, before_replace=before_replace
-            )
-
-    async def _update_unlocked(
-        self,
-        plugin_id: str,
-        *,
-        source_id: str = "official",
-        before_replace=None,
-    ) -> tuple[str, Path]:
-        if not self._sources:
-            await self.refresh()
+        await self.ensure_indexes()
         records = await load_sources(self.data_dir)
-        record_name = next(
-            (
-                name
-                for name, item in records.items()
-                if isinstance(item, dict)
-                and (
-                    item.get("plugin_id") == plugin_id
-                    or item.get("market_plugin_id") == plugin_id
-                )
-            ),
-            plugin_id.rsplit("/", 1)[-1],
-        )
+        record_name = plugin_id.rsplit("/", 1)[-1]
         record = records.get(record_name)
-        if not record or record.get("install_method") != "market":
+        if not isinstance(record, dict) or record.get("install_method") != "market":
             raise InstallError("该插件不是通过插件市场安装，无法更新")
-        source_id = str(record.get("registry_id") or source_id)
-        entry = self.find(plugin_id, source_id)
+        recorded_plugin_id = record.get("plugin_id") or record.get("market_plugin_id")
+        if recorded_plugin_id and recorded_plugin_id != plugin_id:
+            raise InstallError("来源记录的插件身份与请求不匹配")
+        registry_id = record.get("registry_id")
+        source = self._sources.get(registry_id) if isinstance(registry_id, str) else None
+        if source is None:
+            raise MarketSourceChanged("已安装插件的来源已删除或缺失，无法确认更新来源")
+        self._check_recorded_source(record, source)
+        entry = self.find(plugin_id, source.id)
         if entry is None:
             raise InstallError(f"插件源中已找不到 {plugin_id}")
-        _check_entry_compatibility(entry)
-        if record_name != entry.name:
-            raise InstallError("来源记录名称与市场条目不匹配")
         destination = self.plugins_dir / entry.name
         old_manifest = _installed_manifest(destination, entry)
-        with tempfile.TemporaryDirectory(prefix=".market-prepare-", dir=self.plugins_dir) as temp:
-            staging = Path(temp)
-            archive = staging / "plugin.zip"
-            await self._download_entry(entry, archive)
-            manifest, root = await _thread_until_done(_extract_market_package, archive, staging / "extract", entry)
-            if _installed_manifest(destination, entry) != old_manifest:
-                raise InstallError("下载期间已安装插件发生变化，请重试")
-            if before_replace is not None:
-                await before_replace(entry.name)
-            await _thread_until_done(replace_prepared_plugin, root, destination, staging / "backup")
-        record = dict(record)
-        record.update(
-            {
-                "version": entry.version,
-                "sha256": entry.sha256,
-                "installed_at": time.time(),
-                "registry_id": source_id,
-            }
-        )
-        await save_source(self.data_dir, manifest.name, record)
+        async with self._prepare_package(entry) as (manifest, root, staging):
+            async def commit():
+                if before_replace is not None:
+                    await before_replace(entry.name)
+                await _thread_until_done(replace_prepared_plugin, root, destination, staging / "backup")
+                await save_source(self.data_dir, manifest.name, {**record, **self._source_record(entry, manifest)})
+
+            async with self._op_lock:
+                await self._reload_sources_locked()
+                self._check_current_source(entry)
+                if (await load_sources(self.data_dir)).get(record_name) != record:
+                    raise MarketSourceChanged("下载期间插件来源记录已变化，请重试")
+                if _installed_manifest(destination, entry) != old_manifest:
+                    raise InstallError("下载期间已安装插件发生变化，请重试")
+                await _finish_task(commit())
         return manifest.name, destination
+
+    @staticmethod
+    def _check_recorded_source(record: dict, source: RegistrySource) -> None:
+        recorded_url = record.get("registry_url")
+        generation = record.get("registry_generation")
+        try:
+            mismatched_url = bool(recorded_url) and normalize_source_url(recorded_url) != source.url
+        except (TypeError, ValueError, AttributeError):
+            mismatched_url = True
+        if mismatched_url or (generation and (generation != source.generation or not recorded_url)):
+            raise MarketSourceChanged("已安装插件的来源身份已变化，拒绝从其他来源更新")
