@@ -275,10 +275,12 @@ def test_followup_with_index_still_maps_by_number():
     req = {"messages": []}
     per = {1: {"action": "skip", "tags": [], "conf": 0.4, "label": "", "note": "a"},
            2: {"action": "skip", "tags": [], "conf": 0.4, "label": "", "note": "b"}}
-    _with_llm(worker, ["#1 结论: 正常 | 闲聊 | 0.6\n#2 结论: 异常 | 辱骂 | 骂人 | 0.8"])
-    restore = None
-    # _with_llm 返回(calls, restore); 这里只需要一次性消费
-    worker.force_verdicts(req, "first", per, {1, 2}, ["辱骂"])
+    _calls, restore = _with_llm(worker, ["#1 结论: 正常 | 闲聊 | 0.6\n#2 结论: 异常 | 辱骂 | 骂人 | 0.8"])
+    try:
+        # 只消费一次追问回复; 用完必须还原, 否则会污染后续测试的 _post_llm
+        worker.force_verdicts(req, "first", per, {1, 2}, ["辱骂"])
+    finally:
+        restore()
     assert per[1]["action"] == "normal" and per[2]["action"] == "abnormal"
 
 
@@ -396,3 +398,167 @@ def test_jsonl_note_lists_fallback_and_noindex_ids():
     note = logs[-1]
     assert "兜底正常: #1" in note, note
     assert "追问无序号转人工: #2" in note, note
+
+
+# ── issue #133: HTTP 重定向/契约字段/百分比置信度 ─────────────────
+
+
+def test_ok_requires_2xx_only():
+    worker = worker_module()
+    assert worker.ok((200, {}))
+    assert worker.ok((201, {}))
+    assert worker.ok((204, {}))
+    for status in (0, 199, 300, 301, 302, 307, 308, 400, 401, 404, 429, 500, 503):
+        assert not worker.ok((status, {})), status
+
+
+def test_redirect_response_is_not_submit_success():
+    """302/307 说明请求被代理重定向, 接口并未落库, 不能算成功。"""
+    worker = worker_module()
+    original = worker.api
+    try:
+        for status in (301, 302, 307, 308):
+            calls = []
+
+            def fake_api(method, path, body=None, _status=status, _calls=calls):
+                _calls.append((method, path, body))
+                return _status, {"detail": "moved"}
+
+            worker.api = fake_api
+            assert worker.submit("bot/private/1", "normal", ["fp-1"]) is False
+            assert len(calls) == 1
+    finally:
+        worker.api = original
+
+
+def test_submit_requires_explicit_changed_count():
+    """2xx 但 changed 缺失/0/非整数都不能当作已处理(否则 worker 会重复提交或误报进度)。"""
+    worker = worker_module()
+    original = worker.api
+    try:
+        bad_payloads = [
+            {},
+            {"changed": 0},
+            {"changed": -1},
+            {"changed": True},
+            {"changed": "1"},
+            {"changed": 1.0},
+            {"changed": None},
+        ]
+        for payload in bad_payloads:
+            worker.api = lambda method, path, body=None, _p=payload: (200, _p)
+            assert worker.submit("bot/private/1", "normal", ["fp-1"]) is False, payload
+
+        seen = {}
+
+        def ok_api(method, path, body=None):
+            seen.update({"method": method, "path": path, "body": body})
+            return 200, {"changed": 3}
+
+        worker.api = ok_api
+        assert worker.submit("bot/private/1", "normal", ["fp-1", "fp-2"]) is True
+        assert seen["method"] == "POST" and seen["path"] == "/api/review"
+        assert seen["body"]["fingerprints"] == ["fp-1", "fp-2"]
+        assert seen["body"]["action"] == "normal"
+    finally:
+        worker.api = original
+
+
+def test_submit_dry_run_and_empty_fps_skip_request():
+    worker = worker_module()
+    original_api, original_dry = worker.api, worker.DRY
+    calls = []
+    worker.api = lambda *a, **kw: calls.append(a) or (200, {"changed": 1})
+    try:
+        assert worker.submit("bot/private/1", "normal", []) is True
+        worker.DRY = True
+        assert worker.submit("bot/private/1", "normal", ["fp-1"]) is True
+    finally:
+        worker.api, worker.DRY = original_api, original_dry
+    assert calls == []
+
+
+def test_skip_session_rejects_redirect():
+    worker = worker_module()
+    original_api, original_dry = worker.api, worker.DRY
+    try:
+        worker.DRY = False
+        worker.api = lambda *a, **kw: (307, {"detail": "moved"})
+        assert worker.skip_session("bot/private/1") is False
+        worker.api = lambda *a, **kw: (200, {"ok": True})
+        assert worker.skip_session("bot/private/1") is True
+    finally:
+        worker.api, worker.DRY = original_api, original_dry
+
+
+def test_post_llm_redirect_is_failure_without_retry_storm():
+    worker = worker_module()
+    original_curl, original_sleep = worker.curl, worker.time.sleep
+    calls = []
+    worker.curl = lambda method, url, body=None, auth=None: calls.append(url) or (307, {"detail": "moved"})
+    worker.time.sleep = lambda *_: None
+    try:
+        text, err = worker._post_llm({"messages": []})
+    finally:
+        worker.curl, worker.time.sleep = original_curl, original_sleep
+    assert text == ""
+    assert "307" in err
+    assert len(calls) == 1, "3xx 是路由/代理配置问题, 重试不会变好"
+
+
+def test_confidence_values_are_normalised_to_unit_interval():
+    worker = worker_module()
+    cases = {
+        "0.9": 0.9,
+        "1": 1.0,
+        "1.0": 1.0,
+        "0": 0.0,
+        "0.9%": 0.009,
+        "1%": 0.01,
+        "90%": 0.9,
+        "100%": 1.0,
+        "90": 0.9,        # 裸数字 >1 视为百分数
+        "70": 0.7,
+        "0.69": 0.69,
+    }
+    for raw, expected in cases.items():
+        got = worker._conf_value(raw)
+        assert got is not None and abs(got - expected) < 1e-12, (raw, got)
+    for raw in ("", "nan", "inf", "-inf", "-5", "200%", "abc", "1.2.3", "101%", "   "):
+        assert worker._conf_value(raw) is None, (raw, worker._conf_value(raw))
+
+
+def test_percent_confidence_is_not_treated_as_high_confidence():
+    """issue #133: 0.9% 必须换算成 0.009, 不能当 0.9 通过阈值自动判正常。"""
+    worker = worker_module()
+    per, _ = worker.parse_verdicts(
+        "#1 结论: 正常 | 只是像广告 | 置信度: 0.9%\n"
+        "#2 结论: 正常 | 明确正常 | 置信度: 90%\n"
+        "#3 结论: 正常 | 正常 | 置信度: 1\n"
+        "#4 结论: 异常 | 辱骂 | 骂人 | 置信度: 0.9%\n",
+        ["辱骂"],
+    )
+    assert per[1]["conf"] is not None and abs(per[1]["conf"] - 0.009) < 1e-12
+    assert abs(per[2]["conf"] - 0.9) < 1e-12
+    assert per[3]["conf"] == 1.0
+    assert abs(per[4]["conf"] - 0.009) < 1e-12
+    d1 = worker.decide(per[1])
+    assert d1["action"] == "skip" and "置信度不足" in d1["note"]
+    assert worker.decide(per[2])["action"] == "normal"
+    assert worker.decide(per[3])["action"] == "normal"
+    assert worker.decide(per[4])["action"] == "skip"
+
+
+def test_confidence_threshold_boundary_and_forced_override():
+    worker = worker_module()
+    at = {"action": "normal", "tags": [], "note": "ok", "conf": worker.MIN_CONF, "label": ""}
+    below = dict(at, conf=worker.MIN_CONF - 1e-6)
+    none = dict(at, conf=None)
+    assert worker.decide(at)["action"] == "normal"
+    assert worker.decide(below)["action"] == "skip"
+    assert worker.decide(none)["action"] == "skip"
+    forced = {"action": "abnormal", "tags": ["辱骂"], "note": "x", "conf": 0.01, "label": "辱骂"}
+    assert worker.decide(forced, forced=True)["action"] == "abnormal"
+    # 积压条目仍需合法标签, 低置信度不拦截
+    no_tag = {"action": "abnormal", "tags": [], "note": "x", "conf": 0.99, "label": "乱写"}
+    assert worker.decide(no_tag, forced=True)["action"] == "skip"

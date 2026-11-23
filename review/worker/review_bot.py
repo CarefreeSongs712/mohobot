@@ -1,3 +1,4 @@
+# ruff: noqa: E701, E702  (存量单行语句风格, 不做无关重排)
 """Mohobot 审核面板全自动客户端: curl 拉会话 -> LLM 三态判定 -> 自动提交, 无需人工确认。
 - LLM 5 路并行预取, 每个请求失败自动重试 3 次; 结论由主线程按会话顺序串行提交。
 - 结论三态: 正常 / 异常 / 存疑, 按「待审#N」逐条判定; 单条存疑只跳过该条, 其余消息照常标掉。
@@ -21,7 +22,15 @@ llm.json 示例:
    "min_conf": 0.7, "run_at": "09:00", "max_attempts": 3, "log_path": "review_log.jsonl",
    "force_after_hours": 72}
 """
-import argparse, getpass, json, os, re, subprocess, sys, time
+import argparse
+import getpass
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta
@@ -98,7 +107,13 @@ def curl(method, url, body=None, auth=None):
     return int(code or 0), js
 
 
-def ok(res): return 0 < res[0] < 400
+def ok(res):
+    """只有 2xx 才算成功; 3xx(重定向)/4xx/5xx/网络失败(0) 都按失败处理。
+
+    服务端契约: 登录、取会话、提交审核结论都应直接返回 200 JSON,
+    被网关/反向代理重定向说明请求没有真正到达接口, 不能当成功(issue #133)。
+    """
+    return 200 <= res[0] < 300
 
 
 def api(method, path, body=None):
@@ -155,6 +170,28 @@ def llm_url():
     return b if b.endswith("/chat/completions") else b + "/chat/completions"
 
 
+def _conf_value(raw):
+    """把模型输出的置信度归一化到 0..1; 非法/越界/非有限值返回 None(issue #133)。
+
+    规则: 带 `%` 的值按百分比换算(0.9% -> 0.009); 裸数字 >1 视为百分数
+    (90 -> 0.9); 其余按 0..1 小数; 结果必须落在 [0, 1] 内。
+    """
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        val = float(text.rstrip("%"))
+    except ValueError:
+        return None
+    if not math.isfinite(val):
+        return None
+    if text.endswith("%") or val > 1.0:
+        val /= 100.0
+    if not 0.0 <= val <= 1.0:
+        return None
+    return val
+
+
 def _parse_one(kind, rest, tags):
     """解析单条「结论: ...」行。返回 dict。"""
     body = CONF_RE.sub("", rest).strip(" |｜-—–")
@@ -162,14 +199,11 @@ def _parse_one(kind, rest, tags):
     conf = None
     cm = CONF_RE.search(rest)
     if cm:
-        try:
-            conf = float(cm.group(1).rstrip("%"))
-            if conf > 1: conf /= 100
-        except ValueError: conf = None
+        conf = _conf_value(cm.group(1))
     if conf is None:  # 模型省略「置信度」二字时, 认最后一个字段里的裸数字
         for f in reversed(fields):
             if re.fullmatch(r"\d{1,3}(?:\.\d+)?%?", f):
-                conf = min(float(f.rstrip("%")) / (100 if f.endswith("%") else 1), 1.0)
+                conf = _conf_value(f)
                 fields = fields[:-1] if f == fields[-1] else fields
                 break
     if kind == "正常":
@@ -220,9 +254,10 @@ def _post_llm(req):
     for i in range(RETRIES + 1):
         if i: time.sleep(2 ** (i - 1))
         code, js = curl("POST", llm_url(), req, CFG["llm_key"])
-        if not 0 < code < 400:
+        if not ok((code, js)):
             err = f"HTTP {code}: {js.get('error', js)}"
-            if 400 <= code < 500 and code != 429: break  # 参数/鉴权错误, 重试无意义
+            # 3xx 多半是网关/代理把请求重定向走了, 4xx(429 除外)是参数/鉴权错误, 重试无意义
+            if 300 <= code < 500 and code != 429: break
             continue
         text = ((js.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         if VERDICT_RE.search(text):
@@ -304,7 +339,7 @@ def prepare(sk, tags, start_page=0):
     path, page = "/api/session/" + quote(sk, safe="/:@!$&'()*+,;="), (start_page or None)
     while True:
         code, s = curl("GET", SERVER + path + (f"?page={page}" if page else ""), auth=TOKEN)
-        if not 0 < code < 400: return {"sk": sk, "err": f"取会话失败 HTTP {code}: {s.get('detail', s)}"}
+        if not ok((code, s)): return {"sk": sk, "err": f"取会话失败 HTTP {code}: {s.get('detail', s)}"}
         pend = [e for e in s["entries"] if e.get("status") == "unreviewed"]
         if pend: break
         if s["unreviewed"] > 0 and s["page"] < s["pages"]: page = s["page"] + 1; continue
@@ -318,12 +353,20 @@ def prepare(sk, tags, start_page=0):
 
 def submit(sk, action, fps, **extra):
     if DRY or not fps: return True
-    res = api("POST", "/api/review", {"session_key": sk, "action": action, "fingerprints": fps, **extra})
-    return ok(res) and res[1].get("changed", 1) > 0
+    res = api("POST", "/api/review", {"session_key": sk, "action": action, "fingerprints": list(fps), **extra})
+    if not ok(res): return False
+    # 服务端契约: 必须回 2xx + 明确 changed 条数; 缺字段/0/非整数都不算提交成功,
+    # 否则被重定向或服务端未落库时会被误判为已处理(issue #133)。
+    changed = res[1].get("changed")
+    if isinstance(changed, bool) or not isinstance(changed, int) or changed <= 0:
+        print(f"  ✗ 提交未确认: changed={changed!r} (action={action}, {len(fps)} 条)")
+        return False
+    return True
 
 
 def skip_session(sk):
-    if not DRY: api("POST", "/api/review", {"session_key": sk, "action": "skip"})
+    if DRY: return True
+    return ok(api("POST", "/api/review", {"session_key": sk, "action": "skip"}))
 
 
 def log_rec(sk, s, v, llm_text="", err=""):
@@ -409,9 +452,9 @@ def handle(r):
         if forced_ids:
             detail += f" / 积压必判 {forced_done}·已提交 (共 {len(forced_ids)})"
             if fallback_ids:
-                detail += f" / 兜底正常: " + " ".join(f"#{i}" for i in fallback_ids)
+                detail += " / 兜底正常: " + " ".join(f"#{i}" for i in fallback_ids)
             if noindex_ids:
-                detail += f" / 追问无序号转人工: " + " ".join(f"#{i}" for i in noindex_ids)
+                detail += " / 追问无序号转人工: " + " ".join(f"#{i}" for i in noindex_ids)
         log_rec(sk, s, {"action": "mixed", "tags": [], "conf": None, "note": detail}, text)
         if groups["skip"]:
             STATS["skip"] += len(groups["skip"])
