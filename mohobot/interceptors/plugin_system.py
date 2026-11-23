@@ -33,6 +33,7 @@ from mohobot.models.onebot import (
     NoticeEvent,
 )
 from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.plugins.imports import PluginImports, namespace_conflict
 from mohobot.plugins.installer import STAGING_MAX_AGE_SECONDS, STAGING_PREFIXES
 from mohobot.plugins.manifest import (
     ManifestError,
@@ -44,6 +45,10 @@ from mohobot.plugins.manifest import (
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
 from mohobot.api import api_version as PLUGIN_API_VERSION
+
+
+class PluginNamespaceConflict(ManifestError):
+    """A rescan cannot proceed without displacing an existing module."""
 
 
 class _PluginTaskSupervisor:
@@ -108,8 +113,6 @@ class PluginSystem(Interceptor):
         self._task_supervisor = None
         self._matcher = None
         self._reload_lock: asyncio.Lock | None = None
-        self._loaded_sys_paths: set[str] = set()
-        self._plugin_sys_paths: dict[str, str] = {}
         self._plugin_api_version = PLUGIN_API_VERSION
         self._active_dispatches = 0
         self._dispatch_drained = asyncio.Event()
@@ -145,36 +148,26 @@ class PluginSystem(Interceptor):
                 continue
             if meta.get("module_name") == module_name:
                 return str(meta.get("name") or "?")
-        return None
-
-    @staticmethod
-    def _is_under(path: str | Path, directory: str | Path) -> bool:
-        try:
-            Path(path).resolve().relative_to(Path(directory).resolve())
-        except (OSError, ValueError):
-            return False
-        return True
+        replacing = next(
+            (meta.get("_imports") for meta in self._plugins if meta["name"] == exclude_name),
+            None,
+        )
+        return namespace_conflict(module_name, replacing)
 
     def _unload_plugin(self, meta: dict[str, Any]) -> None:
         name = meta.get("name", "")
-        base = meta.get("module_name") or self._module_name(name)
         entry_dir = meta.get("entry_dir") or ""
-        for module_name in list(sys.modules):
-            if module_name == base or module_name.startswith(base + "."):
-                sys.modules.pop(module_name, None)
-                continue
-            if entry_dir:
-                module_file = getattr(sys.modules.get(module_name), "__file__", None)
-                if module_file and self._is_under(module_file, entry_dir):
-                    sys.modules.pop(module_name, None)
-        old_path = self._plugin_sys_paths.pop(name, None)
-        if old_path and old_path not in self._plugin_sys_paths.values():
-            while old_path in sys.path:
-                sys.path.remove(old_path)
-            self._loaded_sys_paths.discard(old_path)
+        imports = meta.pop("_imports", None)
+        if imports is None:
+            return
+        imports.detach()
         if entry_dir:
             for cache_dir in Path(entry_dir).rglob("__pycache__"):
-                shutil.rmtree(cache_dir, ignore_errors=True)
+                try:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                except FileNotFoundError:
+                    # Python 3.12 can propagate fstat failure on a vanished directory.
+                    continue
         else:
             cache_dir = self._plugins_dir / "__pycache__"
             if cache_dir.is_dir():
@@ -269,25 +262,23 @@ class PluginSystem(Interceptor):
             return meta
 
         module_name = meta["module_name"]
-        module = None
+        collision = namespace_conflict(module_name)
+        if collision is not None:
+            raise ManifestError(f"插件模块名冲突: {plugin_name} 与 {collision}")
+        imports = PluginImports(module_name, entry_dir)
+        meta["_imports"] = imports
         try:
-            if not entry_dir:
-                spec = importlib.util.spec_from_file_location(module_name, entry_path)
-            else:
-                plugin_dir_abs = str(Path(entry_dir).absolute())
-                if plugin_dir_abs not in sys.path:
-                    sys.path.append(plugin_dir_abs)
-                    self._loaded_sys_paths.add(plugin_dir_abs)
-                self._plugin_sys_paths[plugin_name] = plugin_dir_abs
-                spec = importlib.util.spec_from_file_location(
-                    module_name,
-                    entry_path,
-                    submodule_search_locations=[plugin_dir_abs],
-                )
+            imports.attach()
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                entry_path,
+                submodule_search_locations=[imports.path] if imports.path is not None else None,
+            )
             if spec is None or spec.loader is None:
                 raise ManifestError("spec load failed")
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
+            imports.modules[module_name] = module
             spec.loader.exec_module(module)
 
             plugin_instance = None
@@ -318,14 +309,11 @@ class PluginSystem(Interceptor):
                 meta["config"] = self._load_plugin_config(plugin_name, schema)
                 self._inject_config(plugin_instance, meta["config"])
             logger.info(f"Loaded plugin: {plugin_name}")
-        except Exception as e:
-            if module is not None:
-                for loaded_name in list(sys.modules):
-                    if loaded_name == module_name or loaded_name.startswith(module_name + "."):
-                        sys.modules.pop(loaded_name, None)
-            meta["error"] = str(e)
-            meta["loaded"] = False
+        except BaseException as e:
             self._unload_plugin(meta)
+            if not isinstance(e, Exception):
+                raise
+            meta["error"] = str(e)
             logger.error(f"Failed to load plugin {entry_path.name}: {e}")
         return meta
 
@@ -450,7 +438,9 @@ class PluginSystem(Interceptor):
                 continue
             seen.add(plugin_name)
             module_name = self._module_name(plugin_name)
-            previous = self._module_name_conflict(module_name)
+            previous = None
+            if state.get(plugin_name, {}).get("enabled", True):
+                previous = self._module_name_conflict(module_name)
             if previous is not None:
                 logger.error(f"插件模块名冲突: {plugin_name} 与 {previous}")
                 meta = self._error_meta(
@@ -508,10 +498,35 @@ class PluginSystem(Interceptor):
             await self._task_supervisor.cancel_owner_prefix("plugin:")
         self._unload_all_plugins()
 
-    async def _reload_unlocked(self) -> int:
+    async def _reload_unlocked(self, *, enabled_update: dict[str, Any] | None = None) -> int:
+        state = self._load_state()
+        if enabled_update is not None:
+            state.update(enabled_update)
+        self._check_reload_namespaces(state)
+        if enabled_update is not None:
+            await self._save_state(enabled_update)
         await self._shutdown_unlocked()
-        count = await self._load_all_unlocked()
-        return count
+        return await self._load_all_unlocked()
+
+    def _check_reload_namespaces(self, state: dict[str, Any]) -> None:
+        owners = {
+            imports.namespace: imports
+            for meta in self._plugins
+            if (imports := meta.get("_imports")) is not None
+        }
+        candidates: dict[str, str] = {}
+        seen: set[str] = set()
+        for _, name, _, _ in self._iter_entries():
+            if name in seen:
+                continue
+            seen.add(name)
+            if not state.get(name, {}).get("enabled", True):
+                continue
+            namespace = self._module_name(name)
+            conflict = candidates.get(namespace) or namespace_conflict(namespace, owners.get(namespace))
+            if conflict is not None:
+                raise PluginNamespaceConflict(f"插件模块名冲突: {name} 与 {conflict}")
+            candidates[namespace] = name
 
     def set_song_matcher(self, matcher) -> None:
         """注入全局歌曲匹配器, 供同步插件刷新内存索引。"""
@@ -753,7 +768,7 @@ class PluginSystem(Interceptor):
         """扫描并加载插件; 与热重载共用同一把锁, 避免并发替换注册表。"""
         async with self._lock():
             if self._plugins:
-                await self._shutdown_unlocked()
+                return await self._reload_unlocked()
             return await self._load_all_unlocked()
 
     # ── 插件配置 (schema 驱动) ────────────────────────────────
@@ -979,23 +994,16 @@ class PluginSystem(Interceptor):
                 await self._reload_unlocked()
                 meta = next((m for m in self._plugins if m["name"] == name), None)
                 return bool(meta and meta.get("loaded"))
+            entry = next((item for item in self._iter_entries() if item[1] == name), None)
+            if entry is not None:
+                previous = self._module_name_conflict(self._module_name(name), exclude_name=name)
+                if previous is not None:
+                    logger.error(f"插件模块名冲突: {name} 与 {previous}")
+                    return False
             await self._wait_for_dispatches()
             index = self._plugins.index(meta)
             old_meta = dict(meta)
-            old_module_name = str(meta.get("module_name") or "")
-            old_entry_dir = str(meta.get("entry_dir") or "")
-            old_modules = {
-                module_name: module
-                for module_name, module in list(sys.modules.items())
-                if module_name == old_module_name
-                or module_name.startswith(old_module_name + ".")
-                or (
-                    old_entry_dir
-                    and getattr(module, "__file__", None)
-                    and self._is_under(getattr(module, "__file__"), old_entry_dir)
-                )
-            }
-            old_path = self._plugin_sys_paths.get(name)
+            old_imports = old_meta.get("_imports")
             await self._stop_tick_for(name)
             if self._task_supervisor is not None:
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
@@ -1004,41 +1012,28 @@ class PluginSystem(Interceptor):
             if self._task_supervisor is not None:
                 await self._task_supervisor.cancel_owner_prefix(f"plugin:{name}")
             self._unload_plugin(meta)
-            entry = next((item for item in self._iter_entries() if item[1] == name), None)
             if entry is None:
                 self._plugins.pop(index)
                 return False
-            module_name = self._module_name(entry[1])
-            previous = self._module_name_conflict(module_name, exclude_name=entry[1])
-            if previous is not None:
-                logger.error(f"插件模块名冲突: {entry[1]} 与 {previous}")
-                new_meta = self._error_meta(
-                    entry[0], entry[1], entry[2], entry[3],
-                    ValueError(f"插件模块名冲突: {entry[1]} 与 {previous}"),
+            try:
+                new_meta = self._load_one(
+                    entry[0], entry[1], entry[2], self._load_state(), entry[3]
                 )
-            else:
-                try:
-                    new_meta = self._load_one(
-                        entry[0], entry[1], entry[2], self._load_state(), entry[3]
-                    )
-                except Exception as e:
-                    new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
-                    logger.error(f"Failed to reload plugin {entry[1]}: {e}")
+            except Exception as e:
+                new_meta = self._error_meta(entry[0], entry[1], entry[2], entry[3], e)
+                logger.error(f"Failed to reload plugin {entry[1]}: {e}")
+                # A load error still permits restoring the old enabled instance.
+                new_meta["enabled"] = old_meta["enabled"]
             from mohobot.plugins.sources import load_sources
 
             sources = await load_sources(self._data_dir)
             new_meta["source_record"] = sources.get(new_meta.get("name", ""))
-            if (
-                not new_meta.get("loaded")
-                and new_meta.get("enabled", True)
-                and old_meta.get("loaded")
-            ):
-                sys.modules.update(old_modules)
-                if old_path:
-                    if old_path not in sys.path:
-                        sys.path.append(old_path)
-                    self._plugin_sys_paths[name] = old_path
-                    self._loaded_sys_paths.add(old_path)
+            if not new_meta.get("loaded") and new_meta.get("enabled", True) and old_imports is not None:
+                if not old_imports.restore():
+                    new_meta["error"] = f"{new_meta['error']}; previous plugin modules are occupied"
+                    logger.error(f"Plugin {name} rollback failed: {new_meta['error']}")
+                    self._plugins[index] = new_meta
+                    return False
                 self._plugins[index] = old_meta
                 try:
                     self.apply_injections()
@@ -1090,10 +1085,11 @@ class PluginSystem(Interceptor):
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False
-            await self._save_state({name: {"enabled": enabled}})
+            update = {name: {"enabled": enabled}}
             if not enabled or not meta.get("loaded"):
-                await self._reload_unlocked()
+                await self._reload_unlocked(enabled_update=update)
             else:
+                await self._save_state(update)
                 meta["enabled"] = enabled
         logger.info(f"Plugin {name} {'enabled' if enabled else 'disabled'} (热生效)")
         return True
@@ -1102,7 +1098,7 @@ class PluginSystem(Interceptor):
         """Return plugin metadata (without instances) for the web panel."""
         result = []
         for meta in tuple(self._plugins):
-            item = {k: v for k, v in meta.items() if k != "instance"}
+            item = {k: v for k, v in meta.items() if k != "instance" and not k.startswith("_")}
             result.append(item)
         return result
 

@@ -30,6 +30,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+from mohobot.interceptors.plugin_system import PluginNamespaceConflict
+
 
 def _valid_usage_range(range_key: str) -> bool:
     """用量统计范围校验: Nh(近N小时) / today / 7d / 30d / 自定义 Nd(近N天, 1-3650)。"""
@@ -1220,7 +1222,11 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            if not await self._plugin_system.set_enabled(body.name, body.enabled):
+            try:
+                updated = await self._plugin_system.set_enabled(body.name, body.enabled)
+            except PluginNamespaceConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if not updated:
                 raise HTTPException(status_code=404, detail="插件不存在")
             logger.info(f"Web panel: plugin {body.name} {'enabled' if body.enabled else 'disabled'} (hot)")
             return {"status": "ok", "name": body.name, "enabled": body.enabled}
@@ -1231,7 +1237,10 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=500, detail="插件系统未启用")
-            count = await self._plugin_system.reload_plugins()
+            try:
+                count = await self._plugin_system.reload_plugins()
+            except PluginNamespaceConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             logger.info(f"Web panel: plugins hot-reloaded ({count} active)")
             return {"status": "ok", "count": count, "plugins": self._plugin_system.list_plugins()}
 

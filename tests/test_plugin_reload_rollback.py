@@ -58,5 +58,6 @@ def test_reload_failure_keeps_previous_instance(tmp_path: Path) -> None:
         assert await system.reload_plugin("rollback_plugin") is True
         updated = next(m for m in system._plugins if m["name"] == "rollback_plugin")
         assert updated["instance"].info["description"] == "rollback value=2"
+        await system.shutdown_plugins()
 
     asyncio.run(run())
