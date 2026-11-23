@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from mohobot.plugin_market.journal import MarketOperation, MarketRecoveryError
 from mohobot.plugin_market.service import MarketService, MarketSourceChanged
 from mohobot.plugin_market.sources import DEFAULT_INDEX_URL, add_registry_source
 from mohobot.file_store import json_write
@@ -171,6 +172,56 @@ def test_update_market_plugin(tmp_path: Path) -> None:
         assert seen == ["demo"]
         assert "2.0.0" in (destination / "metadata.yaml").read_text(encoding="utf-8")
         assert (await load_sources(tmp_path / "data"))["demo"]["version"] == "2.0.0"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["install", "update", "uninstall"])
+def test_market_write_rolls_back_files_and_source_if_commit_fails(tmp_path, monkeypatch, kind):
+    async def run():
+        data = tmp_path / "data"
+        plugins = data / "plugins"
+        config_dir = data / "plugins_config"
+        recycle_dir = data / "plugin_recycle"
+        config_file = config_dir / "demo.json"
+        source = _archive(tmp_path, "demo")
+        plugin_id = "CarefreeSongs712/demo"
+        payload = {"$meta": {"schema_version": 1, "name": "index"}, "plugins": {plugin_id: _entry("demo", source)}}
+        service = MarketService(data, plugins, fetcher=lambda url: payload)
+        monkeypatch.setattr("mohobot.plugin_market.service.download_file", lambda url, dest: shutil.copy(source, dest))
+        await save_source(data, "peer", {"version": "9.0.0"})
+        if kind != "install":
+            await service.install(plugin_id)
+        if kind == "update":
+            source = _archive(tmp_path, "demo", "2.0.0")
+            payload["plugins"][plugin_id] = {**_entry("demo", source), "version": "2.0.0"}
+            await service.refresh()
+        config_dir.mkdir()
+        config_file.write_text('{"keep": true}')
+        original = await load_sources(data)
+        live = plugins / "demo"
+        old_inode = live.stat().st_ino if live.exists() else None
+        decisions = []
+        real_write = MarketOperation._write_decision
+
+        def fail_commit(operation, decision):
+            decisions.append(decision)
+            if decision == "committed":
+                raise OSError("fixture cannot mark commit")
+            return real_write(operation, decision)
+
+        monkeypatch.setattr(MarketOperation, "_write_decision", fail_commit)
+        with pytest.raises(MarketRecoveryError, match="fixture cannot mark commit"):
+            if kind == "uninstall":
+                await service.uninstall("demo", config_dir=config_dir, recycle_dir=recycle_dir, delete_config=True)
+            else:
+                await getattr(service, kind)(plugin_id)
+        assert decisions == ["committed", "rolled_back"]
+        assert (live.stat().st_ino if live.exists() else None) == old_inode
+        assert await load_sources(data) == original
+        assert config_file.read_text() == '{"keep": true}'
+        assert not list(recycle_dir.glob("*"))
+        assert not list((plugins / ".market-journal").iterdir())
 
     asyncio.run(run())
 

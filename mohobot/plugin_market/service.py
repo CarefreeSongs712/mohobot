@@ -19,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 
 from mohobot import __version__ as MOHOBOT_VERSION
 from mohobot.api import api_version as PLUGIN_API_VERSION
+from mohobot.plugin_market.journal import MarketJournal, MarketOperation, MarketRecoveryError
 from mohobot.plugin_market.sources import (
     DEFAULT_SOURCE_ID,
     RegistryIdentity,
@@ -29,11 +30,11 @@ from mohobot.plugin_market.sources import (
     save_registry_source,
     validate_source_url,
 )
+from mohobot.plugins._atomic_json import finish_task, thread_until_done
 from mohobot.plugins.installer import (
     InstallError,
     download_file,
     extract_plugin_archive,
-    replace_prepared_plugin,
     with_proxy,
 )
 from mohobot.plugins.manifest import (
@@ -49,7 +50,7 @@ from mohobot.plugins.market import (
     entry_download_url,
     parse_market_index,
 )
-from mohobot.plugins.sources import load_sources, remove_source, save_source
+from mohobot.plugins.sources import SOURCE_SCHEMA_VERSION, load_sources_strict
 
 MAX_INDEX_BYTES = 5 * 1024 * 1024
 
@@ -108,26 +109,16 @@ def _installed_manifest(destination: Path, entry: MarketEntry) -> PluginManifest
     return manifest
 
 
-async def _finish_task(work):
-    """Keep ownership of the work until it settles, then propagate cancellation."""
-    worker = asyncio.create_task(work)
+async def _commit_disk_operation(operation: MarketOperation) -> None:
+    """Complete the transaction for callers without a running PluginSystem."""
     try:
-        return await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not worker.cancelled():
-            worker.exception()
+        await operation.apply()
+        await operation.commit()
+    except Exception:
+        await operation.rollback()
+        await operation.cleanup()
         raise
-
-
-async def _thread_until_done(func, /, *args):
-    return await _finish_task(asyncio.to_thread(func, *args))
+    await operation.cleanup()
 
 
 @dataclass(frozen=True)
@@ -217,6 +208,13 @@ class MarketService:
         self._refresh_sequence = 0
         self._index_init_lock = asyncio.Lock()
         self._op_lock = asyncio.Lock()
+        self._journal = MarketJournal(self.data_dir, self.plugins_dir)
+
+    async def _read_installed_sources(self) -> dict:
+        try:
+            return await load_sources_strict(self.data_dir)
+        except (OSError, ValueError) as exc:
+            raise MarketRecoveryError(f"读取已安装插件来源失败: {exc}") from exc
 
     @property
     def sources(self) -> list[RegistrySource]:
@@ -243,7 +241,7 @@ class MarketService:
             return source
 
         async with self._op_lock:
-            return await _finish_task(commit())
+            return await finish_task(commit())
 
     async def remove_source(self, source_id: str) -> None:
         async def commit():
@@ -251,7 +249,7 @@ class MarketService:
             await self._reload_sources_locked()
 
         async with self._op_lock:
-            await _finish_task(commit())
+            await finish_task(commit())
 
     def source_status(self, source_id: str) -> dict[str, str | float | None]:
         source = self._sources.get(source_id)
@@ -317,7 +315,7 @@ class MarketService:
         async with self._op_lock:
             await self._reload_sources_locked()
             if self._refresh_order.get(identity) == order:
-                await _finish_task(publish())
+                await finish_task(publish())
 
     def entries(self, source_id: str | None = None) -> list[MarketEntry]:
         seen: set[str] = set()
@@ -347,11 +345,11 @@ class MarketService:
         url = entry_download_url(entry)
         proxy_url = with_proxy(url, self.proxy) if self.proxy else url
         try:
-            await _thread_until_done(download_file, proxy_url, target)
+            await thread_until_done(download_file, proxy_url, target)
         except InstallError:
             if not self.proxy:
                 raise
-            await _thread_until_done(download_file, url, target)
+            await thread_until_done(download_file, url, target)
 
     @asynccontextmanager
     async def _prepare_package(self, entry: MarketEntry):
@@ -361,8 +359,8 @@ class MarketService:
             staging = Path(temp)
             archive = staging / "plugin.zip"
             await self._download_entry(entry, archive)
-            manifest, root = await _thread_until_done(_extract_market_package, archive, staging / "extract", entry)
-            yield manifest, root, staging
+            manifest, root = await thread_until_done(_extract_market_package, archive, staging / "extract", entry)
+            yield manifest, root
 
     def _check_current_source(self, entry: MarketEntry) -> None:
         source = self._sources.get(entry.source_id)
@@ -372,6 +370,7 @@ class MarketService:
     @staticmethod
     def _source_record(entry: MarketEntry, manifest: PluginManifest) -> dict:
         return {
+            "schema_version": SOURCE_SCHEMA_VERSION,
             "install_method": "market",
             "registry_id": entry.source_id,
             "registry_url": entry.source_url,
@@ -398,20 +397,18 @@ class MarketService:
                                          source_generation="") != entry:
                 raise MarketSourceChanged("市场条目已变更，请刷新后重试")
             entry = found
-        async with self._prepare_package(entry) as (manifest, root, _):
-            destination = self.plugins_dir / manifest.name
-
+        async with self._prepare_package(entry) as (manifest, root):
             async def commit():
-                if destination.exists() or destination.is_symlink():
-                    raise InstallError(f"插件已安装: {manifest.name}")
-                root.rename(destination)
-                await save_source(self.data_dir, manifest.name, self._source_record(entry, manifest))
+                operation = await self._journal.begin_replace(
+                    manifest.name, root, self._source_record(entry, manifest), expect_installed=False,
+                )
+                await _commit_disk_operation(operation)
 
             async with self._op_lock:
                 await self._reload_sources_locked()
                 self._check_current_source(entry)
-                await _finish_task(commit())
-        return manifest.name, destination
+                await finish_task(commit())
+        return manifest.name, self.plugins_dir / manifest.name
 
     async def install(
         self, plugin_id: str, *, source_id: str = "official", source_generation: str | None = None,
@@ -435,21 +432,17 @@ class MarketService:
         delete_config: bool = False,
         delete_data: bool = False,
     ) -> Path:
-        from mohobot.plugins.installer import uninstall_plugin
+        if (Path(config_dir).absolute() != self._journal.data_dir / "plugins_config"
+                or Path(recycle_dir).absolute() != self._journal.data_dir / "plugin_recycle"):
+            raise ValueError("卸载必须使用宿主配置目录和回收目录")
+
+        async def commit():
+            operation = await self._journal.begin_uninstall(name, delete_config=delete_config, delete_data=delete_data)
+            await _commit_disk_operation(operation)
+            return operation.recycle_path
 
         async with self._op_lock:
-            target = await asyncio.to_thread(
-                uninstall_plugin,
-                name,
-                self.plugins_dir,
-                recycle_dir,
-                config_dir=config_dir,
-                data_dir=self.data_dir,
-                delete_config=delete_config,
-                delete_data=delete_data,
-            )
-            await remove_source(self.data_dir, name)
-            return target
+            return await finish_task(commit())
 
     async def update(
         self,
@@ -459,7 +452,7 @@ class MarketService:
         before_replace=None,
     ) -> tuple[str, Path]:
         await self.ensure_indexes()
-        records = await load_sources(self.data_dir)
+        records = await self._read_installed_sources()
         record_name = plugin_id.rsplit("/", 1)[-1]
         record = records.get(record_name)
         if not isinstance(record, dict) or record.get("install_method") != "market":
@@ -477,21 +470,23 @@ class MarketService:
             raise InstallError(f"插件源中已找不到 {plugin_id}")
         destination = self.plugins_dir / entry.name
         old_manifest = _installed_manifest(destination, entry)
-        async with self._prepare_package(entry) as (manifest, root, staging):
+        async with self._prepare_package(entry) as (manifest, root):
             async def commit():
                 if before_replace is not None:
                     await before_replace(entry.name)
-                await _thread_until_done(replace_prepared_plugin, root, destination, staging / "backup")
-                await save_source(self.data_dir, manifest.name, {**record, **self._source_record(entry, manifest)})
+                operation = await self._journal.begin_replace(
+                    manifest.name, root, {**record, **self._source_record(entry, manifest)}, expect_installed=True,
+                )
+                await _commit_disk_operation(operation)
 
             async with self._op_lock:
                 await self._reload_sources_locked()
                 self._check_current_source(entry)
-                if (await load_sources(self.data_dir)).get(record_name) != record:
+                if (await self._read_installed_sources()).get(record_name) != record:
                     raise MarketSourceChanged("下载期间插件来源记录已变化，请重试")
                 if _installed_manifest(destination, entry) != old_manifest:
                     raise InstallError("下载期间已安装插件发生变化，请重试")
-                await _finish_task(commit())
+                await finish_task(commit())
         return manifest.name, destination
 
     @staticmethod
