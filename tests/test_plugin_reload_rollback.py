@@ -39,29 +39,44 @@ def _write_plugin(root: Path, value: int) -> None:
     )
 
 
-def test_reload_failure_keeps_previous_instance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("helper_removed_before_reload", [False, True])
+def test_reload_failure_keeps_previous_instance(tmp_path: Path, helper_removed_before_reload: bool) -> None:
     async def run() -> None:
         _write_plugin(tmp_path, 1)
         system = PluginSystem(str(tmp_path / "plugins"), str(tmp_path / "data"))
-        await system.load_plugins()
-        before = next(m for m in system._plugins if m["name"] == "rollback_plugin")
-        instance = before["instance"]
-        assert instance.info["description"] == "rollback value=1"
+        try:
+            assert await system.load_plugins() == 1
+            before = next(m for m in system._plugins if m["name"] == "rollback_plugin")
+            instance = before["instance"]
+            assert instance.info["description"] == "rollback value=1"
+            module_name = type(instance).__module__
+            helper_name = f"{module_name}.helper"
+            original_entry = sys.modules[module_name]
+            original_helper = sys.modules[helper_name]
+            if helper_removed_before_reload:
+                # The old generation no longer owns this sys.modules slot.
+                del sys.modules[helper_name]
 
-        entry = tmp_path / "plugins" / "rollback_plugin" / "main.py"
-        entry.write_text("this is not python !!!\n", encoding="utf-8")
-        assert await system.reload_plugin("rollback_plugin") is False
+            entry = tmp_path / "plugins" / "rollback_plugin" / "main.py"
+            entry.write_text("this is not python !!!\n", encoding="utf-8")
+            assert await system.reload_plugin("rollback_plugin") is False
 
-        after = next(m for m in system._plugins if m["name"] == "rollback_plugin")
-        assert after["loaded"] is True
-        assert after["instance"] is instance
-        assert after["instance"].info["description"] == "rollback value=1"
+            after = next(m for m in system._plugins if m["name"] == "rollback_plugin")
+            assert after["loaded"] is True
+            assert after["instance"] is instance
+            assert after["instance"].info["description"] == "rollback value=1"
+            assert sys.modules[module_name] is original_entry
+            if helper_removed_before_reload:
+                assert helper_name not in sys.modules
+            else:
+                assert sys.modules[helper_name] is original_helper
 
-        _write_plugin(tmp_path, 2)
-        assert await system.reload_plugin("rollback_plugin") is True
-        updated = next(m for m in system._plugins if m["name"] == "rollback_plugin")
-        assert updated["instance"].info["description"] == "rollback value=2"
-        await system.shutdown_plugins()
+            _write_plugin(tmp_path, 2)
+            assert await system.reload_plugin("rollback_plugin") is True
+            updated = next(m for m in system._plugins if m["name"] == "rollback_plugin")
+            assert updated["instance"].info["description"] == "rollback value=2"
+        finally:
+            await system.shutdown_plugins()
 
     asyncio.run(run())
 
