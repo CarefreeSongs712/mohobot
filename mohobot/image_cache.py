@@ -68,27 +68,30 @@ class ImageCache:
 
         并发去重(单飞): 同一图片的识别任务进行中时, 其他调用(如多个 bot
         同时收到同一张图)等待并复用结果, 避免重复调 VLM。
+
+        issue #128: 共享识别任务用独立 Task 承载, 不绑定任何一个等待者。
+        发起者被取消(超时/机器人 shutdown)时识别继续执行, 其他等待者仍能
+        拿到结果; 旧实现用裸 Future 在发起者 CancelledError 时既不结清
+        Future 又把它移出 in-flight, 导致 follower 的 shield 永久挂起。
         """
-        existing = self._in_flight.get(image_url)
-        if existing is not None and not existing.done():
-            try:
-                return await asyncio.shield(existing)
-            except Exception:
-                pass  # 原任务失败, 重新识别
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-        self._in_flight[image_url] = future
-        try:
-            result = await self._get_or_describe_impl(image_url, vision_callback)
-            if not future.done():
-                future.set_result(result)
-            return result
-        except Exception as e:
-            if not future.done():
-                future.set_exception(e)
-            raise
-        finally:
-            self._in_flight.pop(image_url, None)
+        task = self._in_flight.get(image_url)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._get_or_describe_impl(image_url, vision_callback),
+                name=f"image-describe:{image_url[:64]}",
+            )
+            self._in_flight[image_url] = task
+
+            def _cleanup(done: asyncio.Task) -> None:
+                if self._in_flight.get(image_url) is done:
+                    self._in_flight.pop(image_url, None)
+                if not done.cancelled():
+                    # 消费异常, 避免 "Task exception was never retrieved" 噪声;
+                    # 等待者仍然会通过 shield 收到同一个异常。
+                    done.exception()
+
+            task.add_done_callback(_cleanup)
+        return await asyncio.shield(task)
 
     async def peek_description(self, image_url: str) -> str | None:
         """只读探测图片描述缓存: 不下载、不调视觉, 命中返回描述文本。
@@ -254,7 +257,8 @@ class ImageCache:
         )
 
         freed = 0
-        removed = []
+        # issue #137: 淘汰集合可能是万级, 用 set 做成员判断(O(1)); 结果与原 list 一致。
+        removed: set[str] = set()
         for url, entry in sorted_entries:
             if total_size - freed <= self._max_size:
                 break
@@ -264,7 +268,7 @@ class ImageCache:
                 try:
                     os.remove(filepath)
                     freed += entry.get("size", 0)
-                    removed.append(url)
+                    removed.add(url)
                 except OSError as e:
                     logger.warning(f"Failed to remove cached image: {e}")
 
