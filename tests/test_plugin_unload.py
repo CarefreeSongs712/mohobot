@@ -24,5 +24,6 @@ def test_unload_plugin_stops_and_removes_only_target(tmp_path: Path) -> None:
         assert alpha.stopped is True
         assert all(m["name"] != "alpha" for m in system._plugins)
         assert next(m["instance"] for m in system._plugins if m["name"] == "beta") is beta
+        await system.shutdown_plugins()
 
     asyncio.run(run())

@@ -45,6 +45,7 @@ async def test_perbot_binding():
     # 观察钩子同样过滤
     handled3, _ = await ps.dispatch_observed("bot_002", make_group_event(2001, "抽老婆"), {})
     assert not handled3
+    await ps.shutdown_plugins()
     print("[+] per-bot 拦截/观察过滤 OK")
 
 
@@ -68,6 +69,7 @@ async def test_command_collection_filtered():
     sections = ch._build_help_sections("bot_002")
     titles = [s["title"] for s in sections]
     assert not any("wifepicker" in t for t in titles), titles
+    await ps.shutdown_plugins()
     print("[+] 命令收集按 bot 过滤 OK")
 
 

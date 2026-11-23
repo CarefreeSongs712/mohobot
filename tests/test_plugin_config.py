@@ -64,6 +64,7 @@ async def test_plugin_config_system() -> None:
 
     # 未知插件保存 → False
     assert await ps.save_plugin_config("nope", {}) is False
+    await ps.shutdown_plugins()
     print("[1] 插件配置系统(目录插件/schema/默认/热同步) OK")
 
 
@@ -83,6 +84,7 @@ async def test_admin_injection() -> None:
     # 热更新
     ps.set_admin_ids([9999])
     assert inst._admin_ids == ["9999"]
+    await ps.shutdown_plugins()
     print("[2] 管理员注入 OK")
 
 
@@ -159,6 +161,7 @@ async def test_relationship_commands() -> None:
     # 非命令 → 不处理
     handled, reply = await inst.on_message("bot_001", group_event("你好"), {})
     assert handled is False
+    await ps.shutdown_plugins()
     print("[3] 关系插件命令 + 权限门控 OK")
 
 
@@ -256,6 +259,8 @@ async def test_schema_coercion() -> None:
     assert getattr(inst, "plugin_config", {}).get("manage_users") == ["2001", "2002"]
     assert inst._cfg is None, "on_config_update 后应失效重建"
 
+    await ps.shutdown_plugins()
+
     # 存档脏值(手工编辑)启动也不崩
     import json as _json
     archive = Path(tmp) / "plugins_config" / "relationship.json"
@@ -271,6 +276,7 @@ async def test_schema_coercion() -> None:
     assert cfg2["batch_delay_min"] == 10, "脏 int 回退默认"
     assert cfg2["batch_delay_max"] == 55, "合法数字字符串应转换"
     assert cfg2["notice"]["max_group_capacity"] == 100
+    await ps2.shutdown_plugins()
     print("[5] schema 类型强转 + 存档脏值防护 OK")
 
 
@@ -298,6 +304,7 @@ async def test_admin_hot_update() -> None:
     # 再次入口 → 重新构造 cfg, 新管理员生效
     inst._ensure_handlers()
     assert "2002" in inst._cfg.manage_users, "热更新后的管理员应进入审批员"
+    await ps.shutdown_plugins()
     print("[6] admin 热更新即时生效 OK")
 
 
@@ -352,6 +359,7 @@ async def test_empty_command_no_crash() -> None:
     )
     handled, reply = await inst.on_message("bot_001", ev, {})
     assert handled is False, "单独 / 不应命中任何命令"
+    await ps.shutdown_plugins()
     print("[8] 空命令防护 OK")
 
 
