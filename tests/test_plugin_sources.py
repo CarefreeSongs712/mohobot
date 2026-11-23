@@ -34,6 +34,65 @@ def test_source_records_merge_and_remove(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_atomic_source_replace_compares_only_target_and_keeps_peers(tmp_path):
+    from mohobot.plugins.sources import SourceRecordConflict, replace_source_record
+
+    async def run():
+        await save_source(tmp_path, "alpha", {"version": "1.0.0"})
+        previous = await get_source(tmp_path, "alpha")
+        replacement = {**previous, "version": "2.0.0"}
+        await save_source(tmp_path, "beta", {"extra": {"keep": True}})
+        await replace_source_record(tmp_path, "alpha", expected=previous, record=replacement)
+        with pytest.raises(SourceRecordConflict, match="alpha"):
+            await replace_source_record(tmp_path, "alpha", expected=previous, record=None)
+        assert await get_source(tmp_path, "alpha") == replacement
+        await replace_source_record(tmp_path, "alpha", expected=replacement, record=previous)
+        assert await load_sources(tmp_path) == {
+            "alpha": previous, "beta": {"schema_version": 1, "extra": {"keep": True}},
+        }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("content", ["", "{", "null", "[]", '{"alpha": 1}', '{"x": {}, "x": {}}', '{"alpha": {"v": NaN}}'])
+def test_malformed_source_record_file_is_not_overwritten(tmp_path, content):
+    path = tmp_path / "plugin_sources.json"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError):
+        asyncio.run(save_source(tmp_path, "alpha", {}))
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_source_replace_failure_preserves_old_bytes(tmp_path, monkeypatch):
+    async def run():
+        await save_source(tmp_path, "alpha", {"version": "1.0.0"})
+        path = tmp_path / "plugin_sources.json"
+        previous = path.read_bytes()
+
+        def deny_replace(source, destination):
+            assert destination == path
+            raise PermissionError("fixture denied replace")
+
+        monkeypatch.setattr("mohobot.plugins._atomic_json.os.replace", deny_replace)
+        with pytest.raises(PermissionError, match="fixture denied"):
+            await save_source(tmp_path, "alpha", {"version": "2.0.0"})
+        assert path.read_bytes() == previous
+        assert list(tmp_path.iterdir()) == [path]
+
+    asyncio.run(run())
+
+
+def test_source_mutation_refuses_symlink(tmp_path):
+    target = tmp_path / "other.json"
+    target.write_text("{}", encoding="utf-8")
+    path = tmp_path / "plugin_sources.json"
+    path.symlink_to(target)
+    with pytest.raises(ValueError, match="plugin_sources.json"):
+        asyncio.run(save_source(tmp_path, "alpha", {}))
+    assert path.is_symlink()
+    assert target.read_text(encoding="utf-8") == "{}"
+
+
 def test_registry_generation_tracks_url_changes_not_display_names(tmp_path, monkeypatch):
     from mohobot.plugin_market import sources
 
