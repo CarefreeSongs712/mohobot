@@ -8,6 +8,7 @@ from dataclasses import replace
 import time
 import urllib.request
 from pathlib import Path
+from zipfile import BadZipFile
 from typing import Any, Callable
 
 from loguru import logger
@@ -23,10 +24,16 @@ from mohobot.plugin_market.sources import (
 from mohobot.plugins.installer import (
     InstallError,
     download_file,
-    install_from_archive,
-    upgrade_from_archive,
-    verify_sha256,
+    extract_plugin_archive,
+    replace_prepared_plugin,
     with_proxy,
+)
+from mohobot.plugins.manifest import (
+    ManifestError,
+    PluginManifest,
+    check_compatibility,
+    find_manifest,
+    parse_manifest,
 )
 from mohobot.plugins.market import (
     MarketEntry,
@@ -55,6 +62,60 @@ def _check_entry_compatibility(entry: MarketEntry) -> None:
         raise InstallError(
             f"插件要求 mohobot {entry.mohobot_version}, 当前 {MOHOBOT_VERSION}"
         )
+
+
+def _extract_market_package(
+    archive: Path, staging: Path, entry: MarketEntry,
+) -> tuple[PluginManifest, Path]:
+    if not entry.sha256:
+        raise InstallError("市场条目缺少归档 SHA256")
+    try:
+        manifest, root = extract_plugin_archive(archive, staging, expected_sha256=entry.sha256)
+        if manifest.plugin_id != entry.plugin_id:
+            raise InstallError(f"归档身份不匹配: 期望 {entry.plugin_id}, 实际 {manifest.plugin_id}")
+        if manifest.version != entry.version:
+            raise InstallError(f"归档版本不匹配: 期望 {entry.version}, 实际 {manifest.version}")
+        check_compatibility(manifest, api_version=PLUGIN_API_VERSION, mohobot_version=MOHOBOT_VERSION)
+    except (ManifestError, BadZipFile) as exc:
+        raise InstallError(f"归档无效: {exc}") from exc
+    return manifest, root
+
+
+def _installed_manifest(destination: Path, entry: MarketEntry) -> PluginManifest:
+    path = find_manifest(destination)
+    if path is None:
+        raise InstallError(f"已安装插件缺少 metadata.yaml: {destination.name}")
+    try:
+        manifest = parse_manifest(path)
+    except ManifestError as exc:
+        raise InstallError(f"已安装插件清单无效: {exc}") from exc
+    if manifest.plugin_id != entry.plugin_id:
+        raise InstallError(f"已安装插件身份不匹配: 期望 {entry.plugin_id}, 实际 {manifest.plugin_id}")
+    try:
+        newer = Version(entry.version) > Version(manifest.version)
+    except InvalidVersion as exc:
+        raise InstallError(f"市场版本无效: {entry.version}") from exc
+    if not newer:
+        raise InstallError(f"市场版本 {entry.version} 不高于已安装版本 {manifest.version}")
+    return manifest
+
+
+async def _thread_until_done(func, /, *args):
+    """Do not let task cancellation release a thread's paths before it exits."""
+    worker = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not worker.cancelled():
+            worker.exception()
+        raise
 
 
 def _cache_path(data_dir: Path, url: str) -> Path:
@@ -153,11 +214,11 @@ class MarketService:
         url = entry_download_url(entry)
         proxy_url = with_proxy(url, self.proxy) if self.proxy else url
         try:
-            await asyncio.to_thread(download_file, proxy_url, target)
+            await _thread_until_done(download_file, proxy_url, target)
         except InstallError:
             if not self.proxy:
                 raise
-            await asyncio.to_thread(download_file, url, target)
+            await _thread_until_done(download_file, url, target)
 
     async def install_from_entry(
         self,
@@ -176,18 +237,16 @@ class MarketService:
     ) -> tuple[str, Path]:
         _check_entry_compatibility(entry)
         source_id = entry.source_id or source_id
-        with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
-            archive = Path(temp) / "plugin.zip"
+        self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".market-prepare-", dir=self.plugins_dir) as temp:
+            staging = Path(temp)
+            archive = staging / "plugin.zip"
             await self._download_entry(entry, archive)
-            if entry.sha256:
-                await asyncio.to_thread(verify_sha256, archive, entry.sha256)
-            manifest, destination = await asyncio.to_thread(
-                install_from_archive,
-                archive,
-                self.plugins_dir,
-                expected_name=entry.name,
-                expected_version=entry.version,
-            )
+            manifest, root = await _thread_until_done(_extract_market_package, archive, staging / "extract", entry)
+            destination = self.plugins_dir / manifest.name
+            if destination.exists() or destination.is_symlink():
+                raise InstallError(f"插件已安装: {manifest.name}")
+            root.rename(destination)
         registry_url = next(
             (source.url for source in self._sources if source.id == source_id), ""
         )
@@ -284,25 +343,20 @@ class MarketService:
         if entry is None:
             raise InstallError(f"插件源中已找不到 {plugin_id}")
         _check_entry_compatibility(entry)
-        installed_version = str(record.get("version") or "")
-        if installed_version:
-            try:
-                if Version(entry.version) <= Version(installed_version):
-                    raise InstallError(
-                        f"市场版本 {entry.version} 不高于已安装版本 {installed_version}"
-                    )
-            except InvalidVersion:
-                pass
-        with tempfile.TemporaryDirectory(prefix="mohobot-market-") as temp:
-            archive = Path(temp) / "plugin.zip"
+        if record_name != entry.name:
+            raise InstallError("来源记录名称与市场条目不匹配")
+        destination = self.plugins_dir / entry.name
+        old_manifest = _installed_manifest(destination, entry)
+        with tempfile.TemporaryDirectory(prefix=".market-prepare-", dir=self.plugins_dir) as temp:
+            staging = Path(temp)
+            archive = staging / "plugin.zip"
             await self._download_entry(entry, archive)
-            if entry.sha256:
-                await asyncio.to_thread(verify_sha256, archive, entry.sha256)
+            manifest, root = await _thread_until_done(_extract_market_package, archive, staging / "extract", entry)
+            if _installed_manifest(destination, entry) != old_manifest:
+                raise InstallError("下载期间已安装插件发生变化，请重试")
             if before_replace is not None:
                 await before_replace(entry.name)
-            manifest, destination = await asyncio.to_thread(
-                upgrade_from_archive, archive, self.plugins_dir, entry.name
-            )
+            await _thread_until_done(replace_prepared_plugin, root, destination, staging / "backup")
         record = dict(record)
         record.update(
             {

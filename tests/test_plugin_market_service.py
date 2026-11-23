@@ -1,14 +1,17 @@
 import asyncio
 import shutil
+import threading
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from mohobot.plugin_market.service import MarketService
 from mohobot.plugin_market.sources import add_registry_source
 from mohobot.file_store import json_write
-from mohobot.plugins.installer import sha256_file
-from mohobot.plugins.sources import load_sources
+from mohobot.plugins.installer import InstallError, sha256_file
+from mohobot.plugins.sources import load_sources, save_source
 
 
 def _entry(name: str, archive: Path | None = None) -> dict:
@@ -139,6 +142,10 @@ def test_update_market_plugin(tmp_path: Path) -> None:
         ):
             await service.install_from_entry(entry)
 
+        # #145 used to record the index version even when the ZIP was older.
+        # A stale record must not prevent retrying a real upgrade.
+        stale = (await load_sources(tmp_path / "data"))["demo"]
+        await save_source(tmp_path / "data", "demo", {**stale, "version": "99.0.0"})
         archive_v2 = _archive(tmp_path, "demo", version="2.0.0")
         payload["plugins"]["CarefreeSongs712/demo"] = _entry("demo", archive_v2)
         payload["plugins"]["CarefreeSongs712/demo"]["version"] = "2.0.0"
@@ -158,6 +165,110 @@ def test_update_market_plugin(tmp_path: Path) -> None:
         assert name == "demo"
         assert seen == ["demo"]
         assert "2.0.0" in (destination / "metadata.yaml").read_text(encoding="utf-8")
+        assert (await load_sources(tmp_path / "data"))["demo"]["version"] == "2.0.0"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["install", "update"])
+@pytest.mark.parametrize("case", ["version", "author", "api", "host", "entry", "digest"])
+def test_market_checks_actual_archive_before_replacing_target(tmp_path, monkeypatch, operation, case):
+    async def run() -> None:
+        data = tmp_path / "data"
+        service = MarketService(data, data / "plugins", fetcher=lambda url: payload)
+        target = service.plugins_dir / "demo"
+        entry_id = "CarefreeSongs712/demo"
+        record = {"install_method": "market", "plugin_id": entry_id, "version": "1.0.0"}
+        want_version = "2.0.0" if operation == "update" else "1.0.0"
+        old_metadata = (
+            "name: demo\nauthor: CarefreeSongs712\ndisplay_name: Demo\nversion: 1.0.0\n"
+            "description: demo\nrepo: https://github.com/CarefreeSongs712/mohobot-plugin-demo\n"
+            "license: MIT\napi_version: 1\n"
+        )
+        if operation == "update":
+            target.mkdir(parents=True)
+            (target / "metadata.yaml").write_text(old_metadata, encoding="utf-8")
+            (target / "main.py").write_text("# old bytes\n", encoding="utf-8")
+            await save_source(data, "demo", record)
+        original_records = await load_sources(data)
+
+        metadata = old_metadata.replace("version: 1.0.0", f"version: {want_version}")
+        if case == "version":
+            metadata = metadata.replace(f"version: {want_version}", "version: 0.5.0")
+        elif case == "author":
+            metadata = metadata.replace("author: CarefreeSongs712", "author: OtherOwner")
+        elif case == "api":
+            metadata = metadata.replace("api_version: 1", "api_version: 999")
+        elif case == "host":
+            metadata += 'mohobot_version: ">=999.0.0"\n'
+        elif case == "entry":
+            metadata += "entry: src/not_there.py\n"
+        archive = tmp_path / "candidate.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("demo/metadata.yaml", metadata)
+            handle.writestr("demo/main.py", "raise AssertionError('must not execute')\n")
+        entry = _entry("demo", archive)
+        entry["version"] = want_version
+        if case == "digest":
+            entry["sha256"] = "0" * 64
+        payload = {"$meta": {"schema_version": 1}, "plugins": {entry_id: entry}}
+        monkeypatch.setattr("mohobot.plugin_market.service.download_file", lambda url, dest: shutil.copy(archive, dest))
+        stopped = []
+
+        async def before_replace(name):
+            stopped.append(name)
+
+        expected_error = {
+            "version": "版本", "author": "身份", "api": "API", "host": "mohobot",
+            "entry": "entry file not found", "digest": "SHA256",
+        }[case]
+        with pytest.raises(InstallError, match=expected_error):
+            if operation == "update":
+                await service.update(entry_id, before_replace=before_replace)
+            else:
+                await service.install(entry_id)
+        assert stopped == []
+        assert await load_sources(data) == original_records
+        if operation == "update":
+            assert (target / "metadata.yaml").read_text(encoding="utf-8") == old_metadata
+            assert (target / "main.py").read_bytes() == b"# old bytes\n"
+        else:
+            assert not target.exists()
+
+    asyncio.run(run())
+
+
+def test_cancelled_download_keeps_staging_until_worker_exits(tmp_path, monkeypatch):
+    async def run():
+        service = MarketService(tmp_path / "data", tmp_path / "installed", fetcher=lambda url: _payload("demo"))
+        loop = asyncio.get_running_loop()
+        started = loop.create_future()
+        release = threading.Event()
+
+        def download(url, path):
+            loop.call_soon_threadsafe(started.set_result, path)
+            assert release.wait(5)
+            assert path.parent.is_dir()
+            path.write_bytes(b"discarded download")
+
+        monkeypatch.setattr("mohobot.plugin_market.service.download_file", download)
+        task = asyncio.create_task(service.install("CarefreeSongs712/demo"))
+        path = await asyncio.wait_for(started, 5)
+        try:
+            for _ in range(2):
+                task.cancel()
+                turn = loop.create_future()
+                loop.call_soon(turn.set_result, None)
+                await turn
+                assert not task.done()
+                assert path.parent.is_dir()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not path.parent.exists()
+        assert not (service.plugins_dir / "demo").exists()
+        assert await load_sources(service.data_dir) == {}
 
     asyncio.run(run())
 

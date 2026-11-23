@@ -1,6 +1,6 @@
 # 插件市场事务与来源一致性设计（#144–#147）
 
-日期：2026-11-23 · 状态：待规格确认。范围对应 [#144](https://github.com/CarefreeSongs712/mohobot/issues/144)、[#145](https://github.com/CarefreeSongs712/mohobot/issues/145)、[#146](https://github.com/CarefreeSongs712/mohobot/issues/146)、[#147](https://github.com/CarefreeSongs712/mohobot/issues/147)，按工作分工合为一个市场 PR。
+日期：2026-11-23 · 状态：已确认。范围对应 [#144](https://github.com/CarefreeSongs712/mohobot/issues/144)、[#145](https://github.com/CarefreeSongs712/mohobot/issues/145)、[#146](https://github.com/CarefreeSongs712/mohobot/issues/146)、[#147](https://github.com/CarefreeSongs712/mohobot/issues/147)，按工作分工合为一个市场 PR。
 
 ## 1. 范围与取舍
 

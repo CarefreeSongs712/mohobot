@@ -163,6 +163,28 @@ def install_from_directory(
         raise InstallError(f"安装失败: {exc}") from exc
 
 
+def extract_plugin_archive(
+    archive: Path,
+    staging: Path,
+    *,
+    expected_sha256: str = "",
+) -> tuple[PluginManifest, Path]:
+    """Verify an archive and extract a package into caller-owned, empty staging."""
+    archive = Path(archive)
+    if not archive.is_file():
+        raise InstallError("压缩包不存在")
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise InstallError("压缩包超过大小限制")
+    if expected_sha256:
+        verify_sha256(archive, expected_sha256)
+    safe_extract_zip(archive, staging)
+    root = find_plugin_root(staging)
+    manifest_path = find_manifest(root)
+    if manifest_path is None:
+        raise InstallError("压缩包内找不到 metadata.yaml")
+    return parse_manifest(manifest_path), root
+
+
 def install_from_archive(
     archive: Path,
     plugins_dir: Path,
@@ -172,20 +194,11 @@ def install_from_archive(
     expected_sha256: str = "",
     proxy: str = "",
 ) -> tuple[PluginManifest, Path]:
-    archive = Path(archive)
-    if not archive.is_file():
-        raise InstallError("压缩包不存在")
-    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
-        raise InstallError("压缩包超过大小限制")
-    if expected_sha256:
-        verify_sha256(archive, expected_sha256)
-
     plugins_dir = Path(plugins_dir).resolve()
     plugins_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=INSTALL_PREFIX, dir=plugins_dir))
     try:
-        safe_extract_zip(archive, staging / "extract")
-        root = find_plugin_root(staging / "extract")
+        _, root = extract_plugin_archive(archive, staging / "extract", expected_sha256=expected_sha256)
         return install_from_directory(
             root,
             plugins_dir,
@@ -236,41 +249,37 @@ def upgrade_from_archive(
     *,
     expected_sha256: str | None = None,
 ) -> tuple[PluginManifest, Path]:
-    archive = Path(archive)
-    if not archive.is_file():
-        raise InstallError("压缩包不存在")
-    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
-        raise InstallError("压缩包超过大小限制")
-    if expected_sha256:
-        verify_sha256(archive, expected_sha256)
     plugins_dir = Path(plugins_dir)
     destination = plugins_dir / expected_name
     if not destination.is_dir():
         raise InstallError(f"插件未安装: {expected_name}")
     with tempfile.TemporaryDirectory(prefix=UPGRADE_PREFIX, dir=plugins_dir) as temp:
         temp_path = Path(temp)
-        extracted = temp_path / "extract"
-        safe_extract_zip(archive, extracted)
-        root = find_plugin_root(extracted)
-        manifest = parse_manifest(find_manifest(root) or (root / "metadata.yaml"))
+        manifest, root = extract_plugin_archive(
+            archive, temp_path / "extract", expected_sha256=expected_sha256 or "",
+        )
         if manifest.name != expected_name:
             raise InstallError(
                 f"更新包名称 {manifest.name} 与已安装插件 {expected_name} 不一致"
             )
-        backup = temp_path / "backup"
-        shutil.copytree(destination, backup)
-        try:
-            shutil.rmtree(destination)
-            shutil.move(str(root), str(destination))
-            installed_path = find_manifest(destination)
-            if installed_path is None:
-                raise InstallError("更新后清单缺失")
-            installed = parse_manifest(installed_path)
-            if installed.name != expected_name:
-                raise InstallError("更新后清单名称不一致")
-        except Exception:
-            shutil.rmtree(destination, ignore_errors=True)
-            if backup.exists():
-                shutil.move(str(backup), str(destination))
-            raise
+        replace_prepared_plugin(root, destination, temp_path / "backup")
     return manifest, destination
+
+
+def replace_prepared_plugin(root: Path, destination: Path, backup: Path) -> None:
+    """Legacy manual replacement; marketplace will retain its own journal and backup."""
+    if not destination.is_dir():
+        raise InstallError(f"插件未安装: {destination.name}")
+    shutil.copytree(destination, backup)
+    try:
+        shutil.rmtree(destination)
+        shutil.move(str(root), str(destination))
+        path = find_manifest(destination)
+        if path is None:
+            raise InstallError("更新后清单缺失")
+        if parse_manifest(path).name != destination.name:
+            raise InstallError("更新后清单名称不一致")
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        shutil.move(str(backup), str(destination))
+        raise
