@@ -10,12 +10,14 @@ import pytest
 from mohobot.bot_manager import BotManager
 from mohobot.llm_service import LLMService
 from mohobot.models.config import GlobalConfig
+from mohobot.plugin_market.journal import MarketJournal, MarketRecoveryError
 from mohobot.ws_server import WSServer
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("startup_fails", [False, True])
-async def test_installed_plugin_activation_before_websocket_listens(tmp_path, monkeypatch, startup_fails):
+@pytest.mark.parametrize("pending_market_install", [False, True])
+async def test_installed_plugin_activation_before_websocket_listens(tmp_path, monkeypatch, startup_fails, pending_market_install):
     entry = Path(__file__).resolve().parents[1] / "main.py"
     spec = spec_from_file_location("_cold_plugin_application_test", entry)
     module = module_from_spec(spec)
@@ -63,6 +65,17 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
                     raise RuntimeError("fixture startup failure after injection")
     """), encoding="utf-8")
 
+    if pending_market_install:
+        installed = plugin_dir.parent
+        candidate = installed / ".prepare"
+        candidate.mkdir()
+        (candidate / "main.py").write_text("raise AssertionError('uncommitted entry was imported')\n")
+        (candidate / "metadata.yaml").write_text((plugin_dir / "metadata.yaml").read_text())
+        journal = MarketJournal(cfg.data_dir, installed)
+        op = await journal.begin_replace(name, candidate, {"version": "2.0.0"}, expect_installed=True)
+        await op.apply()
+        assert (plugin_dir / "main.py").read_text().startswith("raise AssertionError")
+
     monkeypatch.setattr(GlobalConfig, "load", Mock(return_value=cfg))
     monkeypatch.setattr(BotManager, "migrate_legacy_bots", Mock())
     monkeypatch.setattr(module.MohobotApplication, "_maybe_start_review_panel", Mock())
@@ -99,3 +112,26 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
             assert_plugin_refs()
     finally:
         await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_market_journal_stops_startup_before_assembly(tmp_path, monkeypatch):
+    entry = Path(__file__).resolve().parents[1] / "main.py"
+    spec = spec_from_file_location("_cold_market_recovery_test", entry)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cfg = GlobalConfig()
+    cfg.data_dir = str(tmp_path / "data")
+    path = Path(cfg.data_dir) / "plugins" / ".market-journal" / ("a" * 32) / "journal.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    monkeypatch.setattr(GlobalConfig, "load", Mock(return_value=cfg))
+    listen = AsyncMock()
+    monkeypatch.setattr(WSServer, "start", listen)
+    app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
+    with pytest.raises(MarketRecoveryError, match=path.parent.name):
+        await app.startup()
+    assert app._plugin_system is None
+    assert app._bot_manager is None
+    listen.assert_not_awaited()
+    assert path.read_text() == "{broken"

@@ -30,6 +30,7 @@ from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig
 from mohobot.persona_service import PersonaService
 from mohobot.plugin_market import MarketService
+from mohobot.plugin_market.journal import MarketJournal
 from mohobot.services.task_supervisor import TaskSupervisor
 from mohobot.utils.logger import setup_logger
 from mohobot.web_panel.app import WebPanel
@@ -76,6 +77,9 @@ class MohobotApplication:
 
         # 1. Load config
         self._config = GlobalConfig.load(self._config_path)
+        data_dir_abs = Path(self._config.data_dir).resolve()
+        # Recover before discovery, service startup, or binding a listening socket.
+        await MarketJournal(data_dir_abs, data_dir_abs / "plugins").recover()
 
         # 2. Ensure data directories exist
         await ensure_dir(self._config.data_dir)
@@ -324,7 +328,6 @@ class MohobotApplication:
             except Exception:
                 pass
 
-        data_dir_abs = Path(self._config.data_dir).resolve()
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
             # 绝对路径: 插件内 data 目录按进程 cwd 解析, 启动 cwd 不对会读错文件
