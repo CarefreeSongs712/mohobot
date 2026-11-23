@@ -1,13 +1,34 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from fastapi.testclient import TestClient
 
 from mohobot.interceptors.plugin_system import PluginNamespaceConflict
 from mohobot.web_panel.app import WebPanel
+
+_MISSING = object()
+
+
+@contextmanager
+def _patched_attrs(target, **attrs):
+    """临时替换属性, 结束后恢复(兼容 tests/_run_all.py 无 fixture 环境)。"""
+    old = {}
+    for name in attrs:
+        namespace = getattr(target, "__dict__", {})
+        old[name] = (namespace.get(name, _MISSING), getattr(target, name))
+    try:
+        for name, value in attrs.items():
+            setattr(target, name, value)
+        yield target
+    finally:
+        for name, (previous, value) in old.items():
+            if previous is _MISSING:
+                delattr(target, name)
+            else:
+                setattr(target, name, value)
 
 
 class _FakeMarket:
@@ -91,20 +112,23 @@ def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("endpoint, method, payload", [
-    ("reload", "reload_plugins", None),
-    ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
-])
-def test_plugin_namespace_conflict_returns_409(tmp_path, monkeypatch, endpoint, method, payload):
+def test_plugin_namespace_conflict_returns_409(tmp_path):
     async def conflict(*args):
         raise PluginNamespaceConflict("fixture namespace conflict")
 
-    monkeypatch.setattr(_FakePluginSystem, method, conflict)
-    client, headers = _client(tmp_path)
-    kwargs = {"json": payload} if payload is not None else {}
-    response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
-    assert response.status_code == 409
-    assert response.json()["detail"] == "fixture namespace conflict"
+    cases = (
+        ("reload", "reload_plugins", None),
+        ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
+    )
+    for endpoint, method, payload in cases:
+        case_dir = tmp_path / endpoint
+        case_dir.mkdir()
+        with _patched_attrs(_FakePluginSystem, **{method: conflict}):
+            client, headers = _client(case_dir)
+            kwargs = {"json": payload} if payload is not None else {}
+            response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
+            assert response.status_code == 409
+            assert response.json()["detail"] == "fixture namespace conflict"
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:

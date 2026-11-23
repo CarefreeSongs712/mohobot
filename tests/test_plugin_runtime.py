@@ -136,16 +136,20 @@ def test_manifest_parse_and_validation(tmp_path: Path) -> None:
 def test_installed_plugin_requires_manifest(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
-        installed = tmp_path / "data" / "plugins" / "extdemo"
-        _write(
-            installed / "main.py",
-            "class Plugin:\n"
-            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
-        )
-        await ps.load_plugins()
-        assert ps._plugins[0]["source"] == "installed"
-        assert ps._plugins[0]["loaded"] is False
-        assert "metadata" in ps._plugins[0]["error"]
+        try:
+            installed = tmp_path / "data" / "plugins" / "extdemo"
+            _write(
+                installed / "main.py",
+                "class Plugin:\n"
+                "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+            )
+            await ps.load_plugins()
+            assert ps._plugins[0]["source"] == "installed"
+            assert ps._plugins[0]["loaded"] is False
+            assert "metadata" in ps._plugins[0]["error"]
+        finally:
+            # 清理失败加载可能残留的模块/路径, 避免影响同文件后续用例。
+            await ps.shutdown_plugins()
 
     asyncio.run(run())
 
@@ -153,29 +157,33 @@ def test_installed_plugin_requires_manifest(tmp_path: Path) -> None:
 def test_installed_plugin_loads_with_manifest(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
-        installed = tmp_path / "data" / "plugins" / "extdemo"
-        _write(
-            installed / "main.py",
-            "class Plugin:\n"
-            "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
-        )
-        _write(
-            installed / "metadata.yaml",
-            "name: extdemo\n"
-            "author: CarefreeSongs712\n"
-            "display_name: 外置演示\n"
-            "version: 1.0.0\n"
-            "description: installed plugin\n"
-            "repo: https://github.com/CarefreeSongs712/mohobot-plugin-extdemo\n"
-            "license: MIT\n"
-            "api_version: 1\n",
-        )
-        await ps.load_plugins()
-        meta = ps._plugins[0]
-        assert meta["source"] == "installed"
-        assert meta["loaded"] is True
-        assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
-        assert meta["file"] == "extdemo/main.py"
+        try:
+            installed = tmp_path / "data" / "plugins" / "extdemo"
+            _write(
+                installed / "main.py",
+                "class Plugin:\n"
+                "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
+            )
+            _write(
+                installed / "metadata.yaml",
+                "name: extdemo\n"
+                "author: CarefreeSongs712\n"
+                "display_name: 外置演示\n"
+                "version: 1.0.0\n"
+                "description: installed plugin\n"
+                "repo: https://github.com/CarefreeSongs712/mohobot-plugin-extdemo\n"
+                "license: MIT\n"
+                "api_version: 1\n",
+            )
+            await ps.load_plugins()
+            meta = ps._plugins[0]
+            assert meta["source"] == "installed"
+            assert meta["loaded"] is True
+            assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
+            assert meta["file"] == "extdemo/main.py"
+        finally:
+            # 卸载模块并清理 __pycache__, 否则同一进程内后跑的用例会看到 extdemo 模块名冲突。
+            await ps.shutdown_plugins()
 
     asyncio.run(run())
 
