@@ -566,7 +566,16 @@ class PluginSystem(Interceptor):
             await self._task_supervisor.cancel_owner("plugins")
             await self._task_supervisor.cancel_owner_prefix("plugin:")
         for meta in reversed(targets):
-            await self._retire_plugin(meta)
+            try:
+                await self._retire_plugin(meta)
+            except Exception as exc:
+                logger.error(f"Plugin {meta.get('name', '?')} shutdown incomplete: {exc}")
+                # Keep the instance and recovery intent for a retry, but release
+                # module names so a later load is not blocked by stale modules.
+                imports = meta.pop("_imports", None)
+                if imports is not None:
+                    imports.detach()
+                continue
             self._unload_plugin(meta)
             meta.pop("_rollback", None)
         if self._task_supervisor is not None:
@@ -615,7 +624,9 @@ class PluginSystem(Interceptor):
                 meta.pop("_hook_name")
             if meta.get("_hook_name") != "on_shutdown":
                 await self._drain_plugin_tasks(meta)
-            await self._call_hook(meta, "on_shutdown")
+            if not await self._call_hook(meta, "on_shutdown"):
+                # Keep ownership and the recovery intent: callers retry later.
+                raise RuntimeError(f"plugin {meta['name']} on_shutdown failed")
             meta["_shutdown_done"] = True
         await self._drain_plugin_tasks(meta)
         registry.unregister_owner(str(meta.get("name", "")))
@@ -1345,7 +1356,10 @@ class PluginSystem(Interceptor):
                 (package / manifest.entry, name, str(package), "installed"), state, record,
             )
             if candidate.get("loaded"):
-                await self._activate_plugin(candidate, publish=False, seed_config=False)
+                if not await self._activate_plugin(candidate, publish=False, seed_config=False):
+                    # Recovery reloads the previous version under the same module
+                    # name; release the failed candidate's imports first.
+                    self._unload_plugin(candidate)
             error = candidate.get("error")
             if error is not None and (expect_installed or entry is not None):
                 raise InstallError(f"插件 {name} 激活失败：{error}")
@@ -1453,6 +1467,7 @@ class PluginSystem(Interceptor):
         if meta.get("loaded"):
             activated = await self._activate_plugin(meta)
             if not activated:
+                self._unload_plugin(meta)
                 raise MarketRecoveryError(
                     f"插件 {name} 原版本激活失败，保留事务恢复状态：{meta.get('error')}"
                 )
