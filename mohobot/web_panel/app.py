@@ -1286,30 +1286,49 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_market or not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
+            name = None
             try:
                 name, destination = await self._plugin_market.install(
                     body.plugin_id, source_id=body.source_id
                 )
                 count = await self._plugin_system.reload_plugins()
+                target = next(
+                    (item for item in self._plugin_system.list_plugins()
+                     if item["name"] == name and item["source"] == "installed"),
+                    None,
+                )
+                if target is None:
+                    raise RuntimeError("插件未出现在已安装列表中")
+                if target["error"] is not None:
+                    raise RuntimeError(target["error"] or "插件启动失败")
+                if target["loaded"]:
+                    activation = "active"
+                elif not target["enabled"]:
+                    activation = "disabled"
+                else:
+                    raise RuntimeError("插件未就绪")
             except Exception as exc:
+                detail = str(exc) if name is None else f"插件 {name} 文件已安装，但激活失败：{exc}"
                 await self._audit.write(
                     actor="admin",
                     action="plugin_market_install",
-                    target=body.plugin_id,
+                    target=name or body.plugin_id,
                     success=False,
-                    details={"error": str(exc)},
+                    details={"error": detail, "files_installed": name is not None},
                     remote=request.client.host if request.client else "",
                 )
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise HTTPException(status_code=400, detail=detail) from exc
             await self._audit.write(
                 actor="admin",
                 action="plugin_market_install",
                 target=name,
                 success=True,
-                details={"plugin_id": body.plugin_id, "source_id": body.source_id},
+                details={"plugin_id": body.plugin_id, "source_id": body.source_id, "activation": activation},
                 remote=request.client.host if request.client else "",
             )
-            return {"status": "ok", "name": name, "path": str(destination), "count": count}
+            return {
+                "status": "ok", "name": name, "path": str(destination), "count": count, "activation": activation,
+            }
 
         @app.post("/api/plugins/market/update")
         async def update_market_plugin(request: Request, body: PluginMarketInstallRequest):
