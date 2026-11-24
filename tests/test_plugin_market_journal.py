@@ -11,7 +11,6 @@ import pytest
 from mohobot.plugin_market.journal import MarketJournal, MarketRecoveryError
 from mohobot.plugins.sources import load_sources_strict, save_source, sources_path
 
-
 OLD = {"schema_version": 1, "version": "1.0.0", "extra": {"keep": True}}
 NEW = {"schema_version": 1, "version": "2.0.0"}
 PEER = {"schema_version": 1, "version": "9.0.0"}
@@ -213,6 +212,43 @@ def test_config_seed_moves_with_candidate_but_existing_archive_is_untouched(tmp_
         assert json.loads(config.read_text()) == {"mode": "default"}
     else:
         assert not config.exists()
+
+
+@pytest.mark.parametrize("committed", [True, False])
+def test_cleanup_retries_final_discard_in_same_process(tmp_path, monkeypatch, committed):
+    from mohobot.plugin_market import journal as module
+
+    async def run():
+        txns = MarketJournal(data, plugins)
+        op = await txns.begin_uninstall("demo", delete_config=False, delete_data=False)
+        await op.apply()
+        if committed:
+            await op.commit()
+        else:
+            await op.rollback()
+        discard = module._discard
+        failed = False
+
+        def transient(path):
+            nonlocal failed
+            if path.name.startswith(".done-") and not failed:
+                failed = True
+                raise PermissionError("fixture final discard")
+            return discard(path)
+
+        monkeypatch.setattr(module, "_discard", transient)
+        with pytest.raises(MarketRecoveryError):
+            await op.cleanup()
+        assert failed and not op.path.exists()
+        assert op.path.with_name(f".done-{op.path.name}").is_dir()
+        for _ in range(2):
+            await op.cleanup()
+        assert not list(txns.root.iterdir())
+        assert (await load_sources_strict(data)).get("demo") == (None if committed else OLD)
+        assert (plugins / "demo").exists() != committed
+
+    data, plugins = _fixture(tmp_path)
+    asyncio.run(run())
 
 
 def test_uninstall_refuses_recycle_collision_before_moving_live_files(tmp_path):

@@ -10,7 +10,7 @@ import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from zipfile import BadZipFile
 
 from loguru import logger
@@ -19,7 +19,11 @@ from packaging.version import InvalidVersion, Version
 
 from mohobot import __version__ as MOHOBOT_VERSION
 from mohobot.api import api_version as PLUGIN_API_VERSION
-from mohobot.plugin_market.journal import MarketJournal, MarketOperation, MarketRecoveryError
+from mohobot.plugin_market.journal import (
+    MarketJournal,
+    MarketOperation,
+    MarketRecoveryError,
+)
 from mohobot.plugin_market.sources import (
     DEFAULT_SOURCE_ID,
     RegistryIdentity,
@@ -51,6 +55,9 @@ from mohobot.plugins.market import (
     parse_market_index,
 )
 from mohobot.plugins.sources import SOURCE_SCHEMA_VERSION, load_sources_strict
+
+if TYPE_CHECKING:
+    from mohobot.interceptors.plugin_system import PluginSystem
 
 MAX_INDEX_BYTES = 5 * 1024 * 1024
 
@@ -383,12 +390,37 @@ class MarketService:
             "installed_at": time.time(),
         }
 
+    def _check_runtime_paths(self, plugin_system: PluginSystem) -> None:
+        if (plugin_system.data_dir.resolve() != self._journal.data_dir
+                or plugin_system.installed_dir.resolve() != self._journal.plugins_dir):
+            raise MarketRecoveryError("插件市场与运行时目录不一致，拒绝变更")
+
+    async def _replace(self, manifest, root, record, *, expect_installed, recheck, plugin_system):
+        async with self._op_lock:
+            if plugin_system is not None:
+                self._check_runtime_paths(plugin_system)
+                result = await plugin_system.replace_market_plugin(
+                    manifest, root, record, expect_installed=expect_installed, recheck=recheck,
+                )
+                return manifest.name, self.plugins_dir / manifest.name, result
+
+            async def commit():
+                await recheck()
+                operation = await self._journal.begin_replace(
+                    manifest.name, root, record, expect_installed=expect_installed,
+                )
+                await _commit_disk_operation(operation)
+
+            await finish_task(commit())
+        return manifest.name, self.plugins_dir / manifest.name
+
     async def install_from_entry(
         self,
         entry: MarketEntry,
         *,
         source_id: str = "official",
-    ) -> tuple[str, Path]:
+        plugin_system: PluginSystem | None = None,
+    ) -> tuple[str, Path] | tuple[str, Path, dict]:
         # Direct callers must either pass a frozen selection or match the current index.
         if not entry.source_generation:
             await self.ensure_indexes()
@@ -398,21 +430,19 @@ class MarketService:
                 raise MarketSourceChanged("市场条目已变更，请刷新后重试")
             entry = found
         async with self._prepare_package(entry) as (manifest, root):
-            async def commit():
-                operation = await self._journal.begin_replace(
-                    manifest.name, root, self._source_record(entry, manifest), expect_installed=False,
-                )
-                await _commit_disk_operation(operation)
-
-            async with self._op_lock:
+            async def recheck():
                 await self._reload_sources_locked()
                 self._check_current_source(entry)
-                await finish_task(commit())
-        return manifest.name, self.plugins_dir / manifest.name
+
+            return await self._replace(
+                manifest, root, self._source_record(entry, manifest), expect_installed=False,
+                recheck=recheck, plugin_system=plugin_system,
+            )
 
     async def install(
         self, plugin_id: str, *, source_id: str = "official", source_generation: str | None = None,
-    ) -> tuple[str, Path]:
+        plugin_system: PluginSystem | None = None,
+    ) -> tuple[str, Path] | tuple[str, Path, dict]:
         await self.ensure_indexes()
         source = self._sources.get(source_id)
         if source_generation is not None and (source is None or source.generation != source_generation):
@@ -420,7 +450,7 @@ class MarketService:
         entry = self.find(plugin_id, source_id)
         if entry is None:
             raise InstallError(f"插件不存在: {plugin_id}")
-        return await self.install_from_entry(entry, source_id=source_id)
+        return await self.install_from_entry(entry, source_id=source_id, plugin_system=plugin_system)
 
 
     async def uninstall(
@@ -431,7 +461,8 @@ class MarketService:
         recycle_dir: str | Path,
         delete_config: bool = False,
         delete_data: bool = False,
-    ) -> Path:
+        plugin_system: PluginSystem | None = None,
+    ) -> Path | tuple[Path, dict]:
         if (Path(config_dir).absolute() != self._journal.data_dir / "plugins_config"
                 or Path(recycle_dir).absolute() != self._journal.data_dir / "plugin_recycle"):
             raise ValueError("卸载必须使用宿主配置目录和回收目录")
@@ -442,6 +473,9 @@ class MarketService:
             return operation.recycle_path
 
         async with self._op_lock:
+            if plugin_system is not None:
+                self._check_runtime_paths(plugin_system)
+                return await plugin_system.uninstall_market_plugin(name, delete_config=delete_config, delete_data=delete_data)
             return await finish_task(commit())
 
     async def update(
@@ -449,8 +483,10 @@ class MarketService:
         plugin_id: str,
         *,
         source_id: str = "official",
+        source_generation: str | None = None,
         before_replace=None,
-    ) -> tuple[str, Path]:
+        plugin_system: PluginSystem | None = None,
+    ) -> tuple[str, Path] | tuple[str, Path, dict]:
         await self.ensure_indexes()
         records = await self._read_installed_sources()
         record_name = plugin_id.rsplit("/", 1)[-1]
@@ -465,29 +501,30 @@ class MarketService:
         if source is None:
             raise MarketSourceChanged("已安装插件的来源已删除或缺失，无法确认更新来源")
         self._check_recorded_source(record, source)
+        if source_generation is not None and source_generation != source.generation:
+            raise MarketSourceChanged("插件源已变更，请刷新市场后重试")
         entry = self.find(plugin_id, source.id)
         if entry is None:
             raise InstallError(f"插件源中已找不到 {plugin_id}")
         destination = self.plugins_dir / entry.name
         old_manifest = _installed_manifest(destination, entry)
+        if plugin_system is not None and before_replace is not None:
+            raise ValueError("运行时更新不接受外部停用回调")
         async with self._prepare_package(entry) as (manifest, root):
-            async def commit():
-                if before_replace is not None:
-                    await before_replace(entry.name)
-                operation = await self._journal.begin_replace(
-                    manifest.name, root, {**record, **self._source_record(entry, manifest)}, expect_installed=True,
-                )
-                await _commit_disk_operation(operation)
-
-            async with self._op_lock:
+            async def recheck():
                 await self._reload_sources_locked()
                 self._check_current_source(entry)
                 if (await self._read_installed_sources()).get(record_name) != record:
                     raise MarketSourceChanged("下载期间插件来源记录已变化，请重试")
                 if _installed_manifest(destination, entry) != old_manifest:
                     raise InstallError("下载期间已安装插件发生变化，请重试")
-                await finish_task(commit())
-        return manifest.name, destination
+                if before_replace is not None:
+                    await before_replace(entry.name)
+
+            return await self._replace(
+                manifest, root, {**record, **self._source_record(entry, manifest)}, expect_installed=True,
+                recheck=recheck, plugin_system=plugin_system,
+            )
 
     @staticmethod
     def _check_recorded_source(record: dict, source: RegistrySource) -> None:

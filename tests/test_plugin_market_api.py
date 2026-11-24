@@ -52,13 +52,19 @@ class _FakeMarket:
     def entries(self):
         return [self._entry]
 
-    async def install(self, plugin_id: str, *, source_id: str = "official", source_generation=None):
-        return "demo", Path("demo")
+    async def install(
+        self, plugin_id: str, *, source_id: str = "official", source_generation=None,
+        plugin_system=None,
+    ):
+        return "demo", Path("demo"), {"activation": "active"}
 
-    async def update(self, plugin_id: str, *, source_id: str = "official", before_replace=None):
+    async def update(
+        self, plugin_id: str, *, source_id: str = "official", before_replace=None,
+        source_generation=None, plugin_system=None,
+    ):
         if before_replace is not None:
             await before_replace("demo")
-        return "demo", Path("demo")
+        return "demo", Path("demo"), {"activation": "active"}
 
 
 class _FakePluginSystem:
@@ -160,9 +166,13 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
         (data / "plugins_state.json").write_text(state, encoding="utf-8")
 
     class Market(_FakeMarket):
-        async def install(self, plugin_id, *, source_id, source_generation=None):
-            destination.mkdir(parents=True)
-            (destination / "metadata.yaml").write_text(dedent(f"""\
+        async def install(self, plugin_id, *, source_id, source_generation=None, plugin_system=None):
+            from mohobot.plugins.manifest import parse_manifest
+
+            assert plugin_system is not None
+            candidate = data / "plugins" / ".market-prepare-fixture" / name
+            candidate.mkdir(parents=True)
+            (candidate / "metadata.yaml").write_text(dedent(f"""\
                 name: {name}
                 author: TestFixture
                 display_name: Offline market install fixture
@@ -172,13 +182,34 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
                 license: MIT
                 api_version: 1
             """), encoding="utf-8")
-            (destination / "main.py").write_text(dedent(f"""\
+            (candidate / "main.py").write_text(dedent(f"""\
                 class Plugin:
                     async def on_startup(self):
                         if {fails!r}:
                             raise RuntimeError("fixture startup rejected")
             """), encoding="utf-8")
-            return name, destination
+            manifest = parse_manifest(candidate / "metadata.yaml")
+            record = {
+                "schema_version": 1,
+                "install_method": "market",
+                "registry_id": "official",
+                "registry_url": "https://example.com/index.json",
+                "registry_generation": "official-v1",
+                "plugin_id": manifest.plugin_id,
+                "repo": manifest.repo,
+                "download_url": "https://example.com/plugin.zip",
+                "sha256": "a" * 64,
+                "version": manifest.version,
+                "installed_at": 123.0,
+            }
+
+            async def recheck():
+                return None
+
+            result = await plugin_system.replace_market_plugin(
+                manifest, candidate, record, expect_installed=False, recheck=recheck,
+            )
+            return name, destination, result
 
     plugins = PluginSystem(str(builtin), str(data))
     panel = WebPanel(
@@ -188,6 +219,7 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
         plugin_market=Market(),
     )
     try:
+        await plugins.load_plugins()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=panel._app),
                                      base_url="http://test") as client:
             login = await client.post("/api/login", json={"username": "admin", "password": "test-password"})

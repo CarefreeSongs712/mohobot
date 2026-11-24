@@ -159,6 +159,9 @@ class MarketJournal:
         self.root.mkdir(parents=True, exist_ok=True)
         op_id = uuid4().hex
         active = self.root / op_id
+        operation = MarketOperation(self, active, intent)
+        if intent.kind == "uninstall" and _stat(operation.recycle_path) is not None:
+            raise FileExistsError(f"事务目标已存在: {operation.recycle_path}")
         draft = self.root / f".draft-{op_id}"
         draft.mkdir()
         try:
@@ -248,6 +251,7 @@ class MarketOperation:
         self.journal = journal
         self.path = path
         self.intent = intent
+        self._cleanup_renamed = False
 
     @property
     def recycle_path(self) -> Path:
@@ -378,6 +382,10 @@ class MarketOperation:
             raise self.journal._error(exc, self.path) from exc
 
     def _clean_slots(self) -> None:
+        done = self.path.with_name(f".done-{self.path.name}")
+        if self._cleanup_renamed:
+            _discard(done)
+            return
         paths, _, layouts = self._layout()
         committed = self.intent.decision == "committed"
         desired = layouts[-1] if committed else layouts[0]
@@ -392,8 +400,8 @@ class MarketOperation:
                     path.unlink()
                 else:
                     shutil.rmtree(path)
-        done = self.path.with_name(f".done-{self.path.name}")
         _move(self.path, done)
+        self._cleanup_renamed = True
         _discard(done)
 
     async def cleanup(self) -> None:

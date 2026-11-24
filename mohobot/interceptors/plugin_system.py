@@ -17,26 +17,38 @@ import asyncio
 import importlib
 import importlib.util
 import inspect
-import shutil
 import json
 import re
+import shutil
 import sys
 import time
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from loguru import logger
 
+from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.api import api_version as PLUGIN_API_VERSION
 from mohobot.interceptors.base import Interceptor
 from mohobot.models.onebot import (
     MessageEvent,
     MetaEvent,
     NoticeEvent,
 )
-from mohobot import __version__ as MOHOBOT_VERSION
+from mohobot.plugin_market.journal import (
+    MarketJournal,
+    MarketOperation,
+    MarketRecoveryError,
+)
+from mohobot.plugins._atomic_json import finish_task
 from mohobot.plugins.imports import PluginImports, namespace_conflict
-from mohobot.plugins.installer import STAGING_MAX_AGE_SECONDS, STAGING_PREFIXES
+from mohobot.plugins.installer import (
+    STAGING_MAX_AGE_SECONDS,
+    STAGING_PREFIXES,
+    InstallError,
+)
 from mohobot.plugins.manifest import (
     ManifestError,
     PluginManifest,
@@ -47,7 +59,6 @@ from mohobot.plugins.manifest import (
 from mohobot.services.task_supervisor import TaskSupervisorClosed
 from mohobot.utils.cq_code import extract_plain_text as _extract_plain_text
 
-from mohobot.api import api_version as PLUGIN_API_VERSION
 
 if TYPE_CHECKING:
     from mohobot.services.llm_tools import PluginToolStage
@@ -59,6 +70,19 @@ class PluginNamespaceConflict(ValueError):
 
 class PluginSystemRetired(RuntimeError):
     """The plugin system is no longer accepting mutations."""
+
+
+class PluginNotFound(InstallError):
+    """The requested installed or discovered plugin does not exist."""
+
+
+@dataclass
+class _MarketRecovery:
+    name: str
+    operation: MarketOperation
+    candidate: dict[str, Any] | None = None
+    restoring_previous: bool = False
+    previous: dict[str, Any] | None = None
 
 
 class PluginConfigCommit(TypedDict):
@@ -149,6 +173,8 @@ class PluginSystem(Interceptor):
         self._dispatch_drain_timeout = 5.0
         self._drain_timeout = 5.0
         self._hook_timeout = 30.0
+        self._market_recovery: _MarketRecovery | None = None
+        self._market_journal = MarketJournal(self._data_dir, self._installed_dir)
 
     @property
     def plugins_dir(self) -> Path:
@@ -758,7 +784,10 @@ class PluginSystem(Interceptor):
             return False
         return True
 
-    async def _activate_plugin(self, meta: dict[str, Any], *, persist_enable: bool = False) -> bool:
+    async def _activate_plugin(
+        self, meta: dict[str, Any], *, persist_enable: bool = False,
+        publish: bool = True, seed_config: bool = True,
+    ) -> bool:
         from mohobot.services.llm_tools import registry
 
         stage = meta.get("_llm_tool_stage")
@@ -769,7 +798,7 @@ class PluginSystem(Interceptor):
         try:
             schema = meta.get("config_schema")
             if schema is not None:
-                effective = await self._read_effective_config(meta["name"], schema, seed=True)
+                effective = await self._read_effective_config(meta["name"], schema, seed=seed_config)
                 config = meta.get("config")
                 if config is None:
                     config = meta["config"] = effective
@@ -815,12 +844,16 @@ class PluginSystem(Interceptor):
                 return False
             meta["enabled"] = True
         meta["loaded"] = True
-        meta["_ready"] = True
         meta["error"] = None
-        self._start_tick_for(meta)
+        if publish:
+            self._publish_plugin(meta)
         if cancelled is not None:
             raise cancelled
         return True
+
+    def _publish_plugin(self, meta: dict[str, Any]) -> None:
+        meta["_ready"] = True
+        self._start_tick_for(meta)
 
     async def _start_plugin(self, meta: dict[str, Any]) -> bool:
         """Start one loaded candidate; kept as the single-plugin entry point."""
@@ -830,6 +863,7 @@ class PluginSystem(Interceptor):
         """Start candidates that have not yet been activated."""
         async with self._lock():
             self._require_admission()
+            self._require_market_settled()
             await self._startup_plugins_unlocked()
 
     async def _startup_plugins_unlocked(self) -> None:
@@ -850,9 +884,15 @@ class PluginSystem(Interceptor):
         if self._admission_closed:
             raise PluginSystemRetired("plugin system is retired")
 
+    def _require_market_settled(self, name: str | None = None) -> None:
+        recovery = self._market_recovery
+        if recovery is not None and (name is None or name == recovery.name):
+            raise MarketRecoveryError(f"插件 {recovery.name} 市场事务待恢复：{recovery.operation.path}")
+
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
         async with self._lock():
+            await finish_task(self._finish_market_recovery(shutting_down=True))
             await self._shutdown_unlocked()
 
     # ── 周期任务 ─────────────────────────────────────────────
@@ -1038,6 +1078,7 @@ class PluginSystem(Interceptor):
         """扫描并加载插件; 与热重载共用同一把锁, 避免并发替换注册表。"""
         async with self._lock():
             self._require_admission()
+            self._require_market_settled()
             if self._plugins:
                 return await self._reload_unlocked()
             return await self._load_all_unlocked()
@@ -1187,6 +1228,7 @@ class PluginSystem(Interceptor):
     async def read_plugin_config(self, name: str) -> dict | None:
         """Read one schema and its effective archive view under the lifecycle lock."""
         async with self._lock():
+            self._require_market_settled(name)
             schema = self.get_config_schema(name)
             if schema is None:
                 return None
@@ -1199,6 +1241,7 @@ class PluginSystem(Interceptor):
     async def commit_plugin_config(self, name: str, config: dict) -> PluginConfigCommit | None:
         async with self._lock():
             self._require_admission()
+            self._require_market_settled(name)
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None or (schema := meta.get("config_schema")) is None:
                 return None
@@ -1262,11 +1305,239 @@ class PluginSystem(Interceptor):
             result["application"] = "applied"
         return result
 
+    async def replace_market_plugin(
+        self, manifest: PluginManifest, root: Path, record: dict, *,
+        expect_installed: bool, recheck: Callable[[], Any],
+    ) -> dict:
+        """Called with the market write lock held, after archive validation."""
+        async with self._lock():
+            self._require_admission()
+            await finish_task(self._finish_market_recovery())
+            self._require_admission()
+            return await finish_task(self._replace_market_plugin(manifest, root, record, expect_installed, recheck))
+
+    async def _replace_market_plugin(self, manifest, root, record, expect_installed, recheck) -> dict:
+        self._require_admission()
+        await recheck()
+        self._require_admission()
+        name = manifest.name
+        self._check_market_namespace(name)
+        state = self._load_state()
+        seed = None
+        if state.get(name, {}).get("enabled", True):
+            schema = self._load_config_schema(root)
+            if schema is not None:
+                seed = self._effective_config(schema, None)
+        old = self._market_meta(name)
+        entry = next((item for item in self._iter_entries() if item[1] == name), None)
+        operation = await self._market_journal.begin_replace(
+            name, root, record, expect_installed=expect_installed, config_seed=seed,
+        )
+        recovery = self._market_recovery = _MarketRecovery(
+            name, operation, restoring_previous=entry is not None, previous=old,
+        )
+        try:
+            await self._retire_market_meta(old)
+            recovery.previous = None
+            await operation.apply()
+            package = self._installed_dir / name
+            candidate = recovery.candidate = self._load_market_target(
+                (package / manifest.entry, name, str(package), "installed"), state, record,
+            )
+            if candidate.get("loaded"):
+                await self._activate_plugin(candidate, publish=False, seed_config=False)
+            error = candidate.get("error")
+            if error is not None and (expect_installed or entry is not None):
+                raise InstallError(f"插件 {name} 激活失败：{error}")
+            await operation.commit()
+        except Exception as exc:
+            await self._abort_market_change(recovery, exc)
+            raise
+
+        recovery.candidate = None
+        recovery.restoring_previous = False
+        self._set_market_meta(name, candidate)
+        if candidate.get("loaded"):
+            self._publish_plugin(candidate)
+        warning = await self._clean_market_commit(recovery)
+        if error is not None:
+            detail = f"插件 {name} 文件已安装，但激活失败：{error}"
+            raise InstallError(f"{detail}；{warning}" if warning else detail)
+        return self._market_result(candidate, warning)
+
+    async def uninstall_market_plugin(self, name: str, *, delete_config: bool, delete_data: bool) -> tuple[Path, dict]:
+        """Use this path whether or not a market index is configured."""
+        async with self._lock():
+            self._require_admission()
+            await finish_task(self._finish_market_recovery())
+            self._require_admission()
+            return await finish_task(self._uninstall_market_plugin(name, delete_config, delete_data))
+
+    async def _uninstall_market_plugin(self, name, delete_config, delete_data) -> tuple[Path, dict]:
+        self._require_admission()
+        installed = self._installed_dir / name
+        if not installed.exists() and not installed.is_symlink():
+            raise PluginNotFound(f"插件未安装: {name}")
+        self._check_market_namespace(name)
+        operation = await self._market_journal.begin_uninstall(name, delete_config=delete_config, delete_data=delete_data)
+        recovery = self._market_recovery = _MarketRecovery(
+            name, operation, restoring_previous=True, previous=self._market_meta(name),
+        )
+        try:
+            await self._retire_market_meta(recovery.previous)
+            recovery.previous = None
+            await operation.apply()
+            await operation.commit()
+        except Exception as exc:
+            await self._abort_market_change(recovery, exc)
+            raise
+
+        recovery.restoring_previous = False
+        self._set_market_meta(name, None)
+        try:
+            fallback = await self._restore_market_target(recovery)
+        except Exception as exc:
+            # The external plugin is already gone. Retain any unfinished builtin
+            # owner without conflating activation failure with uninstall failure.
+            fallback = recovery.candidate
+            if fallback is not None:
+                fallback["error"] = f"内置插件激活失败，待收尾：{exc}"
+                self._set_market_meta(name, fallback)
+            logger.error(f"Plugin {name} builtin activation could not settle: {exc}")
+        warning = await self._clean_market_commit(recovery)
+        result = self._market_result(fallback, warning)
+        if fallback is not None and fallback.get("error") is not None:
+            result["activation"] = "failed"
+        return operation.recycle_path, result
+
+    def _market_meta(self, name: str) -> dict | None:
+        return next((m for m in self._plugins if m["name"] == name), None)
+
+    def _set_market_meta(self, name: str, meta: dict | None) -> None:
+        index = next((i for i, m in enumerate(self._plugins) if m["name"] == name), len(self._plugins))
+        self._plugins[index:index + 1] = [meta] if meta is not None else []
+
+    def _check_market_namespace(self, name: str) -> None:
+        module = self._module_name(name)
+        other = self._module_name_conflict(module, exclude_name=name)
+        if other is None:
+            other = next((n for _, n, _, _ in self._iter_entries() if n != name and self._module_name(n) == module), None)
+        if other is not None:
+            raise PluginNamespaceConflict(f"插件模块名冲突: {name} 与 {other}")
+
+    async def _retire_market_meta(self, meta: dict | None) -> None:
+        if meta is not None and meta.get("loaded"):
+            await self._pause_dispatches((meta,))
+            await self._retire_plugin(meta)
+            self._unload_plugin(meta)
+
+    def _load_market_target(self, entry, state, record) -> dict:
+        path, name, directory, source = entry
+        try:
+            meta = self._load_one(path, name, directory, state, source)
+        except Exception as exc:
+            meta = self._error_meta(path, name, directory, source, exc)
+            meta["enabled"] = state.get(name, {}).get("enabled", True)
+        if record is not None and source == "installed":
+            meta["source_record"] = record
+        return meta
+
+    async def _restore_market_target(self, recovery: _MarketRecovery) -> dict | None:
+        name = recovery.name
+        entry = next((item for item in self._iter_entries() if item[1] == name), None)
+        if entry is None:
+            self._set_market_meta(name, None)
+            return None
+        meta = recovery.candidate = self._load_market_target(entry, self._load_state(), recovery.operation.intent.old)
+        self._set_market_meta(name, meta)
+        if meta.get("loaded"):
+            activated = await self._activate_plugin(meta)
+            if not activated:
+                raise MarketRecoveryError(
+                    f"插件 {name} 原版本激活失败，保留事务恢复状态：{meta.get('error')}"
+                )
+        elif meta.get("error") is not None:
+            raise MarketRecoveryError(
+                f"插件 {name} 原版本加载失败，保留事务恢复状态：{meta.get('error')}"
+            )
+        recovery.candidate = None
+        return meta
+
+    async def _abort_market_change(self, recovery: _MarketRecovery, error: Exception) -> None:
+        # A failed startup may still own tasks. Never rename files until that
+        # exact candidate has drained; a later retry will resume here.
+        candidate = recovery.candidate
+        if candidate is not None and candidate.get("loaded") and candidate.get("_retiring"):
+            candidate["error"] = f"插件市场事务待恢复 ({recovery.operation.path.name})：{error}"
+            self._set_market_meta(recovery.name, candidate)
+            raise MarketRecoveryError(candidate["error"]) from error
+        try:
+            await self._finish_market_recovery()
+        except Exception as exc:
+            raise MarketRecoveryError(f"插件 {recovery.name} 事务待恢复：{error}；{exc}") from exc
+        if isinstance(error, InstallError) and recovery.operation.intent.decision == "rolled_back":
+            fallback = self._market_meta(recovery.name)
+            status = "已回退"
+            if fallback is None:
+                status += "，未找到原插件"
+            elif fallback.get("error") is not None:
+                status += f"，原插件未激活：{fallback['error']}"
+            raise InstallError(f"{error}；{status}") from error
+
+    async def _finish_market_recovery(self, *, shutting_down: bool = False) -> None:
+        recovery = self._market_recovery
+        if recovery is None:
+            return
+        operation = recovery.operation
+        # Keep the old owner reachable until its hook and supervised tasks have
+        # actually exited. Rollback must not load over a half-retired instance.
+        await self._retire_market_meta(recovery.previous)
+        recovery.previous = None
+        await self._retire_market_meta(recovery.candidate)
+        recovery.candidate = None
+        if operation.intent.decision == "pending":
+            await operation.rollback()
+        if recovery.restoring_previous and not shutting_down:
+            await self._restore_market_target(recovery)
+            recovery.restoring_previous = False
+        try:
+            await operation.cleanup()
+        except MarketRecoveryError as exc:
+            if not shutting_down:
+                raise
+            # A terminal journal cleanup can be retried on next startup. It no
+            # longer affects the selected plugin owner, so do not skip teardown.
+            logger.error(f"Plugin {recovery.name} market journal cleanup deferred during shutdown: {exc}")
+            return
+        self._market_recovery = None
+
+    async def _clean_market_commit(self, recovery: _MarketRecovery) -> str | None:
+        if recovery.candidate is not None:
+            return "内置插件仍在收尾，暂未清理事务"
+        try:
+            await recovery.operation.cleanup()
+        except MarketRecoveryError as exc:
+            logger.error(str(exc))
+            return f"已提交，待清理：{exc}"
+        self._market_recovery = None
+        return None
+
+    def _market_result(self, meta: dict | None, warning: str | None) -> dict:
+        target = None
+        activation = None
+        if meta is not None:
+            target = {key: meta.get(key) for key in ("name", "source", "version", "enabled", "error", "source_record")}
+            target["loaded"] = self._can_dispatch(meta)
+            activation = "active" if target["loaded"] else "disabled" if not target["enabled"] else "failed"
+        return {"activation": activation, "target": target, "warning": warning,
+                "count": sum(self._can_dispatch(m) for m in self._plugins)}
+
     async def reload_plugins(self) -> int:
         """热重载: 重新扫描 plugins/ 目录并加载全部插件。"""
         logger.info("Hot-reloading plugins...")
         async with self._lock():
             self._require_admission()
+            self._require_market_settled()
             count = await self._reload_unlocked()
         logger.info(f"Plugin hot-reload complete: {count} plugin(s) active")
         return count
@@ -1275,6 +1546,7 @@ class PluginSystem(Interceptor):
         """卸载单个已加载插件; 文件移除前先停任务并执行 on_shutdown。"""
         async with self._lock():
             self._require_admission()
+            self._require_market_settled(name)
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False
@@ -1303,6 +1575,15 @@ class PluginSystem(Interceptor):
         """只重载一个插件, 其余插件实例与周期任务保持不变。"""
         async with self._lock():
             self._require_admission()
+            recovery = self._market_recovery
+            if recovery is not None and recovery.name == name:
+                await finish_task(self._finish_market_recovery())
+                return self._market_meta(name) is not None
+            meta = self._market_meta(name)
+            if not (meta is not None and "_rollback" in meta) and not any(
+                item[1] == name for item in self._iter_entries()
+            ):
+                raise PluginNotFound(f"未找到插件: {name}")
             return await self._reload_one_unlocked(name)
 
     async def _reload_one_unlocked(self, name: str, *, enable: bool = False) -> bool:
@@ -1439,6 +1720,7 @@ class PluginSystem(Interceptor):
         """启用/禁用插件, 立即生效(无需重启)。"""
         async with self._lock():
             self._require_admission()
+            self._require_market_settled(name)
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None:
                 return False

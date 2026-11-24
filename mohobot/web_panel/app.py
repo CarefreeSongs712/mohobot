@@ -30,8 +30,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystemRetired
+from mohobot.interceptors.plugin_system import (
+    PluginNamespaceConflict,
+    PluginNotFound,
+    PluginSystemRetired,
+)
+from mohobot.plugin_market.journal import MarketRecoveryError
 from mohobot.plugin_market.service import MarketSourceChanged
+from mohobot.plugins.installer import InstallError
 
 
 def _valid_usage_range(range_key: str) -> bool:
@@ -1101,8 +1107,9 @@ class WebPanel:
         @app.put("/api/tts/config")
         async def update_tts_config(request: Request, body: ConfigUpdateRequest):
             await _require_auth(request)
-            from mohobot.models.config import GlobalConfig, TTSConfig
             import dataclasses as _dc
+
+            from mohobot.models.config import GlobalConfig, TTSConfig
             cfg = GlobalConfig.load(self._config_path)
             data = body.data or {}
 
@@ -1288,96 +1295,50 @@ class WebPanel:
             return {"status": "ok", "count": len(self._plugin_market.entries()),
                     "sources": _market_sources_payload()}
 
-        @app.post("/api/plugins/market/install")
-        async def install_market_plugin(request: Request, body: PluginMarketInstallRequest):
+        def _plugin_write_error(exc: Exception) -> HTTPException:
+            if isinstance(exc, PluginNotFound):
+                status = 404
+            elif isinstance(exc, (MarketSourceChanged, PluginNamespaceConflict, PluginSystemRetired)):
+                status = 409
+            elif isinstance(exc, (InstallError, ValueError)):
+                status = 400
+            else:
+                status = 500
+            return HTTPException(status_code=status, detail=str(exc))
+
+        async def _audit_market(request, action, target, *, success, details):
+            try:
+                await self._audit.write(
+                    actor=self._username, action=action, target=target, success=success,
+                    details=details, remote=request.client.host if request.client else "",
+                )
+            except Exception as exc:
+                logger.warning(f"Plugin market audit write failed: {exc}")
+
+        async def _market_replace(request: Request, body: PluginMarketInstallRequest, *, update: bool):
             await _require_auth(request)
             if not self._plugin_market or not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
-            name = None
+            action = "plugin_market_update" if update else "plugin_market_install"
+            operation = self._plugin_market.update if update else self._plugin_market.install
             try:
-                name, destination = await self._plugin_market.install(
+                name, destination, result = await operation(
                     body.plugin_id, source_id=body.source_id, source_generation=body.source_generation,
+                    plugin_system=self._plugin_system,
                 )
-                count = await self._plugin_system.reload_plugins()
-                target = next(
-                    (item for item in self._plugin_system.list_plugins()
-                     if item["name"] == name and item["source"] == "installed"),
-                    None,
-                )
-                if target is None:
-                    raise RuntimeError("插件未出现在已安装列表中")
-                if target["error"] is not None:
-                    raise RuntimeError(target["error"] or "插件启动失败")
-                if target["loaded"]:
-                    activation = "active"
-                elif not target["enabled"]:
-                    activation = "disabled"
-                else:
-                    raise RuntimeError("插件未就绪")
             except Exception as exc:
-                detail = str(exc) if name is None else f"插件 {name} 文件已安装，但激活失败：{exc}"
-                await self._audit.write(
-                    actor="admin",
-                    action="plugin_market_install",
-                    target=name or body.plugin_id,
-                    success=False,
-                    details={"error": detail, "files_installed": name is not None},
-                    remote=request.client.host if request.client else "",
-                )
-                status = 409 if isinstance(exc, MarketSourceChanged) else 400
-                raise HTTPException(status_code=status, detail=detail) from exc
-            await self._audit.write(
-                actor="admin",
-                action="plugin_market_install",
-                target=name,
-                success=True,
-                details={"plugin_id": body.plugin_id, "source_id": body.source_id, "activation": activation},
-                remote=request.client.host if request.client else "",
-            )
-            return {
-                "status": "ok", "name": name, "path": str(destination), "count": count, "activation": activation,
-            }
+                await _audit_market(request, action, body.plugin_id, success=False, details={"error": str(exc)})
+                raise _plugin_write_error(exc) from exc
+            await _audit_market(request, action, name, success=True, details={"plugin_id": body.plugin_id, **result})
+            return {"status": "ok", "name": name, "path": str(destination), **result}
+
+        @app.post("/api/plugins/market/install")
+        async def install_market_plugin(request: Request, body: PluginMarketInstallRequest):
+            return await _market_replace(request, body, update=False)
 
         @app.post("/api/plugins/market/update")
         async def update_market_plugin(request: Request, body: PluginMarketInstallRequest):
-            await _require_auth(request)
-            if not self._plugin_market or not self._plugin_system:
-                raise HTTPException(status_code=404, detail="插件市场未启用")
-            try:
-                async def _unload_installed(plugin_name: str) -> None:
-                    await self._plugin_system.unload_plugin(plugin_name)
-
-                name, destination = await self._plugin_market.update(
-                    body.plugin_id,
-                    source_id=body.source_id,
-                    before_replace=_unload_installed,
-                )
-                count = await self._plugin_system.reload_plugins()
-            except Exception as exc:
-                if not isinstance(exc, MarketSourceChanged):
-                    try:
-                        await self._plugin_system.reload_plugins()
-                    except Exception as reload_exc:
-                        logger.error(f"Plugin reload after failed update failed: {reload_exc}")
-                await self._audit.write(
-                    actor="admin",
-                    action="plugin_market_update",
-                    target=body.plugin_id,
-                    success=False,
-                    details={"error": str(exc)},
-                    remote=request.client.host if request.client else "",
-                )
-                status = 409 if isinstance(exc, MarketSourceChanged) else 400
-                raise HTTPException(status_code=status, detail=str(exc)) from exc
-            await self._audit.write(
-                actor="admin",
-                action="plugin_market_update",
-                target=name,
-                success=True,
-                details={"plugin_id": body.plugin_id},
-                remote=request.client.host if request.client else "",
-            )
-            return {"status": "ok", "name": name, "path": str(destination), "count": count}
+            return await _market_replace(request, body, update=True)
 
         @app.post("/api/plugins/{name}/reload")
         async def reload_one_plugin(name: str, request: Request):
@@ -1385,7 +1346,10 @@ class WebPanel:
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
             name = self._safe_id(name, "插件名")
-            ok = await self._plugin_system.reload_plugin(name)
+            try:
+                ok = await self._plugin_system.reload_plugin(name)
+            except (PluginNotFound, PluginSystemRetired, MarketRecoveryError) as exc:
+                raise _plugin_write_error(exc) from exc
             if not ok:
                 raise HTTPException(status_code=400, detail=f"插件 {name} 重载失败")
             return {"status": "ok", "name": name}
@@ -1401,58 +1365,30 @@ class WebPanel:
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
             name = self._safe_id(name, "插件名")
-            from mohobot.plugins.installer import InstallError, uninstall_plugin
-            from mohobot.plugins.sources import remove_source
-
             try:
-                installed = Path(self._plugin_system.installed_dir) / name
-                if installed.is_dir():
-                    await self._plugin_system.unload_plugin(name)
                 if self._plugin_market is not None:
-                    target = await self._plugin_market.uninstall(
+                    target, result = await self._plugin_market.uninstall(
                         name,
                         config_dir=self._data_dir / "plugins_config",
                         recycle_dir=self._data_dir / "plugin_recycle",
                         delete_config=delete_config,
                         delete_data=delete_data,
+                        plugin_system=self._plugin_system,
                     )
                 else:
-                    target = await asyncio.to_thread(
-                        uninstall_plugin,
-                        name,
-                        self._plugin_system.installed_dir,
-                        self._data_dir / "plugin_recycle",
-                        config_dir=self._data_dir / "plugins_config",
-                        data_dir=self._data_dir,
-                        delete_config=delete_config,
-                        delete_data=delete_data,
+                    target, result = await self._plugin_system.uninstall_market_plugin(
+                        name, delete_config=delete_config, delete_data=delete_data,
                     )
-                    await remove_source(self._data_dir, name)
-                await self._plugin_system.reload_plugins()
             except Exception as exc:
-                await self._audit.write(
-                    actor="admin",
-                    action="plugin_uninstall",
-                    target=name,
-                    success=False,
-                    details={
-                        "error": str(exc),
-                        "delete_config": delete_config,
-                        "delete_data": delete_data,
-                    },
-                    remote=request.client.host if request.client else "",
-                )
-                status = 400 if isinstance(exc, (InstallError, ValueError)) else 500
-                raise HTTPException(status_code=status, detail=str(exc)) from exc
-            await self._audit.write(
-                actor="admin",
-                action="plugin_uninstall",
-                target=name,
-                success=True,
-                details={"recycle": str(target), "delete_config": delete_config, "delete_data": delete_data},
-                remote=request.client.host if request.client else "",
-            )
-            return {"status": "ok", "name": name, "recycle": str(target)}
+                await _audit_market(request, "plugin_uninstall", name, success=False, details={
+                    "error": str(exc), "delete_config": delete_config, "delete_data": delete_data,
+                })
+                raise _plugin_write_error(exc) from exc
+            await _audit_market(request, "plugin_uninstall", name, success=True, details={
+                "recycle": str(target), "delete_config": delete_config, "delete_data": delete_data,
+                "activation": result["activation"],
+            })
+            return {"status": "ok", "name": name, "recycle": str(target), **result}
 
         @app.get("/api/plugin-sources")
         async def list_plugin_sources(request: Request):
