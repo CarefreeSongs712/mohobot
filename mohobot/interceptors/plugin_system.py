@@ -535,6 +535,10 @@ class PluginSystem(Interceptor):
             meta.pop("_rollback", None)
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
+        # Candidates whose startup failed keep their imported modules for retry;
+        # shutdown must still detach them or the next load sees phantom modules.
+        for meta in tuple(self._plugins):
+            self._unload_plugin(meta)
 
     @staticmethod
     def _owner_key(meta: dict[str, Any]) -> str:
