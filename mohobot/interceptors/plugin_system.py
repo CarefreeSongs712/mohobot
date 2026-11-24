@@ -274,6 +274,10 @@ class PluginSystem(Interceptor):
 
         registry.set_owner_state_path(plugin_name, self._state_file)
         if not meta["enabled"]:
+            # llm_tools preloads built-in plugin modules before this system is
+            # constructed.  Disabled plugins must not leave those unowned
+            # tools callable outside the lifecycle registry.
+            registry.take_unowned_plugin_tools(plugin_name)
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
 
@@ -301,6 +305,10 @@ class PluginSystem(Interceptor):
             sys.modules[module_name] = module
             with registry.registration_scope(tool_stage):
                 spec.loader.exec_module(module)
+            # Adopt tools registered by the module's eager import before
+            # constructing the plugin.  If construction or validation fails,
+            # discarding this stage also removes the eager tools atomically.
+            tool_stage.tools.update(registry.take_unowned_plugin_tools(plugin_name))
             with registry.registration_scope(tool_stage):
                 plugin_instance = None
                 for name, cls in inspect.getmembers(module, inspect.isclass):
@@ -329,6 +337,7 @@ class PluginSystem(Interceptor):
                     meta["config_schema"] = schema
                     meta["config"] = self._load_plugin_config(plugin_name, schema)
                     self._inject_config(plugin_instance, meta["config"])
+                meta["_llm_tool_import_tools"] = dict(tool_stage.tools)
                 logger.info(f"Loaded plugin: {plugin_name}")
         except Exception as e:
             registry.discard_plugin_stage(tool_stage)
@@ -635,6 +644,9 @@ class PluginSystem(Interceptor):
         stage = meta.get("_llm_tool_stage")
         if stage is None:
             stage = registry.new_plugin_stage(str(meta.get("name", "")), self._state_file)
+            import_tools = meta.get("_llm_tool_import_tools")
+            if isinstance(import_tools, dict):
+                stage.tools.update(import_tools)
             meta["_llm_tool_stage"] = stage
         success = await self._call_hook(meta, "on_startup", stage)
         try:

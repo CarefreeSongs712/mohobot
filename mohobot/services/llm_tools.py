@@ -117,6 +117,23 @@ class LLMToolRegistry:
             if self._owners.get(name) == owner
         }
 
+    def take_unowned_plugin_tools(self, owner: str) -> dict[str, LLMTool]:
+        """Move eagerly imported tools into a plugin's pending stage.
+
+        Built-in plugin modules are imported once when this registry is first
+        imported, before :class:`PluginSystem` has a registration scope.  The
+        plugin loader adopts those unowned tools before publishing its stage so
+        disable, reload, and shutdown use the same owner lifecycle as normal
+        staged registrations.
+        """
+        adopted: dict[str, LLMTool] = {}
+        for name, tool in tuple(self._tools.items()):
+            if name in self._owners or owner_plugin_of(tool) != owner:
+                continue
+            adopted[name] = tool
+            self._tools.pop(name, None)
+        return adopted
+
     def restore_owner_tools(self, owner: str, tools: dict[str, LLMTool]) -> None:
         for name in tools:
             if name in self._tools and self._owners.get(name) != owner:

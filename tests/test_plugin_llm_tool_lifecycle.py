@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from mohobot.interceptors.plugin_system import PluginSystem
-from mohobot.services.llm_tools import registry
+from mohobot.services.llm_tools import LLMTool, registry, tool_schema
 
 
 def _write_plugin(plugins_dir: Path, name: str, source: str) -> Path:
@@ -162,6 +162,163 @@ def test_startup_retry_uses_a_fresh_registration_stage(tmp_path: Path) -> None:
         finally:
             registry.unregister(tool_name)
             await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_startup_retry_restores_import_time_tools(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "startup_import_retry_probe"
+        tool_name = "startup_import_retry_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            "attempts = 0\n"
+            f"def handle(): return {tool_name!r}\n"
+            f"registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), handle))\n"
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        global attempts\n"
+            "        attempts += 1\n"
+            "        if attempts == 1:\n"
+            "            raise RuntimeError('first startup failed')\n",
+        )
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        try:
+            await system.load_plugins()
+            assert tool_name not in _schema_names()
+            assert "error" in json.loads(await registry.execute(tool_name, {}))
+
+            await system.startup_plugins()
+            assert tool_name in _schema_names()
+            assert registry._owners[tool_name] == plugin_name
+            assert await registry.execute(tool_name, {}) == tool_name
+        finally:
+            registry.unregister(tool_name)
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_eager_plugin_tools_join_the_owner_lifecycle(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "eager_owner_probe"
+        tool_name = "eager_owner_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            f"def handle(): return 'dynamic'\n"
+            f"if not registry.contains({tool_name!r}):\n"
+            f"    registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), handle))\n"
+            "class Plugin:\n"
+            "    pass\n",
+        )
+
+        def eager_handle():
+            return "eager"
+
+        eager_handle.__module__ = f"plugins.{plugin_name}"
+        registry.register(LLMTool(tool_schema(tool_name, "probe", {}, []), eager_handle))
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        try:
+            await system.load_plugins()
+            assert tool_name in _schema_names()
+            assert registry._owners[tool_name] == plugin_name
+            assert await registry.execute(tool_name, {}) == "eager"
+
+            assert await system.unload_plugin(plugin_name) is True
+            assert tool_name not in _schema_names()
+            assert "error" in json.loads(await registry.execute(tool_name, {}))
+        finally:
+            registry.unregister(tool_name)
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_eager_plugin_tools_are_removed_when_disabled(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "eager_disabled_probe"
+        tool_name = "eager_disabled_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        data_dir = tmp_path / "data"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            f"def handle(): return 'dynamic'\n"
+            f"if not registry.contains({tool_name!r}):\n"
+            f"    registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), handle))\n"
+            "class Plugin:\n"
+            "    pass\n",
+        )
+        data_dir.mkdir(parents=True)
+        (data_dir / "plugins_state.json").write_text(
+            json.dumps({plugin_name: {"enabled": False}}), encoding="utf-8"
+        )
+
+        def eager_handle():
+            return "eager"
+
+        eager_handle.__module__ = f"plugins.{plugin_name}"
+        registry.register(LLMTool(tool_schema(tool_name, "probe", {}, []), eager_handle))
+        system = PluginSystem(str(plugins_dir), str(data_dir))
+        try:
+            await system.load_plugins()
+            assert tool_name not in _schema_names()
+            assert "error" in json.loads(await registry.execute(tool_name, {}))
+
+            assert await system.set_enabled(plugin_name, True) is True
+            assert tool_name in _schema_names()
+            assert registry._owners[tool_name] == plugin_name
+            assert await registry.execute(tool_name, {}) == "dynamic"
+        finally:
+            registry.unregister(tool_name)
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_eager_plugin_tools_are_removed_on_global_shutdown(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin_name = "eager_shutdown_probe"
+        tool_name = "eager_shutdown_probe_tool"
+        plugins_dir = tmp_path / "plugins"
+        _write_plugin(
+            plugins_dir,
+            plugin_name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            f"def handle(): return 'dynamic'\n"
+            f"if not registry.contains({tool_name!r}):\n"
+            f"    registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), handle))\n"
+            "class Plugin:\n"
+            "    pass\n",
+        )
+
+        def eager_handle():
+            return "eager"
+
+        eager_handle.__module__ = f"plugins.{plugin_name}"
+        registry.register(LLMTool(tool_schema(tool_name, "probe", {}, []), eager_handle))
+        system = PluginSystem(str(plugins_dir), str(tmp_path / "data"))
+        shutdown = False
+        try:
+            await system.load_plugins()
+            assert tool_name in _schema_names()
+            assert registry._owners[tool_name] == plugin_name
+
+            await system.shutdown_plugins()
+            shutdown = True
+            assert tool_name not in _schema_names()
+            assert "error" in json.loads(await registry.execute(tool_name, {}))
+        finally:
+            registry.unregister(tool_name)
+            if not shutdown:
+                await system.shutdown_plugins()
 
     asyncio.run(run())
 
