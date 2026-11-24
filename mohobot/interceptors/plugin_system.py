@@ -22,7 +22,6 @@ import json
 import re
 import sys
 import time
-from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
