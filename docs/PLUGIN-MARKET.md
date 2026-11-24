@@ -8,7 +8,7 @@
 {
   "$meta": {"schema_version": 1, "name": "mohobot-plugin-index", "updated_at": "2026-11-21"},
   "plugins": {
-    "CarefreeSongs712/mohobot-plugin-demo": {
+    "CarefreeSongs712/demo": {
       "author": "CarefreeSongs712",
       "name": "demo",
       "display_name": "演示插件",
