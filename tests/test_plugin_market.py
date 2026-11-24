@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,19 @@ def test_market_key_must_match_author_name() -> None:
     payload["plugins"]["other/demo"] = payload["plugins"].pop("CarefreeSongs712/demo")
     with pytest.raises(InstallError):
         parse_market_index(payload)
+
+
+def test_docs_index_example_matches_parser() -> None:
+    """docs/PLUGIN-MARKET.md 的索引示例必须能被 parse_market_index 接受，防止文档与校验规则漂移。"""
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "PLUGIN-MARKET.md").read_text(encoding="utf-8")
+    match = re.search(r"```json\s*\n(.*?)\n```", doc, re.DOTALL)
+    assert match is not None, "docs/PLUGIN-MARKET.md 缺少 index.json 示例"
+    payload = json.loads(match.group(1))
+    for entry in payload["plugins"].values():
+        if entry.get("sha256") == "<64 位十六进制>":
+            entry["sha256"] = "a" * 64
+    index = parse_market_index(payload)
+    assert index.plugins["CarefreeSongs712/demo"].name == "demo"
 
 
 def test_market_requires_sha256() -> None:
