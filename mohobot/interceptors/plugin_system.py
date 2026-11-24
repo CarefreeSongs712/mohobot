@@ -760,8 +760,6 @@ class PluginSystem(Interceptor):
                 registry.commit_plugin_stage(stage)
             except Exception as exc:
                 raise RuntimeError(f"LLM tool registration failed: {exc}") from exc
-            if persist_enable:
-                cancelled = await self._save_enabled(meta["name"], True)
         except asyncio.CancelledError:
             registry.discard_plugin_stage(stage)
             meta["_llm_tool_stage"] = None
@@ -769,16 +767,30 @@ class PluginSystem(Interceptor):
             meta["error"] = "activation cancelled"
             raise
         except Exception as exc:
+            # Keep the imported candidate retryable: startup_plugins can replay
+            # on_startup with a fresh tool stage instead of losing the module.
             registry.discard_plugin_stage(stage)
             meta["_llm_tool_stage"] = None
+            meta["_ready"] = False
+            meta["loaded"] = False
             meta["error"] = str(exc)
             logger.error(f"Plugin {meta['name']} activation failed: {exc}")
-            await self._retire_plugin(meta)
-            self._unload_plugin(meta)
             return False
-        meta["_llm_tool_stage"] = None
+        finally:
+            if meta.get("_llm_tool_stage") is stage:
+                meta["_llm_tool_stage"] = None
         if persist_enable:
+            try:
+                cancelled = await self._save_enabled(meta["name"], True)
+            except Exception as exc:
+                # The candidate was never published: retire it like #166 did.
+                meta["error"] = str(exc)
+                logger.error(f"Plugin {meta['name']} enable write failed: {exc}")
+                await self._retire_plugin(meta)
+                self._unload_plugin(meta)
+                return False
             meta["enabled"] = True
+        meta["loaded"] = True
         meta["_ready"] = True
         meta["error"] = None
         self._start_tick_for(meta)
@@ -798,11 +810,13 @@ class PluginSystem(Interceptor):
 
     async def _startup_plugins_unlocked(self) -> None:
         for meta in tuple(self._plugins):
-            if (
-                meta.get("enabled") and meta.get("loaded")
-                and not meta.get("_ready", True) and not meta.get("_retiring")
-            ):
-                await self._activate_plugin(meta)
+            if not meta.get("enabled") or meta.get("_retiring"):
+                continue
+            if meta.get("instance") is None or meta.get("_ready", True):
+                continue
+            # A failed startup keeps its imported instance so retries only replay
+            # on_startup with a fresh registration stage.
+            await self._activate_plugin(meta)
 
     def close_admission(self) -> None:
         """Retire this plugin system before the application drains it."""
