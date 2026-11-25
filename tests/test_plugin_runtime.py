@@ -20,6 +20,40 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+
+
+_MISSING = object()
+
+
+class _MonkeyPatch:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的用例入口。"""
+
+    def __init__(self) -> None:
+        self._undo: list[tuple[object, str, object]] = []
+
+    def setattr(self, obj, name: str, value) -> None:  # noqa: A003 - 对齐 pytest 接口
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value) -> None:
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self) -> None:
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
 def test_directory_plugin_relative_import_reloads(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
@@ -172,11 +206,15 @@ def test_installed_plugin_loads_with_manifest(tmp_path: Path) -> None:
             "api_version: 1\n",
         )
         await ps.load_plugins()
-        meta = ps._plugins[0]
-        assert meta["source"] == "installed"
-        assert meta["loaded"] is True
-        assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
-        assert meta["file"] == "extdemo/main.py"
+        try:
+            meta = ps._plugins[0]
+            assert meta["source"] == "installed"
+            assert meta["loaded"] is True
+            assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
+            assert meta["file"] == "extdemo/main.py"
+        finally:
+            # 清理已加载插件, 避免模块残留在 sys.modules 影响后续用例顺序。
+            await ps.shutdown_plugins()
 
     asyncio.run(run())
 
@@ -647,8 +685,7 @@ def test_cold_startup_injects_runtime_before_startup_hook(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("finish_shutdown", [False, True], ids=["cancelled", "finished"])
-def test_interrupted_shutdown_keeps_hook_and_children_owned(tmp_path: Path, finish_shutdown: bool) -> None:
+def _probe_interrupted_shutdown(tmp_path: Path, finish_shutdown: bool) -> None:
     from mohobot.services.task_supervisor import TaskSupervisor
 
     async def run() -> None:
@@ -733,8 +770,7 @@ def test_interrupted_shutdown_keeps_hook_and_children_owned(tmp_path: Path, fini
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("enabled", [False, True], ids=["disable", "enable"])
-def test_plugin_toggle_finishes_publication_when_writer_waiter_is_cancelled(tmp_path: Path, monkeypatch, enabled: bool) -> None:
+def _probe_toggle_publication(tmp_path: Path, monkeypatch, enabled: bool) -> None:
     from mohobot import file_store
 
     async def run() -> None:
@@ -776,7 +812,7 @@ def test_plugin_toggle_finishes_publication_when_writer_waiter_is_cancelled(tmp_
     asyncio.run(run())
 
 
-def test_enable_write_failure_retires_unpublished_candidate(tmp_path: Path, monkeypatch) -> None:
+def _probe_enable_write_failure(tmp_path: Path, monkeypatch) -> None:
     from mohobot import file_store
 
     async def run() -> None:
@@ -826,7 +862,7 @@ def test_enable_write_failure_retires_unpublished_candidate(tmp_path: Path, monk
     asyncio.run(run())
 
 
-def test_observed_fallthrough_skips_instance_entering_retirement(tmp_path: Path, monkeypatch) -> None:
+def _probe_observed_fallthrough(tmp_path: Path, monkeypatch) -> None:
     from types import SimpleNamespace
 
     async def run() -> None:
@@ -937,5 +973,140 @@ def test_tick_stop_exits_loop_after_callback_suppresses_cancel(tmp_path: Path) -
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+def test_interrupted_shutdown_keeps_hook_and_children_owned(tmp_path: Path) -> None:
+    for finish_shutdown in (False, True):
+        case_dir = tmp_path / ("finished" if finish_shutdown else "cancelled")
+        case_dir.mkdir()
+        _probe_interrupted_shutdown(case_dir, finish_shutdown)
+
+
+def test_plugin_toggle_finishes_publication_when_writer_waiter_is_cancelled(tmp_path: Path) -> None:
+    for enabled in (False, True):
+        case_dir = tmp_path / f"toggle-{int(enabled)}"
+        case_dir.mkdir()
+        patcher = _MonkeyPatch()
+        try:
+            _probe_toggle_publication(case_dir, patcher, enabled)
+        finally:
+            patcher.undo()
+
+
+def test_enable_write_failure_retires_unpublished_candidate(tmp_path: Path) -> None:
+    patcher = _MonkeyPatch()
+    try:
+        _probe_enable_write_failure(tmp_path, patcher)
+    finally:
+        patcher.undo()
+
+
+def test_observed_fallthrough_skips_instance_entering_retirement(tmp_path: Path) -> None:
+    patcher = _MonkeyPatch()
+    try:
+        _probe_observed_fallthrough(tmp_path, patcher)
+    finally:
+        patcher.undo()
+
+
+def test_failed_startup_candidate_can_be_reloaded_after_fix(tmp_path: Path) -> None:
+    """冷启动 on_startup 失败后修复文件, 面板重载/全部重载/启用都能恢复。"""
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        plugin_dir = tmp_path / "plugins" / "retryme"
+        _write(
+            plugin_dir / "main.py",
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        raise RuntimeError('first startup fails')\n",
+        )
+        assert await ps.load_plugins() == 0
+        meta = ps._plugins[0]
+        assert meta["loaded"] is False
+        assert meta["_imports"] is not None
+        assert "mohobot_plugin_retryme" in sys.modules
+        _write(
+            plugin_dir / "main.py",
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        return None\n",
+        )
+        assert await ps.reload_plugin("retryme") is True
+        assert ps.list_plugins()[0]["loaded"] is True
+        assert await ps.reload_plugins() == 1
+        assert await ps.set_enabled("retryme", True) is True
+        await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_one_shutdown_timeout_does_not_skip_other_plugins(tmp_path: Path) -> None:
+    """一个插件 on_shutdown 挂起不得中断其余插件的关闭 (审查 P3)。"""
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        ps._hook_timeout = 0.1
+        _write(
+            tmp_path / "plugins" / "hangplug" / "main.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    calls = []\n"
+            "    async def on_shutdown(self):\n"
+            "        type(self).calls.append('hang')\n"
+            "        await asyncio.Event().wait()\n",
+        )
+        _write(
+            tmp_path / "plugins" / "goodplug" / "main.py",
+            "class Plugin:\n"
+            "    calls = []\n"
+            "    async def on_shutdown(self):\n"
+            "        type(self).calls.append('good')\n",
+        )
+        assert await ps.load_plugins() == 2
+        classes = {meta["name"]: meta["instance"].__class__ for meta in ps._plugins}
+        try:
+            await asyncio.wait_for(ps.shutdown_plugins(), timeout=5)
+            # 先关闭的是 hangplug(列表逆序), 超时后 goodplug 仍必须收到 on_shutdown。
+            assert classes["goodplug"].calls == ["good"]
+            assert classes["hangplug"].calls == ["hang"]
+            hang = next(meta for meta in ps._plugins if meta["name"] == "hangplug")
+            assert hang.get("_retiring") is True
+        finally:
+            for meta in ps._plugins:
+                hook = meta.get("_hook_task")
+                if hook is not None and not hook.done():
+                    hook.cancel()
+                    await asyncio.gather(hook, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_failed_startup_candidate_does_not_dispatch_or_tick(tmp_path: Path) -> None:
+    """冷启动 on_startup 失败的候选不得接收事件或启动周期任务 (审查 P3)。
+
+    合并 #166 退役所有权架构后失败候选 loaded=False、保留 _imports 供重试。
+    """
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "badstart.py",
+            "class Plugin:\n"
+            "    interval_sec = 1\n"
+            "    async def on_startup(self):\n"
+            "        raise RuntimeError('startup boom')\n"
+            "    async def on_message(self, *args): return True, 'blocked'\n"
+            "    async def on_tick(self): return None\n",
+        )
+        assert await ps.load_plugins() == 0
+        meta = ps._plugins[0]
+        assert meta["loaded"] is False
+        assert meta["error"] == "startup boom"
+        assert meta["_ready"] is False
+        assert meta["_imports"] is not None
+        assert ps._can_dispatch(meta) is False
+        assert await ps.intercept("bot", object(), {}) == (False, None)
+        ps.start_tick_tasks()
+        assert "badstart" not in ps._tick_tasks_by_name
+        await ps.shutdown_plugins()
 
     asyncio.run(run())

@@ -8,6 +8,40 @@ import pytest
 from mohobot.interceptors.plugin_system import PluginSystem
 
 
+_MISSING = object()
+
+
+class _MonkeyPatch:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的用例入口。"""
+
+    def __init__(self) -> None:
+        self._undo: list[tuple[object, str, object]] = []
+
+    def setattr(self, obj, name: str, value) -> None:  # noqa: A003 - 对齐 pytest 接口
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value) -> None:
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self) -> None:
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
 def _write_plugin(root: Path, value: int) -> None:
     plugin = root / "plugins" / "rollback_plugin"
     plugin.mkdir(parents=True, exist_ok=True)
@@ -39,8 +73,7 @@ def _write_plugin(root: Path, value: int) -> None:
     )
 
 
-@pytest.mark.parametrize("helper_removed_before_reload", [False, True])
-def test_reload_failure_keeps_previous_instance(tmp_path: Path, helper_removed_before_reload: bool) -> None:
+def _probe_reload_failure(tmp_path: Path, helper_removed_before_reload: bool) -> None:
     async def run() -> None:
         _write_plugin(tmp_path, 1)
         system = PluginSystem(str(tmp_path / "plugins"), str(tmp_path / "data"))
@@ -81,8 +114,7 @@ def test_reload_failure_keeps_previous_instance(tmp_path: Path, helper_removed_b
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("next_action", ["restore", "retry", "disable", "shutdown"])
-def test_cancelled_reload_keeps_rollback_until_cleanup(tmp_path: Path, monkeypatch, next_action: str) -> None:
+def _probe_cancelled_reload(tmp_path: Path, monkeypatch, next_action: str) -> None:
     blocked_cleanup = next_action != "restore"
     async def run() -> None:
         _write_plugin(tmp_path, 1)
@@ -182,3 +214,21 @@ def test_cancelled_reload_keeps_rollback_until_cleanup(tmp_path: Path, monkeypat
             await system.shutdown_plugins()
 
     asyncio.run(run())
+
+
+def test_reload_failure_keeps_previous_instance(tmp_path: Path) -> None:
+    for helper_removed_before_reload in (False, True):
+        case_dir = tmp_path / ("helper-removed" if helper_removed_before_reload else "helper-kept")
+        case_dir.mkdir()
+        _probe_reload_failure(case_dir, helper_removed_before_reload)
+
+
+def test_cancelled_reload_keeps_rollback_until_cleanup(tmp_path: Path) -> None:
+    for next_action in ("restore", "retry", "disable", "shutdown"):
+        case_dir = tmp_path / next_action
+        case_dir.mkdir()
+        patcher = _MonkeyPatch()
+        try:
+            _probe_cancelled_reload(case_dir, patcher, next_action)
+        finally:
+            patcher.undo()

@@ -315,6 +315,12 @@ class PluginSystem(Interceptor):
         from mohobot.services.llm_tools import registry
 
         registry.set_owner_state_path(plugin_name, self._state_file)
+        # schema 解析不依赖模块导入: 禁用插件也必须在面板里可见并可编辑配置
+        # (#170 审查 P1)。坏 schema 与基线一致地降级为无配置。
+        try:
+            meta["config_schema"] = self._load_config_schema(plugin_dir)
+        except Exception as exc:
+            logger.warning(f"Plugin {plugin_name} config schema load failed: {exc}")
         if not meta["enabled"]:
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
@@ -366,7 +372,9 @@ class PluginSystem(Interceptor):
                 if isinstance(cls_info, dict):
                     meta["info"].update(cls_info)
 
-                schema = self._load_config_schema(plugin_dir)
+                schema = meta.get("config_schema") or self._load_config_schema(
+                    plugin_dir,
+                )
                 if schema:
                     meta["config_schema"] = schema
                 logger.info(f"Loaded plugin: {plugin_name}")
@@ -565,19 +573,28 @@ class PluginSystem(Interceptor):
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
             await self._task_supervisor.cancel_owner_prefix("plugin:")
+        failed_shutdowns: list[str] = []
         for meta in reversed(targets):
             try:
                 await self._retire_plugin(meta)
-            except Exception as exc:
-                logger.error(f"Plugin {meta.get('name', '?')} shutdown incomplete: {exc}")
-                # Keep the instance and recovery intent for a retry, but release
-                # module names so a later load is not blocked by stale modules.
+            except Exception as exc:  # 单插件 hook 超时/失败不得中断其余插件
+                failed_shutdowns.append(str(meta.get("name", "?")))
+                logger.error(
+                    "Plugin {} shutdown did not finish: {}",
+                    meta.get("name", "?"), exc,
+                )
+                # 保留归属与 hook 任务供重试, 但释放模块名, 避免后续加载被旧模块阻塞。
                 imports = meta.pop("_imports", None)
                 if imports is not None:
                     imports.detach()
                 continue
             self._unload_plugin(meta)
             meta.pop("_rollback", None)
+        if failed_shutdowns:
+            logger.warning(
+                "Plugin shutdown incomplete for: {} (ownership kept for retry)",
+                ", ".join(sorted(failed_shutdowns)),
+            )
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
         # Candidates whose startup failed keep their imported modules for retry;
@@ -1164,8 +1181,14 @@ class PluginSystem(Interceptor):
         return merged
 
     @classmethod
-    def _coerce_config(cls, schema: dict, data: dict) -> dict:
-        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。"""
+    def _coerce_config(
+        cls, schema: dict, data: dict, *, strict: bool = False,
+    ) -> dict:
+        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。
+
+        strict=True 用于面板提交: 无法解析的数字抛出带字段名的 ValueError,
+        由面板返回 400; 读取磁盘存档时保持宽松回退默认值, 脏存档不阻塞启动。
+        """
         result: dict = {}
         for key, spec in (schema or {}).items():
             if not isinstance(spec, dict) or key not in data:
@@ -1174,7 +1197,8 @@ class PluginSystem(Interceptor):
             stype = spec.get("type", "string")
             if stype == "object":
                 branch = cls._coerce_config(
-                    spec.get("items") or {}, value if isinstance(value, dict) else {}
+                    spec.get("items") or {}, value if isinstance(value, dict) else {},
+                    strict=strict,
                 )
                 if branch:
                     result[key] = branch
@@ -1187,11 +1211,16 @@ class PluginSystem(Interceptor):
                 try:
                     result[key] = int(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        # 面板提交不能静默回退默认值 (#170 审查 P3)。
+                        raise ValueError(f"配置字段 {key} 需要整数") from None
                     result[key] = spec.get("default", 0)
             elif stype == "float":
                 try:
                     result[key] = float(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        raise ValueError(f"配置字段 {key} 需要数字") from None
                     result[key] = spec.get("default", 0.0)
             elif stype == "list":
                 if isinstance(value, list):
@@ -1256,7 +1285,7 @@ class PluginSystem(Interceptor):
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None or (schema := meta.get("config_schema")) is None:
                 return None
-            patch = self._coerce_config(schema, config or {})
+            patch = self._coerce_config(schema, config or {}, strict=True)
             if not patch:
                 return {"config": await self._read_effective_config(name, schema), "application": "unchanged"}
             commit = asyncio.create_task(self._commit_config(meta, schema, patch), name=f"plugin-config:{name}")
@@ -1629,14 +1658,19 @@ class PluginSystem(Interceptor):
         old_instance = None
         old_imports = None
         old_tools: dict[str, Any] = {}
-        if meta is not None and meta.get("loaded"):
-            can_restore = self._can_dispatch(meta)
-            old_tools = registry.snapshot_owner_tools(name)
-            await self._pause_dispatches((meta,))
-            await self._retire_plugin(meta)
-            if can_restore:
-                old_instance = meta.get("instance")
-                old_imports = meta.get("_imports")
+        # on_startup 失败的候选 loaded=False 但仍持有 "_imports" 以便
+        # startup_plugins() 重试。重新加载前必须先释放它占用的命名空间,
+        # 否则 _load_one 会把它自己的旧模块判为冲突, 且旧模块残留在
+        # sys.modules, 让之后的 reload/enable 永久报模块名冲突。
+        if meta is not None and (meta.get("loaded") or meta.get("_imports") is not None):
+            if meta.get("loaded"):
+                can_restore = self._can_dispatch(meta)
+                old_tools = registry.snapshot_owner_tools(name)
+                await self._pause_dispatches((meta,))
+                await self._retire_plugin(meta)
+                if can_restore:
+                    old_instance = meta.get("instance")
+                    old_imports = meta.get("_imports")
             self._unload_plugin(meta)
         entry_path, _, entry_dir, source = entry
         try:
