@@ -536,10 +536,25 @@ class PluginSystem(Interceptor):
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner("plugins")
             await self._task_supervisor.cancel_owner_prefix("plugin:")
+        failed_shutdowns: list[str] = []
         for meta in reversed(targets):
-            await self._retire_plugin(meta)
+            try:
+                await self._retire_plugin(meta)
+            except Exception as exc:  # 单插件 hook 超时/失败不得中断其余插件
+                failed_shutdowns.append(str(meta.get("name", "?")))
+                logger.error(
+                    "Plugin {} shutdown did not finish: {}",
+                    meta.get("name", "?"), exc,
+                )
+                # 保留归属与 hook 任务, 供调用方重试/进程退出前收尾。
+                continue
             self._unload_plugin(meta)
             meta.pop("_rollback", None)
+        if failed_shutdowns:
+            logger.warning(
+                "Plugin shutdown incomplete for: {} (ownership kept for retry)",
+                ", ".join(sorted(failed_shutdowns)),
+            )
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
         # Candidates whose startup failed keep their imported modules for retry;
@@ -1330,14 +1345,19 @@ class PluginSystem(Interceptor):
         old_instance = None
         old_imports = None
         old_tools: dict[str, Any] = {}
-        if meta is not None and meta.get("loaded"):
-            can_restore = self._can_dispatch(meta)
-            old_tools = registry.snapshot_owner_tools(name)
-            await self._pause_dispatches((meta,))
-            await self._retire_plugin(meta)
-            if can_restore:
-                old_instance = meta.get("instance")
-                old_imports = meta.get("_imports")
+        # on_startup 失败的候选 loaded=False 但仍持有 "_imports" 以便
+        # startup_plugins() 重试。重新加载前必须先释放它占用的命名空间,
+        # 否则 _load_one 会把它自己的旧模块判为冲突, 且旧模块残留在
+        # sys.modules, 让之后的 reload/enable 永久报模块名冲突。
+        if meta is not None and (meta.get("loaded") or meta.get("_imports") is not None):
+            if meta.get("loaded"):
+                can_restore = self._can_dispatch(meta)
+                old_tools = registry.snapshot_owner_tools(name)
+                await self._pause_dispatches((meta,))
+                await self._retire_plugin(meta)
+                if can_restore:
+                    old_instance = meta.get("instance")
+                    old_imports = meta.get("_imports")
             self._unload_plugin(meta)
         entry_path, _, entry_dir, source = entry
         try:
