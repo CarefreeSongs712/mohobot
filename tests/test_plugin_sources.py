@@ -54,8 +54,7 @@ def test_atomic_source_replace_compares_only_target_and_keeps_peers(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("content", ["", "{", "null", "[]", '{"alpha": 1}', '{"x": {}, "x": {}}', '{"alpha": {"v": NaN}}'])
-def test_malformed_source_record_file_is_not_overwritten(tmp_path, content):
+def _probe_malformed_source_record_file_is_not_overwritten(tmp_path, content):
     path = tmp_path / "plugin_sources.json"
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError):
@@ -63,7 +62,7 @@ def test_malformed_source_record_file_is_not_overwritten(tmp_path, content):
     assert path.read_text(encoding="utf-8") == content
 
 
-def test_source_replace_failure_preserves_old_bytes(tmp_path, monkeypatch):
+def _probe_source_replace_failure_preserves_old_bytes(tmp_path, monkeypatch):
     async def run():
         await save_source(tmp_path, "alpha", {"version": "1.0.0"})
         path = tmp_path / "plugin_sources.json"
@@ -93,7 +92,7 @@ def test_source_mutation_refuses_symlink(tmp_path):
     assert target.read_text(encoding="utf-8") == "{}"
 
 
-def test_registry_generation_tracks_url_changes_not_display_names(tmp_path, monkeypatch):
+def _probe_registry_generation_tracks_url_changes_not_display_names(tmp_path, monkeypatch):
     from mohobot.plugin_market import sources
 
     monkeypatch.setattr(sources.socket, "getaddrinfo", lambda *args: [])
@@ -123,7 +122,7 @@ def test_registry_generation_tracks_url_changes_not_display_names(tmp_path, monk
     asyncio.run(run())
 
 
-def test_registry_legacy_identity_is_stable_until_source_is_replaced(tmp_path, monkeypatch):
+def _probe_registry_legacy_identity_is_stable_until_source_is_replaced(tmp_path, monkeypatch):
     from mohobot.file_store import json_write
     from mohobot.plugin_market import sources
 
@@ -171,3 +170,91 @@ def test_source_host_resolving_to_private_ip_is_rejected() -> None:
             sources.validate_source_url("https://plugins.example.test/index.json")
     finally:
         sources.socket.getaddrinfo = original
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_malformed_source_record_file_is_not_overwritten(tmp_path):
+    for index, content in enumerate(["", "{", "null", "[]", '{"alpha": 1}', '{"x": {}, "x": {}}', '{"alpha": {"v": NaN}}']):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_malformed_source_record_file_is_not_overwritten(case_dir, content)
+        finally:
+            mp.undo()
+
+
+def test_source_replace_failure_preserves_old_bytes(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_source_replace_failure_preserves_old_bytes(case_dir, mp)
+    finally:
+        mp.undo()
+
+
+def test_registry_generation_tracks_url_changes_not_display_names(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_registry_generation_tracks_url_changes_not_display_names(case_dir, mp)
+    finally:
+        mp.undo()
+
+
+def test_registry_legacy_identity_is_stable_until_source_is_replaced(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_registry_legacy_identity_is_stable_until_source_is_replaced(case_dir, mp)
+    finally:
+        mp.undo()

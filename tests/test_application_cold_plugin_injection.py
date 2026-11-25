@@ -1,5 +1,7 @@
 """Cold plugin activation runs after host wiring but before event admission."""
 
+import asyncio
+from contextlib import contextmanager
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from textwrap import dedent
@@ -13,11 +15,37 @@ from mohobot.models.config import GlobalConfig
 from mohobot.plugin_market.journal import MarketJournal, MarketRecoveryError
 from mohobot.ws_server import WSServer
 
+_MISSING = object()
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("startup_fails", [False, True])
-@pytest.mark.parametrize("pending_market_install", [False, True])
-async def test_installed_plugin_activation_before_websocket_listens(tmp_path, monkeypatch, startup_fails, pending_market_install):
+
+@contextmanager
+def _patched(*patches):
+    """临时替换属性并在退出时还原。
+
+    不用 pytest fixture: 项目自研 legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+
+    还原时使用 ``vars(owner)[name]`` 的原始值: 类上可能有 staticmethod/
+    classmethod 描述符, 用 getattr 还原会把描述符解析成普通函数, 影响
+    后续用例。
+    """
+    undo = []
+    try:
+        for obj, name, value in patches:
+            undo.append((obj, name, vars(obj).get(name, _MISSING)))
+            setattr(obj, name, value)
+        yield
+    finally:
+        for obj, name, old in reversed(undo):
+            if old is _MISSING:
+                delattr(obj, name)
+            else:
+                setattr(obj, name, old)
+
+
+async def _check_activation(
+    tmp_path: Path, startup_fails: bool, pending_market_install: bool,
+) -> None:
     entry = Path(__file__).resolve().parents[1] / "main.py"
     spec = spec_from_file_location("_cold_plugin_application_test", entry)
     module = module_from_spec(spec)
@@ -76,12 +104,6 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
         await op.apply()
         assert (plugin_dir / "main.py").read_text().startswith("raise AssertionError")
 
-    monkeypatch.setattr(GlobalConfig, "load", Mock(return_value=cfg))
-    monkeypatch.setattr(BotManager, "migrate_legacy_bots", Mock())
-    monkeypatch.setattr(module.MohobotApplication, "_maybe_start_review_panel", Mock())
-    monkeypatch.setattr(LLMService, "_provider_identities", Mock(return_value=dict.fromkeys(("chat", "vision", "emotion"))))
-    monkeypatch.setattr(WSServer, "stop", AsyncMock())
-    app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
     listened = []
 
     async def record_listen(server):
@@ -103,19 +125,45 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
         assert instance.ws_injections == [app._ws_server]
         assert instance.handler_injections == [app._message_handler]
 
-    monkeypatch.setattr(WSServer, "start", record_listen)
-    try:
-        await app.startup()
-        assert listened == [app._ws_server]
-        if not startup_fails:
-            assert await app._plugin_system.reload_plugin(name)
-            assert_plugin_refs()
-    finally:
-        await app.shutdown()
+    with _patched(
+        (GlobalConfig, "load", Mock(return_value=cfg)),
+        (BotManager, "migrate_legacy_bots", Mock()),
+        (module.MohobotApplication, "_maybe_start_review_panel", Mock()),
+        (LLMService, "_provider_identities", Mock(
+            return_value=dict.fromkeys(("chat", "vision", "emotion")),
+        )),
+        (WSServer, "start", record_listen),
+        (WSServer, "stop", AsyncMock()),
+    ):
+        app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
+        try:
+            await app.startup()
+            assert listened == [app._ws_server]
+            if not startup_fails:
+                assert await app._plugin_system.reload_plugin(name)
+                assert_plugin_refs()
+        finally:
+            await app.shutdown()
+
+
+def test_installed_plugin_activation_before_websocket_listens(tmp_path: Path) -> None:
+    """startup 结果与挂起市场事务两组场景各自独立目录执行。
+
+    不用 parametrize: legacy runner 只支持无参或仅 ``tmp_path`` 的入口。
+    """
+    for startup_fails in (False, True):
+        for pending_market_install in (False, True):
+            label = (
+                f"{'fails' if startup_fails else 'ok'}-"
+                f"{'pending' if pending_market_install else 'clean'}"
+            )
+            case_dir = tmp_path / label
+            case_dir.mkdir()
+            asyncio.run(_check_activation(case_dir, startup_fails, pending_market_install))
 
 
 @pytest.mark.asyncio
-async def test_corrupt_market_journal_stops_startup_before_assembly(tmp_path, monkeypatch):
+async def test_corrupt_market_journal_stops_startup_before_assembly(tmp_path: Path) -> None:
     entry = Path(__file__).resolve().parents[1] / "main.py"
     spec = spec_from_file_location("_cold_market_recovery_test", entry)
     module = module_from_spec(spec)
@@ -125,13 +173,15 @@ async def test_corrupt_market_journal_stops_startup_before_assembly(tmp_path, mo
     path = Path(cfg.data_dir) / "plugins" / ".market-journal" / ("a" * 32) / "journal.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken")
-    monkeypatch.setattr(GlobalConfig, "load", Mock(return_value=cfg))
     listen = AsyncMock()
-    monkeypatch.setattr(WSServer, "start", listen)
-    app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
-    with pytest.raises(MarketRecoveryError, match=path.parent.name):
-        await app.startup()
-    assert app._plugin_system is None
-    assert app._bot_manager is None
-    listen.assert_not_awaited()
-    assert path.read_text() == "{broken"
+    with _patched(
+        (GlobalConfig, "load", Mock(return_value=cfg)),
+        (WSServer, "start", listen),
+    ):
+        app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
+        with pytest.raises(MarketRecoveryError, match=path.parent.name):
+            await app.startup()
+        assert app._plugin_system is None
+        assert app._bot_manager is None
+        listen.assert_not_awaited()
+        assert path.read_text() == "{broken"

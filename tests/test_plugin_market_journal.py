@@ -96,8 +96,7 @@ def _exit_mid_operation(data, plugins, kind, cut):
     assert run.returncode == 77, (run.stdout, run.stderr)
 
 
-@pytest.mark.parametrize("cut", ["intent", "rename-1", "rename-2", "source", "rollback-rename", "commit", "cleanup"])
-def test_replace_recovers_after_abrupt_exit(tmp_path, cut):
+def _probe_replace_recovers_after_abrupt_exit(tmp_path, cut):
     data, plugins = _fixture(tmp_path)
     _plugin(plugins / ".fixture-candidate", "2.0.0")
     _exit_mid_operation(data, plugins, "update", cut)
@@ -124,8 +123,7 @@ def test_uncommitted_first_install_is_removed_on_recovery(tmp_path):
     assert asyncio.run(load_sources_strict(data)) == {"peer": PEER}
 
 
-@pytest.mark.parametrize("cut", ["intent", "rename-1", "rename-2", "rename-3", "rename-4", "source", "rollback-rename", "commit", "cleanup"])
-def test_uninstall_recovery_is_reversible_and_cleanup_keeps_new_data(tmp_path, cut):
+def _probe_uninstall_recovery_is_reversible_and_cleanup_keeps_new_data(tmp_path, cut):
     data, plugins = _fixture(tmp_path)
     config = data / "plugins_config" / "demo.json"
     config.parent.mkdir()
@@ -162,8 +160,7 @@ def test_uninstall_recovery_is_reversible_and_cleanup_keeps_new_data(tmp_path, c
     assert not list(journal.root.iterdir())
 
 
-@pytest.mark.parametrize("damage", ["journal", "source", "destination", "symlink"])
-def test_ambiguous_state_stops_recovery_without_destroying_evidence(tmp_path, damage):
+def _probe_ambiguous_state_stops_recovery_without_destroying_evidence(tmp_path, damage):
     data, plugins = _fixture(tmp_path)
     _plugin(plugins / ".fixture-candidate", "2.0.0")
     _exit_mid_operation(data, plugins, "update", "source")
@@ -191,9 +188,7 @@ def test_ambiguous_state_stops_recovery_without_destroying_evidence(tmp_path, da
     assert (op / "previous" / "main.py").is_file()
 
 
-@pytest.mark.parametrize("cut", ["rename-2", "rename-3", "source", "commit"])
-@pytest.mark.parametrize("exists", [False, True])
-def test_config_seed_moves_with_candidate_but_existing_archive_is_untouched(tmp_path, cut, exists):
+def _probe_config_seed_moves_with_candidate_but_existing_archive_is_untouched(tmp_path, cut, exists):
     if exists and cut == "rename-3":
         # The existing archive means there are just two renames to interrupt.
         cut = "rename-2"
@@ -214,8 +209,7 @@ def test_config_seed_moves_with_candidate_but_existing_archive_is_untouched(tmp_
         assert not config.exists()
 
 
-@pytest.mark.parametrize("committed", [True, False])
-def test_cleanup_retries_final_discard_in_same_process(tmp_path, monkeypatch, committed):
+def _probe_cleanup_retries_final_discard_in_same_process(tmp_path, monkeypatch, committed):
     from mohobot.plugin_market import journal as module
 
     async def run():
@@ -263,3 +257,106 @@ def test_uninstall_refuses_recycle_collision_before_moving_live_files(tmp_path):
 
     data, plugins = _fixture(tmp_path)
     asyncio.run(run())
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_replace_recovers_after_abrupt_exit(tmp_path):
+    for cut in ["intent", "rename-1", "rename-2", "source", "rollback-rename", "commit", "cleanup"]:
+        case_dir = tmp_path / ("case-" + str(abs(hash((cut)))))
+        case_dir.mkdir(exist_ok=True)
+        mp = _MP()
+        try:
+            _probe_replace_recovers_after_abrupt_exit(case_dir, cut)
+        finally:
+            mp.undo()
+
+
+def test_uninstall_recovery_is_reversible_and_cleanup_keeps_new_data(tmp_path):
+    for cut in ["intent", "rename-1", "rename-2", "rename-3", "rename-4", "source", "rollback-rename", "commit", "cleanup"]:
+        case_dir = tmp_path / ("case-" + str(abs(hash((cut)))))
+        case_dir.mkdir(exist_ok=True)
+        mp = _MP()
+        try:
+            _probe_uninstall_recovery_is_reversible_and_cleanup_keeps_new_data(case_dir, cut)
+        finally:
+            mp.undo()
+
+
+def test_ambiguous_state_stops_recovery_without_destroying_evidence(tmp_path):
+    for damage in ["journal", "source", "destination", "symlink"]:
+        case_dir = tmp_path / ("case-" + str(abs(hash((damage)))))
+        case_dir.mkdir(exist_ok=True)
+        mp = _MP()
+        try:
+            _probe_ambiguous_state_stops_recovery_without_destroying_evidence(case_dir, damage)
+        finally:
+            mp.undo()
+
+
+def test_config_seed_moves_with_candidate_but_existing_archive_is_untouched(tmp_path):
+    for values in __import__("itertools").product(["rename-2", "rename-3", "source", "commit"], [False, True]):
+        cut, exists = values
+        case_dir = tmp_path / ("case-" + str(abs(hash((cut, exists)))))
+        case_dir.mkdir(exist_ok=True)
+        mp = _MP()
+        try:
+            _probe_config_seed_moves_with_candidate_but_existing_archive_is_untouched(case_dir, cut, exists)
+        finally:
+            mp.undo()
+
+
+def test_cleanup_retries_final_discard_in_same_process(tmp_path):
+    for committed in [True, False]:
+        case_dir = tmp_path / ("case-" + str(abs(hash((committed)))))
+        case_dir.mkdir(exist_ok=True)
+        mp = _MP()
+        try:
+            _probe_cleanup_retries_final_discard_in_same_process(case_dir, mp, committed)
+        finally:
+            mp.undo()

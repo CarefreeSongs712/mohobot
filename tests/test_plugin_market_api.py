@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystem
@@ -109,20 +109,33 @@ def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("endpoint, method, payload", [
-    ("reload", "reload_plugins", None),
-    ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
-])
-def test_plugin_namespace_conflict_returns_409(tmp_path, monkeypatch, endpoint, method, payload):
-    async def conflict(*args):
-        raise PluginNamespaceConflict("fixture namespace conflict")
+def test_plugin_namespace_conflict_returns_409(tmp_path: Path) -> None:
+    """两种入口的命名空间冲突都映射为 409。
 
-    monkeypatch.setattr(_FakePluginSystem, method, conflict)
-    client, headers = _client(tmp_path)
-    kwargs = {"json": payload} if payload is not None else {}
-    response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
-    assert response.status_code == 409
-    assert response.json()["detail"] == "fixture namespace conflict"
+    不用 parametrize/monkeypatch: legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+    """
+    cases = [
+        ("reload", "reload_plugins", None),
+        ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
+    ]
+    for endpoint, method, payload in cases:
+        original = getattr(_FakePluginSystem, method)
+
+        async def conflict(*args, **kwargs):
+            raise PluginNamespaceConflict("fixture namespace conflict")
+
+        setattr(_FakePluginSystem, method, conflict)
+        try:
+            case_dir = tmp_path / endpoint
+            case_dir.mkdir()
+            client, headers = _client(case_dir)
+            kwargs = {"json": payload} if payload is not None else {}
+            response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
+            assert response.status_code == 409
+            assert response.json()["detail"] == "fixture namespace conflict"
+        finally:
+            setattr(_FakePluginSystem, method, original)
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:
@@ -150,9 +163,7 @@ def test_market_install_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled, fails", [(True, True), (False, True), (True, False)])
-async def test_market_install_reports_target_activation(tmp_path, enabled, fails):
+async def _check_market_install_activation(tmp_path: Path, enabled: bool, fails: bool) -> None:
     data = tmp_path / "data"
     data.mkdir()
     builtin = tmp_path / "builtin"
@@ -256,6 +267,18 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
         await panel.stop()
 
 
+def test_market_install_reports_target_activation(tmp_path: Path) -> None:
+    """三种安装场景各自独立目录执行。
+
+    不用 parametrize: legacy runner 只支持无参或仅 ``tmp_path`` 的用例入口,
+    而 CI 在 push main 时仍会执行该 runner。
+    """
+    for enabled, fails in ((True, True), (False, True), (True, False)):
+        case_dir = tmp_path / f"enabled-{int(enabled)}-fails-{int(fails)}"
+        case_dir.mkdir()
+        asyncio.run(_check_market_install_activation(case_dir, enabled, fails))
+
+
 def test_market_update_endpoint(tmp_path: Path) -> None:
     client, headers = _client(tmp_path)
     response = client.post(
@@ -267,7 +290,7 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-def test_source_listing_does_not_prevent_market_first_fetch(tmp_path: Path, monkeypatch) -> None:
+def _probe_source_listing_does_not_prevent_market_first_fetch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("mohobot.plugin_market.sources.socket.getaddrinfo", lambda *args: [])
     calls = []
 
@@ -326,3 +349,60 @@ def test_source_list_reloads_from_disk(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert market.reload_count == 1
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_source_listing_does_not_prevent_market_first_fetch(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_source_listing_does_not_prevent_market_first_fetch(case_dir, mp)
+    finally:
+        mp.undo()

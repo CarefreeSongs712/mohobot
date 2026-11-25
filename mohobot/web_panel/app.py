@@ -1298,7 +1298,11 @@ class WebPanel:
         def _plugin_write_error(exc: Exception) -> HTTPException:
             if isinstance(exc, PluginNotFound):
                 status = 404
-            elif isinstance(exc, (MarketSourceChanged, PluginNamespaceConflict, PluginSystemRetired)):
+            elif isinstance(exc, (
+                MarketRecoveryError, MarketSourceChanged,
+                PluginNamespaceConflict, PluginSystemRetired,
+            )):
+                # 事务待恢复是可重试状态, 用 409 而非 500 (#172 审查 P3)。
                 status = 409
             elif isinstance(exc, (InstallError, ValueError)):
                 status = 400
@@ -1464,6 +1468,8 @@ class WebPanel:
                 result = await self._plugin_system.commit_plugin_config(name, body.data)
             except PluginSystemRetired:
                 raise HTTPException(status_code=409, detail="插件系统已停止接收配置保存") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
             except Exception:
                 raise HTTPException(status_code=500, detail="插件配置保存失败") from None
             if result is None:

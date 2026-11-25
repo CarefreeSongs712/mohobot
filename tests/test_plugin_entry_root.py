@@ -1,5 +1,6 @@
 """Installed entry paths, import roots and configuration across plugin overlays."""
 
+import asyncio
 import json
 from zipfile import ZipFile
 
@@ -47,13 +48,7 @@ def _meta(system, name):
     return next(meta for meta in system._plugins if meta["name"] == name)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("entry", "manifest_name"), [
-    ("main.py", "metadata.yaml"),
-    ("src/worker.py", "metadata.yaml"),
-    ("src/nested/worker.py", "metadata.yml"),
-])
-async def test_installed_entry_uses_package_root_for_manifest_and_schema(tmp_path, entry, manifest_name):
+async def _check_entry_root(tmp_path, entry, manifest_name):
     name = "entry_root_fixture"
     system = PluginSystem(plugins_dir=str(tmp_path / "builtin"), data_dir=str(tmp_path / "runtime"))
     manifest, installed = _install(tmp_path, system, name, entry, ROOT_SCHEMA, manifest_name=manifest_name)
@@ -190,3 +185,19 @@ async def test_nested_overlay_panel_uses_active_schema_without_migrating_archive
     finally:
         await system.shutdown_plugins()
         await panel.stop()
+
+
+def test_installed_entry_uses_package_root_for_manifest_and_schema(tmp_path):
+    """三种入口形态各自独立目录执行。
+
+    不用 parametrize: 项目自研 legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner (#171 审查 P1)。
+    """
+    for index, (entry, manifest_name) in enumerate((
+        ("main.py", "metadata.yaml"),
+        ("src/worker.py", "metadata.yaml"),
+        ("src/nested/worker.py", "metadata.yml"),
+    )):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        asyncio.run(_check_entry_root(case_dir, entry, manifest_name))
