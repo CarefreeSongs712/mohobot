@@ -610,3 +610,29 @@ def test_lifecycle_hook_timeout_is_bounded(tmp_path: Path) -> None:
         assert ps._plugins[0]["loaded"] is True
 
     asyncio.run(run())
+
+
+def test_failed_startup_candidate_does_not_dispatch_or_tick(tmp_path: Path) -> None:
+    """冷启动 on_startup 失败后实例保持 loaded, 但不得接收事件或启动周期任务 (审查 P3)。"""
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "badstart.py",
+            "class Plugin:\n"
+            "    interval_sec = 1\n"
+            "    async def on_startup(self):\n"
+            "        raise RuntimeError('startup boom')\n"
+            "    async def on_message(self, *args): return True, 'blocked'\n"
+            "    async def on_tick(self): return None\n",
+        )
+        assert await ps.load_plugins() == 1
+        meta = ps._plugins[0]
+        assert meta["loaded"] is True
+        assert meta["error"] == "startup boom"
+        assert meta["_ready"] is False
+        assert await ps.intercept("bot", object(), {}) == (False, None)
+        ps.start_tick_tasks()
+        assert "badstart" not in ps._tick_tasks_by_name
+        await ps.shutdown_plugins()
+
+    asyncio.run(run())

@@ -649,6 +649,7 @@ class PluginSystem(Interceptor):
             logger.error(f"Plugin {meta.get('name', '?')} LLM tool registration failed: {e}")
             success = False
         meta["_llm_tool_stage"] = None
+        meta["_ready"] = success
         if success:
             meta["error"] = None
         return success
@@ -681,8 +682,17 @@ class PluginSystem(Interceptor):
         for meta in tuple(self._plugins):
             self._start_tick_for(meta)
 
+    @staticmethod
+    def _dispatchable(meta: dict[str, Any]) -> bool:
+        """已启用、已加载且 on_startup 未失败才接收事件/启动周期任务。"""
+        return (
+            bool(meta.get("enabled"))
+            and bool(meta.get("loaded"))
+            and bool(meta.get("_ready", True))
+        )
+
     def _start_tick_for(self, meta: dict[str, Any]) -> None:
-        if not meta.get("enabled") or not meta.get("loaded"):
+        if not self._dispatchable(meta):
             return
         plugin = meta.get("instance")
         if plugin is None:
@@ -1281,7 +1291,7 @@ class PluginSystem(Interceptor):
     async def dispatch_notice(self, bot_id: str, event: NoticeEvent, raw: dict) -> None:
         """Dispatch a notice event to all enabled plugins."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1296,7 +1306,7 @@ class PluginSystem(Interceptor):
     async def dispatch_meta(self, bot_id: str, event: MetaEvent, raw: dict) -> None:
         """Dispatch a meta event to all enabled plugins."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1316,7 +1326,7 @@ class PluginSystem(Interceptor):
         Returns True if a plugin handled the request (框架不再自动同意)。
         """
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1343,7 +1353,7 @@ class PluginSystem(Interceptor):
         返回 (是否消费, 回复); 不消费时消息继续走正常流程(gate → 拦截链 → LLM)。
         """
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1421,7 +1431,7 @@ class PluginSystem(Interceptor):
         """
         parts: list[str] = []
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
@@ -1445,7 +1455,7 @@ class PluginSystem(Interceptor):
     ) -> tuple[bool, str | list[dict[str, Any]] | None]:
         """Give plugins a chance to intercept messages."""
         for meta in tuple(self._plugins):
-            if not meta.get("enabled") or not meta.get("loaded"):
+            if not self._dispatchable(meta):
                 continue
             if not self._bot_allowed(meta, bot_id):
                 continue
