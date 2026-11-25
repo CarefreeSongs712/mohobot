@@ -1,11 +1,11 @@
 """Cold plugin activation runs after host wiring but before event admission."""
 
+import asyncio
+from contextlib import contextmanager
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from textwrap import dedent
 from unittest.mock import AsyncMock, Mock
-
-import pytest
 
 from mohobot.bot_manager import BotManager
 from mohobot.llm_service import LLMService
@@ -13,9 +13,35 @@ from mohobot.models.config import GlobalConfig
 from mohobot.ws_server import WSServer
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("startup_fails", [False, True])
-async def test_installed_plugin_activation_before_websocket_listens(tmp_path, monkeypatch, startup_fails):
+_MISSING = object()
+
+
+@contextmanager
+def _patched(*patches):
+    """临时替换属性并在退出时还原。
+
+    不用 pytest fixture: 项目自研 legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+
+    还原时使用 ``vars(owner)[name]`` 的原始值: 类上可能有 staticmethod/
+    classmethod 描述符, 用 getattr 还原会把描述符解析成普通函数, 影响
+    后续用例。
+    """
+    undo = []
+    try:
+        for obj, name, value in patches:
+            undo.append((obj, name, vars(obj).get(name, _MISSING)))
+            setattr(obj, name, value)
+        yield
+    finally:
+        for obj, name, old in reversed(undo):
+            if old is _MISSING:
+                delattr(obj, name)
+            else:
+                setattr(obj, name, old)
+
+
+async def _check_activation(tmp_path: Path, startup_fails: bool) -> None:
     entry = Path(__file__).resolve().parents[1] / "main.py"
     spec = spec_from_file_location("_cold_plugin_application_test", entry)
     module = module_from_spec(spec)
@@ -63,12 +89,6 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
                     raise RuntimeError("fixture startup failure after injection")
     """), encoding="utf-8")
 
-    monkeypatch.setattr(GlobalConfig, "load", Mock(return_value=cfg))
-    monkeypatch.setattr(BotManager, "migrate_legacy_bots", Mock())
-    monkeypatch.setattr(module.MohobotApplication, "_maybe_start_review_panel", Mock())
-    monkeypatch.setattr(LLMService, "_provider_identities", Mock(return_value=dict.fromkeys(("chat", "vision", "emotion"))))
-    monkeypatch.setattr(WSServer, "stop", AsyncMock())
-    app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
     listened = []
 
     async def record_listen(server):
@@ -90,12 +110,29 @@ async def test_installed_plugin_activation_before_websocket_listens(tmp_path, mo
         assert instance.ws_injections == [app._ws_server]
         assert instance.handler_injections == [app._message_handler]
 
-    monkeypatch.setattr(WSServer, "start", record_listen)
-    try:
-        await app.startup()
-        assert listened == [app._ws_server]
-        if not startup_fails:
-            assert await app._plugin_system.reload_plugin(name)
-            assert_plugin_refs()
-    finally:
-        await app.shutdown()
+    with _patched(
+        (GlobalConfig, "load", Mock(return_value=cfg)),
+        (BotManager, "migrate_legacy_bots", Mock()),
+        (module.MohobotApplication, "_maybe_start_review_panel", Mock()),
+        (LLMService, "_provider_identities", Mock(
+            return_value=dict.fromkeys(("chat", "vision", "emotion")),
+        )),
+        (WSServer, "start", record_listen),
+        (WSServer, "stop", AsyncMock()),
+    ):
+        app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
+        try:
+            await app.startup()
+            assert listened == [app._ws_server]
+            if not startup_fails:
+                assert await app._plugin_system.reload_plugin(name)
+                assert_plugin_refs()
+        finally:
+            await app.shutdown()
+
+
+def test_installed_plugin_activation_before_websocket_listens(tmp_path):
+    for startup_fails in (False, True):
+        case_dir = tmp_path / ("startup-fails" if startup_fails else "startup-ok")
+        case_dir.mkdir()
+        asyncio.run(_check_activation(case_dir, startup_fails))
