@@ -40,12 +40,22 @@ def test_market_key_must_match_author_name() -> None:
         parse_market_index(payload)
 
 
+def _docs_index_payload(doc: str) -> dict:
+    """取文档中真正的索引示例块(含 plugins 的对象), 不盲取第一个 json 代码块。"""
+    for block in re.findall(r"```json\s*\n(.*?)\n```", doc, re.DOTALL):
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "plugins" in candidate:
+            return candidate
+    raise AssertionError("docs/PLUGIN-MARKET.md 缺少可解析的 index.json 示例")
+
+
 def test_docs_index_example_matches_parser() -> None:
     """docs/PLUGIN-MARKET.md 的索引示例必须能被 parse_market_index 接受，防止文档与校验规则漂移。"""
     doc = (Path(__file__).resolve().parents[1] / "docs" / "PLUGIN-MARKET.md").read_text(encoding="utf-8")
-    match = re.search(r"```json\s*\n(.*?)\n```", doc, re.DOTALL)
-    assert match is not None, "docs/PLUGIN-MARKET.md 缺少 index.json 示例"
-    payload = json.loads(match.group(1))
+    payload = _docs_index_payload(doc)
     for entry in payload["plugins"].values():
         if entry.get("sha256") == "<64 位十六进制>":
             entry["sha256"] = "a" * 64
