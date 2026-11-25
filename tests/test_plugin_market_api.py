@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from mohobot.interceptors.plugin_system import PluginSystem
@@ -119,9 +119,7 @@ def test_market_install_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled, fails", [(True, True), (False, True), (True, False)])
-async def test_market_install_reports_target_activation(tmp_path, enabled, fails):
+async def _check_market_install_activation(tmp_path: Path, enabled: bool, fails: bool) -> None:
     data = tmp_path / "data"
     data.mkdir()
     builtin = tmp_path / "builtin"
@@ -197,6 +195,18 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
     finally:
         await plugins.shutdown_plugins()
         await panel.stop()
+
+
+def test_market_install_reports_target_activation(tmp_path: Path) -> None:
+    """三种安装场景各自独立目录执行。
+
+    不用 parametrize: legacy runner 只支持无参或仅 ``tmp_path`` 的用例入口,
+    而 CI 在 push main 时仍会执行该 runner。
+    """
+    for enabled, fails in ((True, True), (False, True), (True, False)):
+        case_dir = tmp_path / f"enabled-{int(enabled)}-fails-{int(fails)}"
+        case_dir.mkdir()
+        asyncio.run(_check_market_install_activation(case_dir, enabled, fails))
 
 
 def test_market_update_endpoint(tmp_path: Path) -> None:
