@@ -232,4 +232,3 @@ def test_cancelled_reload_keeps_rollback_until_cleanup(tmp_path: Path) -> None:
             _probe_cancelled_reload(case_dir, patcher, next_action)
         finally:
             patcher.undo()
-
