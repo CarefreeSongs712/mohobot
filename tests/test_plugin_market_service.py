@@ -176,8 +176,7 @@ def test_update_market_plugin(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("kind", ["install", "update", "uninstall"])
-def test_market_write_rolls_back_files_and_source_if_commit_fails(tmp_path, monkeypatch, kind):
+def _probe_market_write_rolls_back_files_and_source_if_commit_fails(tmp_path, monkeypatch, kind):
     async def run():
         data = tmp_path / "data"
         plugins = data / "plugins"
@@ -226,9 +225,7 @@ def test_market_write_rolls_back_files_and_source_if_commit_fails(tmp_path, monk
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("operation", ["install", "update"])
-@pytest.mark.parametrize("case", ["version", "author", "api", "host", "entry", "digest"])
-def test_market_checks_actual_archive_before_replacing_target(tmp_path, monkeypatch, operation, case):
+def _probe_market_checks_actual_archive_before_replacing_target(tmp_path, monkeypatch, operation, case):
     async def run() -> None:
         data = tmp_path / "data"
         service = MarketService(data, data / "plugins", fetcher=lambda url: payload)
@@ -358,8 +355,7 @@ def test_source_list_does_not_skip_initial_index_or_proxy_fallback(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mutation", ["url", "recreate"])
-def test_old_source_refresh_and_cache_are_invalidated(tmp_path, mutation):
+def _probe_old_source_refresh_and_cache_are_invalidated(tmp_path, mutation):
     async def run():
         loop = asyncio.get_running_loop()
         started = loop.create_future()
@@ -421,8 +417,7 @@ def test_corrupt_identity_cache_is_not_reused(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mutation", ["rename", "url", "recreate"])
-def test_install_rechecks_frozen_source_after_download(tmp_path, monkeypatch, mutation):
+def _probe_install_rechecks_frozen_source_after_download(tmp_path, monkeypatch, mutation):
     async def run():
         loop = asyncio.get_running_loop()
         started = loop.create_future()
@@ -466,13 +461,7 @@ def test_install_rechecks_frozen_source_after_download(tmp_path, monkeypatch, mu
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("record_identity, expected", [
-    ("wrong_url", MarketSourceChanged),
-    ("wrong_generation", MarketSourceChanged),
-    ("no_url", None),
-    ("normalized_url", None),
-])
-def test_update_never_rebinds_recorded_source_and_backfills_legacy(tmp_path, monkeypatch, record_identity, expected):
+def _probe_update_never_rebinds_recorded_source_and_backfills_legacy(tmp_path, monkeypatch, record_identity, expected):
     async def run():
         plugin_id = "CarefreeSongs712/demo"
         _archive(tmp_path, "demo")
@@ -522,7 +511,7 @@ def test_update_never_rebinds_recorded_source_and_backfills_legacy(tmp_path, mon
     asyncio.run(run())
 
 
-def test_cancelled_download_keeps_staging_until_worker_exits(tmp_path, monkeypatch):
+def _probe_cancelled_download_keeps_staging_until_worker_exits(tmp_path, monkeypatch):
     async def run():
         service = MarketService(tmp_path / "data", tmp_path / "installed", fetcher=lambda url: _payload("demo"))
         loop = asyncio.get_running_loop()
@@ -582,3 +571,123 @@ def test_reload_sources_reads_persisted_changes(tmp_path: Path) -> None:
         assert [source.id for source in sources] == ["official", "custom"]
 
     asyncio.run(run())
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_market_write_rolls_back_files_and_source_if_commit_fails(tmp_path):
+    for index, kind in enumerate(["install", "update", "uninstall"]):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_market_write_rolls_back_files_and_source_if_commit_fails(case_dir, mp, kind)
+        finally:
+            mp.undo()
+
+
+def test_market_checks_actual_archive_before_replacing_target(tmp_path):
+    for index, values in enumerate(__import__("itertools").product(["install", "update"], ["version", "author", "api", "host", "entry", "digest"])):
+        operation, case = values
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_market_checks_actual_archive_before_replacing_target(case_dir, mp, operation, case)
+        finally:
+            mp.undo()
+
+
+def test_old_source_refresh_and_cache_are_invalidated(tmp_path):
+    for index, mutation in enumerate(["url", "recreate"]):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_old_source_refresh_and_cache_are_invalidated(case_dir, mutation)
+        finally:
+            mp.undo()
+
+
+def test_install_rechecks_frozen_source_after_download(tmp_path):
+    for index, mutation in enumerate(["rename", "url", "recreate"]):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_install_rechecks_frozen_source_after_download(case_dir, mp, mutation)
+        finally:
+            mp.undo()
+
+
+def test_update_never_rebinds_recorded_source_and_backfills_legacy(tmp_path):
+    for index, (record_identity, expected) in enumerate([
+        ("wrong_url", MarketSourceChanged),
+        ("wrong_generation", MarketSourceChanged),
+        ("no_url", None),
+        ("normalized_url", None),
+    ]):
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            _probe_update_never_rebinds_recorded_source_and_backfills_legacy(
+                case_dir, mp, record_identity, expected,
+            )
+        finally:
+            mp.undo()
+
+
+def test_cancelled_download_keeps_staging_until_worker_exits(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_cancelled_download_keeps_staging_until_worker_exits(case_dir, mp)
+    finally:
+        mp.undo()

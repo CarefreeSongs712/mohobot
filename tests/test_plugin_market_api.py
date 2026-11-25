@@ -290,7 +290,7 @@ def test_market_update_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-def test_source_listing_does_not_prevent_market_first_fetch(tmp_path: Path, monkeypatch) -> None:
+def _probe_source_listing_does_not_prevent_market_first_fetch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("mohobot.plugin_market.sources.socket.getaddrinfo", lambda *args: [])
     calls = []
 
@@ -349,3 +349,60 @@ def test_source_list_reloads_from_disk(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert market.reload_count == 1
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_source_listing_does_not_prevent_market_first_fetch(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        _probe_source_listing_does_not_prevent_market_first_fetch(case_dir, mp)
+    finally:
+        mp.undo()

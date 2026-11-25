@@ -1298,7 +1298,11 @@ class WebPanel:
         def _plugin_write_error(exc: Exception) -> HTTPException:
             if isinstance(exc, PluginNotFound):
                 status = 404
-            elif isinstance(exc, (MarketSourceChanged, PluginNamespaceConflict, PluginSystemRetired)):
+            elif isinstance(exc, (
+                MarketRecoveryError, MarketSourceChanged,
+                PluginNamespaceConflict, PluginSystemRetired,
+            )):
+                # 事务待恢复是可重试状态, 用 409 而非 500 (#172 审查 P3)。
                 status = 409
             elif isinstance(exc, (InstallError, ValueError)):
                 status = 400

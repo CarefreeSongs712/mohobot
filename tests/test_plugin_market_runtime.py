@@ -78,10 +78,7 @@ _SHUTDOWN = dedent("""\
 """)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["update", "uninstall"])
-@pytest.mark.parametrize("failure", ["raise", "timeout"])
-async def test_old_retirement_remains_owned_until_recovery(tmp_path, operation, failure):
+async def _probe_old_retirement_remains_owned_until_recovery(tmp_path, operation, failure):
     data, plugins = await _fixture(tmp_path, _SHUTDOWN)
     old = plugins._market_meta("demo")
     peer = plugins._market_meta("market_peer")["instance"]
@@ -134,10 +131,7 @@ async def test_old_retirement_remains_owned_until_recovery(tmp_path, operation, 
         await plugins.shutdown_plugins()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["update", "uninstall"])
-@pytest.mark.parametrize("settle", ["reload", "shutdown"])
-async def test_committed_cleanup_retry_does_not_reactivate_target(tmp_path, monkeypatch, operation, settle):
+async def _probe_committed_cleanup_retry_does_not_reactivate_target(tmp_path, monkeypatch, operation, settle):
     data, plugins = await _fixture(tmp_path)
     peer = plugins._market_meta("market_peer")["instance"]
     discard = journal._discard
@@ -211,8 +205,7 @@ async def test_failed_restore_keeps_recovery_intent_for_retry(tmp_path):
         await plugins.shutdown_plugins()
 
 
-@pytest.mark.asyncio
-async def test_persistent_terminal_cleanup_failure_does_not_skip_shutdown(tmp_path, monkeypatch):
+async def _probe_persistent_terminal_cleanup_failure_does_not_skip_shutdown(tmp_path, monkeypatch):
     data, plugins = await _fixture(tmp_path)
     peer = plugins._market_meta("market_peer")["instance"]
     shutdown_calls = []
@@ -257,10 +250,7 @@ async def test_persistent_terminal_cleanup_failure_does_not_skip_shutdown(tmp_pa
         await plugins.shutdown_plugins()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("with_market", [True, False])
-@pytest.mark.parametrize("failure", ["preflight", "collision", None])
-async def test_uninstall_api_uses_runtime_transaction(tmp_path, monkeypatch, with_market, failure):
+async def _probe_uninstall_api_uses_runtime_transaction(tmp_path, monkeypatch, with_market, failure):
     data, plugins = await _fixture(tmp_path)
     old = plugins._market_meta("demo")["instance"]
     peer = plugins._market_meta("market_peer")["instance"]
@@ -285,7 +275,10 @@ async def test_uninstall_api_uses_runtime_transaction(tmp_path, monkeypatch, wit
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=panel._app), base_url="http://test") as client:
             token = (await client.post("/api/login", json={"username": "admin", "password": "test-password"})).json()["token"]
             response = await client.delete("/api/plugins/demo", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == (500 if failure else 200), response.text
+        # 事务待恢复/事务目标冲突都抛 MarketRecoveryError, 按可重试状态映射为
+        # 409 (#172 审查 P3); 无失败时正常 200。
+        expected_status = 409 if failure else 200
+        assert response.status_code == expected_status, response.text
         assert plugins._market_meta("market_peer")["instance"] is peer
         assert plugins._can_dispatch(plugins._market_meta("market_peer"))
         if failure:
@@ -302,3 +295,96 @@ async def test_uninstall_api_uses_runtime_transaction(tmp_path, monkeypatch, wit
             assert "demo" not in await load_sources_strict(data)
     finally:
         await plugins.shutdown_plugins()
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def _resolve(self, target):
+        if isinstance(target, str):
+            import importlib
+            parts = target.split(".")
+            obj = importlib.import_module(parts[0])
+            for part in parts[1:-1]:
+                obj = getattr(obj, part)
+            return obj, parts[-1]
+        return target, None
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        obj, attr = self._resolve(target)
+        if attr is not None:
+            name, value = attr, name
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value):
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self):
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+
+def test_old_retirement_remains_owned_until_recovery(tmp_path):
+    for index, values in enumerate(__import__("itertools").product(["update", "uninstall"], ["raise", "timeout"])):
+        operation, failure = values
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            asyncio.run(_probe_old_retirement_remains_owned_until_recovery(case_dir, operation, failure))
+        finally:
+            mp.undo()
+
+
+def test_committed_cleanup_retry_does_not_reactivate_target(tmp_path):
+    for index, values in enumerate(__import__("itertools").product(["update", "uninstall"], ["reload", "shutdown"])):
+        operation, settle = values
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            asyncio.run(_probe_committed_cleanup_retry_does_not_reactivate_target(case_dir, mp, operation, settle))
+        finally:
+            mp.undo()
+
+
+def test_persistent_terminal_cleanup_failure_does_not_skip_shutdown(tmp_path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    mp = _MP()
+    try:
+        asyncio.run(_probe_persistent_terminal_cleanup_failure_does_not_skip_shutdown(case_dir, mp))
+    finally:
+        mp.undo()
+
+
+def test_uninstall_api_uses_runtime_transaction(tmp_path):
+    for index, values in enumerate(__import__("itertools").product([True, False], ["preflight", "collision", None])):
+        with_market, failure = values
+        case_dir = tmp_path / f"case-{index}"
+        case_dir.mkdir()
+        mp = _MP()
+        try:
+            asyncio.run(_probe_uninstall_api_uses_runtime_transaction(case_dir, mp, with_market, failure))
+        finally:
+            mp.undo()
