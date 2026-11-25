@@ -1082,7 +1082,10 @@ def test_one_shutdown_timeout_does_not_skip_other_plugins(tmp_path: Path) -> Non
 
 
 def test_failed_startup_candidate_does_not_dispatch_or_tick(tmp_path: Path) -> None:
-    """冷启动 on_startup 失败后实例保持 loaded, 但不得接收事件或启动周期任务 (审查 P3)。"""
+    """冷启动 on_startup 失败的候选不得接收事件或启动周期任务 (审查 P3)。
+
+    合并 #166 退役所有权架构后失败候选 loaded=False、保留 _imports 供重试。
+    """
     async def run() -> None:
         ps = _plugin_system(tmp_path)
         _write(
@@ -1094,11 +1097,13 @@ def test_failed_startup_candidate_does_not_dispatch_or_tick(tmp_path: Path) -> N
             "    async def on_message(self, *args): return True, 'blocked'\n"
             "    async def on_tick(self): return None\n",
         )
-        assert await ps.load_plugins() == 1
+        assert await ps.load_plugins() == 0
         meta = ps._plugins[0]
-        assert meta["loaded"] is True
+        assert meta["loaded"] is False
         assert meta["error"] == "startup boom"
         assert meta["_ready"] is False
+        assert meta["_imports"] is not None
+        assert ps._can_dispatch(meta) is False
         assert await ps.intercept("bot", object(), {}) == (False, None)
         ps.start_tick_tasks()
         assert "badstart" not in ps._tick_tasks_by_name

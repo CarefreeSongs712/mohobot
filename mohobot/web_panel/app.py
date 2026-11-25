@@ -1517,6 +1517,8 @@ class WebPanel:
                 result = await self._plugin_system.commit_plugin_config(name, body.data)
             except PluginSystemRetired:
                 raise HTTPException(status_code=409, detail="插件系统已停止接收配置保存") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
             except Exception:
                 raise HTTPException(status_code=500, detail="插件配置保存失败") from None
             if result is None:

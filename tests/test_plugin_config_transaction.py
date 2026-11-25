@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 
 import httpx
@@ -24,6 +24,36 @@ SCHEMA = {
     "limit": {"type": "int", "default": 1},
 }
 _MISSING = object()
+
+
+class _MonkeyPatch:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self) -> None:
+        self._undo: list[tuple[object, str, object]] = []
+
+    def setattr(self, obj, name: str, value) -> None:  # noqa: A003 - 对齐接口
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def undo(self) -> None:
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+
+    @contextmanager
+    def context(self):
+        nested = _MonkeyPatch()
+        try:
+            yield nested
+        finally:
+            nested.undo()
 
 
 def make_system(tmp_path, raw=_MISSING):
@@ -82,9 +112,7 @@ async def test_explicit_leaves_merge_latest_raw_file_and_keep_injected_dict(tmp_
         assert inst.plugin_config["request"]["blacklist"] == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("raw", ["{}\n", "", "[1]", "{broken json"])
-async def test_existing_archive_not_repaired_by_startup_or_read(tmp_path, raw):
+async def _probe_existing_archive(tmp_path, raw):
     system, archive = make_system(tmp_path, raw)
     async with running(system):
         config = system.get_plugin_config(PLUGIN)
@@ -101,9 +129,7 @@ async def test_missing_archive_is_seeded_with_effective_defaults(tmp_path):
         assert await file_store.json_read(archive) == instance(system).plugin_config
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_waiter", [False, True], ids=["save-first", "repeated-cancel"])
-async def test_entered_commit_holds_lifecycle_until_write_and_publication(tmp_path, monkeypatch, cancel_waiter):
+async def _probe_entered_commit(tmp_path, monkeypatch, cancel_waiter):
     system, archive = make_system(tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
     original = file_store.json_update
@@ -153,8 +179,7 @@ async def test_entered_commit_holds_lifecycle_until_write_and_publication(tmp_pa
             await asyncio.gather(*(t for t in (save, reload) if t is not None), return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_empty_schema_patch_neither_writes_nor_publishes(tmp_path, monkeypatch):
+async def _probe_empty_schema_patch(tmp_path, monkeypatch):
     system, archive = make_system(tmp_path)
     async with running(system):
         before = archive.read_bytes()
@@ -174,8 +199,7 @@ async def test_empty_schema_patch_neither_writes_nor_publishes(tmp_path, monkeyp
         assert archive.read_bytes() == before
 
 
-@pytest.mark.asyncio
-async def test_reload_first_and_cancelled_queued_save(tmp_path, monkeypatch):
+async def _probe_reload_queued_save(tmp_path, monkeypatch):
     system, archive = make_system(tmp_path)
     gate, started, save_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async with running(system):
@@ -221,8 +245,7 @@ async def test_reload_first_and_cancelled_queued_save(tmp_path, monkeypatch):
             await asyncio.gather(*(t for t in (reload, cancelled_save, save) if t is not None), return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_close_admission_during_write_does_not_apply_or_accept_next_write(tmp_path, monkeypatch):
+async def _probe_close_admission_write(tmp_path, monkeypatch):
     system, archive = make_system(tmp_path)
     gate, entered = asyncio.Event(), asyncio.Event()
     original = file_store.json_update
@@ -253,9 +276,7 @@ async def test_close_admission_during_write_does_not_apply_or_accept_next_write(
             await asyncio.gather(save, return_exceptions=True)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("raw", ["", "[1]", "{broken json"])
-async def test_explicit_save_can_replace_invalid_archive_with_only_patch(tmp_path, raw):
+async def _probe_replace_invalid_archive(tmp_path, raw):
     system, archive = make_system(tmp_path, raw)
     async with running(system):
         assert await system.save_plugin_config(PLUGIN, {"limit": 9})
@@ -263,8 +284,7 @@ async def test_explicit_save_can_replace_invalid_archive_with_only_patch(tmp_pat
         assert instance(system).plugin_config["group"] == "100"
 
 
-@pytest.mark.asyncio
-async def test_authenticated_panel_config_responses(tmp_path, monkeypatch):
+async def _probe_panel_config_responses(tmp_path, monkeypatch):
     system, archive = make_system(tmp_path, {"limit": "2", "request": {"blacklist": "111,222"}})
     panel = WebPanel(data_dir=str(system.data_dir), password_hash=WebPanel._hash_password("fixture"), plugin_system=system)
     api = f"/api/plugins/{PLUGIN}/config"
@@ -326,3 +346,97 @@ async def test_authenticated_panel_config_responses(tmp_path, monkeypatch):
         system.close_admission()
         assert (await post({"limit": 12})).status_code == 409
         assert (await file_store.json_read(archive))["limit"] == 11
+
+
+def test_existing_archive_not_repaired_by_startup_or_read(tmp_path):
+    for index, raw in enumerate(("{}\n", "", "[1]", "{broken json")):
+        case = tmp_path / f"raw-{index}"
+        case.mkdir()
+        asyncio.run(_probe_existing_archive(case, raw))
+
+
+def test_entered_commit_holds_lifecycle_until_write_and_publication(tmp_path):
+    for index, cancel_waiter in enumerate((False, True)):
+        case = tmp_path / f"cancel-{index}"
+        case.mkdir()
+        patcher = _MonkeyPatch()
+        try:
+            asyncio.run(_probe_entered_commit(case, patcher, cancel_waiter))
+        finally:
+            patcher.undo()
+
+
+def test_empty_schema_patch_neither_writes_nor_publishes(tmp_path):
+    patcher = _MonkeyPatch()
+    try:
+        asyncio.run(_probe_empty_schema_patch(tmp_path, patcher))
+    finally:
+        patcher.undo()
+
+
+def test_reload_first_and_cancelled_queued_save(tmp_path):
+    patcher = _MonkeyPatch()
+    try:
+        asyncio.run(_probe_reload_queued_save(tmp_path, patcher))
+    finally:
+        patcher.undo()
+
+
+def test_close_admission_during_write_does_not_apply_or_accept_next_write(tmp_path):
+    patcher = _MonkeyPatch()
+    try:
+        asyncio.run(_probe_close_admission_write(tmp_path, patcher))
+    finally:
+        patcher.undo()
+
+
+def test_explicit_save_can_replace_invalid_archive_with_only_patch(tmp_path):
+    for index, raw in enumerate(("", "[1]", "{broken json")):
+        case = tmp_path / f"replace-{index}"
+        case.mkdir()
+        asyncio.run(_probe_replace_invalid_archive(case, raw))
+
+
+def test_authenticated_panel_config_responses(tmp_path):
+    patcher = _MonkeyPatch()
+    try:
+        asyncio.run(_probe_panel_config_responses(tmp_path, patcher))
+    finally:
+        patcher.undo()
+
+
+def test_disabled_plugin_exposes_schema_and_accepts_patch(tmp_path):
+    """禁用插件必须能在面板读 schema、保存配置 (#170 审查 P1)。"""
+    async def run() -> None:
+        package = tmp_path / "builtin" / PLUGIN
+        package.mkdir(parents=True)
+        (package / "_conf_schema.json").write_text(json.dumps(SCHEMA), encoding="utf-8")
+        (package / "main.py").write_text(
+            "class Plugin:\n"
+            "    def on_startup(self):\n"
+            "        self.started = True\n",
+            encoding="utf-8",
+        )
+        runtime = tmp_path / "custom-runtime"
+        runtime.mkdir()
+        (runtime / "plugins_state.json").write_text(
+            json.dumps({PLUGIN: {"enabled": False}}), encoding="utf-8",
+        )
+        system = PluginSystem(plugins_dir=str(package.parent), data_dir=str(runtime))
+        try:
+            assert await system.load_plugins() == 0
+            meta = next(m for m in system._plugins if m["name"] == PLUGIN)
+            assert meta["loaded"] is False
+            assert meta["config_schema"] == SCHEMA
+            view = await system.read_plugin_config(PLUGIN)
+            assert view is not None and view["schema"] == SCHEMA
+            result = await system.commit_plugin_config(PLUGIN, {"limit": 7})
+            assert result is not None
+            assert result["config"]["limit"] == 7
+            assert result["application"] == "not_running"
+            archive = runtime / "plugins_config" / f"{PLUGIN}.json"
+            assert json.loads(archive.read_text(encoding="utf-8"))["limit"] == 7
+        finally:
+            await system.shutdown_plugins()
+
+    asyncio.run(run())

@@ -286,6 +286,12 @@ class PluginSystem(Interceptor):
         from mohobot.services.llm_tools import registry
 
         registry.set_owner_state_path(plugin_name, self._state_file)
+        # schema 解析不依赖模块导入: 禁用插件也必须在面板里可见并可编辑配置
+        # (#170 审查 P1)。坏 schema 与基线一致地降级为无配置。
+        try:
+            meta["config_schema"] = self._load_config_schema(entry_path.parent)
+        except Exception as exc:
+            logger.warning(f"Plugin {plugin_name} config schema load failed: {exc}")
         if not meta["enabled"]:
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
@@ -337,7 +343,9 @@ class PluginSystem(Interceptor):
                 if isinstance(cls_info, dict):
                     meta["info"].update(cls_info)
 
-                schema = self._load_config_schema(entry_path.parent)
+                schema = meta.get("config_schema") or self._load_config_schema(
+                    entry_path.parent,
+                )
                 if schema:
                     meta["config_schema"] = schema
                 logger.info(f"Loaded plugin: {plugin_name}")
@@ -1124,8 +1132,14 @@ class PluginSystem(Interceptor):
         return merged
 
     @classmethod
-    def _coerce_config(cls, schema: dict, data: dict) -> dict:
-        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。"""
+    def _coerce_config(
+        cls, schema: dict, data: dict, *, strict: bool = False,
+    ) -> dict:
+        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。
+
+        strict=True 用于面板提交: 无法解析的数字抛出带字段名的 ValueError,
+        由面板返回 400; 读取磁盘存档时保持宽松回退默认值, 脏存档不阻塞启动。
+        """
         result: dict = {}
         for key, spec in (schema or {}).items():
             if not isinstance(spec, dict) or key not in data:
@@ -1134,7 +1148,8 @@ class PluginSystem(Interceptor):
             stype = spec.get("type", "string")
             if stype == "object":
                 branch = cls._coerce_config(
-                    spec.get("items") or {}, value if isinstance(value, dict) else {}
+                    spec.get("items") or {}, value if isinstance(value, dict) else {},
+                    strict=strict,
                 )
                 if branch:
                     result[key] = branch
@@ -1147,11 +1162,16 @@ class PluginSystem(Interceptor):
                 try:
                     result[key] = int(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        # 面板提交不能静默回退默认值 (#170 审查 P3)。
+                        raise ValueError(f"配置字段 {key} 需要整数") from None
                     result[key] = spec.get("default", 0)
             elif stype == "float":
                 try:
                     result[key] = float(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        raise ValueError(f"配置字段 {key} 需要数字") from None
                     result[key] = spec.get("default", 0.0)
             elif stype == "list":
                 if isinstance(value, list):
@@ -1214,7 +1234,7 @@ class PluginSystem(Interceptor):
             meta = next((m for m in self._plugins if m["name"] == name), None)
             if meta is None or (schema := meta.get("config_schema")) is None:
                 return None
-            patch = self._coerce_config(schema, config or {})
+            patch = self._coerce_config(schema, config or {}, strict=True)
             if not patch:
                 return {"config": await self._read_effective_config(name, schema), "application": "unchanged"}
             commit = asyncio.create_task(self._commit_config(meta, schema, patch), name=f"plugin-config:{name}")
