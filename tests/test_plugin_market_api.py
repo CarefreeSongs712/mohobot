@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystem
@@ -94,20 +94,33 @@ def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("endpoint, method, payload", [
-    ("reload", "reload_plugins", None),
-    ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
-])
-def test_plugin_namespace_conflict_returns_409(tmp_path, monkeypatch, endpoint, method, payload):
-    async def conflict(*args):
-        raise PluginNamespaceConflict("fixture namespace conflict")
+def test_plugin_namespace_conflict_returns_409(tmp_path: Path) -> None:
+    """两种入口的命名空间冲突都映射为 409。
 
-    monkeypatch.setattr(_FakePluginSystem, method, conflict)
-    client, headers = _client(tmp_path)
-    kwargs = {"json": payload} if payload is not None else {}
-    response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
-    assert response.status_code == 409
-    assert response.json()["detail"] == "fixture namespace conflict"
+    不用 parametrize/monkeypatch: legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+    """
+    cases = [
+        ("reload", "reload_plugins", None),
+        ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
+    ]
+    for endpoint, method, payload in cases:
+        original = getattr(_FakePluginSystem, method)
+
+        async def conflict(*args, **kwargs):
+            raise PluginNamespaceConflict("fixture namespace conflict")
+
+        setattr(_FakePluginSystem, method, conflict)
+        try:
+            case_dir = tmp_path / endpoint
+            case_dir.mkdir()
+            client, headers = _client(case_dir)
+            kwargs = {"json": payload} if payload is not None else {}
+            response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
+            assert response.status_code == 409
+            assert response.json()["detail"] == "fixture namespace conflict"
+        finally:
+            setattr(_FakePluginSystem, method, original)
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:
@@ -135,9 +148,7 @@ def test_market_install_endpoint(tmp_path: Path) -> None:
     assert response.json()["name"] == "demo"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled, fails", [(True, True), (False, True), (True, False)])
-async def test_market_install_reports_target_activation(tmp_path, enabled, fails):
+async def _check_market_install_activation(tmp_path: Path, enabled: bool, fails: bool) -> None:
     data = tmp_path / "data"
     data.mkdir()
     builtin = tmp_path / "builtin"
@@ -213,6 +224,18 @@ async def test_market_install_reports_target_activation(tmp_path, enabled, fails
     finally:
         await plugins.shutdown_plugins()
         await panel.stop()
+
+
+def test_market_install_reports_target_activation(tmp_path: Path) -> None:
+    """三种安装场景各自独立目录执行。
+
+    不用 parametrize: legacy runner 只支持无参或仅 ``tmp_path`` 的用例入口,
+    而 CI 在 push main 时仍会执行该 runner。
+    """
+    for enabled, fails in ((True, True), (False, True), (True, False)):
+        case_dir = tmp_path / f"enabled-{int(enabled)}-fails-{int(fails)}"
+        case_dir.mkdir()
+        asyncio.run(_check_market_install_activation(case_dir, enabled, fails))
 
 
 def test_market_update_endpoint(tmp_path: Path) -> None:
