@@ -1421,6 +1421,11 @@ class WebPanel:
             try:
                 source = await self._plugin_market.add_source(source_id=body.id, name=body.name, url=body.url)
             except ValueError as exc:
+                # 失败也写领域审计, 与 install/update/uninstall 失败路径一致 (#174 审查 P3)。
+                await _audit_plugin_action(
+                    request, "plugin_source_add", body.id, success=False,
+                    details={"error": str(exc)},
+                )
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             audited = await _audit_plugin_action(
                 request, "plugin_source_add", source.id, success=True, details={"url": source.url},
@@ -1438,6 +1443,10 @@ class WebPanel:
             try:
                 await self._plugin_market.remove_source(source_id)
             except ValueError as exc:
+                await _audit_plugin_action(
+                    request, "plugin_source_remove", source_id, success=False,
+                    details={"error": str(exc)},
+                )
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             audited = await _audit_plugin_action(
                 request, "plugin_source_remove", source_id, success=True, details={},

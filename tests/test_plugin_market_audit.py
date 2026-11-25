@@ -1,5 +1,6 @@
 """Domain audit must use the authenticated actor and never change the business result."""
 
+import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -125,7 +126,7 @@ async def test_source_and_install_audit_use_authenticated_actor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_source_audit_failure_keeps_business_result(tmp_path, monkeypatch):
+async def _probe_source_audit_failure(tmp_path, monkeypatch):
     data = tmp_path / "data"
     data.mkdir()
     market = _FakeMarket()
@@ -159,7 +160,7 @@ async def test_source_audit_failure_keeps_business_result(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_uninstall_audit_failure_keeps_business_result(tmp_path, monkeypatch):
+async def _probe_uninstall_audit_failure(tmp_path, monkeypatch):
     data = tmp_path / "data"
     builtin = tmp_path / "builtin"
     builtin.mkdir()
@@ -188,3 +189,44 @@ async def test_uninstall_audit_failure_keeps_business_result(tmp_path, monkeypat
     finally:
         await system.shutdown_plugins()
         await panel.stop()
+
+
+_MISSING = object()
+
+
+class _MP:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的入口。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def setattr(self, target, name, value=None):  # noqa: A003 - 对齐 pytest 接口
+        self._undo.append((target, name, vars(target).get(name, _MISSING)))
+        setattr(target, name, value)
+
+    def undo(self):
+        while self._undo:
+            target, name, old = self._undo.pop()
+            if old is _MISSING:
+                try:
+                    delattr(target, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(target, name, old)
+
+
+def test_source_audit_failure_keeps_business_result(tmp_path):
+    mp = _MP()
+    try:
+        asyncio.run(_probe_source_audit_failure(tmp_path, mp))
+    finally:
+        mp.undo()
+
+
+def test_uninstall_audit_failure_keeps_business_result(tmp_path):
+    mp = _MP()
+    try:
+        asyncio.run(_probe_uninstall_audit_failure(tmp_path, mp))
+    finally:
+        mp.undo()
