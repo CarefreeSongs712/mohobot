@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -65,25 +66,42 @@ async def _command(plugin, args="fill"):
     return reply
 
 
-def test_cancelled_waiter_retains_database_reservation_through_reload(tmp_path, monkeypatch):
+@contextmanager
+def _patched(*patches):
+    """临时替换属性并在退出时还原。
+
+    不用 pytest fixture: 项目自研 legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+    """
+    undo = []
+    try:
+        for obj, name, value in patches:
+            undo.append((obj, name, getattr(obj, name)))
+            setattr(obj, name, value)
+        yield
+    finally:
+        for obj, name, old in reversed(undo):
+            setattr(obj, name, old)
+
+
+def test_cancelled_waiter_retains_database_reservation_through_reload(tmp_path):
+    change_db = Mock()
+    adapters = Mock(return_value=[object()])
+    started = asyncio.Event()
+    unblock = threading.Event()
+    exited = threading.Event()
+    loop_holder: list[asyncio.AbstractEventLoop] = []
+
+    def worker(_adapters, *, mode, limit):
+        if mode == "fill_missing":
+            loop_holder[0].call_soon_threadsafe(started.set)
+            assert unblock.wait(_TIMEOUT * 3)
+            exited.set()
+        return SimpleNamespace(summary_text=lambda: "fake report")
+
     async def run():
-        started = asyncio.Event()
-        unblock = threading.Event()
-        exited = threading.Event()
-        loop = asyncio.get_running_loop()
-        change_db = Mock()
-        adapters = Mock(return_value=[object()])
+        loop_holder.append(asyncio.get_running_loop())
 
-        def worker(_adapters, *, mode, limit):
-            if mode == "fill_missing":
-                loop.call_soon_threadsafe(started.set)
-                assert unblock.wait(_TIMEOUT * 3)
-                exited.set()
-            return SimpleNamespace(summary_text=lambda: "fake report")
-
-        monkeypatch.setattr(sync, "set_db_location", change_db)
-        monkeypatch.setattr(sync, "build_adapters", adapters)
-        monkeypatch.setattr(sync, "sync_all", worker)
         supervisor = _Supervisor()
         system = await _load(tmp_path, supervisor)
         try:
@@ -125,15 +143,18 @@ def test_cancelled_waiter_retains_database_reservation_through_reload(tmp_path, 
             await system.shutdown_plugins()
             await supervisor.shutdown()
 
-    asyncio.run(run())
+    with _patched(
+        (sync, "set_db_location", change_db),
+        (sync, "build_adapters", adapters),
+        (sync, "sync_all", worker),
+    ):
+        asyncio.run(run())
 
 
-def test_sync_reserves_at_command_and_prestart_cancellation_allows_retry(tmp_path, monkeypatch):
+def test_sync_reserves_at_command_and_prestart_cancellation_allows_retry(tmp_path):
+    change_db = Mock()
+
     async def run():
-        change_db = Mock()
-        monkeypatch.setattr(sync, "set_db_location", change_db)
-        monkeypatch.setattr(sync, "build_adapters", Mock(return_value=[object()]))
-        monkeypatch.setattr(sync, "sync_all", Mock(side_effect=RuntimeError("fake worker error")))
         supervisor = _Supervisor()
         system = await _load(tmp_path, supervisor)
         try:
@@ -155,13 +176,16 @@ def test_sync_reserves_at_command_and_prestart_cancellation_allows_retry(tmp_pat
             await system.shutdown_plugins()
             await supervisor.shutdown()
 
-    asyncio.run(run())
+    with _patched(
+        (sync, "set_db_location", change_db),
+        (sync, "build_adapters", Mock(return_value=[object()])),
+        (sync, "sync_all", Mock(side_effect=RuntimeError("fake worker error"))),
+    ):
+        asyncio.run(run())
 
 
-def test_sync_task_rejection_and_failed_due_check_release_reservation(tmp_path, monkeypatch):
+def test_sync_task_rejection_and_failed_due_check_release_reservation(tmp_path):
     async def run():
-        monkeypatch.setattr(sync, "set_db_location", Mock())
-        monkeypatch.setattr(sync, "build_adapters", Mock(return_value=[]))
         supervisor = _Supervisor()
         system = await _load(tmp_path, supervisor)
         try:
@@ -169,10 +193,11 @@ def test_sync_task_rejection_and_failed_due_check_release_reservation(tmp_path, 
             plugin._due.side_effect = ValueError("fake due check failure")
             with pytest.raises(ValueError, match="fake due check failure"):
                 await plugin.on_tick()
-            with monkeypatch.context() as rejected:
-                rejected.setattr(
-                    supervisor, "create_task", Mock(side_effect=TaskSupervisorClosed("rejected")),
-                )
+            with _patched(
+                (supervisor, "create_task", Mock(
+                    side_effect=TaskSupervisorClosed("rejected"),
+                )),
+            ):
                 with pytest.raises(TaskSupervisorClosed):
                     await _command(plugin)
             plugin._due.side_effect = None
@@ -185,4 +210,8 @@ def test_sync_task_rejection_and_failed_due_check_release_reservation(tmp_path, 
             await system.shutdown_plugins()
             await supervisor.shutdown()
 
-    asyncio.run(run())
+    with _patched(
+        (sync, "set_db_location", Mock()),
+        (sync, "build_adapters", Mock(return_value=[])),
+    ):
+        asyncio.run(run())
