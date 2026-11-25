@@ -100,9 +100,24 @@ class MohobotApplication:
         # music_knowledge 未启用/初始化失败 → 降级(正常聊天不受影响)。
         # 索引缓存/后台构建: 缓存命中时数秒内就绪; miss 时先启动服务,
         # 索引在后台构建(期间歌曲识别为空, 不影响聊天)。
-        self._song_matcher: SongInfoMatcher | None = None
+        # 面板内重启: 上一实例的构建线程可能仍在退出。先继续排空, 尚未退出时
+        # 不创建第二个 matcher, 避免新旧构建线程并发写同一 cache 目录(#164 审查 P3)。
+        self._song_matcher: SongInfoMatcher | None = getattr(self, "_song_matcher", None)
+        if self._song_matcher is not None:
+            try:
+                drained = self._song_matcher.close(timeout=5.0)
+            except Exception as exc:
+                drained = False
+                logger.debug(f"song matcher close failed before restart: {exc}")
+            if drained:
+                self._song_matcher = None
+            else:
+                logger.error(
+                    "上一轮歌曲索引构建线程未在 5.0s 内退出, "
+                    "跳过创建新实例以免并发构建"
+                )
         music_cfg = (self._config.music_knowledge or {})
-        if music_cfg.get("enabled", True):
+        if self._song_matcher is None and music_cfg.get("enabled", True):
             try:
                 from mohobot.music_knowledge import SongInfoMatcher, SongInfoService
                 song_db_cfg = music_cfg.get("song_database") or {}
@@ -716,9 +731,16 @@ class MohobotApplication:
         # 避免面板内重启/再次 startup 时出现两个构建线程。
         if getattr(self, "_song_matcher", None) is not None:
             try:
-                self._song_matcher.close(timeout=5.0)
+                drained = self._song_matcher.close(timeout=5.0)
             except Exception as exc:
+                drained = False
                 logger.debug(f"song matcher close failed: {exc}")
+            if not drained:
+                # 线程未退出: 不丢弃引用, 面板内重启路径会再次 close 直到退出。
+                logger.warning(
+                    "歌曲索引构建线程未在 5.0s 内退出, "
+                    "保留 matcher 引用供重启前继续排空"
+                )
 
         # Stop web panel (await its server task so the port is freed
         # before a restart rebinds it — otherwise "Address already in use")
