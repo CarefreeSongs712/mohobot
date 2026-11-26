@@ -528,11 +528,11 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 ### 6.1 形态与加载
 
 - **单文件插件**：`plugins/xxx.py` → 插件名 `xxx`。
-- **目录插件**：`plugins/xxx/main.py` → 插件名 `xxx`（目录里**必须有 `main.py`**，否则整个目录被跳过）。
-- 跳过规则：以 `_` 开头、`__pycache__`、没有 `main.py` 的目录。
+- **目录插件**：默认入口 `plugins/xxx/main.py`；有清单时可指定相对于包根的入口（如 `src/worker.py`），插件名取清单 `name`。可选的 `_conf_schema.json` 放包根。外置插件另见[插件 API 与清单](PLUGIN-API.md)。
+- 跳过规则：以 `_` 或 `.` 开头的目录、没有所选入口文件的目录。
   > 现状：`plugins/feed/` 是只剩 `__pycache__` 的空目录（已删插件的残留），加载器会静默跳过。
-- 导入方式：`importlib.util.spec_from_file_location(f"mohobot_plugin_{name}", ...)`，**不注册进 `sys.modules`**；类必须是该模块内定义的、字面名为 `Plugin` 的类。
-- 目录插件会把自己的目录插进 `sys.path`，所以 `main.py` 里可以 `import xxx_core`（wifepicker / relationship / qzone 都这样组织）。
+- 导入方式：入口以 `mohobot_plugin_{name}` 载入 `sys.modules`；类必须是该入口模块内定义的、字面名为 `Plugin` 的类。
+- 目录插件的导入根是包根，即使入口在子目录，也可用根相对导入或现有的 `import xxx_core` 形式（wifepicker / relationship / qzone 都这样组织）。
 - **热重载**：`reload_plugins()` 退役旧实例后重新扫描；`reload_plugin(name)` 只针对指定插件。冷启动和热重载都先注入，再运行 `on_startup`；成功的实例才开始接收事件和运行 tick。**没有文件监听 watchdog**，由面板操作触发。
 - **启停状态**：`data/plugins_state.json`，格式 `{plugin_name: {"enabled": bool}}`，缺省为启用。
 

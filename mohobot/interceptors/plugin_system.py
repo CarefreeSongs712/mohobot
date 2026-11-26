@@ -242,26 +242,29 @@ class PluginSystem(Interceptor):
         state: dict[str, Any],
         source: str = "builtin",
     ) -> dict[str, Any]:
+        # Discovery passes the package root for directory plugins, even when the entry is nested.
+        plugin_dir = Path(entry_dir) if entry_dir else entry_path.parent
         manifest: PluginManifest | None = None
-        manifest_path = find_manifest(entry_path.parent) if entry_dir else None
+        manifest_path = find_manifest(plugin_dir) if entry_dir else None
         if manifest_path is not None:
             manifest = parse_manifest(manifest_path)
             plugin_name = manifest.name
-            if manifest.entry != entry_path.name:
+            relative_entry = entry_path.relative_to(plugin_dir).as_posix()
+            if manifest.entry != relative_entry:
                 raise ManifestError(
-                    f"metadata entry={manifest.entry} 与入口 {entry_path.name} 不一致"
+                    f"metadata entry={manifest.entry} 与入口 {relative_entry} 不一致"
                 )
             check_compatibility(
                 manifest,
                 api_version=self._plugin_api_version,
                 mohobot_version=MOHOBOT_VERSION,
             )
+            if source == "installed" and manifest.name != plugin_dir.name:
+                raise ManifestError(
+                    f"metadata name={manifest.name} 与安装目录 {plugin_dir.name} 不一致"
+                )
         elif source == "installed":
             raise ManifestError("已安装插件缺少 metadata.yaml")
-        if source == "installed" and manifest.name != entry_path.parent.name:
-            raise ManifestError(
-                f"metadata name={manifest.name} 与安装目录 {entry_path.parent.name} 不一致"
-            )
 
         root = self._installed_dir if source == "installed" else self._plugins_dir
         meta: dict[str, Any] = {
@@ -289,7 +292,7 @@ class PluginSystem(Interceptor):
         # schema 解析不依赖模块导入: 禁用插件也必须在面板里可见并可编辑配置
         # (#170 审查 P1)。坏 schema 与基线一致地降级为无配置。
         try:
-            meta["config_schema"] = self._load_config_schema(entry_path.parent)
+            meta["config_schema"] = self._load_config_schema(plugin_dir)
         except Exception as exc:
             logger.warning(f"Plugin {plugin_name} config schema load failed: {exc}")
         if not meta["enabled"]:
@@ -344,7 +347,7 @@ class PluginSystem(Interceptor):
                     meta["info"].update(cls_info)
 
                 schema = meta.get("config_schema") or self._load_config_schema(
-                    entry_path.parent,
+                    plugin_dir,
                 )
                 if schema:
                     meta["config_schema"] = schema
