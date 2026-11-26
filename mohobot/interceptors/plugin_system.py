@@ -22,8 +22,9 @@ import json
 import re
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from loguru import logger
 
@@ -54,6 +55,15 @@ if TYPE_CHECKING:
 
 class PluginNamespaceConflict(ValueError):
     """A plugin operation would overwrite an occupied import namespace."""
+
+
+class PluginSystemRetired(RuntimeError):
+    """The plugin system is no longer accepting mutations."""
+
+
+class PluginConfigCommit(TypedDict):
+    config: dict
+    application: Literal["applied", "not_running", "apply_failed", "unchanged"]
 
 
 class _PluginTaskSupervisor:
@@ -276,6 +286,12 @@ class PluginSystem(Interceptor):
         from mohobot.services.llm_tools import registry
 
         registry.set_owner_state_path(plugin_name, self._state_file)
+        # schema 解析不依赖模块导入: 禁用插件也必须在面板里可见并可编辑配置
+        # (#170 审查 P1)。坏 schema 与基线一致地降级为无配置。
+        try:
+            meta["config_schema"] = self._load_config_schema(entry_path.parent)
+        except Exception as exc:
+            logger.warning(f"Plugin {plugin_name} config schema load failed: {exc}")
         if not meta["enabled"]:
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
@@ -327,11 +343,11 @@ class PluginSystem(Interceptor):
                 if isinstance(cls_info, dict):
                     meta["info"].update(cls_info)
 
-                schema = self._load_config_schema(entry_path.parent)
+                schema = meta.get("config_schema") or self._load_config_schema(
+                    entry_path.parent,
+                )
                 if schema:
                     meta["config_schema"] = schema
-                    meta["config"] = self._load_plugin_config(plugin_name, schema)
-                    self._inject_config(plugin_instance, meta["config"])
                 logger.info(f"Loaded plugin: {plugin_name}")
         except BaseException as e:
             registry.discard_plugin_stage(tool_stage)
@@ -556,6 +572,10 @@ class PluginSystem(Interceptor):
             )
         if self._task_supervisor is not None:
             await self._task_supervisor.cancel_owner_prefix("plugin:")
+        # Candidates whose startup failed keep their imported modules for retry;
+        # shutdown must still detach them or the next load sees phantom modules.
+        for meta in tuple(self._plugins):
+            self._unload_plugin(meta)
 
     @staticmethod
     def _owner_key(meta: dict[str, Any]) -> str:
@@ -774,6 +794,16 @@ class PluginSystem(Interceptor):
             meta["_llm_tool_stage"] = stage
         cancelled = None
         try:
+            schema = meta.get("config_schema")
+            if schema is not None:
+                effective = await self._read_effective_config(meta["name"], schema, seed=True)
+                config = meta.get("config")
+                if config is None:
+                    config = meta["config"] = effective
+                else:
+                    config.clear()
+                    config.update(effective)
+                self._inject_config(meta["instance"], config)
             self._inject_runtime(meta)
             if not await self._call_hook(meta, "on_startup", stage):
                 raise RuntimeError(meta.get("error") or "on_startup failed")
@@ -845,7 +875,7 @@ class PluginSystem(Interceptor):
 
     def _require_admission(self) -> None:
         if self._admission_closed:
-            raise RuntimeError("plugin system is retired")
+            raise PluginSystemRetired("plugin system is retired")
 
     async def shutdown_plugins(self) -> None:
         """停止 tick 并运行已加载插件的可选 on_shutdown hook。"""
@@ -1053,33 +1083,26 @@ class PluginSystem(Interceptor):
             logger.error(f"Failed to load config schema {schema_path}: {e}")
             return None
 
-    def _load_plugin_config(self, plugin_name: str, schema: dict) -> dict:
-        """合并 schema 默认值 + 已存配置(存于 data/plugins_config/{name}.json)。
+    @classmethod
+    def _effective_config(cls, schema: dict, raw: Any) -> dict:
+        return cls._deep_merge(
+            cls._schema_defaults(schema),
+            cls._coerce_config(schema, raw if isinstance(raw, dict) else {}),
+        )
 
-        存档按 schema 强转类型, 防止手工编辑/旧版本写入脏值导致插件崩溃。
-        """
-        defaults = self._schema_defaults(schema)
-        saved: dict = {}
-        config_file = self._config_dir / f"{plugin_name}.json"
-        if config_file.exists():
-            try:
-                saved = json.loads(config_file.read_text(encoding="utf-8"))
-                if not isinstance(saved, dict):
-                    saved = {}
-            except Exception as e:
-                logger.error(f"Failed to load plugin config {config_file}: {e}")
-        coerced = self._coerce_config(schema, saved)
-        merged = self._deep_merge(defaults, coerced)
-        # 首次无存档时写默认值, 便于面板编辑
-        if not saved:
-            try:
-                config_file.parent.mkdir(parents=True, exist_ok=True)
-                config_file.write_text(
-                    json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-            except Exception as e:
-                logger.error(f"Failed to save default plugin config: {e}")
-        return merged
+    async def _read_effective_config(self, name: str, schema: dict, *, seed: bool = False) -> dict:
+        from mohobot.file_store import json_read
+
+        path = self._config_dir / f"{name}.json"
+        try:
+            if seed:
+                raw = await json_read(path, create_if_missing=self._effective_config(schema, None))
+            else:
+                raw = await json_read(path)
+        except (ValueError, OSError) as exc:
+            logger.warning(f"Failed to read plugin config {name}: {type(exc).__name__}")
+            raw = None
+        return self._effective_config(schema, raw)
 
     @classmethod
     def _schema_defaults(cls, schema: dict) -> dict:
@@ -1092,7 +1115,7 @@ class PluginSystem(Interceptor):
             if stype == "object":
                 result[key] = cls._schema_defaults(spec.get("items") or {})
             elif "default" in spec:
-                result[key] = spec["default"]
+                result[key] = deepcopy(spec["default"])
             elif stype == "list":
                 result[key] = []
             elif stype == "bool":
@@ -1116,8 +1139,14 @@ class PluginSystem(Interceptor):
         return merged
 
     @classmethod
-    def _coerce_config(cls, schema: dict, data: dict) -> dict:
-        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。"""
+    def _coerce_config(
+        cls, schema: dict, data: dict, *, strict: bool = False,
+    ) -> dict:
+        """按 schema 类型强制转换配置值(面板可能提交字符串/错误类型)。
+
+        strict=True 用于面板提交: 无法解析的数字抛出带字段名的 ValueError,
+        由面板返回 400; 读取磁盘存档时保持宽松回退默认值, 脏存档不阻塞启动。
+        """
         result: dict = {}
         for key, spec in (schema or {}).items():
             if not isinstance(spec, dict) or key not in data:
@@ -1125,9 +1154,12 @@ class PluginSystem(Interceptor):
             value = data[key]
             stype = spec.get("type", "string")
             if stype == "object":
-                result[key] = cls._coerce_config(
-                    spec.get("items") or {}, value if isinstance(value, dict) else {}
+                branch = cls._coerce_config(
+                    spec.get("items") or {}, value if isinstance(value, dict) else {},
+                    strict=strict,
                 )
+                if branch:
+                    result[key] = branch
             elif stype == "bool":
                 if isinstance(value, str):
                     result[key] = value.strip().lower() in ("true", "1", "yes", "on")
@@ -1137,11 +1169,16 @@ class PluginSystem(Interceptor):
                 try:
                     result[key] = int(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        # 面板提交不能静默回退默认值 (#170 审查 P3)。
+                        raise ValueError(f"配置字段 {key} 需要整数") from None
                     result[key] = spec.get("default", 0)
             elif stype == "float":
                 try:
                     result[key] = float(value)
                 except (TypeError, ValueError):
+                    if strict:
+                        raise ValueError(f"配置字段 {key} 需要数字") from None
                     result[key] = spec.get("default", 0.0)
             elif stype == "list":
                 if isinstance(value, list):
@@ -1166,67 +1203,103 @@ class PluginSystem(Interceptor):
                 pass
 
     def get_plugin_config(self, name: str) -> dict | None:
-        """Web 面板读取插件配置(优先读存档, 插件运行时 _persist 的修改立即可见)。"""
-        meta = next((m for m in self._plugins if m["name"] == name), None)
-        if meta is None:
+        """Synchronous compatibility view; the panel uses the locked async read."""
+        schema = self.get_config_schema(name)
+        if schema is None:
             return None
-        # 插件运行时可写回配置文件(如关系插件黑名单); 面板应显示最新存档
-        config_file = self._config_dir / f"{name}.json"
-        if config_file.exists():
-            try:
-                saved = json.loads(config_file.read_text(encoding="utf-8"))
-                if isinstance(saved, dict):
-                    return saved
-            except Exception as e:
-                logger.error(f"Failed to read plugin config {config_file}: {e}")
-        return meta.get("config")
+        path = self._config_dir / f"{name}.json"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raw = None
+        except (ValueError, OSError) as exc:
+            logger.warning(f"Failed to read plugin config {name}: {type(exc).__name__}")
+            raw = None
+        return self._effective_config(schema, raw)
 
     def get_config_schema(self, name: str) -> dict | None:
         for meta in tuple(self._plugins):
             if meta["name"] == name:
-                return meta.get("config_schema")
+                return deepcopy(meta.get("config_schema"))
         return None
 
-    async def save_plugin_config(self, name: str, config: dict) -> bool:
-        """保存插件配置并热同步到插件实例(立即生效, 无需重启)。
+    async def read_plugin_config(self, name: str) -> dict | None:
+        """Read one schema and its effective archive view under the lifecycle lock."""
+        async with self._lock():
+            schema = self.get_config_schema(name)
+            if schema is None:
+                return None
+            return {"schema": schema, "config": await self._read_effective_config(name, schema)}
 
-        用 json_update 原子读改写: 以磁盘当前存档为基础合并面板提交值,
-        与插件运行时 _persist(黑名单/审批员)并发写同一存档时不互相覆盖。
-        """
+    async def save_plugin_config(self, name: str, config: dict) -> bool:
+        """Compatibility wrapper: False means no plugin config schema."""
+        return await self.commit_plugin_config(name, config) is not None
+
+    async def commit_plugin_config(self, name: str, config: dict) -> PluginConfigCommit | None:
+        async with self._lock():
+            self._require_admission()
+            meta = next((m for m in self._plugins if m["name"] == name), None)
+            if meta is None or (schema := meta.get("config_schema")) is None:
+                return None
+            patch = self._coerce_config(schema, config or {}, strict=True)
+            if not patch:
+                return {"config": await self._read_effective_config(name, schema), "application": "unchanged"}
+            commit = asyncio.create_task(self._commit_config(meta, schema, patch), name=f"plugin-config:{name}")
+            cancelled = None
+            while not commit.done():
+                try:
+                    # The lifecycle lock stays held until the write and publication finish.
+                    await asyncio.wait({commit})
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            try:
+                result = commit.result()
+            except Exception as exc:
+                if cancelled is not None:
+                    raise cancelled from exc
+                raise
+            if cancelled is not None:
+                raise cancelled
+            return result
+
+    async def _commit_config(self, meta: dict, schema: dict, patch: dict) -> PluginConfigCommit:
         from mohobot.file_store import json_update
 
-        meta = next((m for m in self._plugins if m["name"] == name), None)
-        if meta is None or meta.get("config_schema") is None:
-            return False
-        # 按 schema 类型强转(面板可能提交字符串/错误类型)
-        coerced = self._coerce_config(meta["config_schema"], config or {})
-        merged = self._deep_merge(
-            self._schema_defaults(meta["config_schema"]), coerced
-        )
-        meta["config"] = merged
+        self._require_admission()
+        name = meta["name"]
+
+        def merge(raw):
+            return self._deep_merge(raw if isinstance(raw, dict) else {}, patch)
+
         try:
-            self._config_dir.mkdir(parents=True, exist_ok=True)
-            path = self._config_dir / f"{name}.json"
-
-            def _merge(current):
-                base = current if isinstance(current, dict) else {}
-                return self._deep_merge(base, merged)
-
-            await json_update(path, _merge, default=merged)
-        except Exception as e:
-            logger.error(f"Failed to save plugin config {name}: {e}")
-            return False
+            raw = await json_update(self._config_dir / f"{name}.json", merge)
+        except Exception as exc:
+            logger.error(f"Failed to save plugin config {name}: {type(exc).__name__}")
+            raise
+        # Do not yield between leaving the file lock and publishing the committed view.
+        effective = self._effective_config(schema, raw)
+        result: PluginConfigCommit = {"config": deepcopy(effective), "application": "not_running"}
         inst = meta.get("instance")
-        if inst is not None:
-            self._inject_config(inst, merged)
+        if inst is None or not self._can_dispatch(meta):
+            meta["config"] = effective
+            return result
+        active = meta.get("config")
+        if active is None:
+            active = meta["config"] = effective
+        else:
+            active.clear()
+            active.update(effective)
+        self._inject_config(inst, active)
+        try:
             updater = getattr(inst, "on_config_update", None)
             if callable(updater):
-                try:
-                    updater(merged)
-                except Exception as e:
-                    logger.error(f"Plugin {name} on_config_update failed: {e}")
-        logger.info(f"Plugin {name} config updated (热生效)")
-        return True
+                updater(active)
+        except (Exception, asyncio.CancelledError) as exc:
+            logger.error(f"Plugin {name} on_config_update failed: {type(exc).__name__}")
+            result["application"] = "apply_failed"
+        else:
+            result["application"] = "applied"
+        return result
 
     async def reload_plugins(self) -> int:
         """热重载: 重新扫描 plugins/ 目录并加载全部插件。"""
@@ -1349,9 +1422,11 @@ class PluginSystem(Interceptor):
     async def _rollback_reload(self, candidate: dict[str, Any], index: int) -> None:
         from mohobot.services.llm_tools import registry
 
-        if candidate.get("loaded"):
+        if candidate.get("_retiring") or candidate.get("loaded"):
+            # Cancellation/failed startup may still own the startup hook or tasks.
             await self._retire_plugin(candidate)
-            self._unload_plugin(candidate)
+        # A failed candidate may still own imported modules even without _ready.
+        self._unload_plugin(candidate)
 
         meta, instance, imports, old_tools = candidate.pop("_rollback")
         name = meta["name"]
@@ -1439,6 +1514,8 @@ class PluginSystem(Interceptor):
         result = []
         for meta in tuple(self._plugins):
             item = {k: v for k, v in meta.items() if k != "instance" and not k.startswith("_")}
+            item["config"] = deepcopy(item.get("config"))
+            item["config_schema"] = deepcopy(item.get("config_schema"))
             item["loaded"] = self._can_dispatch(meta)
             result.append(item)
         return result

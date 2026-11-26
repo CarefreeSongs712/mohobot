@@ -30,7 +30,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from mohobot.interceptors.plugin_system import PluginNamespaceConflict
+from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystemRetired
 
 
 def _valid_usage_range(range_key: str) -> bool:
@@ -1286,30 +1286,49 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_market or not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件市场未启用")
+            name = None
             try:
                 name, destination = await self._plugin_market.install(
                     body.plugin_id, source_id=body.source_id
                 )
                 count = await self._plugin_system.reload_plugins()
+                target = next(
+                    (item for item in self._plugin_system.list_plugins()
+                     if item["name"] == name and item["source"] == "installed"),
+                    None,
+                )
+                if target is None:
+                    raise RuntimeError("插件未出现在已安装列表中")
+                if target["error"] is not None:
+                    raise RuntimeError(target["error"] or "插件启动失败")
+                if target["loaded"]:
+                    activation = "active"
+                elif not target["enabled"]:
+                    activation = "disabled"
+                else:
+                    raise RuntimeError("插件未就绪")
             except Exception as exc:
+                detail = str(exc) if name is None else f"插件 {name} 文件已安装，但激活失败：{exc}"
                 await self._audit.write(
                     actor="admin",
                     action="plugin_market_install",
-                    target=body.plugin_id,
+                    target=name or body.plugin_id,
                     success=False,
-                    details={"error": str(exc)},
+                    details={"error": detail, "files_installed": name is not None},
                     remote=request.client.host if request.client else "",
                 )
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise HTTPException(status_code=400, detail=detail) from exc
             await self._audit.write(
                 actor="admin",
                 action="plugin_market_install",
                 target=name,
                 success=True,
-                details={"plugin_id": body.plugin_id, "source_id": body.source_id},
+                details={"plugin_id": body.plugin_id, "source_id": body.source_id, "activation": activation},
                 remote=request.client.host if request.client else "",
             )
-            return {"status": "ok", "name": name, "path": str(destination), "count": count}
+            return {
+                "status": "ok", "name": name, "path": str(destination), "count": count, "activation": activation,
+            }
 
         @app.post("/api/plugins/market/update")
         async def update_market_plugin(request: Request, body: PluginMarketInstallRequest):
@@ -1483,11 +1502,10 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            config = self._plugin_system.get_plugin_config(name)
-            schema = self._plugin_system.get_config_schema(name)
-            if config is None or schema is None:
+            view = await self._plugin_system.read_plugin_config(name)
+            if view is None:
                 raise HTTPException(status_code=404, detail=f"插件 {name} 无配置")
-            return {"schema": schema, "config": config}
+            return view
 
         @app.post("/api/plugins/{name}/config")
         async def save_plugin_config(name: str, request: Request, body: ConfigUpdateRequest):
@@ -1495,11 +1513,17 @@ class WebPanel:
             await _require_auth(request)
             if not self._plugin_system:
                 raise HTTPException(status_code=404, detail="插件系统未启用")
-            ok = await self._plugin_system.save_plugin_config(name, body.data or {})
-            if not ok:
+            try:
+                result = await self._plugin_system.commit_plugin_config(name, body.data)
+            except PluginSystemRetired:
+                raise HTTPException(status_code=409, detail="插件系统已停止接收配置保存") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            except Exception:
+                raise HTTPException(status_code=500, detail="插件配置保存失败") from None
+            if result is None:
                 raise HTTPException(status_code=404, detail=f"插件 {name} 无配置或不存在")
-            logger.info(f"Web panel: plugin {name} config updated (hot)")
-            return {"status": "ok", "config": self._plugin_system.get_plugin_config(name)}
+            return {"status": "ok", **result}
 
         # ── 5. Conversations (对话数据) ──────────────────────
 

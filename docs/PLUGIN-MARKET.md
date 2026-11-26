@@ -48,7 +48,7 @@
 3. 校验 `metadata.yaml`、名称、API 版本与 SHA256；
 4. 目标目录已存在则拒绝安装；
 5. 解压到 `data/plugins/{name}`，写入 `data/plugin_sources.json`；
-6. 重载插件系统。
+6. 重载插件系统，按本次安装的插件报告激活结果。HTTP 200 的 `activation` 为 `active`（已启动）或 `disabled`（沿用原有停用设置）。若文件和安装记录已落盘而激活失败，接口返回 HTTP 400 并注明文件已安装及失败原因；请到已安装列表查看错误，修复后重载，无需重复安装。
 
 市场安装记录包含 `install_method=market`、`registry_id`、`plugin_id`、`repo`、`download_url`、`version`、`installed_at`。非市场安装不允许按市场源更新。
 
