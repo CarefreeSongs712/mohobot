@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from mohobot.interceptors.plugin_system import PluginNamespaceConflict
 from mohobot.web_panel.app import WebPanel
 
 
@@ -87,6 +88,35 @@ def test_toggle_unknown_plugin_returns_404(tmp_path: Path) -> None:
         json={"name": "missing", "enabled": False},
     )
     assert response.status_code == 404
+
+
+def test_plugin_namespace_conflict_returns_409(tmp_path: Path) -> None:
+    """两种入口的命名空间冲突都映射为 409。
+
+    不用 parametrize/monkeypatch: legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+    """
+    cases = [
+        ("reload", "reload_plugins", None),
+        ("toggle", "set_enabled", {"name": "demo", "enabled": True}),
+    ]
+    for endpoint, method, payload in cases:
+        original = getattr(_FakePluginSystem, method)
+
+        async def conflict(*args, **kwargs):
+            raise PluginNamespaceConflict("fixture namespace conflict")
+
+        setattr(_FakePluginSystem, method, conflict)
+        try:
+            case_dir = tmp_path / endpoint
+            case_dir.mkdir()
+            client, headers = _client(case_dir)
+            kwargs = {"json": payload} if payload is not None else {}
+            response = client.post(f"/api/plugins/{endpoint}", headers=headers, **kwargs)
+            assert response.status_code == 409
+            assert response.json()["detail"] == "fixture namespace conflict"
+        finally:
+            setattr(_FakePluginSystem, method, original)
 
 
 def test_market_endpoint_requires_auth(tmp_path: Path) -> None:

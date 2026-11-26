@@ -79,6 +79,7 @@ def test_reload_plugin_only_replaces_target(tmp_path: Path) -> None:
         assert await ps.reload_plugin("alpha") is True
         new_beta = next(m["instance"] for m in ps._plugins if m["name"] == "beta")
         assert new_beta is old_beta
+        await ps.shutdown_plugins()
 
     asyncio.run(run())
 
@@ -170,11 +171,15 @@ def test_installed_plugin_loads_with_manifest(tmp_path: Path) -> None:
             "api_version: 1\n",
         )
         await ps.load_plugins()
-        meta = ps._plugins[0]
-        assert meta["source"] == "installed"
-        assert meta["loaded"] is True
-        assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
-        assert meta["file"] == "extdemo/main.py"
+        try:
+            meta = ps._plugins[0]
+            assert meta["source"] == "installed"
+            assert meta["loaded"] is True
+            assert meta["plugin_id"] == "CarefreeSongs712/extdemo"
+            assert meta["file"] == "extdemo/main.py"
+        finally:
+            # 清理已加载插件, 避免模块残留在 sys.modules 影响后续用例顺序。
+            await ps.shutdown_plugins()
 
     asyncio.run(run())
 
@@ -208,6 +213,7 @@ def test_installed_plugin_overrides_bundled_name(tmp_path: Path) -> None:
         loaded = [m for m in ps._plugins if m.get("loaded")]
         assert [m["source"] for m in loaded] == ["installed"]
         assert len(ps._plugins) == 1
+        await ps.shutdown_plugins()
 
     asyncio.run(run())
 
@@ -311,6 +317,7 @@ def test_plugin_owned_tasks_with_custom_owner_are_cancelled(tmp_path: Path) -> N
         await ps.reload_plugins()
         await asyncio.sleep(0)
         assert task.cancelled()
+        await ps.shutdown_plugins()
 
     asyncio.run(run())
 

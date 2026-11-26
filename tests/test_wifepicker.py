@@ -137,6 +137,7 @@ async def test_load_and_store() -> None:
     # 存档生成
     archive = Path(tmp) / "plugins_config" / "wifepicker.json"
     assert archive.exists()
+    await ps.shutdown_plugins()
     print("[1] 插件加载 + schema + 数据初始化 OK")
 
 
