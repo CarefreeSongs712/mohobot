@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,40 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+
+
+_MISSING = object()
+
+
+class _MonkeyPatch:
+    """最小 monkeypatch 替身: legacy runner 只支持无参或仅 tmp_path 的用例入口。"""
+
+    def __init__(self) -> None:
+        self._undo: list[tuple[object, str, object]] = []
+
+    def setattr(self, obj, name: str, value) -> None:  # noqa: A003 - 对齐 pytest 接口
+        self._undo.append((obj, name, vars(obj).get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    def setitem(self, mapping, key, value) -> None:
+        self._undo.append((mapping, key, mapping.get(key, _MISSING)))
+        mapping[key] = value
+
+    def undo(self) -> None:
+        while self._undo:
+            obj, name, old = self._undo.pop()
+            if isinstance(obj, dict):
+                if old is _MISSING:
+                    obj.pop(name, None)
+                else:
+                    obj[name] = old
+            elif old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
 def test_directory_plugin_relative_import_reloads(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
@@ -252,13 +287,17 @@ def test_full_reload_cancels_plugin_owned_tasks(tmp_path: Path) -> None:
             "            asyncio.sleep(60), name='worker-task', owner='plugins')\n"
             "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
         )
-        await ps.load_plugins()
-        instance = ps._plugins[0]["instance"]
-        task = instance.task
-        assert not task.cancelled()
-        await ps.reload_plugins()
-        await asyncio.sleep(0)
-        assert task.cancelled()
+        try:
+            assert await ps.load_plugins() == 1
+            instance = ps._plugins[0]["instance"]
+            task = instance.task
+            assert not task.cancelled()
+            await ps.reload_plugins()
+            await asyncio.sleep(0)
+            assert task.cancelled()
+        finally:
+            await ps.shutdown_plugins()
+            await supervisor.shutdown()
 
     asyncio.run(run())
 
@@ -579,9 +618,6 @@ def test_reload_waits_for_inflight_handler(tmp_path: Path) -> None:
             "        await self.release.wait()\n"
             "        return (True, 'done')\n",
         )
-        ps.apply_injections = lambda *a, **k: None
-        ps.startup_plugins = _noop
-        ps.start_tick_tasks = lambda *a, **k: None
         await ps.load_plugins()
         instance = ps._plugins[0]["instance"]
         instance.started = started
@@ -598,10 +634,6 @@ def test_reload_waits_for_inflight_handler(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-async def _noop(*args, **kwargs):
-    return None
-
-
 def test_lifecycle_hook_timeout_is_bounded(tmp_path: Path) -> None:
     async def run() -> None:
         ps = _plugin_system(tmp_path)
@@ -613,7 +645,437 @@ def test_lifecycle_hook_timeout_is_bounded(tmp_path: Path) -> None:
             "    async def on_startup(self): await asyncio.sleep(60)\n"
             "    async def on_message(self, bot_id, event, raw): return (False, None)\n",
         )
-        await ps.load_plugins()
-        assert ps._plugins[0]["loaded"] is True
+        assert await ps.load_plugins() == 0
+        assert ps._plugins[0]["loaded"] is False
+        assert "on_startup" in ps._plugins[0]["error"]
+
+    asyncio.run(run())
+
+
+def test_cold_startup_injects_runtime_before_startup_hook(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        ps.set_admin_ids([7])
+        ps.set_runtime_refs(ws_server=object(), message_handler=object())
+        _write(
+            tmp_path / "plugins" / "cold_refs.py",
+            "class Plugin:\n"
+            "    ws = None\n"
+            "    handler = None\n"
+            "    admins = []\n"
+            "    @classmethod\n"
+            "    def inject_ws_server(cls, value): cls.ws = value\n"
+            "    @classmethod\n"
+            "    def inject_message_handler(cls, value): cls.handler = value\n"
+            "    @classmethod\n"
+            "    def inject_admin_ids(cls, value): cls.admins = list(value)\n"
+            "    async def on_startup(self):\n"
+            "        if self.ws is None or self.handler is None or self.admins != ['7']:\n"
+            "            raise RuntimeError('host refs missing at startup')\n"
+            "        self.started = True\n"
+            "    async def on_message(self, bot_id, event, raw): return (True, 'ok')\n",
+        )
+        assert await ps.load_plugins() == 1
+        meta = ps._plugins[0]
+        assert meta["error"] is None and ps._can_dispatch(meta)
+        assert getattr(meta["instance"], "started", False) is True
+        assert await ps.intercept("bot_001", object(), {}) == (True, "ok")
+        await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def _probe_interrupted_shutdown(tmp_path: Path, finish_shutdown: bool) -> None:
+    from mohobot.services.task_supervisor import TaskSupervisor
+
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        ps.set_task_supervisor(TaskSupervisor())
+        _write(
+            tmp_path / "plugins" / "retry_shutdown.py",
+            "class Plugin:\n"
+            "    @classmethod\n"
+            "    def inject_task_supervisor(cls, supervisor): cls.supervisor = supervisor\n"
+            "    async def on_message(self, bot_id, event, raw): return (True, 'old')\n",
+        )
+        assert await ps.load_plugins() == 1
+        meta = ps._plugins[0]
+        instance = meta["instance"]
+        entered = asyncio.Event()
+        child_started = asyncio.Event()
+        child_closing = asyncio.Event()
+        release_child = asyncio.Event()
+        release_hook = asyncio.Event()
+        hook_cancelled = asyncio.Event()
+        calls = 0
+
+        async def child():
+            child_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                child_closing.set()
+                await release_child.wait()
+
+        async def shutdown():
+            nonlocal calls, child_task
+            calls += 1
+            if calls > 1:
+                assert child_task.done()
+                return
+            child_task = instance.supervisor.create_task(child(), name="hook-child", owner="child")
+            await child_started.wait()
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                hook_cancelled.set()
+                await release_hook.wait()
+                if not finish_shutdown:
+                    raise
+
+        child_task = None
+        instance.on_shutdown = shutdown
+        remove = asyncio.create_task(ps.unload_plugin("retry_shutdown"))
+        retry = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            remove.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await remove
+            await asyncio.wait_for(hook_cancelled.wait(), timeout=5)
+            hook = meta["_hook_task"]
+            assert not hook.done()
+            assert meta["instance"] is instance and not ps._can_dispatch(meta)
+            assert await ps.intercept("bot_001", object(), {}) == (False, None)
+
+            release_hook.set()
+            assert (await asyncio.wait({hook}, timeout=5))[0] == {hook}
+            assert hook.cancelled() is not finish_shutdown
+            retry = asyncio.create_task(ps.unload_plugin("retry_shutdown"))
+            await asyncio.wait_for(child_closing.wait(), timeout=5)
+            assert not retry.done()
+            assert meta["instance"] is instance and calls == 1
+            release_child.set()
+            assert await asyncio.wait_for(retry, timeout=5)
+            assert calls == (1 if finish_shutdown else 2)
+            assert meta not in ps._plugins
+        finally:
+            release_hook.set()
+            release_child.set()
+            remove.cancel()
+            await asyncio.gather(remove, *([retry] if retry else []), return_exceptions=True)
+            await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def _probe_toggle_publication(tmp_path: Path, monkeypatch, enabled: bool) -> None:
+    from mohobot import file_store
+
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(tmp_path / "plugins" / "toggle_retry.py", "class Plugin: pass\n")
+        initial = {"toggle_retry": {"enabled": not enabled, "other": "preserved"}}
+        _write(ps._state_file, json.dumps(initial))
+        assert await ps.load_plugins() == int(not enabled)
+        writing = asyncio.Event()
+        release = asyncio.Event()
+        original_update = file_store.json_update
+
+        async def gated_update(*args, **kwargs):
+            writing.set()
+            await release.wait()
+            return await original_update(*args, **kwargs)
+
+        monkeypatch.setattr(file_store, "json_update", gated_update)
+        toggle = asyncio.create_task(ps.set_enabled("toggle_retry", enabled))
+        try:
+            await asyncio.wait_for(writing.wait(), timeout=5)
+            toggle.cancel()
+            await asyncio.sleep(0)
+            assert not toggle.done() and ps._lock().locked()
+            assert ps.list_plugins()[0]["enabled"] is not enabled
+            assert not ps.list_plugins()[0]["loaded"]
+            assert ps._load_state() == initial
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(toggle, timeout=5)
+            assert ps.list_plugins()[0]["enabled"] is enabled
+            assert ps.list_plugins()[0]["loaded"] is enabled
+            assert ps._load_state() == {"toggle_retry": {"enabled": enabled, "other": "preserved"}}
+        finally:
+            release.set()
+            await asyncio.gather(toggle, return_exceptions=True)
+            await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def _probe_enable_write_failure(tmp_path: Path, monkeypatch) -> None:
+    from mohobot import file_store
+
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        name = "enable_write_retry"
+        _write(tmp_path / "plugins" / f"{name}.py", "class Plugin: pass\n")
+        initial = {name: {"enabled": False, "other": "preserved"}}
+        _write(ps._state_file, json.dumps(initial))
+        started = []
+        stopped = []
+        load_one = ps._load_one
+        update = file_store.json_update
+
+        def load_candidate(*args, **kwargs):
+            meta = load_one(*args, **kwargs)
+            if meta.get("loaded"):
+                instance = meta["instance"]
+                instance.on_startup = lambda: started.append(instance)
+                instance.on_shutdown = lambda: stopped.append(instance)
+            return meta
+
+        async def fail_update(*args, **kwargs):
+            assert len(started) == 1
+            assert not ps.list_plugins()[0]["loaded"]
+            raise OSError("fixture: state write failed")
+
+        monkeypatch.setattr(ps, "_load_one", load_candidate)
+        monkeypatch.setattr(file_store, "json_update", fail_update)
+        assert await ps.load_plugins() == 0
+        try:
+            assert not await ps.set_enabled(name, True)
+            assert started == stopped and len(stopped) == 1
+            assert type(stopped[0]).__module__ not in sys.modules
+            row = ps.list_plugins()[0]
+            assert not row["enabled"] and not row["loaded"]
+            assert "state write failed" in row["error"]
+            assert ps._load_state() == initial
+
+            monkeypatch.setattr(file_store, "json_update", update)
+            assert await ps.set_enabled(name, True)
+            assert ps.list_plugins()[0]["loaded"]
+            assert started[1] is not stopped[0]
+            assert ps._load_state() == {name: {**initial[name], "enabled": True}}
+        finally:
+            await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def _probe_observed_fallthrough(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "observed_retire.py",
+            "class Plugin:\n"
+            "    no_prefix_triggers = ['probe']\n"
+            "    async def on_message(self, *_args): return True, 'target'\n",
+        )
+        _write(
+            tmp_path / "plugins" / "observed_retire_neighbor.py",
+            "class Plugin:\n"
+            "    no_prefix_triggers = ['probe']\n"
+            "    async def on_message(self, *_args): return True, 'neighbor'\n",
+        )
+        assert await ps.load_plugins() == 2
+        target = ps._plugins[0]["instance"]
+        entered = asyncio.Event()
+        pausing = asyncio.Event()
+        release = asyncio.Event()
+        pause_dispatch = ps._pause_dispatches
+        old_calls = []
+
+        async def observe(*_args):
+            entered.set()
+            await release.wait()
+            return False, None
+
+        async def message(*_args):
+            old_calls.append("old")
+            return True, "old"
+
+        async def pause(targets):
+            pausing.set()
+            await pause_dispatch(targets)
+
+        target.on_message_observed = observe
+        target.on_message = message
+        monkeypatch.setattr(ps, "_pause_dispatches", pause)
+        event = SimpleNamespace(message=[{"type": "text", "data": {"text": "probe"}}])
+        dispatch = asyncio.create_task(ps.dispatch_observed("bot", event, {}))
+        reload = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            reload = asyncio.create_task(ps.reload_plugin("observed_retire"))
+            await asyncio.wait_for(pausing.wait(), timeout=5)
+            assert not reload.done() and not ps.list_plugins()[0]["loaded"]
+            release.set()
+            assert await dispatch == (True, "neighbor")
+            assert await reload and not old_calls
+            assert await ps.dispatch_observed("bot", event, {}) == (True, "target")
+        finally:
+            release.set()
+            await asyncio.gather(dispatch, *([reload] if reload is not None else []), return_exceptions=True)
+            await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_tick_stop_exits_loop_after_callback_suppresses_cancel(tmp_path: Path) -> None:
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        _write(
+            tmp_path / "plugins" / "tick_stop.py",
+            "class Plugin:\n"
+            "    async def on_tick(self): await self.tick()\n",
+        )
+        assert await ps.load_plugins() == 1
+        instance = ps._plugins[0]["instance"]
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def tick():
+            nonlocal calls
+            calls += 1
+            # Detect entering another iteration without waiting for another tick.
+            instance.interval_sec = 3600
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+
+        instance.tick = tick
+        instance.interval_sec = 1
+        ps.start_tick_tasks()
+        task = ps._tick_tasks_by_name["tick_stop"]
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            ps.stop_tick_tasks()
+            await asyncio.wait_for(cancelled.wait(), timeout=5)
+            ps._drain_timeout = 0
+            with pytest.raises(TimeoutError):
+                await ps.stop_tick_tasks_async()
+            assert ps._tick_tasks_by_name["tick_stop"] is task and not task.done()
+            assert task.cancelling() == 1
+            release.set()
+            assert (await asyncio.wait({task}, timeout=1))[0] == {task}
+            assert calls == 1 and not task.cancelled()
+            assert "tick_stop" not in ps._tick_tasks_by_name
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+def test_interrupted_shutdown_keeps_hook_and_children_owned(tmp_path: Path) -> None:
+    for finish_shutdown in (False, True):
+        case_dir = tmp_path / ("finished" if finish_shutdown else "cancelled")
+        case_dir.mkdir()
+        _probe_interrupted_shutdown(case_dir, finish_shutdown)
+
+
+def test_plugin_toggle_finishes_publication_when_writer_waiter_is_cancelled(tmp_path: Path) -> None:
+    for enabled in (False, True):
+        case_dir = tmp_path / f"toggle-{int(enabled)}"
+        case_dir.mkdir()
+        patcher = _MonkeyPatch()
+        try:
+            _probe_toggle_publication(case_dir, patcher, enabled)
+        finally:
+            patcher.undo()
+
+
+def test_enable_write_failure_retires_unpublished_candidate(tmp_path: Path) -> None:
+    patcher = _MonkeyPatch()
+    try:
+        _probe_enable_write_failure(tmp_path, patcher)
+    finally:
+        patcher.undo()
+
+
+def test_observed_fallthrough_skips_instance_entering_retirement(tmp_path: Path) -> None:
+    patcher = _MonkeyPatch()
+    try:
+        _probe_observed_fallthrough(tmp_path, patcher)
+    finally:
+        patcher.undo()
+
+
+def test_failed_startup_candidate_can_be_reloaded_after_fix(tmp_path: Path) -> None:
+    """冷启动 on_startup 失败后修复文件, 面板重载/全部重载/启用都能恢复。"""
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        plugin_dir = tmp_path / "plugins" / "retryme"
+        _write(
+            plugin_dir / "main.py",
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        raise RuntimeError('first startup fails')\n",
+        )
+        assert await ps.load_plugins() == 0
+        meta = ps._plugins[0]
+        assert meta["loaded"] is False
+        assert meta["_imports"] is not None
+        assert "mohobot_plugin_retryme" in sys.modules
+        _write(
+            plugin_dir / "main.py",
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        return None\n",
+        )
+        assert await ps.reload_plugin("retryme") is True
+        assert ps.list_plugins()[0]["loaded"] is True
+        assert await ps.reload_plugins() == 1
+        assert await ps.set_enabled("retryme", True) is True
+        await ps.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_one_shutdown_timeout_does_not_skip_other_plugins(tmp_path: Path) -> None:
+    """一个插件 on_shutdown 挂起不得中断其余插件的关闭 (审查 P3)。"""
+    async def run() -> None:
+        ps = _plugin_system(tmp_path)
+        ps._hook_timeout = 0.1
+        _write(
+            tmp_path / "plugins" / "hangplug" / "main.py",
+            "import asyncio\n"
+            "class Plugin:\n"
+            "    calls = []\n"
+            "    async def on_shutdown(self):\n"
+            "        type(self).calls.append('hang')\n"
+            "        await asyncio.Event().wait()\n",
+        )
+        _write(
+            tmp_path / "plugins" / "goodplug" / "main.py",
+            "class Plugin:\n"
+            "    calls = []\n"
+            "    async def on_shutdown(self):\n"
+            "        type(self).calls.append('good')\n",
+        )
+        assert await ps.load_plugins() == 2
+        classes = {meta["name"]: meta["instance"].__class__ for meta in ps._plugins}
+        try:
+            await asyncio.wait_for(ps.shutdown_plugins(), timeout=5)
+            # 先关闭的是 hangplug(列表逆序), 超时后 goodplug 仍必须收到 on_shutdown。
+            assert classes["goodplug"].calls == ["good"]
+            assert classes["hangplug"].calls == ["hang"]
+            hang = next(meta for meta in ps._plugins if meta["name"] == "hangplug")
+            assert hang.get("_retiring") is True
+        finally:
+            for meta in ps._plugins:
+                hook = meta.get("_hook_task")
+                if hook is not None and not hook.done():
+                    hook.cancel()
+                    await asyncio.gather(hook, return_exceptions=True)
 
     asyncio.run(run())
