@@ -1310,14 +1310,17 @@ class WebPanel:
                 status = 500
             return HTTPException(status_code=status, detail=str(exc))
 
-        async def _audit_market(request, action, target, *, success, details):
+        async def _audit_plugin_action(request, action, target, *, success, details) -> bool:
+            """Best-effort domain audit: I/O failure must not change the business result."""
             try:
                 await self._audit.write(
                     actor=self._username, action=action, target=target, success=success,
                     details=details, remote=request.client.host if request.client else "",
                 )
             except Exception as exc:
-                logger.warning(f"Plugin market audit write failed: {exc}")
+                logger.warning(f"Plugin audit write failed: {exc}")
+                return False
+            return True
 
         async def _market_replace(request: Request, body: PluginMarketInstallRequest, *, update: bool):
             await _require_auth(request)
@@ -1331,10 +1334,15 @@ class WebPanel:
                     plugin_system=self._plugin_system,
                 )
             except Exception as exc:
-                await _audit_market(request, action, body.plugin_id, success=False, details={"error": str(exc)})
+                await _audit_plugin_action(request, action, body.plugin_id, success=False, details={"error": str(exc)})
                 raise _plugin_write_error(exc) from exc
-            await _audit_market(request, action, name, success=True, details={"plugin_id": body.plugin_id, **result})
-            return {"status": "ok", "name": name, "path": str(destination), **result}
+            audited = await _audit_plugin_action(
+                request, action, name, success=True, details={"plugin_id": body.plugin_id, **result},
+            )
+            payload = {"status": "ok", "name": name, "path": str(destination), **result}
+            if not audited:
+                payload["audit"] = "not_written"
+            return payload
 
         @app.post("/api/plugins/market/install")
         async def install_market_plugin(request: Request, body: PluginMarketInstallRequest):
@@ -1384,15 +1392,18 @@ class WebPanel:
                         name, delete_config=delete_config, delete_data=delete_data,
                     )
             except Exception as exc:
-                await _audit_market(request, "plugin_uninstall", name, success=False, details={
+                await _audit_plugin_action(request, "plugin_uninstall", name, success=False, details={
                     "error": str(exc), "delete_config": delete_config, "delete_data": delete_data,
                 })
                 raise _plugin_write_error(exc) from exc
-            await _audit_market(request, "plugin_uninstall", name, success=True, details={
+            audited = await _audit_plugin_action(request, "plugin_uninstall", name, success=True, details={
                 "recycle": str(target), "delete_config": delete_config, "delete_data": delete_data,
                 "activation": result["activation"],
             })
-            return {"status": "ok", "name": name, "recycle": str(target), **result}
+            payload = {"status": "ok", "name": name, "recycle": str(target), **result}
+            if not audited:
+                payload["audit"] = "not_written"
+            return payload
 
         @app.get("/api/plugin-sources")
         async def list_plugin_sources(request: Request):
@@ -1410,16 +1421,19 @@ class WebPanel:
             try:
                 source = await self._plugin_market.add_source(source_id=body.id, name=body.name, url=body.url)
             except ValueError as exc:
+                # 失败也写领域审计, 与 install/update/uninstall 失败路径一致 (#174 审查 P3)。
+                await _audit_plugin_action(
+                    request, "plugin_source_add", body.id, success=False,
+                    details={"error": str(exc)},
+                )
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            await self._audit.write(
-                actor="admin",
-                action="plugin_source_add",
-                target=source.id,
-                success=True,
-                details={"url": source.url},
-                remote=request.client.host if request.client else "",
+            audited = await _audit_plugin_action(
+                request, "plugin_source_add", source.id, success=True, details={"url": source.url},
             )
-            return {"status": "ok", "source": {"id": source.id, "name": source.name, "url": source.url}}
+            payload = {"status": "ok", "source": {"id": source.id, "name": source.name, "url": source.url}}
+            if not audited:
+                payload["audit"] = "not_written"
+            return payload
 
         @app.delete("/api/plugin-sources/{source_id}")
         async def delete_plugin_source(source_id: str, request: Request):
@@ -1429,15 +1443,18 @@ class WebPanel:
             try:
                 await self._plugin_market.remove_source(source_id)
             except ValueError as exc:
+                await _audit_plugin_action(
+                    request, "plugin_source_remove", source_id, success=False,
+                    details={"error": str(exc)},
+                )
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            await self._audit.write(
-                actor="admin",
-                action="plugin_source_remove",
-                target=source_id,
-                success=True,
-                remote=request.client.host if request.client else "",
+            audited = await _audit_plugin_action(
+                request, "plugin_source_remove", source_id, success=True, details={},
             )
-            return {"status": "ok", "id": source_id}
+            payload = {"status": "ok", "id": source_id}
+            if not audited:
+                payload["audit"] = "not_written"
+            return payload
 
         @app.get("/api/plugins/{name}/config")
         async def get_plugin_config(name: str, request: Request):
