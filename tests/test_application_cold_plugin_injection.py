@@ -7,11 +7,13 @@ from pathlib import Path
 from textwrap import dedent
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from mohobot.bot_manager import BotManager
 from mohobot.llm_service import LLMService
 from mohobot.models.config import GlobalConfig
+from mohobot.plugin_market.journal import MarketJournal, MarketRecoveryError
 from mohobot.ws_server import WSServer
-
 
 _MISSING = object()
 
@@ -41,7 +43,9 @@ def _patched(*patches):
                 setattr(obj, name, old)
 
 
-async def _check_activation(tmp_path: Path, startup_fails: bool) -> None:
+async def _check_activation(
+    tmp_path: Path, startup_fails: bool, pending_market_install: bool,
+) -> None:
     entry = Path(__file__).resolve().parents[1] / "main.py"
     spec = spec_from_file_location("_cold_plugin_application_test", entry)
     module = module_from_spec(spec)
@@ -89,6 +93,17 @@ async def _check_activation(tmp_path: Path, startup_fails: bool) -> None:
                     raise RuntimeError("fixture startup failure after injection")
     """), encoding="utf-8")
 
+    if pending_market_install:
+        installed = plugin_dir.parent
+        candidate = installed / ".prepare"
+        candidate.mkdir()
+        (candidate / "main.py").write_text("raise AssertionError('uncommitted entry was imported')\n")
+        (candidate / "metadata.yaml").write_text((plugin_dir / "metadata.yaml").read_text())
+        journal = MarketJournal(cfg.data_dir, installed)
+        op = await journal.begin_replace(name, candidate, {"version": "2.0.0"}, expect_installed=True)
+        await op.apply()
+        assert (plugin_dir / "main.py").read_text().startswith("raise AssertionError")
+
     listened = []
 
     async def record_listen(server):
@@ -131,8 +146,42 @@ async def _check_activation(tmp_path: Path, startup_fails: bool) -> None:
             await app.shutdown()
 
 
-def test_installed_plugin_activation_before_websocket_listens(tmp_path):
+def test_installed_plugin_activation_before_websocket_listens(tmp_path: Path) -> None:
+    """startup 结果与挂起市场事务两组场景各自独立目录执行。
+
+    不用 parametrize: legacy runner 只支持无参或仅 ``tmp_path`` 的入口。
+    """
     for startup_fails in (False, True):
-        case_dir = tmp_path / ("startup-fails" if startup_fails else "startup-ok")
-        case_dir.mkdir()
-        asyncio.run(_check_activation(case_dir, startup_fails))
+        for pending_market_install in (False, True):
+            label = (
+                f"{'fails' if startup_fails else 'ok'}-"
+                f"{'pending' if pending_market_install else 'clean'}"
+            )
+            case_dir = tmp_path / label
+            case_dir.mkdir()
+            asyncio.run(_check_activation(case_dir, startup_fails, pending_market_install))
+
+
+@pytest.mark.asyncio
+async def test_corrupt_market_journal_stops_startup_before_assembly(tmp_path: Path) -> None:
+    entry = Path(__file__).resolve().parents[1] / "main.py"
+    spec = spec_from_file_location("_cold_market_recovery_test", entry)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cfg = GlobalConfig()
+    cfg.data_dir = str(tmp_path / "data")
+    path = Path(cfg.data_dir) / "plugins" / ".market-journal" / ("a" * 32) / "journal.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    listen = AsyncMock()
+    with _patched(
+        (GlobalConfig, "load", Mock(return_value=cfg)),
+        (WSServer, "start", listen),
+    ):
+        app = module.MohobotApplication(config_path=str(tmp_path / "unused.yaml"))
+        with pytest.raises(MarketRecoveryError, match=path.parent.name):
+            await app.startup()
+        assert app._plugin_system is None
+        assert app._bot_manager is None
+        listen.assert_not_awaited()
+        assert path.read_text() == "{broken"
