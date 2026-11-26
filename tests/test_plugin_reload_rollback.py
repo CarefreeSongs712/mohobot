@@ -232,3 +232,58 @@ def test_cancelled_reload_keeps_rollback_until_cleanup(tmp_path: Path) -> None:
             _probe_cancelled_reload(case_dir, patcher, next_action)
         finally:
             patcher.undo()
+
+
+def _probe_failed_startup_candidate_full_reload(tmp_path: Path) -> None:
+    async def run() -> None:
+        plugin = tmp_path / "plugins" / "startup_probe"
+        plugin.mkdir(parents=True)
+        (plugin / "main.py").write_text(
+            "class Plugin:\n"
+            "    async def on_startup(self):\n"
+            "        raise RuntimeError('startup boom')\n",
+            encoding="utf-8",
+        )
+        system = PluginSystem(str(tmp_path / "plugins"), str(tmp_path / "data"))
+        try:
+            assert await system.load_plugins() == 0
+            failed = next(m for m in system._plugins if m["name"] == "startup_probe")
+            assert failed["loaded"] is False
+            assert failed["error"] == "startup boom"
+            assert failed.get("_imports") is not None
+
+            (plugin / "main.py").write_text(
+                "class Plugin:\n"
+                "    async def on_startup(self):\n"
+                "        pass\n"
+                "    async def on_message(self, *args):\n"
+                "        return True, 'ok'\n",
+                encoding="utf-8",
+            )
+            # 全量重载必须释放失败候选保留的模块归属, 不能自判模块名冲突
+            assert await system.reload_plugins() == 1
+            loaded = next(m for m in system._plugins if m["name"] == "startup_probe")
+            assert loaded["loaded"] is True
+            assert loaded["error"] is None
+            assert loaded["_imports"] is not None
+            assert type(loaded["instance"]).__module__ in sys.modules
+            assert system._can_dispatch(loaded)
+
+            # 全量重载后单插件重载仍能工作, 说明命名空间所有权没有丢失
+            (plugin / "main.py").write_text(
+                "class Plugin:\n"
+                "    async def on_startup(self):\n"
+                "        pass\n"
+                "    async def on_message(self, *args):\n"
+                "        return True, 'ok-2'\n",
+                encoding="utf-8",
+            )
+            assert await system.reload_plugin("startup_probe") is True
+        finally:
+            await system.shutdown_plugins()
+
+    asyncio.run(run())
+
+
+def test_failed_startup_candidate_survives_full_reload(tmp_path: Path) -> None:
+    _probe_failed_startup_candidate_full_reload(tmp_path)

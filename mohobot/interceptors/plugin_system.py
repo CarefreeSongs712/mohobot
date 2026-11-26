@@ -542,6 +542,13 @@ class PluginSystem(Interceptor):
                 continue
             self._unload_plugin(meta)
             meta.pop("_rollback", None)
+        # 启动失败候选从未激活, 但保留的模块归属会挡住下一次全量加载;
+        # 全量重载/关闭前统一释放, 避免 reload_plugins() 把自身残留判成
+        # 模块名冲突并丢失所有权 (#166 审查 P1)。
+        for meta in self._plugins:
+            if not meta.get("loaded") and meta.get("_imports") is not None:
+                self._unload_plugin(meta)
+                meta.pop("_rollback", None)
         if failed_shutdowns:
             logger.warning(
                 "Plugin shutdown incomplete for: {} (ownership kept for retry)",
