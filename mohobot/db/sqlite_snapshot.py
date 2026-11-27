@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 #: 主库必须存在的基础表(空库也存在, 用于拒绝明显不是本系统的 SQLite 文件)。
@@ -49,13 +50,9 @@ def snapshot_sqlite(
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         dst.unlink()
-    src_conn = _connect(src)
-    dst_conn = _connect(dst)
-    try:
+    # A failed target open must also close the already opened source connection.
+    with closing(_connect(src)) as src_conn, closing(_connect(dst)) as dst_conn:
         src_conn.backup(dst_conn)
-    finally:
-        dst_conn.close()
-        src_conn.close()
     validate_sqlite(dst, required_tables)
 
 
@@ -69,13 +66,8 @@ def restore_sqlite(
     """
     validate_sqlite(snapshot, required_tables)
     target.parent.mkdir(parents=True, exist_ok=True)
-    src_conn = _connect(snapshot)
-    dst_conn = _connect(target)
-    try:
+    with closing(_connect(snapshot)) as src_conn, closing(_connect(target)) as dst_conn:
         src_conn.backup(dst_conn)
-    finally:
-        dst_conn.close()
-        src_conn.close()
     validate_sqlite(target, required_tables)
 
 
