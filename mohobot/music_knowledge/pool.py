@@ -55,11 +55,18 @@ def ensure_init(db_folder: str, db_file: str) -> None:
         _engine_url = url
 
 
+def get_session_if_initialized() -> Session | None:
+    """从已发布的连接池取会话，不初始化或切换数据库。"""
+    factory = _SessionLocal
+    return factory() if factory is not None else None
+
+
 def get_session() -> Session:
     """获取一个 SQLAlchemy Session(线程内安全; 调用方负责 close/with)。"""
-    if _SessionLocal is None:
+    db = get_session_if_initialized()
+    if db is None:
         raise RuntimeError("music_knowledge pool 未初始化, 请先调用 pool.ensure_init()")
-    return _SessionLocal()
+    return db
 
 
 def close_all() -> None:
