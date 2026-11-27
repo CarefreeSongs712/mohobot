@@ -1,52 +1,17 @@
 import asyncio
 import importlib
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from textwrap import dedent
 from types import ModuleType
 
 import pytest
 
+from _test_helpers import patched_attrs as _patched_attrs, patched_items as _patched_items
+
 from mohobot.interceptors import plugin_system as plugin_system_module
 from mohobot.interceptors.plugin_system import PluginNamespaceConflict, PluginSystem
 from mohobot.plugins.imports import PluginImports
-
-_MISSING = object()
-
-
-@contextmanager
-def _patched_attrs(target, **attrs):
-    """临时替换属性, 结束后恢复(兼容 tests/_run_all.py 无 fixture 环境)。"""
-    old = {}
-    for name in attrs:
-        namespace = getattr(target, "__dict__", {})
-        old[name] = (namespace.get(name, _MISSING), getattr(target, name))
-    try:
-        for name, value in attrs.items():
-            setattr(target, name, value)
-        yield target
-    finally:
-        for name, (previous, value) in old.items():
-            if previous is _MISSING:
-                delattr(target, name)
-            else:
-                setattr(target, name, value)
-
-
-@contextmanager
-def _patched_items(mapping, **items):
-    """临时替换 mapping 中的键, 结束后恢复。"""
-    old = {key: mapping.get(key, _MISSING) for key in items}
-    try:
-        mapping.update(items)
-        yield mapping
-    finally:
-        for key, value in old.items():
-            if value is _MISSING:
-                mapping.pop(key, None)
-            else:
-                mapping[key] = value
 
 
 def _write(root: Path, relative: str, source: str) -> Path:
@@ -91,7 +56,7 @@ def test_rejected_collision_leaves_live_namespace_and_preexisting_path(tmp_path)
 def test_unload_removes_only_current_objects_owned_by_generation(tmp_path):
     for replace_objects in (False, True):
         async def run(replace_objects=replace_objects):
-            plugins = tmp_path / "plugins"
+            plugins = tmp_path / str(replace_objects) / "plugins"
             entry = _write(plugins, "ownership_probe/main.py", """
                 from ownership_preloaded import VALUE
                 from . import eager

@@ -10,6 +10,8 @@ import asyncio
 import json
 import sys
 import tempfile
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -236,20 +238,24 @@ async def test_schema_coercion() -> None:
     ps = PluginSystem(plugins_dir="plugins", data_dir=tmp)
     await ps.load_plugins()
 
-    # 面板提交错误类型: int 字段给字符串, bool 给字符串, list 给逗号串
+    # 面板提交字符串类型: 合法数字串/布尔串/逗号串按 schema 强转
     ok = await ps.save_plugin_config("relationship", {
         "batch_delay_min": "50",
-        "notice": {"max_ban_days": "abc"},
         "request": {"auto_agree_friend": "true", "auto_reject_group": 1},
         "manage_users": "2001,2002",
     })
     assert ok
     cfg = ps.get_plugin_config("relationship")
     assert cfg["batch_delay_min"] == 50, cfg["batch_delay_min"]
-    assert cfg["notice"]["max_ban_days"] == 3, "非法 int 回退默认值"
     assert cfg["request"]["auto_agree_friend"] is True
     assert cfg["request"]["auto_reject_group"] is True
     assert cfg["manage_users"] == ["2001", "2002"]
+
+    # 无法解析的数字不再静默回退默认值, 而是抛错由面板返回 400 (#170 审查 P3)
+    with pytest.raises(ValueError, match="max_ban_days"):
+        await ps.save_plugin_config("relationship", {
+            "notice": {"max_ban_days": "abc"},
+        })
 
     # 插件实例热同步 + on_config_update 后 cfg 重建
     meta = next(m for m in ps._plugins if m["name"] == "relationship")

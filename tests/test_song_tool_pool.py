@@ -18,12 +18,15 @@ from mohobot.services import llm_tools
 
 @contextmanager
 def _song_tools(tmp_path):
-    """加载歌曲工具模块并隔离 cwd/registry/pool, 兼容 tests/_run_all.py 无 fixture 环境。"""
-    previous_cwd = Path.cwd()
-    previous_registry = llm_tools.registry
-    previous_pool = {
-        attr: getattr(pool, attr)
-        for attr in ("_engine", "_SessionLocal", "_engine_url")
+    """隔离 cwd/registry/pool 后加载 song_tools 模块, 退出时全部还原。
+
+    不用 pytest fixture: 项目自研 legacy runner 只支持无参或仅 ``tmp_path``
+    的用例入口, 而 CI 在 push main 时仍会执行该 runner。
+    """
+    cwd = os.getcwd()
+    registry = llm_tools.registry
+    saved_pool = {
+        attr: getattr(pool, attr) for attr in ("_engine", "_SessionLocal", "_engine_url")
     }
     os.chdir(tmp_path)
     llm_tools.registry = llm_tools.LLMToolRegistry()
@@ -39,15 +42,15 @@ def _song_tools(tmp_path):
         yield module
     finally:
         pool.close_all()
-        llm_tools.registry = previous_registry
-        for attr, value in previous_pool.items():
+        os.chdir(cwd)
+        llm_tools.registry = registry
+        for attr, value in saved_pool.items():
             setattr(pool, attr, value)
-        os.chdir(previous_cwd)
 
 
 def test_song_tools_read_active_pool_while_sync_worker_is_running(tmp_path):
-    async def run():
-        with _song_tools(tmp_path) as song_tools:
+    with _song_tools(tmp_path) as song_tools:
+        async def run():
             loop = asyncio.get_running_loop()
             started, unblock = asyncio.Event(), threading.Event()
             reservation = try_reserve()
@@ -77,7 +80,7 @@ def test_song_tools_read_active_pool_while_sync_worker_is_running(tmp_path):
                 await asyncio.wait_for(task, 5)
                 assert await wait_until_idle(timeout=0)
 
-    asyncio.run(run())
+        asyncio.run(run())
 
 
 def test_song_tools_only_initialize_fallback_when_pool_is_free(tmp_path):

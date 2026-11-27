@@ -12,8 +12,9 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from contextlib import contextmanager
 from pathlib import Path
+
+from _test_helpers import patched_attrs as _patched_attrs
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -32,19 +33,6 @@ def _write_jsonl(path: Path, rows: list[dict | str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [row if isinstance(row, str) else json.dumps(row, ensure_ascii=False) for row in rows]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-@contextmanager
-def _patched_attrs(target, **attrs):
-    """临时替换模块/对象属性, 结束后恢复(兼容 tests/_run_all.py 无 fixture 环境)。"""
-    old = {name: getattr(target, name) for name in attrs}
-    try:
-        for name, value in attrs.items():
-            setattr(target, name, value)
-        yield target
-    finally:
-        for name, value in old.items():
-            setattr(target, name, value)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
