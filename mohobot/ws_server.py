@@ -39,6 +39,7 @@ _MESSAGE_ACTIONS = {
     "send_group_forward_msg": "group",
 }
 _BLOCKED_GROUP_SEND = object()
+_BLOCKED_DISPATCH = object()
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,10 @@ class WSServer:
             return
 
         # Register bot (按 QQ 查找绑定; 未绑定则接受但不处理)
-        instance = self._bot_manager.register(qq, websocket)
+        if str(client_role).lower() in ("event", "api"):
+            instance = self._bot_manager.register(qq, websocket, client_role=client_role)
+        else:
+            instance = self._bot_manager.register(qq, websocket)
 
         try:
             async for raw_message in websocket:
@@ -269,6 +273,8 @@ class WSServer:
         if "status" in data:
             await self._bot_manager.handle_api_response(bot_id, data)
             return
+        if getattr(instance, "client_role", "Universal") == "API":
+            return
 
         # 群成员减少通知(被踢/主动退群): 立即从群在线集合剔除该 bot, 否则
         # 全局指令抽签仍可能选中它导致命令无响应(issue #9 第 4 点)。
@@ -292,7 +298,19 @@ class WSServer:
         if "post_type" in data:
             event = Event.from_dict(data)
             if self._on_event:
-                coro = self._on_event(bot_id, event, data)
+                generation = getattr(instance, "generation", 0)
+
+                async def dispatch_current():
+                    # 排队期间可能发生同角色重连、解绑或禁用。已开始执行的
+                    # callback 保持原有生命周期; 未开始的旧连接事件不产生副作用。
+                    if (not instance.bound or instance.bot_id != bot_id
+                            or getattr(instance, "generation", 0) != generation
+                            or (callable(is_current) and not is_current(instance))
+                            or not getattr(getattr(instance, "config", None), "enabled", True)):
+                        return
+                    await self._on_event(bot_id, event, data)
+
+                coro = dispatch_current()
                 try:
                     if self._task_supervisor is not None:
                         self._task_supervisor.create_task(
@@ -339,8 +357,12 @@ class WSServer:
             getattr(cfg, "external_service_groups", ()),
         )
 
-    async def _send_guarded(self, instance, payload: dict[str, Any]):
+    async def _send_guarded(
+        self, instance, payload: dict[str, Any], dispatch_guard: Callable[[], bool] | None = None,
+    ):
         """Recheck the live config when the scheduler actually dispatches a send."""
+        if dispatch_guard is not None and not dispatch_guard():
+            return _BLOCKED_DISPATCH
         if self._blocks_group_send(payload["action"], payload["params"]):
             return _BLOCKED_GROUP_SEND
         return await instance.send(payload)
@@ -416,6 +438,7 @@ class WSServer:
         source: str = "auto",
         outcome: dict[str, Any] | None = None,
         quick_ack_timeout: float = 0.0,
+        dispatch_guard: Callable[[], bool] | None = None,
     ) -> dict[str, Any] | None:
         """Send a message with echo tracking + bot speech archival.
 
@@ -463,10 +486,15 @@ class WSServer:
         # 发送前登记指纹: 其他 bot 会收到这条消息的入站副本(message_id 按
         # 账号分配, 无法靠 id 判重), 据此跳过, 避免同一句 bot 发言存两行。
         claimed = self._claim_sent_signature(instance, chat_type, chat_id, action, params)
+        operation = (
+            (lambda: self._send_guarded(instance, payload))
+            if dispatch_guard is None
+            else (lambda: self._send_guarded(instance, payload, dispatch_guard))
+        )
         try:
             result = await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
-                lambda: self._send_guarded(instance, payload),
+                operation,
                 label=action,
                 attempt=attempt,
             )
@@ -496,9 +524,10 @@ class WSServer:
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
             raise
-        if result is _BLOCKED_GROUP_SEND:
+        if result is _BLOCKED_GROUP_SEND or result is _BLOCKED_DISPATCH:
             if outcome is not None:
-                outcome.update(status="blocked", reason="external_service_group")
+                reason = "dispatch_guard" if result is _BLOCKED_DISPATCH else "external_service_group"
+                outcome.update(status="blocked", reason=reason)
             self._release_sent_signature(claimed)
             self._bot_manager.drop_pending_sent(echo)
             self._bot_manager.remove_response_future(bot_id, echo)
@@ -838,6 +867,7 @@ class WSServer:
         self, bot_id: str, chat_type: str, chat_id: int | str,
         message: str | list[dict[str, Any]], *, source: str = "llm",
         ack_timeout: float = 5.0,
+        dispatch_guard: Callable[[], bool] | None = None,
     ) -> DeliveryResult:
         """发送消息并返回投递结果(issue #128)。
 
@@ -865,6 +895,7 @@ class WSServer:
                     bot_id, action, params, chat_type, chat_id,
                     wait_response=False, source=source, outcome=outcome,
                     quick_ack_timeout=self._QUICK_ACK_WINDOW,
+                    dispatch_guard=dispatch_guard,
                 )
             except Exception as e:  # noqa: BLE001 - 发送异常要显式反馈给调用方
                 logger.warning(
@@ -883,7 +914,7 @@ class WSServer:
             response = await self._send_tracked(
                 bot_id, action, params, chat_type, chat_id,
                 wait_response=True, timeout=ack_timeout, source=source,
-                outcome=outcome,
+                outcome=outcome, dispatch_guard=dispatch_guard,
             )
         except Exception as e:  # noqa: BLE001 - 发送异常要显式反馈给调用方
             logger.warning(

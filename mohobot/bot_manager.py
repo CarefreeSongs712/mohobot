@@ -14,6 +14,7 @@ import json
 import random
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,11 @@ import websockets  # 类型注解用(运行时只做注解, 不直接调用)
 from loguru import logger
 
 from mohobot.models.config import BotConfig
+
+
+@dataclass
+class _ConnectionConfig:
+    config: BotConfig
 
 
 class BotInstance:
@@ -36,8 +42,10 @@ class BotInstance:
     ):
         self.bot_id: str = bot_id
         self.ws: "websockets.WebSocketServerProtocol" = websocket
-        self.config: BotConfig = config
+        self._shared_config = _ConnectionConfig(config)
         self.bound: bool = bound
+        self.client_role: str = "Universal"
+        self.connection_qq: int = config.qq
         # 在线时长统一用 wall clock(time.time): 与 WebUI 面板/status 插件的
         # time.time() - connected_at 计算一致, 避免 monotonic 混用导致时长显示异常
         self.connected_at: float = time.time()
@@ -61,6 +69,8 @@ class BotInstance:
 
     async def send(self, data: dict[str, Any]) -> None:
         """Send a JSON message to this bot via WebSocket (thread-safe)."""
+        if self.stale or self.client_role == "Event":
+            raise RuntimeError("connection cannot dispatch API calls")
         async with self._send_lock:
             try:
                 payload = json.dumps(data, ensure_ascii=False)
@@ -79,8 +89,17 @@ class BotInstance:
         return request  # Response will be handled via the message handler
 
     @property
+    def config(self) -> BotConfig:
+        return self._shared_config.config
+
+    @config.setter
+    def config(self, value: BotConfig) -> None:
+        # 面板/人设热更新仍可直接替换 config; Event/API 同步看到新对象。
+        self._shared_config.config = value
+
+    @property
     def qq(self) -> int:
-        return self.config.qq
+        return self.connection_qq
 
     @property
     def nickname(self) -> str:
@@ -102,6 +121,8 @@ class BotManager:
     def __init__(self, data_dir: str = "./data"):
         self._bots: dict[str, BotInstance] = {}   # bot_id -> instance (已绑定)
         self._unbound: dict[str, BotInstance] = {}  # qq(str) -> instance (未绑定连接)
+        # OneBot 可将事件和 API 分别连接; 每个角色独立替换, 出站优先 API。
+        self._connections: dict[str, dict[str, BotInstance]] = {}
         self._data_dir = data_dir
         self._bots_dir = Path(data_dir) / "bots"
         # 按 bot_id 隔离的 pending 响应: bot_id -> {echo: future}
@@ -214,26 +235,30 @@ class BotManager:
         cfg.qq = qq_int
         cfg.save(cfg_path)
 
-        # 连接迁移: 未绑定连接晋升 / 旧连接降级
+        # 先降级旧 QQ 的所有角色, 再晋升目标 QQ, 避免覆盖 _bots 后留下旧绑定。
+        inst = self._bots.get(bot_id)
+        if inst is not None and old_qq and old_qq != qq_int:
+            self._bots.pop(bot_id, None)
+            inst.bound, inst.bot_id, inst.config = False, "", cfg
+            self._sync_connection_binding(inst)
+            self._unbound[str(inst.connection_qq)] = inst
+            logger.info(f"{bot_id} 换绑: QQ{old_qq} 连接降级为未绑定")
+
+        # 连接迁移: 未绑定连接晋升 / 原 QQ 更新配置
         qq_str = str(qq_int)
         if qq_str in self._unbound:
             inst = self._unbound.pop(qq_str)
             inst.bound = True
             inst.bot_id = bot_id
             inst.config = cfg
+            self._sync_connection_binding(inst)
             self._bots[bot_id] = inst
             logger.info(f"QQ {qq_int} 的未绑定连接已晋升为 {bot_id}")
         else:
             inst = self._bots.get(bot_id)
             if inst is not None:
                 inst.config = cfg
-                if old_qq and old_qq != qq_int:
-                    # 旧 QQ 的连接不再属于本 bot → 降级为未绑定
-                    self._bots.pop(bot_id, None)
-                    inst.bound = False
-                    inst.bot_id = ""
-                    self._unbound[str(old_qq)] = inst
-                    logger.info(f"{bot_id} 换绑: QQ{old_qq} 连接降级为未绑定")
+                self._sync_connection_binding(inst)
 
         logger.info(f"Bot {bot_id} 绑定 QQ {qq_int}")
         return True
@@ -254,6 +279,7 @@ class BotManager:
             inst.bound = False
             inst.bot_id = ""
             inst.config = cfg
+            self._sync_connection_binding(inst)
             if old_qq:
                 self._unbound[str(old_qq)] = inst
             logger.info(f"{bot_id} 解绑 QQ{old_qq}, 连接降级为未绑定")
@@ -279,6 +305,7 @@ class BotManager:
                     inst.bound = False
                     inst.bot_id = ""
                     inst.config = cfg
+                    self._sync_connection_binding(inst)
                     self._unbound[qq_str] = inst
                 logger.info(f"QQ 唯一绑定: {cfg.bot_id} 已被解绑 (QQ {qq} 转给 {exclude_bot_id})")
 
@@ -352,6 +379,9 @@ class BotManager:
         instance = self._bots.get(bot_id)
         if instance is None or getattr(instance, "stale", False):
             return False
+        if (getattr(instance, "client_role", "Universal") == "API"
+                and "Event" not in self._connections.get(str(instance.qq), {})):
+            return False  # 只有 API 连接时无法收到群事件, 不能抢占全局指令。
         config = getattr(instance, "config", None)
         return bool(getattr(config, "enabled", True))
 
@@ -446,41 +476,51 @@ class BotManager:
 
     # ── 连接注册 / 注销 ───────────────────────────────────────
 
-    def register(self, qq: int | str, websocket: "websockets.WebSocketServerProtocol") -> BotInstance:
-        """按 QQ 号注册连接: 已绑定 → bot 实例; 未绑定 → 未绑定连接(不处理消息)。
-
-        #127: 同一 QQ 重连时新连接直接替换旧实例。旧实例标记 stale 并关闭
-        其 WS, 避免旧连接的事件循环在重叠窗口内继续派发重复事件。
-        """
+    def register(
+        self, qq: int | str, websocket: "websockets.WebSocketServerProtocol",
+        client_role: str = "Universal",
+    ) -> BotInstance:
+        """Register one transport; Event/API coexist, equal roles replace each other."""
         qq_str = str(qq)
-        bot_cfg = self.find_bot_by_qq(qq)
-
+        role = {"event": "Event", "api": "API"}.get(str(client_role).lower(), "Universal")
+        connections = self._connections.setdefault(qq_str, {})
+        for previous_role, previous in tuple(connections.items()):
+            if role == "Universal" or previous_role in (role, "Universal"):
+                del connections[previous_role]
+                self._retire_instance(previous)
+        peer = next(iter(connections.values()), None)
+        bot_cfg = peer.config if peer is not None and peer.bound else self.find_bot_by_qq(qq)
         if bot_cfg is not None:
             instance = BotInstance(bot_cfg.bot_id, websocket, bot_cfg, bound=True)
-            instance.generation = self._next_generation()
-            previous = self._bots.get(bot_cfg.bot_id)
-            if previous is not None and previous is not instance:
-                self._retire_instance(previous)
-            self._bots[bot_cfg.bot_id] = instance
-            self._unbound.pop(qq_str, None)
-            logger.info(
-                f"Bot {bot_cfg.bot_id} connected (QQ={bot_cfg.qq}, nickname={bot_cfg.nickname})"
-            )
-            return instance
-
-        # 未绑定: 接受连接但不处理消息
-        unbound_cfg = BotConfig(qq=int(qq), nickname=f"QQ{qq}")
-        instance = BotInstance("", websocket, unbound_cfg, bound=False)
+        else:
+            instance = BotInstance("", websocket, BotConfig(qq=int(qq), nickname=f"QQ{qq}"), bound=False)
+        instance.client_role = role
         instance.generation = self._next_generation()
-        previous = self._unbound.get(qq_str)
-        if previous is not None and previous is not instance:
-            self._retire_instance(previous)
-        self._unbound[qq_str] = instance
-        logger.warning(
-            f"QQ {qq} 已连接但未绑定任何 bot — 消息将被忽略, "
-            f"请在 Web 面板创建 bot 并绑定该 QQ"
-        )
+        if peer is not None:
+            instance._shared_config = peer._shared_config
+            instance._sent_messages = peer._sent_messages
+        connections[role] = instance
+        self._select_connection(qq_str)
+        logger.info(f"Connection registered: QQ={qq}, bot={instance.bot_id or 'unbound'}, role={role}")
         return instance
+
+    def _select_connection(self, qq: str) -> None:
+        """Expose the API-capable transport through the existing bot lookup API."""
+        connections = self._connections.get(qq, {})
+        primary = next((connections[r] for r in ("Universal", "API", "Event") if r in connections), None)
+        if primary is None:
+            self._connections.pop(qq, None)
+            return
+        if primary.bound:
+            self._bots[primary.bot_id] = primary
+            self._unbound.pop(qq, None)
+        else:
+            self._unbound[qq] = primary
+
+    def _sync_connection_binding(self, instance: BotInstance) -> None:
+        """Keep both transports attached to the same live binding/config object."""
+        for peer in self._connections.get(str(instance.connection_qq), {}).values():
+            peer.bound, peer.bot_id, peer.config = instance.bound, instance.bot_id, instance.config
 
     def _next_generation(self) -> int:
         self._generation_seq += 1
@@ -512,8 +552,11 @@ class BotManager:
 
     def is_current(self, instance: BotInstance) -> bool:
         """该连接实例是否仍是当前注册实例(旧连接返回 False)。"""
-        if instance is None:
+        if instance is None or getattr(instance, "stale", False):
             return False
+        connections = self._connections.get(str(getattr(instance, "connection_qq", instance.qq)))
+        if connections is not None:
+            return connections.get(instance.client_role) is instance
         if getattr(instance, "bound", False):
             return self._bots.get(instance.bot_id) is instance
         return self._unbound.get(str(instance.qq)) is instance
@@ -523,6 +566,17 @@ class BotManager:
 
         传实例而非 key, 防止旧连接断开误删同 QQ 的新实例(重连竞态)。
         """
+        qq_str = str(getattr(instance, "connection_qq", instance.qq))
+        connections = self._connections.get(qq_str)
+        if connections is not None:
+            if connections.get(instance.client_role) is not instance:
+                return
+            del connections[instance.client_role]
+            instance.stale = True
+            if connections:
+                self._select_connection(qq_str)
+                return
+            self._connections.pop(qq_str, None)
         if instance.bound:
             if self._bots.get(instance.bot_id) is instance:
                 del self._bots[instance.bot_id]

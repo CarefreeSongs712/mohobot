@@ -985,16 +985,8 @@ class MessageHandler:
         message_id 互不相同, 但发送者、时间、消息内容一致。用这三者构造
         稳定指纹作为抽签/认领 key, 保证同一条消息只被一个 bot 认领。
         """
-        sender = str(getattr(event, "user_id", "") or "")
-        ts = str(getattr(event, "time", "") or "")
-        message = getattr(event, "message", None)
-        try:
-            signature = message_signature(message)
-        except Exception:
-            # 解析失败时同时带上原始消息内容, 降低不同消息退化成同一
-            # raw_message 占位符时的碰撞概率(仍只用于抽签/认领, 不落库)。
-            signature = f"{getattr(event, 'raw_message', '') or ''}|{message!r}"
-        return f"{sender}:{ts}:{signature}"
+        from mohobot.history_dedup import group_message_fingerprint
+        return group_message_fingerprint(event)
 
     def _cache_quote(
         self, bot_id: str, chat_type: str, chat_id: str, reply_id: str,
