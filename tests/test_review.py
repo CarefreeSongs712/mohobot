@@ -482,6 +482,7 @@ def test_loader_sidecar_cache_persistence():
         # group 合并会话也来自缓存(含 bot_mids 与 bot 归属, 过滤仍生效)
         grow = data2.filtered_rows("_merged/group/20002")
         assert len(grow) == 6
+        data2.flush_cache()
 
         # 损坏的缓存 → 忽略并从磁盘重新解析, 结果不变
         cache.write_text("{corrupted", encoding="utf-8")

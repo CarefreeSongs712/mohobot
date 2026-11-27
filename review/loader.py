@@ -213,7 +213,8 @@ class _FileIndex:
 
     __slots__ = ("mtime", "mtime_ns", "ctime_ns", "change_ns", "generation",
                  "tail_anchor", "head_anchor", "verified_identity", "size",
-                 "offset", "inode", "rows", "bot_mids", "seen_mids",
+                 "offset", "inode", "prefix_digest", "prefix_hasher",
+                 "rows", "bot_mids", "seen_mids",
                  "bot_mids_by_bot", "bot_self_ids", "bots")
 
     def __init__(self) -> None:
@@ -227,8 +228,11 @@ class _FileIndex:
         self.change_ns: int = -1
         # 内容代次: 每次实际解析(追加/重读)自增, 供派生缓存做二级失效。
         self.generation: int = 0
-        # 已消费字节的尾部锚点(最多 _TAIL_ANCHOR_BYTES 字节): 文件变大但
-        # 前缀被改写时(非追加更新)用少量回读发现, 避免漏掉整段替换。
+        # 已消费前缀的完整摘要: 增长时必须逐块校验, 首尾采样不能证明纯追加。
+        # hasher 仅驻内存; sidecar 保存 digest, 重启后校验时重建 hasher。
+        self.prefix_hasher: Any = hashlib.sha256()
+        self.prefix_digest: str = self.prefix_hasher.hexdigest()
+        # 首尾锚点只用于同身份下的轻量兜底, 不作为纯追加证明。
         self.tail_anchor: bytes = b""
         # 头/尾锚点最近一次复核通过时的文件身份(issue #136 review N4):
         # 身份完全一致时复用复核结论, 避免每次读索引都重新打开文件 seek;
@@ -278,6 +282,8 @@ class _FileIndex:
         idx.mtime_ns = int(d.get("mtime_ns") or -1)
         idx.ctime_ns = int(d.get("ctime_ns") or -1)
         idx.change_ns = int(d.get("change_ns") or -1)
+        idx.prefix_digest = str(d.get("prefix_digest") or "")
+        idx.prefix_hasher = None
         anchor = d.get("tail_anchor") or ""
         try:
             idx.tail_anchor = anchor.encode("latin-1") if isinstance(anchor, str) else b""
@@ -313,6 +319,8 @@ class _FileIndex:
         self.bot_self_ids = {}
         self.bots = []
         self.offset = 0
+        self.prefix_hasher = hashlib.sha256()
+        self.prefix_digest = self.prefix_hasher.hexdigest()
         self.tail_anchor = b""
         self.head_anchor = b""
         self.verified_identity = None
@@ -329,7 +337,9 @@ class MohobotData:
     # v6: bot 发言增加 source 标记(llm/auto), 机械内容不参与审核; 旧缓存作废
     # v8: offset 改为字节偏移; v7 缓存里存的是字符偏移(含中文时错位), 必须作废
     # v9: 文件身份加入高精度 mtime_ns/ctime_ns + 尾部锚点(issue #133 缓存失效)
-    _CACHE_VERSION = 9
+    # v10: 已消费前缀完整 SHA-256, 不再把旧尾部 64B 相同当作纯追加证明。
+    _CACHE_VERSION = 10
+    _PREFIX_READ_CHUNK = 1 << 20  # 增长时流式校验前缀, 不复制整个旧文件
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
     _TAIL_ANCHOR_BYTES = 64    # 已消费字节的尾部锚点长度(非追加更新探测)
     # 超过该大小的文件不再做锚点内容复核(issue #136 review N4): 大归档每次
@@ -443,6 +453,7 @@ class MohobotData:
             snapshot = [
                 (path, idx.mtime, idx.mtime_ns, idx.ctime_ns, idx.change_ns,
                  idx.size, idx.offset, idx.inode, idx.tail_anchor, idx.head_anchor,
+                 idx.prefix_digest,
                  sorted(idx.bot_mids), list(idx.rows),
                  {k: sorted(v) for k, v in idx.bot_mids_by_bot.items()},
                  dict(idx.bot_self_ids), list(idx.bots))
@@ -453,7 +464,7 @@ class MohobotData:
 
         files: dict[str, Any] = {}
         for (path, mtime, mtime_ns, ctime_ns, change_ns, size, offset, inode,
-             tail_anchor, head_anchor, bot_mids, rows, bot_mids_by_bot,
+             tail_anchor, head_anchor, prefix_digest, bot_mids, rows, bot_mids_by_bot,
              bot_self_ids, bots) in snapshot:
             try:
                 if not Path(path).exists():
@@ -471,6 +482,7 @@ class MohobotData:
                 "inode": inode,
                 "tail_anchor": tail_anchor.decode("latin-1"),
                 "head_anchor": head_anchor.decode("latin-1"),
+                "prefix_digest": prefix_digest,
                 "bot_mids": bot_mids,
                 "bot_mids_by_bot": bot_mids_by_bot,
                 "bot_self_ids": bot_self_ids,
@@ -580,7 +592,6 @@ class MohobotData:
 
     def _is_append_only(
         self, idx: _FileIndex, path: Path, size: int, inode: int,
-        mtime_ns: int, ctime_ns: int,
     ) -> bool:
         """新文件状态是否只是在已解析前缀后"纯追加"。
 
@@ -588,7 +599,11 @@ class MohobotData:
           - 截断/变短: 前缀可能已变;
           - inode 变化: os.replace/rename 等长替换;
           - 长度不变但 mtime/ctime 变化: 就地等长重写;
-          - 长度变长但尾部锚点不匹配: 前缀被改写(伪追加)。
+          - 长度变长但已消费前缀的 SHA-256 不匹配: 前缀被改写(伪追加)。
+
+        无外部写入协议时, 仅凭 metadata/首尾采样无法证明中段没有改写。
+        因此每次增长都流式校验整个已消费前缀(O(offset) I/O, 有界内存),
+        只有校验通过后才增量解析新字节; 相同身份的热读仍不回读文件。
         """
         if idx.mtime_ns < 0 or idx.size < 0:
             return False  # 从未解析过
@@ -599,17 +614,23 @@ class MohobotData:
         if size == idx.size:
             # 身份前面已确认不同; 长度不变 → 内容/元数据被改写。
             return False
-        if not idx.tail_anchor:
-            # 没有锚点(空文件开始)时, 长度增加只可能是追加。
-            return idx.offset == 0
-        start = idx.offset - len(idx.tail_anchor)
+        if not idx.prefix_digest:
+            return False  # 缺少完整前缀摘要时不能证明纯追加
+        hasher = hashlib.sha256()
+        remaining = idx.offset
         try:
             with open(path, "rb") as fh:
-                fh.seek(start)
-                if fh.read(len(idx.tail_anchor)) != idx.tail_anchor:
-                    return False  # 已消费前缀被改写 → 非追加更新
+                while remaining:
+                    block = fh.read(min(self._PREFIX_READ_CHUNK, remaining))
+                    if not block:
+                        return False
+                    hasher.update(block)
+                    remaining -= len(block)
         except OSError:
             return False
+        if hasher.hexdigest() != idx.prefix_digest:
+            return False
+        idx.prefix_hasher = hasher
         return True
 
     @staticmethod
@@ -626,6 +647,17 @@ class MohobotData:
             return idx.change_ns == change_ns
         return True
 
+    def _forget_file(self, path: Path) -> None:
+        """已观察到删除时撤销该文件及派生缓存, 不依赖重建后的 inode/时钟。"""
+        with self._lock:
+            if self._file_cache.pop(str(path), None) is None:
+                return
+            if path.parent.name == "group" and path.parent.parent.name == "history":
+                self._merged_cache.pop(path.stem, None)
+            self._pending_cache = None
+            self._scan_cache = None
+            self._mark_dirty()
+
     def _read_file_index(self, path: Path) -> _FileIndex | None:
         """读一个 history 文件的过滤行(增量: 只解析新增字节)。损坏返回 None。
 
@@ -637,6 +669,9 @@ class MohobotData:
         self._ensure_cache_loaded()
         try:
             st = path.stat()
+        except FileNotFoundError:
+            self._forget_file(path)
+            return None
         except OSError:
             return None
         key = str(path)
@@ -664,7 +699,7 @@ class MohobotData:
                     return idx
 
             rewrite = not self._is_append_only(
-                idx, path, size, inode, mtime_ns, ctime_ns,
+                idx, path, size, inode,
             )
             if rewrite:
                 # 文件被截断/替换/就地改写 → 旧解析结果作废, 全量重读
@@ -686,6 +721,8 @@ class MohobotData:
                 if cut >= 0:
                     new_bytes = new_bytes[: cut + 1]
                     idx.offset = start_offset + cut + 1
+                    idx.prefix_hasher.update(new_bytes)
+                    idx.prefix_digest = idx.prefix_hasher.hexdigest()
                     if not idx.head_anchor and start_offset == 0:
                         idx.head_anchor = new_bytes[: self._TAIL_ANCHOR_BYTES]
                     idx.tail_anchor = (
@@ -700,6 +737,9 @@ class MohobotData:
                 idx.change_ns = change_ns
                 idx.size = size
                 idx.inode = inode
+            except FileNotFoundError:
+                self._forget_file(path)
+                return None
             except OSError:
                 return None
             # 换行符在 UTF-8 中不会出现在多字节序列内, 切分点总在字符边界;
@@ -980,7 +1020,17 @@ class MohobotData:
                         "display_name": f"群 {f.stem}",
                         "bots": list(idx.bots),
                     })
-        self._scan_cache = (now, result)
+        # glob 不会返回已删除路径; 仍须清掉此前索引, 包括从 sidecar 恢复的项。
+        with self._lock:
+            for cached_path in list(self._file_cache):
+                path = Path(cached_path)
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    self._forget_file(path)
+                except OSError:
+                    pass
+            self._scan_cache = (now, result)
         self._maybe_save_cache()
         return result
 
@@ -1002,8 +1052,6 @@ class MohobotData:
         if bot_id == MERGED_BOT_ID and chat_type == "group":
             return self._merged_rows(chat_id)
         path = self.history_path(sk)
-        if not path.exists():
-            return []
         idx = self._read_file_index(path)
         if not idx:
             return []
@@ -1019,8 +1067,6 @@ class MohobotData:
         bot 发言不做内容级去重。
         """
         path = self._group_file(group_id)
-        if not path.exists():
-            return []
         idx = self._read_file_index(path)
         if not idx:
             return []
@@ -1057,11 +1103,9 @@ class MohobotData:
         if bot_id == MERGED_BOT_ID and chat_type == "group":
             return self._merged_rows(chat_id) or []
         path = self.history_path(sk)
-        if not path.exists():
-            return None
         idx = self._read_file_index(path)
-        if not idx:
-            return []
+        if idx is None:
+            return None
         with self._lock:
             return list(idx.rows)
 
@@ -1090,7 +1134,7 @@ class MohobotData:
         sig: tuple | None = None
         if revision is not None:
             st_sig = tuple(
-                (sk, len(st)) for sk, st in sorted(statuses.items()) if st
+                (sk, frozenset(st)) for sk, st in sorted(statuses.items()) if st
             )
             sig = (files_sig, st_sig, int(revision))
             with self._lock:
@@ -1141,7 +1185,7 @@ class MohobotData:
         self.list_sessions()  # 确保文件索引已加载(幂等)
         out: dict[str, int] = {}
         with self._lock:
-            for path_str, idx in self._file_cache.items():
+            for path_str, idx in list(self._file_cache.items()):
                 path = Path(path_str)
                 merged_group = (
                     len(path.parts) >= 3
@@ -1189,7 +1233,7 @@ class MohobotData:
                 for s in (self._scan_cache[1] if self._scan_cache else [])
             }
             out: list[dict[str, Any]] = []
-            for path_str, idx in self._file_cache.items():
+            for path_str, idx in list(self._file_cache.items()):
                 path = Path(path_str)
                 merged_group = (
                     len(path.parts) >= 3

@@ -67,11 +67,7 @@ def create_app(cfg: ReviewConfig, data: _loader.MohobotData, store: ReviewStore,
         计数来自 store 的进程内缓存(与 statuses_by_session 同一次构建),
         管理员免检条目从待审中扣除; loader/DB 的重调用都走线程。
         """
-        def _status_snapshot():
-            return store.statuses_by_session(), store.revision
-
-        all_statuses, revision = await asyncio.to_thread(_status_snapshot)
-        counts = await asyncio.to_thread(store.counts_by_session)
+        all_statuses, counts, revision = await asyncio.to_thread(store.statuses_snapshot)
         # 待审计数必须对"当前文件里的有效消息"求交, 不能拿 total 相减:
         # 恢复较短备份后 total 变小而 DB 仍有旧判定记录, 相减会得到负数/0
         # 与明细矛盾(issue #8 第 4 点)。

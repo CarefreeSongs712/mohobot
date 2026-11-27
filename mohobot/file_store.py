@@ -225,11 +225,10 @@ async def jsonl_read_all(file_path: str | Path) -> list[dict[str, Any]]:
 async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, Any]]:
     """Read the last N lines from a JSONL file without loading the whole file.
 
-    Reads backwards in fixed-size chunks (issue #136: the old implementation
-    did `await f.read()` on the whole file, which for a 15MB group archive cost
-    ~128ms/59MB per call inside the event loop). Chunk boundaries may cut a
-    multi-byte UTF-8 character, but that only affects the first (discarded)
-    line of the buffer, so a replacement-character decode there is harmless.
+    Reads backwards in fixed-size chunks until N complete nonblank logical
+    lines are found. Only the unfinished line spans chunks, so a long blank
+    suffix is processed once rather than repeatedly copied/scanned. UTF-8
+    fragments are joined before decoding, including very long final lines.
     Semantics are kept identical to the previous full-read version: same
     per-path lock, blank lines skipped, malformed JSON lines skipped, the last
     line is returned even without a trailing newline, and universal newlines
@@ -246,24 +245,33 @@ async def jsonl_read_tail(file_path: str | Path, n: int = 10) -> list[dict[str, 
         async with aiofiles.open(path, "rb") as f:
             await f.seek(0, 2)
             pos = await f.tell()
-            data = b""
-            # 多读一个换行, 保证缓冲区首行是可能被截断的半行时, 取尾 n 行
-            # 依然完整; 文件不足一个 chunk 时一次读完(等价旧行为)。
-            while pos > 0 and data.count(b"\n") <= n:
+            lines: list[str] = []  # newest first, including malformed nonblank lines
+            fragments: list[bytes] = []  # unfinished line, rightmost fragment first
+
+            def finish_line(part: bytes) -> None:
+                fragments.append(part)
+                line = b"".join(reversed(fragments)).decode("utf-8", "replace").strip()
+                fragments.clear()
+                if line:
+                    lines.append(line)
+
+            while pos > 0 and len(lines) < n:
                 step = min(_TAIL_READ_CHUNK, pos)
                 pos -= step
                 await f.seek(pos)
-                data = await f.read(step) + data
-            text = data.decode("utf-8", "replace")
+                # CRLF yields one extra empty piece, which blank filtering ignores.
+                pieces = (await f.read(step)).replace(b"\r", b"\n").split(b"\n")
+                for part in reversed(pieces[1:]):
+                    finish_line(part)
+                    if len(lines) == n:
+                        break
+                if len(lines) < n:
+                    fragments.append(pieces[0])
+            if pos == 0 and len(lines) < n:
+                finish_line(b"")
 
-    # 旧实现用文本模式读取(universal newlines): \r\n 与仅 \r 结尾都算换行。
-    # 反向分块是二进制读, 这里显式还原该语义, 否则 CR-only 文件整段被当成
-    # 一行解析失败而返回 [](审查 N3)。
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    tail = lines[-n:]
     result: list[dict[str, Any]] = []
-    for line in tail:
+    for line in reversed(lines):
         try:
             result.append(json.loads(line))
         except json.JSONDecodeError:

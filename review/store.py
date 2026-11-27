@@ -88,8 +88,8 @@ class ReviewStore:
             self._conn.commit()
 
     def _db_stamp(self) -> tuple:
-        """review.db 与 -wal 的 (mtime_ns, size) 戳记 — 检测外部写入。"""
-        out = []
+        """连接 data_version + 文件戳记; 外部提交不依赖文件系统时钟精度。"""
+        out = [int(self._conn.execute("PRAGMA data_version").fetchone()[0])]
         for suffix in ("", "-wal"):
             try:
                 st = Path(str(self._path) + suffix).stat()
@@ -99,6 +99,8 @@ class ReviewStore:
         return tuple(out)
 
     def _build_statuses_locked(self) -> dict[str, dict[str, dict[str, Any]]]:
+        # 在 SELECT 前取戳记: SELECT 后的外部提交不能被标成已包含在本快照中。
+        stamp = self._db_stamp()
         rows = self._conn.execute(
             "SELECT session_key, fingerprint, status, reviewer, reviewed_at FROM reviewed_entries"
         ).fetchall()
@@ -114,7 +116,7 @@ class ReviewStore:
             c[0 if r["status"] == "normal" else 1] += 1
         self._statuses_cache = result
         self._counts_cache = {k: (v[0], v[1]) for k, v in counts.items()}
-        self._statuses_stamp = self._db_stamp()
+        self._statuses_stamp = stamp
         self._revision += 1
         return result
 
@@ -198,7 +200,18 @@ class ReviewStore:
         removed = removed or []
         if self._statuses_cache is None or (not updates and not removed):
             return
-        bucket = self._statuses_cache.setdefault(session_key, {})
+        stamp = self._db_stamp()
+        if stamp[0] != self._statuses_stamp[0]:
+            # 本地提交不改变 data_version; 外部曾写入时不能用局部补丁掩盖它。
+            self._build_statuses_locked()
+            return
+        # 写时复制: 锁外正在使用的旧 statuses/计数必须仍属于原 revision。
+        statuses = dict(self._statuses_cache)
+        bucket = dict(statuses.get(session_key, {}))
+        statuses[session_key] = bucket
+        self._statuses_cache = statuses
+        if self._counts_cache is not None:
+            self._counts_cache = dict(self._counts_cache)
         counts = None
         if self._counts_cache is not None:
             prev_counts = self._counts_cache.get(session_key, (0, 0))
@@ -216,7 +229,7 @@ class ReviewStore:
                 counts[0 if status == "normal" else 1] += 1
         if counts is not None and self._counts_cache is not None:
             self._counts_cache[session_key] = (counts[0], counts[1])
-        self._statuses_stamp = self._db_stamp()
+        self._statuses_stamp = stamp
         self._revision += 1
 
     def skip(self, session_key: str, reviewer: str, detail: str = "") -> None:
@@ -241,6 +254,14 @@ class ReviewStore:
         """
         with self._lock:
             return self._ensure_statuses_locked()
+
+    def statuses_snapshot(self) -> tuple[
+        dict[str, dict[str, dict[str, Any]]], dict[str, tuple[int, int]], int,
+    ]:
+        """同一锁内取得状态、计数及 revision; 返回的旧代数据不会被本地补丁改写。"""
+        with self._lock:
+            statuses = self._ensure_statuses_locked()
+            return statuses, dict(self._counts_cache or {}), self._revision
 
     def counts_by_session(self) -> dict[str, tuple[int, int]]:
         """{session_key: (normal 数, abnormal 数)} — 与 statuses_by_session 同一次构建。"""

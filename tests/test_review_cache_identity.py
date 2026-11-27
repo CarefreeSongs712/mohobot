@@ -334,7 +334,7 @@ def test_merged_group_cache_invalidated_on_equal_length_rewrite():
 
 
 def test_deleted_then_recreated_history_is_reparsed():
-    """history 文件删除后再重建(新 inode) 必须重新解析, 不能复用旧行。"""
+    """观察到删除即撤销旧索引; 重建是否复用 inode/时钟都不影响结果。"""
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)
         hist = tmp_path / "history" / "bot_001" / "private" / "10001.jsonl"
@@ -342,14 +342,19 @@ def test_deleted_then_recreated_history_is_reparsed():
         data = MohobotData(tmp_path)
         sk = session_key("bot_001", "private", "10001")
         assert [r["text"] for r in data.load_entries(sk)] == ["删除前内容"]
+        old_index = data._file_cache[str(hist)]
+        assert data.unreviewed_counts({}, revision=1)[sk] == 1
 
         hist.unlink()
         # 不存在 → load_entries 返回 None(兼容入口语义); 无论如何不得复用旧行
-        assert not data.load_entries(sk), "删除后不应再返回旧行"
+        assert data.load_entries(sk) is None, "删除后不应再返回旧行"
+        assert str(hist) not in data._file_cache
+        assert data._pending_cache is None
 
         _write_private(hist, [_user_msg(2, "重建后内容")])
         texts = [r["text"] for r in data.load_entries(sk) or []]
         assert texts == ["重建后内容"], texts
+        assert data._file_cache[str(hist)] is not old_index
 
 
 def test_append_after_anchor_guard_stays_incremental_and_visible():
