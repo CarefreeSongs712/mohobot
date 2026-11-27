@@ -976,7 +976,8 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - **密钥掩码 + 留空保留**：`GET` 时 `llm/anysearch/tts` 中含 `key|token|secret|password` 的字段返回 `********`；保存时提交空串或掩码则**保留原值**。
 - **路径安全**：所有 `bot_id` 路径参数过 `_safe_id`（`^[A-Za-z0-9_-]{1,128}$`）。
 - 备份/恢复/清理需再次输入账号密码；zip 恢复有 zip-slip 防护。
-- **在线一致性（issue #126）**：备份先在维护协议内（history 屏障冻结 + persona/context 维护锁）复制静态快照，再对快照压缩，不直接打包正在被 append 重写的 contexts；恢复先全量校验 contexts JSON/索引/引用、人设库与 SQLite 快照，校验失败返回 400 且不替换任何现有数据。`database` 范围用 SQLite backup API 做一致性快照。损坏备份（含索引引用但缺失的会话文件、非 JSON 列表、非法索引/引用）整包拒绝，不会静默补空文件。clear/reset 会推进会话 generation，使在途回复持有的旧 generation 回写失败；维护屏障冻结被取消时回滚 frozen 状态。
+- **在线一致性（issue #126）**：备份先在维护协议内（history 屏障冻结 + persona/context 维护锁）复制静态快照，再对快照压缩，不直接打包正在被 append 重写的 contexts；尚未完成首轮的默认私聊 `sess_main` 允许仅有索引，备份会在快照内将其缺失内容物化为 `[]`，不改写运行数据。其他已创建会话缺文件会使备份失败。恢复先全量校验 contexts JSON/索引/引用、人设库与 SQLite 快照，校验失败返回 400 且不替换任何现有数据。上传 ZIP 的索引引用缺成员、非 JSON 列表或非法索引/引用仍整包拒绝，不会静默补空文件。clear/reset 会推进会话 generation，使在途回复持有的旧 generation 回写失败；维护屏障冻结被取消时回滚 frozen 状态。
+- **恢复取消与补偿**：`database` 使用 SQLite backup API；一次解析的目标路径用于预备快照、恢复及补偿。请求首次取消会取消异步事务，所有 SQLite 工作线程均先结束，再执行文件、人设和数据库补偿；后续取消只等待收尾。维护互斥、persona/context 锁、history 冻结与上传临时目录保留至事务结束，补偿失败明确报错。原先不存在的数据库恢复失败后会移除本次创建的库及其日志文件；若缺库但已有 WAL/SHM/journal，则恢复前拒绝覆盖。此协议为单进程内的异常/取消补偿，不提供进程崩溃原子性，也不阻止其他进程写库，数据库恢复仍应安排低峰或停写窗口。
 - 审计：除登录外所有 POST/PUT/PATCH/DELETE 写 `data/audit/web_admin.jsonl`，敏感 key 递归打码。
 - 板块与端点（实际 11 个，docstring 里写「7 个」已过时）：
 
