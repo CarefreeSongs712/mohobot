@@ -80,9 +80,15 @@ async def onebot(tmp_path, *, nickname_gate=0, retcode=0):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("nickname_gate", [1, 2])
-@pytest.mark.parametrize("supervised", [False, True])
-async def test_late_proposal_cannot_revive_stopped_instance(tmp_path, nickname_gate, supervised):
+async def test_late_proposal_cannot_revive_stopped_instance(tmp_path):
+    for supervised in (False, True):
+        for nickname_gate in (1, 2):
+            case = tmp_path / f"proposal-{supervised}-{nickname_gate}"
+            case.mkdir()
+            await _late_proposal_case(case, nickname_gate, supervised)
+
+
+async def _late_proposal_case(tmp_path, nickname_gate, supervised):
     supervisor = TaskSupervisor() if supervised else None
     async with onebot(tmp_path, nickname_gate=nickname_gate) as (ws, bot_id, calls, entered, release):
         cls = load_plugin("wifepicker")
@@ -107,8 +113,14 @@ async def test_late_proposal_cannot_revive_stopped_instance(tmp_path, nickname_g
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retcode", ["0" * 5000, "9" * 5000, "+" + "0" * 5000])
-async def test_overlong_retcode_notifies_applicant_and_admin(tmp_path, retcode):
+async def test_overlong_retcode_notifies_applicant_and_admin(tmp_path):
+    for index, retcode in enumerate(("0" * 5000, "9" * 5000, "+" + "0" * 5000)):
+        case = tmp_path / f"retcode-{index}"
+        case.mkdir()
+        await _overlong_retcode_case(case, retcode)
+
+
+async def _overlong_retcode_case(tmp_path, retcode):
     async with onebot(tmp_path, retcode=retcode) as (ws, bot_id, calls, _, _release):
         cls = load_plugin("relationship")
         cls.inject_ws_server(ws)
@@ -170,8 +182,14 @@ def vcpedia_endpoint(failure):
         thread.join()
 
 
-@pytest.mark.parametrize("failure", ["503", "later503", "badjson", "apierror"])
-def test_vcpedia_real_http_failure_makes_cli_nonzero(tmp_path, failure):
+def test_vcpedia_real_http_failure_makes_cli_nonzero(tmp_path):
+    for failure in ("503", "later503", "badjson", "apierror"):
+        case = tmp_path / f"vcpedia-{failure}"
+        case.mkdir()
+        _vcpedia_failure_case(case, failure)
+
+
+def _vcpedia_failure_case(tmp_path, failure):
     with vcpedia_endpoint(failure) as base_url:
         (tmp_path / "config").mkdir()
         config = {"music_knowledge": {"song_database": {"db_folder": str(tmp_path / "songs"),
