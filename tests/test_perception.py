@@ -111,10 +111,12 @@ async def test_collect_perception():
 
     ps = PluginSystem(plugins_dir="plugins", data_dir=tempfile.mkdtemp())
     await ps.load_plugins()
-    # 只保留感知插件(其余插件无 on_perception, 不影响)
-    text = await ps.collect_perception("bot_001", make_group_event(2001, "hi"), {})
-    assert "发送时间" in text, "应收集到感知文本"
-    assert "农历" in text or "chinese" in text  # 感知内容
+    try:
+        text = await ps.collect_perception("bot_001", make_group_event(2001, "hi"), {})
+        assert "发送时间" in text, "应收集到感知文本"
+        assert "农历" in text or "chinese" in text  # 感知内容
+    finally:
+        await ps.shutdown_plugins()
     print("[+] collect_perception OK")
 
 
