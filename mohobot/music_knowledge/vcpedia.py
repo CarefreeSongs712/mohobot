@@ -920,14 +920,17 @@ def fetch_song_title_list(client: AnubisClient, base_url: str,
             params["cmcontinue"] = cmcontinue
         resp = client.get(api_url, params=params)
         if resp.status_code != 200:
-            logger.warning(f"VCPedia: api.php 返回 {resp.status_code}")
-            break
+            raise RuntimeError(f"VCPedia: api.php 返回 HTTP {resp.status_code}")
         try:
             data = resp.json()
         except Exception as e:
-            logger.warning(f"VCPedia: api.php JSON 解析失败: {e}")
-            break
-        members = (data.get("query") or {}).get("categorymembers") or []
+            raise RuntimeError(f"VCPedia: api.php JSON 解析失败: {e}") from e
+        if not isinstance(data, dict) or data.get("error"):
+            raise RuntimeError(f"VCPedia: api.php 返回错误: {data.get('error') if isinstance(data, dict) else '响应不是对象'}")
+        query = data.get("query")
+        members = query.get("categorymembers") if isinstance(query, dict) else None
+        if not isinstance(members, list):
+            raise RuntimeError("VCPedia: api.php 缺少 query.categorymembers")
         for member in members:
             title = (member.get("title") or "").strip()
             if title and title not in seen:
@@ -936,6 +939,8 @@ def fetch_song_title_list(client: AnubisClient, base_url: str,
         cmcontinue = (data.get("continue") or {}).get("cmcontinue", "")
         if not cmcontinue:
             break
+    if cmcontinue:
+        raise RuntimeError(f"VCPedia: 分类 {category!r} 超过分页上限 {max_pages}")
     return titles
 
 
@@ -958,7 +963,7 @@ def sync_vcpedia_new_songs(song_knowledge_config: Dict[str, Any]) -> Dict[str, A
 
     titles = fetcher_song_titles(fetcher, crawler_cfg)
     if not titles:
-        logger.warning("VCPedia: 未能获取歌曲列表(Anubis 挑战可能失败)")
+        logger.info("VCPedia: 分类枚举成功，歌曲列表为空")
         return {"added": [], "failed": [], "skipped": 0}
 
     added: List[str] = []

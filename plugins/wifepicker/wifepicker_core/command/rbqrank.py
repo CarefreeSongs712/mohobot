@@ -12,7 +12,7 @@ from loguru import logger
 
 from ..core import clean_rbq_stats
 from ..renderer import available, render_png
-from ..utils import build_user_map, get_group_member_list, is_allowed_group
+from ..utils import build_user_map, get_group_member_list
 
 
 async def cmd_rbq_ranking(plugin, bot_id: str, event, rest: str):

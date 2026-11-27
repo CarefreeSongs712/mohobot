@@ -74,6 +74,27 @@ class DatabaseService(
     def _bump_index_generation(self) -> None:
         self._index_generation += 1
 
+    async def _run_index_write(self, operation, *args, always_bump=False):
+        """持锁结清线程写入并推进语料代次，然后再传播调用方取消。"""
+        async with self._write_lock:
+            future = asyncio.create_task(asyncio.to_thread(operation, *args))
+            cancelled = False
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            try:
+                result = future.result()
+                if result or always_bump:
+                    self._bump_index_generation()
+            finally:
+                if cancelled:
+                    raise asyncio.CancelledError()
+            return result
+
     def _ensure_db_dir(self) -> None:
         """确保数据库目录存在。"""
         try:
@@ -586,11 +607,7 @@ class DatabaseService(
         clean_paths = [p for p in paths if isinstance(p, str) and p]
         if not clean_paths:
             return 0
-        async with self._write_lock:
-            deleted = await asyncio.to_thread(self._delete_paths_sync, clean_paths)
-        if deleted:
-            self._bump_index_generation()
-        return deleted
+        return await self._run_index_write(self._delete_paths_sync, clean_paths)
 
     def _delete_paths_sync(self, paths: list[str]) -> int:
         deleted = 0
@@ -612,11 +629,7 @@ class DatabaseService(
     async def update_path(self, path: str, updates: dict[str, Any]) -> bool:
         if not path or not updates:
             return False
-        async with self._write_lock:
-            updated = await asyncio.to_thread(self._update_path_sync, path, updates)
-        if updated:
-            self._bump_index_generation()
-        return updated
+        return await self._run_index_write(self._update_path_sync, path, updates)
 
     def _update_path_sync(self, path: str, updates: dict[str, Any]) -> bool:
         scalar_fields = self._EMOJI_SCALAR_COLUMNS
@@ -677,14 +690,9 @@ class DatabaseService(
     ) -> bool:
         if not old_path or not new_path or old_path == new_path:
             return False
-        async with self._write_lock:
-            moved = await asyncio.to_thread(
-                self._move_path_sync, old_path, new_path, category, updates or {}
-            )
-        if moved:
-            # 路径/元数据变化会影响 BM25 文档语料, 必须让缓存代次失效(#129)。
-            self._bump_index_generation()
-        return moved
+        return await self._run_index_write(
+            self._move_path_sync, old_path, new_path, category, updates or {}
+        )
 
     def _move_path_sync(
         self, old_path: str, new_path: str, category: str, updates: dict[str, Any]
@@ -776,15 +784,11 @@ class DatabaseService(
         if not emojis:
             return 0
 
-        async with self._write_lock:
-            try:
-                count = await asyncio.to_thread(self._insert_batch_sync, emojis)
-            except Exception as e:
-                logger.error(f"[DB] 批量插入失败: {e}")
-                return 0
-        if count:
-            self._bump_index_generation()
-        return count
+        try:
+            return await self._run_index_write(self._insert_batch_sync, emojis)
+        except Exception as e:
+            logger.error(f"[DB] 批量插入失败: {e}")
+            return 0
 
     def _insert_batch_sync(self, emojis: list[dict[str, Any]]) -> int:
         """同步批量插入。"""
@@ -888,12 +892,7 @@ class DatabaseService(
         删除已移交 MaintenanceService 通过孤儿扫描处理，
         避免并发 on_message 时误删其他消息刚入库的条目。
         """
-        async with self._write_lock:
-            changed = await asyncio.to_thread(self._sync_index_sync, idx)
-        if changed:
-            # 索引同步有新增/变更时同样推进代次, 避免 BM25 复用旧语料(#129)。
-            self._bump_index_generation()
-        return changed
+        return await self._run_index_write(self._sync_index_sync, idx)
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> list[str]:
         desired_index = {
@@ -985,13 +984,10 @@ class DatabaseService(
 
     async def clear_all(self) -> None:
         """清空所有数据。"""
-        async with self._write_lock:
-            try:
-                await asyncio.to_thread(self._clear_all_sync)
-            except Exception as e:
-                logger.error(f"[DB] 清空数据失败: {e}")
-                return
-        self._bump_index_generation()
+        try:
+            await self._run_index_write(self._clear_all_sync, always_bump=True)
+        except Exception as e:
+            logger.error(f"[DB] 清空数据失败: {e}")
 
     def _clear_all_sync(self) -> None:
         """同步清空所有数据。"""

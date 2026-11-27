@@ -150,6 +150,7 @@ class Plugin:
         # 后台任务(求婚超时提醒等): 优先交给 TaskSupervisor 按插件归属管理,
         # 无 supervisor 时本地持有引用, on_shutdown 统一取消(issue #155)。
         self._background_tasks: set[asyncio.Task] = set()
+        self._stopped = False
 
     def _spawn_task(self, coro, *, name: str, owner: str = "application"):
         """登记后台任务: 优先 TaskSupervisor(owner 归一为 plugin:wifepicker:*)。
@@ -158,6 +159,12 @@ class Plugin:
         不会再在插件停用后发送提醒。无 supervisor 的环境(单元测试/旧宿主)
         退回本地任务集合, 由 on_shutdown 取消。
         """
+        if self._stopped:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
         supervisor = self._task_supervisor
         if supervisor is not None:
             try:
@@ -213,6 +220,8 @@ class Plugin:
         logger.info("wifepicker 插件配置已热更新")
 
     async def on_shutdown(self) -> None:
+        # Set before the first await so in-flight handlers cannot revive timers.
+        self._stopped = True
         if self._maintenance_task is not None and not self._maintenance_task.done():
             self._maintenance_task.cancel()
             await asyncio.gather(self._maintenance_task, return_exceptions=True)
