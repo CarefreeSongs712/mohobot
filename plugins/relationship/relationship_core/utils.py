@@ -43,7 +43,10 @@ class ApiCallResult:
 
 def summarize_error(value: Any) -> str:
     """把错误信息压成单行纯文本摘要并限长(详细诊断留在日志里)。"""
-    text = str(value if value is not None else "")
+    try:
+        text = str(value if value is not None else "")
+    except (ValueError, OverflowError):
+        text = f"<{type(value).__name__}: 超出可显示范围>"
     text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
     if len(text) > ERROR_TEXT_LIMIT:
         text = text[: ERROR_TEXT_LIMIT - 1] + "…"
@@ -55,9 +58,15 @@ def _parse_retcode(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and _RETCODE_RE.fullmatch(value.strip()):
-        return int(value.strip())
+        return value if -(2**63) <= value < 2**63 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) <= 20 and _RETCODE_RE.fullmatch(text):
+            try:
+                parsed = int(text)
+            except ValueError:
+                return None
+            return parsed if -(2**63) <= parsed < 2**63 else None
     return None
 
 

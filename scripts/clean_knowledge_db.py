@@ -13,7 +13,8 @@
 - 备份使用 SQLite backup API 生成一致快照(不会因为未 checkpoint 的 WAL
   丢失已提交数据), 并对备份做 integrity_check + 行数校验;
 - 每次备份文件名带时间戳且不覆盖已有备份(同日重复运行各自留档);
-- --dry-run 完全只读, 只打印计划, 不备份不写入;
+- --dry-run 使用 SQL 只读连接, 不备份、不修改业务行；为读取已提交 WAL，
+  SQLite 仍可能在源目录创建 -wal/-shm 辅助文件，不保证目录零改动;
 - 实际写入前必须确认(--yes 或交互输入), 非交互环境缺 --yes 直接拒绝。
 
 用法:
@@ -91,7 +92,7 @@ def _confirm(prompt: str, assume_yes: bool) -> bool:
 
 
 def _compute_updates(db_path: Path, *, readonly: bool):
-    """读取全表并计算清洗结果。readonly=True 时用只读连接(dry-run 不落盘)。"""
+    """读取全表并计算清洗结果；只读连接仍可能创建 WAL 辅助文件。"""
     if readonly:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     else:
@@ -126,7 +127,7 @@ def _compute_updates(db_path: Path, *, readonly: bool):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="清理 knowledge_db.db 中的 wiki 冗余")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="knowledge_db.db 路径")
-    parser.add_argument("--dry-run", action="store_true", help="只打印计划, 不备份不写入")
+    parser.add_argument("--dry-run", action="store_true", help="SQL只读预览，不备份；SQLite可能创建-wal/-shm")
     parser.add_argument("--yes", action="store_true", help="跳过交互确认(非交互环境必需)")
     args = parser.parse_args(argv)
 
@@ -143,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             print("  ", uuid, field)
 
     if args.dry_run:
-        print("dry-run: 未备份、未写入任何数据")
+        print("dry-run: 未备份、未修改业务数据；SQLite读取WAL可能创建-wal/-shm辅助文件")
         return EXIT_OK
     if not updates:
         print("没有需要更新的行, 无需备份")

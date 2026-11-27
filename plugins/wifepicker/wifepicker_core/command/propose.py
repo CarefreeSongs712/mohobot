@@ -61,6 +61,8 @@ async def _member_name(plugin, bot_id: str, group_id: str, user_id: str) -> str:
 
 async def cmd_propose(plugin, bot_id: str, event, rest: str):
     """发起求婚(/求婚 @某人)。"""
+    if getattr(plugin, "_stopped", False):
+        return None
     group_id = get_group_id(event)
     if not group_id:
         return "求婚只能在群聊中进行哦~"
@@ -98,7 +100,11 @@ async def cmd_propose(plugin, bot_id: str, event, rest: str):
 
     now = time.time()
     target_name = await _member_name(plugin, bot_id, group_id, target_id)
+    if getattr(plugin, "_stopped", False):
+        return None
     proposer_name = await _member_name(plugin, bot_id, group_id, user_id)
+    if getattr(plugin, "_stopped", False):
+        return None
 
     pending[target_id] = {
         "proposer_id": user_id,

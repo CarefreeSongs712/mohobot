@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 import time
+from contextlib import asynccontextmanager
 from typing import Any
+from weakref import WeakValueDictionary
 
 from ..web.http import jsonify, request
 
@@ -19,6 +21,21 @@ from ..core.util.normalization import is_valid_origin_target, normalize_scope_mo
 from ..core.util.safe_io import safe_remove_file
 
 class PendingRoutes:
+    @asynccontextmanager
+    async def _pending_operation(self, db, pending_id: int):
+        # 锁由 DB 实例持有，多个 API 实例也不能恢复仍在执行的同一条审批。
+        # 弱引用仅回收无人持有的锁；执行者和等待者均持有强引用。
+        locks = getattr(db, "_pending_operation_locks", None)
+        if locks is None:
+            locks = WeakValueDictionary()
+            db._pending_operation_locks = locks
+        lock = locks.get(pending_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[pending_id] = lock
+        async with lock:
+            yield
+
     # ── Pending (待审核池) ────────────────────────────────────
 
     def _build_pending_item(self, row: dict[str, Any]) -> dict[str, Any] | None:
@@ -118,6 +135,7 @@ class PendingRoutes:
         if not marker_path:
             logger.error(f"写审核恢复标记失败 id={pending_id}: 未配置 cache_dir")
             return False
+        row = self._db.get_pending(pending_id) if self._db else None
         try:
             os.makedirs(os.path.dirname(marker_path), exist_ok=True)
             tmp_path = marker_path + ".tmp"
@@ -125,6 +143,7 @@ class PendingRoutes:
                 json.dump(
                     {
                         "pending_id": int(pending_id),
+                        "hash": str((row or {}).get("hash") or ""),
                         "src": src_path,
                         "cat": cat_path,
                         "created_at": int(time.time()),
@@ -214,38 +233,38 @@ class PendingRoutes:
         并发写入占用，此时文件与 DB 都保持原样，避免误删他人数据或让图库
         记录指向被移走的文件(issue #132 review)。返回 False 表示已跳过。
         """
-        skipped = False
         if inserted:
             try:
-                if hasattr(db, "delete_paths"):
-                    current_hash = ""
-                    if expected_hash and hasattr(db, "get_emoji"):
-                        emoji = db.get_emoji(cat_path)
-                        if emoji:
-                            current_hash = str(emoji.get("hash", "") or "")
-                    if not expected_hash or not current_hash or current_hash == expected_hash:
-                        await db.delete_paths([cat_path])
-                        await refresh_search_entry(self.plugin, cat_path)
-                    else:
-                        skipped = True
-                        logger.warning(
-                            f"审核回滚跳过 id={pending_id}: 图库记录哈希已变化, "
-                            "不删除记录也不移动文件"
-                        )
+                emoji = db.get_emoji(cat_path)
+                if emoji and (not expected_hash or str(emoji.get("hash") or "") != expected_hash):
+                    logger.warning(f"审核回滚冲突 id={pending_id}: 图库记录哈希已变化")
+                    return False
+                if emoji:
+                    await db.delete_paths([cat_path])
+                # 不能仅凭 delete 返回值判断；确认记录已不存在才允许移动文件。
+                if db.get_emoji(cat_path) is not None:
+                    return False
             except Exception as exc:
                 logger.warning(f"审核回滚删除图库记录失败 id={pending_id}: {exc}")
-        if skipped:
-            # 记录已不属于本次操作: 清掉恢复标记, 但文件/DB 保持不变。
-            self._clear_approve_marker(pending_id)
-            return False
+                return False
+            try:
+                await refresh_search_entry(self.plugin, cat_path)
+            except Exception as exc:
+                # 索引是可重建缓存，与持久 DB 删除分开处理。
+                logger.warning(f"审核回滚刷新索引失败 id={pending_id}: {exc}")
         try:
-            if cat_path and os.path.isfile(cat_path) and not os.path.exists(src_path):
+            if cat_path and os.path.exists(cat_path):
+                if os.path.exists(src_path):
+                    return False
                 parent = os.path.dirname(src_path)
                 if parent:
                     os.makedirs(parent, exist_ok=True)
                 await asyncio.to_thread(shutil.move, cat_path, src_path)
+            if not os.path.isfile(src_path):
+                return False
         except Exception as exc:
             logger.warning(f"审核回滚移动文件失败 id={pending_id}: {exc}")
+            return False
         self._clear_approve_marker(pending_id)
         return True
 
@@ -272,89 +291,90 @@ class PendingRoutes:
                 continue
         return ""
 
+    @staticmethod
+    def _file_hash(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _approval_identity(self, marker, row, pending_id):
+        src_path = str(marker.get("src") or "")
+        cat_path = str(marker.get("cat") or "")
+        expected_hash = str(row.get("hash") or "")
+        if (marker.get("pending_id") != pending_id or not src_path or not cat_path
+                or os.path.abspath(src_path) != os.path.abspath(str(row.get("path") or ""))
+                or not expected_hash
+                or (marker.get("hash") and marker["hash"] != expected_hash)):
+            raise RuntimeError("审核恢复冲突: 标记与 pending 身份不一致")
+        for path in (src_path, cat_path):
+            if os.path.exists(path) and (
+                not os.path.isfile(path) or self._file_hash(path) != expected_hash
+            ):
+                raise RuntimeError("审核恢复冲突: 文件内容哈希不一致")
+        return src_path, cat_path, expected_hash
+
     async def _recover_interrupted_approve(self, db, pending_id: int) -> bool:
-        """处理上次审核中断留下的恢复标记。返回 True 表示已补完提交。"""
+        async with self._pending_operation(db, pending_id):
+            result, cancelled, error = await self._run_step(self._recover_approve_locked(db, pending_id))
+            if error:
+                raise error
+            if cancelled:
+                raise asyncio.CancelledError()
+            return result
+
+    async def _recover_approve_locked(self, db, pending_id: int) -> bool:
+        """调用方持有同 id 锁；冲突/失败保留标记与 pending 供重试。"""
         marker = self._read_approve_marker(pending_id)
         if not marker:
             return False
-        src_path = str(marker.get("src") or "")
-        cat_path = str(marker.get("cat") or "")
-        row = db.get_pending(pending_id) if hasattr(db, "get_pending") else None
+        row = db.get_pending(pending_id)
         if row is None:
-            # pending 行已删，说明提交已完成，只需清理标记
             self._clear_approve_marker(pending_id)
             return False
-
-        emoji = None
-        if cat_path and hasattr(db, "get_emoji"):
-            try:
-                emoji = db.get_emoji(cat_path)
-            except Exception:
-                emoji = None
+        src_path, cat_path, expected_hash = self._approval_identity(marker, row, pending_id)
+        emoji = db.get_emoji(cat_path)
         if emoji is not None:
-            # DB 已写入、pending 行未删：补齐提交
+            if (str(emoji.get("hash") or "") != expected_hash
+                    or not os.path.isfile(cat_path) or os.path.exists(src_path)):
+                raise RuntimeError("审核恢复冲突: 图库记录不属于本次审批")
+            if hasattr(db, "promote_source_pending_path"):
+                await db.promote_source_pending_path(src_path, cat_path)
+            db.delete_pending(pending_id)
+            self._clear_approve_marker(pending_id)
             try:
-                if hasattr(db, "promote_source_pending_path") and src_path and cat_path:
-                    await db.promote_source_pending_path(src_path, cat_path)
-                db.delete_pending(pending_id)
                 await refresh_search_entry(self.plugin, cat_path, emoji)
             except Exception as exc:
-                logger.warning(f"恢复审核提交失败 id={pending_id}: {exc}")
-                return False
-            self._clear_approve_marker(pending_id)
+                logger.warning(f"恢复审核刷新检索索引失败 id={pending_id}: {exc}")
             return True
-
-        # DB 未提交：文件可能已被移到分类目录，移回 pending 后走正常审核
-        if src_path and cat_path and os.path.isfile(cat_path) and not os.path.exists(src_path):
-            try:
-                parent = os.path.dirname(src_path)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-                await asyncio.to_thread(shutil.move, cat_path, src_path)
-            except Exception as exc:
-                logger.warning(f"恢复审核文件失败 id={pending_id}: {exc}")
-        self._clear_approve_marker(pending_id)
+        if not await self._rollback_approval(
+            db, pending_id, src_path, cat_path, inserted=False, expected_hash=expected_hash,
+        ):
+            raise RuntimeError("审核恢复失败: 文件未能安全回到 pending")
         return False
 
     async def _recover_interrupted_reject(self, db, pending_id: int) -> None:
-        """拒绝前的补偿：上一次审核可能已把文件/记录写进图库，按拒绝语义清掉。"""
+        async with self._pending_operation(db, pending_id):
+            _, cancelled, error = await self._run_step(self._recover_reject_locked(db, pending_id))
+            if error:
+                raise error
+            if cancelled:
+                raise asyncio.CancelledError()
+
+    async def _recover_reject_locked(self, db, pending_id: int) -> None:
         marker = self._read_approve_marker(pending_id)
         if not marker:
             return
-        cat_path = str(marker.get("cat") or "")
-        row = db.get_pending(pending_id) if hasattr(db, "get_pending") else None
-        if hasattr(db, "get_pending") and row is None:
-            # pending 行已删除说明上次审核已提交，不能再按"拒绝"删除图库记录。
-            logger.warning(f"拒绝恢复跳过 id={pending_id}: pending 行已不存在(审核已提交)")
+        row = db.get_pending(pending_id)
+        if row is None:
             self._clear_approve_marker(pending_id)
             return
-        expected_hash = str((row or {}).get("hash", "") or "")
-        if cat_path and os.path.isfile(cat_path):
-            current_hash = ""
-            if hasattr(db, "get_emoji"):
-                try:
-                    emoji = db.get_emoji(cat_path)
-                except Exception:
-                    emoji = None
-                if emoji:
-                    current_hash = str(emoji.get("hash", "") or "")
-            if expected_hash and current_hash and current_hash != expected_hash:
-                logger.error(
-                    f"拒绝恢复跳过 id={pending_id}: 图库记录哈希不匹配, 不删除他人数据"
-                )
-                self._clear_approve_marker(pending_id)
-                return
-            try:
-                if hasattr(db, "delete_paths"):
-                    await db.delete_paths([cat_path])
-                await refresh_search_entry(self.plugin, cat_path)
-            except Exception as exc:
-                logger.warning(f"拒绝恢复删除图库记录失败 id={pending_id}: {exc}")
-            try:
-                await safe_remove_file(cat_path)
-            except Exception as exc:
-                logger.warning(f"拒绝恢复删除文件失败 id={pending_id}: {exc}")
-        self._clear_approve_marker(pending_id)
+        src_path, cat_path, expected_hash = self._approval_identity(marker, row, pending_id)
+        if not await self._rollback_approval(
+            db, pending_id, src_path, cat_path, inserted=True, expected_hash=expected_hash,
+        ):
+            raise RuntimeError("拒绝恢复失败: 保留标记与文件以便重试")
 
     async def _approve_one(self, db, pending_id: int) -> tuple[bool, str]:
         """审核通过单条：pending 文件 → categories/，写 emoji+tag+scene，删 pending 行。
@@ -365,7 +385,21 @@ class PendingRoutes:
         - 提交点 = 删除 pending 行；提交后 promote/索引失败只告警，不再回滚；
         - 空文件按内容哈希找回孤儿文件，找不到才清理 pending 行。
         """
-        if await self._recover_interrupted_approve(db, pending_id):
+        async with self._pending_operation(db, pending_id):
+            try:
+                return await self._approve_locked(db, pending_id)
+            except Exception as exc:
+                return False, str(exc)
+
+    async def _approve_locked(self, db, pending_id: int) -> tuple[bool, str]:
+        recovered, cancelled, error = await self._run_step(
+            self._recover_approve_locked(db, pending_id)
+        )
+        if error:
+            raise error
+        if cancelled:
+            raise asyncio.CancelledError()
+        if recovered:
             return True, ""
 
         row = db.get_pending(pending_id)
@@ -382,7 +416,13 @@ class PendingRoutes:
                     parent = os.path.dirname(src_path)
                     if parent:
                         os.makedirs(parent, exist_ok=True)
-                    await asyncio.to_thread(shutil.move, orphan, src_path)
+                    _, cancelled, error = await self._run_step(
+                        asyncio.to_thread(shutil.move, orphan, src_path)
+                    )
+                    if error:
+                        raise error
+                    if cancelled:
+                        raise asyncio.CancelledError()
                     logger.warning(f"审核通过从分类目录找回孤儿文件 id={pending_id}: {orphan}")
                 except Exception as exc:
                     logger.warning(f"找回孤儿文件失败 id={pending_id}: {exc}")
@@ -550,40 +590,38 @@ class PendingRoutes:
             if not db:
                 return jsonify({"success": False, "error": "db 不可用"})
 
-            # 拒绝前先处理上次审核中断的恢复标记，避免残留图库记录/分类文件
-            rows: list[dict[str, Any]] = []
-            for pending_id in ids:
-                if hasattr(db, "get_pending"):
-                    row = db.get_pending(pending_id)
-                    if row:
-                        rows.append(row)
-                await self._recover_interrupted_reject(db, pending_id)
-
-            removed_rows = db.delete_pending_batch(ids)
-            if not rows:
-                rows = removed_rows
             deleted = 0
             blacklisted = 0
-            for r in rows:
-                p = str(r.get("path", "") or "")
-                h = str(r.get("hash", "") or "")
-                if p:
-                    try:
-                        if await safe_remove_file(p):
-                            deleted += 1
-                    except Exception as e:
-                        logger.warning(f"拒绝时删除文件失败 {p}: {e}")
-                if blacklist and h:
-                    if await add_blacklist_hash(self.plugin, h):
-                        blacklisted += 1
-                    else:
-                        logger.warning(f"拉黑失败 {h}")
+            for pending_id in ids:
+                async with self._pending_operation(db, pending_id):
+                    result, cancelled, error = await self._run_step(
+                        self._reject_locked(db, pending_id, blacklist)
+                    )
+                    if error:
+                        raise error
+                    if cancelled:
+                        raise asyncio.CancelledError()
+                    deleted += result[0]
+                    blacklisted += result[1]
             return jsonify(
                 {"success": True, "deleted": deleted, "blacklisted": blacklisted}
             )
         except Exception as e:
             logger.error(f"审核拒绝失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
+
+    async def _reject_locked(self, db, pending_id: int, blacklist: bool):
+        await self._recover_reject_locked(db, pending_id)
+        rows = db.delete_pending_batch([pending_id])
+        deleted = blacklisted = 0
+        for row in rows:
+            path = str(row.get("path") or "")
+            if path and await safe_remove_file(path):
+                deleted += 1
+            hash_val = str(row.get("hash") or "")
+            if blacklist and hash_val and await add_blacklist_hash(self.plugin, hash_val):
+                blacklisted += 1
+        return deleted, blacklisted
 
     async def handle_pending_update(self):
         """POST /pending/update —— 修改一条 pending 的元数据（分类/描述/标签/场景/作用域）。"""
@@ -600,74 +638,79 @@ class PendingRoutes:
             if not db or not hasattr(db, "update_pending"):
                 return jsonify({"success": False, "error": "db 不可用"})
 
-            row = db.get_pending(pending_id) if hasattr(db, "get_pending") else None
-            if hasattr(db, "get_pending") and row is None:
-                return jsonify({"success": False, "error": "pending 不存在"})
+            async with self._pending_operation(db, pending_id):
+                row = db.get_pending(pending_id) if hasattr(db, "get_pending") else None
+                if hasattr(db, "get_pending") and row is None:
+                    return jsonify({"success": False, "error": "pending 不存在"})
 
-            # 字段白名单 + 类型归一化（与 update_pending 内部白名单一致）
-            fields: dict[str, Any] = {}
-            if "category" in data:
-                category = str(data.get("category") or "").strip()
-                if category and category in (self._cfg.categories or []):
-                    fields["category"] = category
-                elif category:
-                    return jsonify(
-                        {"success": False, "error": f"分类无效: {category!r}"}
+                # 字段白名单 + 类型归一化（与 update_pending 内部白名单一致）
+                fields: dict[str, Any] = {}
+                if "category" in data:
+                    category = str(data.get("category") or "").strip()
+                    if category and category in (self._cfg.categories or []):
+                        fields["category"] = category
+                    elif category:
+                        return jsonify(
+                            {"success": False, "error": f"分类无效: {category!r}"}
+                        )
+                if "desc" in data:
+                    fields["desc"] = str(data.get("desc") or "").strip()
+                if "scope_mode" in data:
+                    fields["scope_mode"] = str(data.get("scope_mode") or "public").strip()
+                if "tags" in data:
+                    tags_raw = data.get("tags")
+                    if isinstance(tags_raw, list):
+                        fields["tags"] = [
+                            str(t).strip() for t in tags_raw if str(t or "").strip()
+                        ]
+                    else:
+                        fields["tags"] = [
+                            t.strip()
+                            for t in str(tags_raw or "").split(",")
+                            if t.strip()
+                        ]
+                if "scenes" in data:
+                    scenes_raw = data.get("scenes")
+                    if isinstance(scenes_raw, list):
+                        fields["scenes"] = [
+                            str(s).strip() for s in scenes_raw if str(s or "").strip()
+                        ]
+                    else:
+                        fields["scenes"] = [
+                            s.strip()
+                            for s in str(scenes_raw or "").split(",")
+                            if s.strip()
+                        ]
+                if "character" in data:
+                    character = self._normalize_character_key(str(data.get("character") or ""))
+                    if character and character not in set(self._cfg.get_characters()):
+                        return jsonify({"success": False, "error": f"角色无效: {character}"})
+                    fields["character"] = character
+
+                if not fields:
+                    return jsonify({"success": False, "error": "没有可更新字段"})
+
+                # local 作用域必须有有效来源（issue #132）：无来源的 local 会对无关群可见
+                if row is not None:
+                    effective_scope = normalize_scope_mode(
+                        fields.get("scope_mode", row.get("scope_mode"))
                     )
-            if "desc" in data:
-                fields["desc"] = str(data.get("desc") or "").strip()
-            if "scope_mode" in data:
-                fields["scope_mode"] = str(data.get("scope_mode") or "public").strip()
-            if "tags" in data:
-                tags_raw = data.get("tags")
-                if isinstance(tags_raw, list):
-                    fields["tags"] = [
-                        str(t).strip() for t in tags_raw if str(t or "").strip()
-                    ]
-                else:
-                    fields["tags"] = [
-                        t.strip()
-                        for t in str(tags_raw or "").split(",")
-                        if t.strip()
-                    ]
-            if "scenes" in data:
-                scenes_raw = data.get("scenes")
-                if isinstance(scenes_raw, list):
-                    fields["scenes"] = [
-                        str(s).strip() for s in scenes_raw if str(s or "").strip()
-                    ]
-                else:
-                    fields["scenes"] = [
-                        s.strip()
-                        for s in str(scenes_raw or "").split(",")
-                        if s.strip()
-                    ]
-            if "character" in data:
-                character = self._normalize_character_key(str(data.get("character") or ""))
-                if character and character not in set(self._cfg.get_characters()):
-                    return jsonify({"success": False, "error": f"角色无效: {character}"})
-                fields["character"] = character
+                    if effective_scope == "local" and not is_valid_origin_target(
+                        row.get("origin_target")
+                    ):
+                        return jsonify({"success": False, "error": LOCAL_SCOPE_ORIGIN_ERROR})
 
-            if not fields:
-                return jsonify({"success": False, "error": "没有可更新字段"})
+                updated, cancelled, error = await self._run_step(db.update_pending(pending_id, fields))
+                if error:
+                    raise error
+                if cancelled:
+                    raise asyncio.CancelledError()
+                if not updated:
+                    return jsonify(
+                        {"success": False, "error": "pending 不存在"}
+                    )
 
-            # local 作用域必须有有效来源（issue #132）：无来源的 local 会对无关群可见
-            if row is not None:
-                effective_scope = normalize_scope_mode(
-                    fields.get("scope_mode", row.get("scope_mode"))
-                )
-                if effective_scope == "local" and not is_valid_origin_target(
-                    row.get("origin_target")
-                ):
-                    return jsonify({"success": False, "error": LOCAL_SCOPE_ORIGIN_ERROR})
-
-            updated = await db.update_pending(pending_id, fields)
-            if not updated:
-                return jsonify(
-                    {"success": False, "error": "pending 不存在"}
-                )
-
-            return jsonify({"success": True, "item": self._build_pending_item(updated)})
+                return jsonify({"success": True, "item": self._build_pending_item(updated)})
         except Exception as e:
             logger.error(f"待审核更新失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})

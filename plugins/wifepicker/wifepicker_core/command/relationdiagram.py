@@ -5,7 +5,6 @@ Playwright 渲染 HTML→PNG(vis-network), 未安装浏览器/渲染失败时降
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 

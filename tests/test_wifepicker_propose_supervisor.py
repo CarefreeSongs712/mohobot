@@ -139,7 +139,10 @@ def _with_propose_seconds(value):
 async def test_propose_timer_registered_with_supervisor():
     supervisor = TaskSupervisor()
     with tempfile.TemporaryDirectory() as td:
-        plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
+        plugin = _make_plugin(td, _PluginTaskSupervisor(
+            supervisor, "plugin:wifepicker",
+            admission_closed=lambda: False, in_hook=lambda: False,
+        ))
         handled, reply = await plugin.on_message(BOT, _propose_event(), {})
         assert handled and "发起了求婚" in reply, reply
 
@@ -161,7 +164,10 @@ async def test_propose_timer_registered_with_supervisor():
 async def test_disable_cancels_timer_and_does_not_send():
     """PluginSystem 禁用/卸载时按 owner 前缀取消, 计时器不得再发提醒。"""
     supervisor = TaskSupervisor()
-    wrapped = _PluginTaskSupervisor(supervisor, "wifepicker")
+    wrapped = _PluginTaskSupervisor(
+        supervisor, "plugin:wifepicker",
+        admission_closed=lambda: False, in_hook=lambda: False,
+    )
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(td, wrapped)
         await plugin.on_message(BOT, _propose_event(), {})
@@ -197,7 +203,10 @@ async def test_spawn_task_when_supervisor_stopping_is_safe():
     supervisor = TaskSupervisor()
     await supervisor.shutdown()  # stopping=True
     with tempfile.TemporaryDirectory() as td:
-        plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
+        plugin = _make_plugin(td, _PluginTaskSupervisor(
+            supervisor, "plugin:wifepicker",
+            admission_closed=lambda: False, in_hook=lambda: False,
+        ))
         handled, reply = await plugin.on_message(BOT, _propose_event(), {})
         assert handled, reply
         # 任务无法登记时不能告诉用户"求婚已发起", 也不能留下待处理请求。
@@ -215,7 +224,10 @@ async def test_propose_agree_clears_pending_before_timer_fires():
     """同意后计时器到点不得再发超时提醒(请求已清除)。"""
     supervisor = TaskSupervisor()
     with tempfile.TemporaryDirectory() as td:
-        plugin = _make_plugin(td, _PluginTaskSupervisor(supervisor, "wifepicker"))
+        plugin = _make_plugin(td, _PluginTaskSupervisor(
+            supervisor, "plugin:wifepicker",
+            admission_closed=lambda: False, in_hook=lambda: False,
+        ))
         await plugin.on_message(BOT, _propose_event(), {})
         assert plugin._propose_requests.get(GROUP)
 
