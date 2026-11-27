@@ -231,12 +231,12 @@ if __name__ == "__main__":
 | 4 | `LLMService`；把 `summarize_context` 注入 ContextManager + `set_trim_config(...)` |
 | 4b | 情感系统 `EmotionManager`（`emotion.enabled` 为真才建，失败降级） |
 | 4c | `ImageCache`；TTS `TTSService`（`tts.enabled` + `base_url`，失败降级） |
-| 5 | `PluginSystem` + 注入点设置 → `load_plugins()` |
+| 5 | 创建 `PluginSystem`，准备管理员配置、任务监督器、歌曲匹配器和可选 Anysearch 客户端；此时不激活插件 |
 | 6 | `DatabaseManager`（`database.enabled`）→ `MessageHandler(...)` |
 | 7 | 拦截器：`BanStore`/`BanInterceptor`、`CommandHandler`、`KeywordFilter` |
-| 8 | `WSServer` → 回填循环引用（`message_handler._ws`、`command_handler._ws`） |
-| 8b | TTS 注入 ws + `start()`；插件 `set_runtime_refs(ws_server=...)` + `apply_injections()` |
-| 9 | `ws_server.set_event_callback(message_handler.handle_event)` → `ws_server.start()` |
+| 8 | `WSServer` → 回填循环引用（`message_handler._ws`、`command_handler._ws`）；若启用 TTS，注入 WS 并启动 TTS；最后连接入站回调 |
+| 8b | `PluginSystem.set_runtime_refs(...)` → `load_plugins()`；先注入，再调用 `on_startup` |
+| 9 | `ws_server.start()`，此时才开始接收入站事件 |
 | 10 | `WebPanel` 创建 + 作为受监管任务启动 |
 | 11 | 上下文周期压缩任务 `context-sweep` |
 | 12 | `_maybe_start_review_panel()` 拉起审核面板独立进程 |
@@ -528,12 +528,12 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 ### 6.1 形态与加载
 
 - **单文件插件**：`plugins/xxx.py` → 插件名 `xxx`。
-- **目录插件**：`plugins/xxx/main.py` → 插件名 `xxx`（目录里**必须有 `main.py`**，否则整个目录被跳过）。
-- 跳过规则：以 `_` 开头、`__pycache__`、没有 `main.py` 的目录。
+- **目录插件**：默认入口 `plugins/xxx/main.py`；有清单时可指定相对于包根的入口（如 `src/worker.py`），插件名取清单 `name`。可选的 `_conf_schema.json` 放包根。外置插件另见[插件 API 与清单](PLUGIN-API.md)。
+- 跳过规则：以 `_` 或 `.` 开头的目录、没有所选入口文件的目录。
   > 现状：`plugins/feed/` 是只剩 `__pycache__` 的空目录（已删插件的残留），加载器会静默跳过。
-- 导入方式：`importlib.util.spec_from_file_location(f"mohobot_plugin_{name}", ...)`，**不注册进 `sys.modules`**；类必须是该模块内定义的、字面名为 `Plugin` 的类。
-- 目录插件会把自己的目录插进 `sys.path`，所以 `main.py` 里可以 `import xxx_core`（wifepicker / relationship / qzone 都这样组织）。
-- **热重载**：`reload_plugins()` = `shutdown_plugins()` + 清空 + 重新 `load_plugins()`（内含 `apply_injections` / `startup_plugins` / `start_tick_tasks`）。**没有文件监听 watchdog**，由面板按钮或 `set_enabled` 触发。
+- 导入方式：入口以 `mohobot_plugin_{name}` 载入 `sys.modules`；类必须是该入口模块内定义的、字面名为 `Plugin` 的类。
+- 目录插件的导入根是包根，即使入口在子目录，也可用根相对导入或现有的 `import xxx_core` 形式（wifepicker / relationship / qzone 都这样组织）。
+- **热重载**：`reload_plugins()` 退役旧实例后重新扫描；`reload_plugin(name)` 只针对指定插件。冷启动和热重载都先注入，再运行 `on_startup`；成功的实例才开始接收事件和运行 tick。**没有文件监听 watchdog**，由面板操作触发。
 - **启停状态**：`data/plugins_state.json`，格式 `{plugin_name: {"enabled": bool}}`，缺省为启用。
 
 ### 6.2 钩子契约全表
