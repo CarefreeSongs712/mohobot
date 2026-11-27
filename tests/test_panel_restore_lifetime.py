@@ -1,4 +1,3 @@
-"""Real SQLite/filesystem cancellation and empty-session restore regressions."""
 import asyncio
 import io
 import json
