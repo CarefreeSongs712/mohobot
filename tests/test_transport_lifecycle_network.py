@@ -1,5 +1,3 @@
-"""Transport regressions using temporary data, real HTTP and WebSocket sockets."""
-
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
