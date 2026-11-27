@@ -1,5 +1,3 @@
-"""Knowledge provider ownership with real clients, SQLite and loopback HTTP."""
-
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
