@@ -1,5 +1,3 @@
-"""Small reversible state helpers usable by pytest and the legacy runner."""
-
 from contextlib import ExitStack, contextmanager
 
 _MISSING = object()
