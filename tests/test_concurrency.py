@@ -9,7 +9,6 @@
 
 import asyncio
 import json
-import random
 import sys
 import tempfile
 from pathlib import Path
@@ -83,6 +82,7 @@ async def test_relationship_config_concurrent() -> None:
     saved = json.loads((Path(tmp) / "plugins_config" / "relationship.json").read_text(encoding="utf-8"))
     extra = saved.get("manage_users", [])
     assert len(extra) == 6, f"并发添加审批员丢失: {extra}"
+    await ps.shutdown_plugins()
     print("[2] 关系插件配置并发修改 OK")
 
 
@@ -199,6 +199,7 @@ async def test_plugin_config_vs_persist_concurrent() -> None:
     # 存档仍是合法 JSON 且不丢失黑名单
     saved = json.loads((Path(tmp) / "plugins_config" / "relationship.json").read_text(encoding="utf-8"))
     assert isinstance(saved, dict)
+    await ps.shutdown_plugins()
     print("[4] 面板保存 vs 插件 _persist 并发 OK")
 
 

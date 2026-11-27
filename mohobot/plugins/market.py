@@ -44,6 +44,8 @@ class MarketEntry:
     tags: tuple[str, ...] = field(default_factory=tuple)
     updated_at: str = ""
     source_id: str = ""
+    source_url: str = ""
+    source_generation: str = ""
 
     @property
     def plugin_id(self) -> str:

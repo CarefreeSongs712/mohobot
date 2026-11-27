@@ -9,8 +9,8 @@
     /sync-songs status          — 查看各来源上次同步时间与结果
 
 定时: 插件声明 interval_sec + on_tick, 框架每轮重读该属性(配置热生效);
-到达 `sync.interval_hours` 且不在静默时段才真正执行。同步任务注册进
-TaskSupervisor(owner="plugins"), 插件重载/关闭时会被取消。
+到达 `sync.interval_hours` 且不在静默时段才真正执行。插件重载或关闭会取消
+受监管的结果等待任务，已提交的同步工作继续持有库占用，直到线程完成。
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from typing import Any
 
 from loguru import logger
 
+from mohobot.music_knowledge.sync_worker import SyncReservation, try_reserve
+
 TRIGGERS = {"/sync-songs", "/同步歌曲"}
 _SOURCE_NAMES = ("vcpedia", "vocawiki", "moegirl")
 _MODE_ALIASES = {
@@ -29,8 +31,7 @@ _MODE_ALIASES = {
     "refresh": "full_refresh", "full_refresh": "full_refresh", "全量": "full_refresh",
 }
 
-# 同步任务串行化: 并发触发 /sync-songs 时避免两个线程同时写知识库 SQLite
-_sync_lock = asyncio.Lock()
+_SYNC_BUSY = "⏳ 已有同步任务在运行, 请稍后再试"
 
 
 class Plugin:
@@ -70,6 +71,19 @@ class Plugin:
 
     def __init__(self) -> None:
         self.plugin_config: dict = {}
+        self._standalone_tasks: set[asyncio.Task] = set()
+        self._closed = False
+
+    def on_startup(self) -> None:
+        self._closed = False
+
+    def on_shutdown(self) -> None:
+        self._closed = True
+        for task in self._standalone_tasks:
+            task.cancel()
+
+    def _stopping(self) -> bool:
+        return self._closed or bool(getattr(self._task_supervisor, "stopping", False))
 
     # ── 配置 ────────────────────────────────────────────────
 
@@ -118,20 +132,28 @@ class Plugin:
 
     async def on_tick(self) -> None:
         """周期检查是否到达同步时间。"""
+        if self._stopping():
+            return
         sync = self._sync_cfg()
         if not sync.get("enabled", False):
-            return
-        hours = float(sync.get("interval_hours", 24) or 24)
-        if not self._due(hours):
             return
         if not self._within_window(sync):
             logger.debug("歌曲定时同步: 当前不在允许时段, 跳过")
             return
-        if _sync_lock.locked():
+        reservation = try_reserve()
+        if reservation is None:
             logger.debug("歌曲定时同步: 已有任务运行, 跳过")
             return
-        self._spawn_sync(mode=sync.get("mode") or "fill_missing", limit=None)
-        logger.info("歌曲定时同步已启动")
+        scheduled = False
+        try:
+            hours = float(sync.get("interval_hours", 24) or 24)
+            if self._due(hours):
+                self._spawn_sync(reservation, mode=sync.get("mode") or "fill_missing", limit=None)
+                scheduled = True
+                logger.info("歌曲定时同步已启动")
+        finally:
+            if not scheduled:
+                reservation.release_if_unsubmitted()
 
     def _due(self, hours: float) -> bool:
         """距上次成功同步是否已超过 interval_hours。"""
@@ -176,7 +198,7 @@ class Plugin:
     async def on_message(self, bot_id: str, event: Any, raw_event: dict[str, Any]):
         text = self._text(event)
         first_word = text.split()[0] if text else ""
-        if first_word not in TRIGGERS:
+        if first_word not in TRIGGERS or self._stopping():
             return (False, None)
 
         if not self._is_admin(event):
@@ -184,7 +206,14 @@ class Plugin:
 
         args = text.split()[1:]
         if args and args[0].lower() in ("status", "状态"):
-            return (True, self._status_text())
+            # Status can initialize or rebind the same database pool as the worker.
+            reservation = try_reserve()
+            if reservation is None:
+                return (True, _SYNC_BUSY)
+            try:
+                return (True, self._status_text())
+            finally:
+                reservation.release_if_unsubmitted()
 
         mode = "fill_missing"
         only_source = ""
@@ -201,56 +230,64 @@ class Plugin:
                     f"[new|fill|refresh|status|{'|'.join(_SOURCE_NAMES)}]",
                 )
 
-        if _sync_lock.locked():
-            return (True, "⏳ 已有同步任务在运行, 请稍后再试")
+        reservation = try_reserve()
+        if reservation is None:
+            return (True, _SYNC_BUSY)
 
         self._spawn_sync(
-            mode=mode, limit=None, only_source=only_source, notify=(bot_id, event),
+            reservation, mode=mode, limit=None, only_source=only_source, notify=(bot_id, event),
         )
         scope = only_source or "全部来源"
         return (True, f"🔄 已开始同步 {scope}({mode}), 完成后会通知你~")
 
-    def _spawn_sync(self, *, mode: str, limit: int | None, only_source: str = "",
-                    notify: tuple[str, Any] | None = None) -> None:
-        coro = self._run_sync(mode, limit, only_source, notify)
-        if self._task_supervisor is not None:
-            self._task_supervisor.create_task(coro, name="song-sync", owner="plugins")
-        else:
-            asyncio.create_task(coro)
-
-    async def _run_sync(self, mode: str, limit: int | None, only_source: str,
-                        notify: tuple[str, Any] | None) -> None:
-        """后台同步(阻塞网络操作放线程池), 完成后可选通知。"""
-        reply = ""
+    def _spawn_sync(self, reservation: SyncReservation, *, mode: str, limit: int | None,
+                    only_source: str = "", notify: tuple[str, Any] | None = None) -> None:
+        coro = self._run_sync(reservation, mode, limit, only_source, notify)
         try:
-            async with _sync_lock:
-                from mohobot.music_knowledge.sync import (
-                    build_adapters, set_db_location, sync_all,
-                )
+            if self._task_supervisor is not None:
+                task = self._task_supervisor.create_task(coro, name="song-sync", owner="plugins")
+            else:
+                task = asyncio.create_task(coro, name="song-sync")
+                self._standalone_tasks.add(task)
+                task.add_done_callback(self._standalone_tasks.discard)
+        except BaseException:
+            coro.close()
+            reservation.release_if_unsubmitted()
+            raise
+        # A task cancelled before its first step never enters _run_sync's finally.
+        task.add_done_callback(lambda _: reservation.release_if_unsubmitted())
 
-                cfg = self._global_config()
-                music_cfg = (cfg.music_knowledge if cfg else None) or {}
-                db_cfg = music_cfg.get("song_database") or {}
-                if db_cfg.get("db_folder") and db_cfg.get("db_file"):
-                    # 同步与匹配器必须指向同一个库文件
-                    set_db_location(str(db_cfg["db_folder"]), str(db_cfg["db_file"]))
-                adapters = build_adapters(music_cfg)
-                if only_source:
-                    adapters = [a for a in adapters if a.name == only_source]
-                if not adapters:
-                    suffix = f"({only_source})" if only_source else ""
-                    reply = f"❌ 没有可用的歌曲来源{suffix}"
-                else:
-                    report = await asyncio.to_thread(
-                        sync_all, adapters, mode=mode, limit=limit,
-                    )
-                    reply = report.summary_text()
-                    self._reload_matcher()
+    async def _run_sync(self, reservation: SyncReservation, mode: str, limit: int | None,
+                        only_source: str, notify: tuple[str, Any] | None) -> None:
+        """后台同步(阻塞网络操作放线程池), 完成后可选通知。"""
+        try:
+            if self._stopping():
+                return
+            from mohobot.music_knowledge.sync import build_adapters, set_db_location, sync_all
+
+            cfg = self._global_config()
+            music_cfg = (cfg.music_knowledge if cfg else None) or {}
+            db_cfg = self._song_db_cfg()
+            set_db_location(str(db_cfg["db_folder"]), str(db_cfg["db_file"]))
+            adapters = build_adapters(music_cfg)
+            if only_source:
+                adapters = [a for a in adapters if a.name == only_source]
+            if not adapters:
+                suffix = f"({only_source})" if only_source else ""
+                reply = f"❌ 没有可用的歌曲来源{suffix}"
+            else:
+                report = await reservation.run(lambda: sync_all(adapters, mode=mode, limit=limit))
+                if self._stopping():
+                    return
+                reply = report.summary_text()
+                self._reload_matcher()
         except Exception as e:
             logger.exception(f"song-sync failed: {e}")
             reply = f"❌ 同步失败: {e}"
+        finally:
+            reservation.release_if_unsubmitted()
 
-        if notify is not None and reply:
+        if notify is not None and reply and not self._stopping():
             bot_id, event = notify
             await self._send_event(bot_id, event, reply)
 

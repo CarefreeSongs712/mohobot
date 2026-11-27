@@ -2310,8 +2310,8 @@ async function loadPlugins() {
     document.getElementById('plugins-table-body').innerHTML = plugins.map(p => `
       <tr>
         <td><b>${escapeHtml(p.name)}</b><div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.file)}</div></td>
-        <td><span class="badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? '已启用' : '已禁用'}</span></td>
-        <td style="color:var(--text-dim)">${escapeHtml(p.info?.description || p.error || '—')}</td>
+        <td><span class="badge ${p.loaded ? 'enabled' : 'disabled'}">${p.loaded ? '已启用' : p.error ? '加载失败' : p.enabled ? '未就绪' : '已禁用'}</span></td>
+        <td style="color:var(--text-dim)">${escapeHtml(p.error || p.info?.description || '—')}</td>
         <td>
           <label class="switch" style="margin-right:10px"><input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)"><span class="slider"></span></label>
           ${p.config_schema ? `<button class="btn btn-sm" onclick="openPluginConfig('${p.name}')">⚙️ 配置</button>` : ''}
@@ -2340,6 +2340,7 @@ async function reloadPlugins() {
 }
 
 let pluginTab = 'installed';
+let pluginMarketRequest = 0;
 let pluginMarketCache = [];
 
 function escapeHtml(value) {
@@ -2357,15 +2358,26 @@ function switchPluginTab(tab) {
   if (tab === 'market') loadMarket();
 }
 
+function marketSourceStatus(source) {
+  const labels = { fresh: '已刷新', cached: '缓存数据', failed: '刷新失败', unattempted: '尚未刷新' };
+  const label = labels[source.status] || labels.unattempted;
+  const lastSuccess = source.last_success_at ? ` · 上次成功 ${new Date(source.last_success_at * 1000).toLocaleString()}` : '';
+  return `${label}${lastSuccess}`;
+}
+
 async function loadMarket(refresh = false) {
+  const request = ++pluginMarketRequest;
   const body = document.getElementById('plugin-market-body');
   body.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">加载中…</td></tr>';
   try {
     const r = await apiJSON('/api/plugins/market' + (refresh ? '?refresh=true' : ''));
+    if (request !== pluginMarketRequest) return;
     pluginMarketCache = r.plugins || [];
-    document.getElementById('plugin-source-body').innerHTML = (r.sources || []).map(source => `
+    const sources = r.sources || [];
+    document.getElementById('plugin-source-body').innerHTML = sources.map(source => `
       <tr>
-        <td>${escapeHtml(source.name)}${source.official ? ' <span class="badge">官方</span>' : ''}</td>
+        <td>${escapeHtml(source.name)}${source.official ? ' <span class="badge">官方</span>' : ''}
+          <div class="small" style="color:var(--text-dim)">${escapeHtml(marketSourceStatus(source))}</div></td>
         <td class="small" style="color:var(--text-dim);word-break:break-all">${escapeHtml(source.url)}</td>
         <td>${source.official ? '—' : `<button class="btn btn-sm secondary" onclick="removePluginSource('${escapeHtml(source.id)}')">删除</button>`}</td>
       </tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--text-dim)">暂无插件源</td></tr>';
@@ -2375,22 +2387,27 @@ async function loadMarket(refresh = false) {
           <div class="small" style="color:var(--text-dim);font-size:11px">${escapeHtml(p.author)} / ${escapeHtml(p.name)} · API ${p.api_version}</div></td>
         <td>${escapeHtml(p.version)}</td>
         <td style="color:var(--text-dim)">${escapeHtml(p.description)}</td>
-        <td><button class="btn btn-sm" onclick="installMarketPlugin('${escapeHtml(p.plugin_id)}', '${escapeHtml(p.source_id || 'official')}')">安装</button></td>
-      </tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">市场暂无插件</td></tr>';
+        <td><button class="btn btn-sm" onclick="installMarketPlugin(this.dataset.pluginId, this.dataset.sourceId, this.dataset.sourceGeneration)" data-plugin-id="${escapeHtml(p.plugin_id)}" data-source-id="${escapeHtml(p.source_id || 'official')}" data-source-generation="${escapeHtml(p.source_generation)}">安装</button></td>
+      </tr>`).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--text-dim)">${sources.some(source => source.status === 'failed') ? '部分插件源刷新失败，未能取得插件条目' : '市场暂无插件'}</td></tr>`;
   } catch (e) {
+    if (request !== pluginMarketRequest) return;
     body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--red)">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
-async function installMarketPlugin(pluginId, sourceId) {
+async function installMarketPlugin(pluginId, sourceId, sourceGeneration) {
   if (!confirm(`安装 ${pluginId}？`)) return;
   showToast('正在下载并安装…');
   try {
-    const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId, source_id: sourceId || 'official' } });
-    showToast(`已安装 ${r.name}`);
+    const r = await apiJSON('/api/plugins/market/install', { method: 'POST', body: { plugin_id: pluginId, source_id: sourceId || 'official', source_generation: sourceGeneration || null } });
+    showToast(`已安装 ${r.name}${r.activation === 'disabled' ? '（保持停用）' : ''}`);
+    if (r.audit === 'not_written') showToast('安装成功，但审计未记录（审计存储不可用）', false);
     await loadPlugins();
     switchPluginTab('installed');
-  } catch (e) { showToast('安装失败: ' + e.message, false); }
+  } catch (e) {
+    showToast(e.message, false);
+    await loadPlugins();
+  }
 }
 
 function openPluginSourceModal() {
@@ -2427,8 +2444,9 @@ async function updateMarketPlugin(pluginId, name) {
   if (!confirm(`更新 ${name}？`)) return;
   showToast('正在检查并更新…');
   try {
-    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId, source_id: 'official' } });
+    const r = await apiJSON('/api/plugins/market/update', { method: 'POST', body: { plugin_id: pluginId } });
     showToast(`已更新 ${r.name}`);
+    if (r.audit === 'not_written') showToast('更新成功，但审计未记录（审计存储不可用）', false);
     await loadPlugins();
   } catch (e) { showToast('更新失败: ' + e.message, false); }
 }
@@ -2445,14 +2463,15 @@ async function uninstallPlugin(name) {
   if (!confirm(`卸载 ${name}？插件目录会移入回收站。`)) return;
   const deleteData = confirm('同时删除该插件的配置与私有数据？选择“取消”则保留。');
   try {
-    await apiJSON(`/api/plugins/${encodeURIComponent(name)}?delete_config=${deleteData}&delete_data=${deleteData}`, { method: 'DELETE' });
+    const r = await apiJSON(`/api/plugins/${encodeURIComponent(name)}?delete_config=${deleteData}&delete_data=${deleteData}`, { method: 'DELETE' });
     showToast(`${name} 已卸载`);
+    if (r.audit === 'not_written') showToast('卸载成功，但审计未记录（审计存储不可用）', false);
     loadPlugins();
   } catch (e) { showToast('卸载失败: ' + e.message, false); }
 }
 
 // ── 插件配置 (schema 驱动表单) ────────────────────────────────
-let pluginConfigCache = { name: '', schema: {}, config: {} };
+let pluginConfigCache = { name: '', schema: {}, initial: {} };
 
 // 递归渲染 schema 字段
 function renderSchemaFields(schema, config, prefix = '') {
@@ -2493,38 +2512,55 @@ function renderSchemaFields(schema, config, prefix = '') {
 
 // 递归收集表单值
 function collectSchemaFields(schema, prefix = '') {
-  const out = {};
+  const out = Object.create(null);
   for (const [key, spec] of Object.entries(schema || {})) {
     if (!spec || typeof spec !== 'object' || spec.invisible) continue;
     const id = prefix + key;
     if (spec.type === 'object') {
-      out[key] = collectSchemaFields(spec.items || {}, id + '.');
-    } else if (spec.type === 'bool') {
-      out[key] = document.getElementById('pcf-' + id)?.checked ?? false;
+      const branch = collectSchemaFields(spec.items || {}, id + '.');
+      if (Object.keys(branch).length) out[key] = branch;
+      continue;
+    }
+    const control = document.getElementById('pcf-' + id);
+    if (!control) continue;
+    if (spec.type === 'bool') {
+      out[key] = control.checked;
     } else if (spec.type === 'list') {
-      out[key] = (document.getElementById('pcf-' + id)?.value || '')
-        .split(',').map(s => s.trim()).filter(Boolean);
-    } else if (spec.type === 'int') {
-      const v = parseInt(document.getElementById('pcf-' + id)?.value, 10);
-      out[key] = isNaN(v) ? (spec.default ?? 0) : v;
-    } else if (spec.type === 'float') {
-      const v = parseFloat(document.getElementById('pcf-' + id)?.value);
-      out[key] = isNaN(v) ? (spec.default ?? 0) : v;
-    } else if (spec.type === 'text') {
-      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
+      out[key] = control.value.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (spec.type === 'int' || spec.type === 'float') {
+      const v = spec.type === 'int' ? parseInt(control.value, 10) : parseFloat(control.value);
+      out[key] = Number.isFinite(v) ? v : (spec.default ?? 0);
     } else {
-      out[key] = document.getElementById('pcf-' + id)?.value ?? '';
+      out[key] = control.value;
     }
   }
   return out;
 }
 
+function diffPluginConfigFields(current, initial) {
+  const edits = Object.create(null);
+  for (const [key, value] of Object.entries(current)) {
+    const before = initial[key];
+    if (Array.isArray(value)) {
+      if (!Array.isArray(before) || value.length !== before.length || value.some((v, i) => v !== before[i])) {
+        edits[key] = value;
+      }
+    } else if (value !== null && typeof value === 'object') {
+      const branch = diffPluginConfigFields(value, before || {});
+      if (Object.keys(branch).length) edits[key] = branch;
+    } else if (value !== before) {
+      edits[key] = value;
+    }
+  }
+  return edits;
+}
+
 async function openPluginConfig(name) {
   try {
-    const r = await apiJSON(`/api/plugins/${name}/config`);
-    pluginConfigCache = { name, schema: r.schema, config: r.config };
+    const r = await apiJSON(`/api/plugins/${encodeURIComponent(name)}/config`);
     document.getElementById('plugin-config-title').textContent = `⚙️ ${name} 配置`;
     document.getElementById('plugin-config-form').innerHTML = renderSchemaFields(r.schema, r.config);
+    pluginConfigCache = { name, schema: r.schema, initial: collectSchemaFields(r.schema) };
     document.getElementById('plugin-config-modal').classList.remove('hidden');
   } catch (e) { showToast('加载配置失败: ' + e.message, false); }
 }
@@ -2534,10 +2570,20 @@ function closePluginConfig() {
 }
 
 async function savePluginConfig() {
-  const data = collectSchemaFields(pluginConfigCache.schema);
+  const { name, schema, initial } = pluginConfigCache;
+  const data = diffPluginConfigFields(collectSchemaFields(schema), initial);
+  if (!Object.keys(data).length) {
+    showToast('配置无改动');
+    closePluginConfig();
+    return;
+  }
   try {
-    await apiJSON(`/api/plugins/${pluginConfigCache.name}/config`, { method: 'POST', body: { data } });
-    showToast('配置已保存(热生效)');
+    const result = await apiJSON(`/api/plugins/${encodeURIComponent(name)}/config`, { method: 'POST', body: { data } });
+    if (result.application === 'applied') showToast('配置已保存（热生效）');
+    else if (result.application === 'not_running') showToast('配置已保存（未热应用）');
+    else if (result.application === 'apply_failed') showToast('配置已保存，但热应用失败', false);
+    else if (result.application === 'unchanged') showToast('配置无改动');
+    else showToast('配置已保存');
     closePluginConfig();
     loadPlugins();
   } catch (e) { showToast('保存失败: ' + e.message, false); }

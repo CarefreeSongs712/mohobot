@@ -30,6 +30,7 @@ from mohobot.message_handler import MessageHandler
 from mohobot.models.config import GlobalConfig
 from mohobot.persona_service import PersonaService
 from mohobot.plugin_market import MarketService
+from mohobot.plugin_market.journal import MarketJournal
 from mohobot.services.task_supervisor import TaskSupervisor
 from mohobot.utils.logger import setup_logger
 from mohobot.web_panel.app import WebPanel
@@ -76,6 +77,9 @@ class MohobotApplication:
 
         # 1. Load config
         self._config = GlobalConfig.load(self._config_path)
+        data_dir_abs = Path(self._config.data_dir).resolve()
+        # Recover before discovery, service startup, or binding a listening socket.
+        await MarketJournal(data_dir_abs, data_dir_abs / "plugins").recover()
 
         # 2. Ensure data directories exist
         await ensure_dir(self._config.data_dir)
@@ -100,9 +104,24 @@ class MohobotApplication:
         # music_knowledge 未启用/初始化失败 → 降级(正常聊天不受影响)。
         # 索引缓存/后台构建: 缓存命中时数秒内就绪; miss 时先启动服务,
         # 索引在后台构建(期间歌曲识别为空, 不影响聊天)。
-        self._song_matcher: SongInfoMatcher | None = None
+        # 面板内重启: 上一实例的构建线程可能仍在退出。先继续排空, 尚未退出时
+        # 不创建第二个 matcher, 避免新旧构建线程并发写同一 cache 目录(#164 审查 P3)。
+        self._song_matcher: SongInfoMatcher | None = getattr(self, "_song_matcher", None)
+        if self._song_matcher is not None:
+            try:
+                drained = self._song_matcher.close(timeout=5.0)
+            except Exception as exc:
+                drained = False
+                logger.debug(f"song matcher close failed before restart: {exc}")
+            if drained:
+                self._song_matcher = None
+            else:
+                logger.error(
+                    "上一轮歌曲索引构建线程未在 5.0s 内退出, "
+                    "跳过创建新实例以免并发构建"
+                )
         music_cfg = (self._config.music_knowledge or {})
-        if music_cfg.get("enabled", True):
+        if self._song_matcher is None and music_cfg.get("enabled", True):
             try:
                 from mohobot.music_knowledge import SongInfoMatcher, SongInfoService
                 song_db_cfg = music_cfg.get("song_database") or {}
@@ -324,7 +343,6 @@ class MohobotApplication:
             except Exception:
                 pass
 
-        data_dir_abs = Path(self._config.data_dir).resolve()
         self._plugin_system = PluginSystem(
             plugins_dir=self._config.plugins_dir,
             # 绝对路径: 插件内 data 目录按进程 cwd 解析, 启动 cwd 不对会读错文件
@@ -339,14 +357,7 @@ class MohobotApplication:
         self._plugin_system.set_task_supervisor(self._task_supervisor)
         self._plugin_system.set_song_matcher(self._song_matcher)
 
-        # 4. Load plugins
-        # 运行时引用由 PluginSystem 持有, 加载/热重载后自动注入
-        self._plugin_system.set_runtime_refs(
-            bot_manager=self._bot_manager, llm_service=self._llm_service,
-            emotion_manager=self._emotion_manager,
-            context_manager=self._context_manager,
-            persona_service=self._persona_service,
-        )
+        # 4. Prepare plugin dependencies; activate plugins after wiring the host.
         self._plugin_system.set_admin_ids(list(self._config.admins))
         # Anysearch 实时联网搜索客户端(供插件与流水线使用)
         from mohobot.anysearch import AnySearchClient
@@ -357,9 +368,6 @@ class MohobotApplication:
                 base_url=self._config.anysearch.base_url,
                 timeout=self._config.anysearch.timeout,
             )
-            self._plugin_system.set_runtime_refs(anysearch_client=self._anysearch_client)
-        plugin_count = await self._plugin_system.load_plugins()
-        logger.info(f"Loaded {plugin_count} plugin(s)")
 
         # 5. Database (会话持久化 + 面板备份/数据管理)
         if self._config.database.enabled:
@@ -447,18 +455,21 @@ class MohobotApplication:
             self._tts_service.set_ws(self._ws_server)
             self._tts_service.start()
 
-        # 注入 WS server 到插件(热重载后由 PluginSystem 自动重新注入);
-        # 上下文/人设/消息处理器供需要完整回复管线的插件(如主动聊天)使用
+        self._ws_server.set_event_callback(self._message_handler.handle_event)
+
+        # Activate plugins with the same injection path as reload, before accepting events.
         self._plugin_system.set_runtime_refs(
             ws_server=self._ws_server,
+            bot_manager=self._bot_manager,
+            anysearch_client=self._anysearch_client,
+            llm_service=self._llm_service,
+            emotion_manager=self._emotion_manager,
             context_manager=self._context_manager,
             persona_service=self._persona_service,
             message_handler=self._message_handler,
         )
-        self._plugin_system.apply_injections()
-
-        # Set event callback from WS server to message handler
-        self._ws_server.set_event_callback(self._message_handler.handle_event)
+        plugin_count = await self._plugin_system.load_plugins()
+        logger.info(f"Loaded {plugin_count} plugin(s)")
 
         # 9. Start servers
         await self._ws_server.start()
@@ -716,9 +727,16 @@ class MohobotApplication:
         # 避免面板内重启/再次 startup 时出现两个构建线程。
         if getattr(self, "_song_matcher", None) is not None:
             try:
-                self._song_matcher.close(timeout=5.0)
+                drained = self._song_matcher.close(timeout=5.0)
             except Exception as exc:
+                drained = False
                 logger.debug(f"song matcher close failed: {exc}")
+            if not drained:
+                # 线程未退出: 不丢弃引用, 面板内重启路径会再次 close 直到退出。
+                logger.warning(
+                    "歌曲索引构建线程未在 5.0s 内退出, "
+                    "保留 matcher 引用供重启前继续排空"
+                )
 
         # Stop web panel (await its server task so the port is freed
         # before a restart rebinds it — otherwise "Address already in use")
