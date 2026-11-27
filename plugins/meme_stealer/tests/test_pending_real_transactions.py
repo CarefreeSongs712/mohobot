@@ -1,5 +1,3 @@
-"""Approval recovery and cancellation against real SQLite, files, and ASGI routes."""
-
 import asyncio
 import hashlib
 import shutil

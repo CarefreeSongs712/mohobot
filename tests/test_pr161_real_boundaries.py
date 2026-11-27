@@ -1,5 +1,3 @@
-"""PR161 lifecycle/receipt/ops regressions with real local protocol endpoints."""
-
 import asyncio
 import importlib.util
 import json
