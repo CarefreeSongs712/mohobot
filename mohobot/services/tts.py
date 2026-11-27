@@ -141,7 +141,9 @@ def _build_client(cfg, task_supervisor=None):
 
 
 def _client_signature(cfg) -> tuple:
-    """影响合成客户端构造的参数快照; 变化时必须重建客户端才真正生效。"""
+    """实际后端使用的客户端参数; HTTP 不消费 MiniMax 的音色/编码参数。"""
+    if cfg.backend != "minimax":
+        return (cfg.backend, float(cfg.timeout), cfg.base_url, cfg.api_key)
     return (
         cfg.backend,
         float(cfg.timeout),
@@ -490,7 +492,20 @@ class TTSService:
         b64 = base64.b64encode(audio).decode()
         segment = [{"type": "record", "data": {"file": f"base64://{b64}"}}]
         try:
-            if job.chat_type == "group":
+            send_with_status = getattr(self._ws, "send_message_with_status", None)
+            if callable(send_with_status):
+                result = await send_with_status(
+                    job.bot_id, job.chat_type, job.chat_id, segment,
+                    source="auto", ack_timeout=0,
+                    dispatch_guard=lambda: not self._job_is_stale(job),
+                )
+                if result.status == "blocked":
+                    self.stats["dropped"] += 1
+                    return
+                if result.status == "failed":
+                    raise RuntimeError(result.reason or "speech dispatch failed")
+            elif job.chat_type == "group":
+                # 保留仅提供直接发送方法的嵌入式适配器契约。
                 await self._ws.send_group_msg(job.bot_id, job.chat_id, segment)
             else:
                 await self._ws.send_private_msg(job.bot_id, job.chat_id, segment)

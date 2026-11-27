@@ -1957,11 +1957,11 @@ class PluginSystem(Interceptor):
         if bm is None:
             return True
         # @ 定向优先: 被 @ 的 bot 都应执行, 不再抽签
-        if self._mentioned_bot_ids(event, bm):
-            return True
-        chosen = bm.pick_bot_for_group(
-            str(event.group_id), str(getattr(event, "message_id", "") or ""),
-        )
+        mentioned = self._mentioned_bot_ids(event, bm)
+        if mentioned:
+            return bot_id in mentioned
+        from mohobot.history_dedup import group_message_fingerprint
+        chosen = bm.claim_global_command(str(event.group_id), group_message_fingerprint(event))
         if chosen is None or chosen == bot_id:
             return True
         logger.debug(f"无前缀全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")

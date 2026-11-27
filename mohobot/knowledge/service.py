@@ -228,13 +228,25 @@ class KnowledgeService:
                 self._retired_providers.append(provider)
                 return
         self._retired_tasks[task] = provider
-        task.add_done_callback(
-            lambda done: self._retired_tasks.pop(done, None),
-        )
+        task.add_done_callback(self._retired_close_done)
+
+    def _retired_close_done(self, task: asyncio.Task) -> None:
+        provider = self._retired_tasks.pop(task, None)
+        if provider is None:
+            # close() 已接管该客户端, 不再重复登记。
+            return
+        try:
+            closed = not task.cancelled() and task.result()
+        except Exception:
+            closed = False
+        if not closed:
+            # main 先 cancel_owner("knowledge") 再 close(); 即使任务尚未开始
+            # 或在等待空闲/关闭期间被取消, 服务仍须持有客户端直到统一回收。
+            self._retired_providers.append(provider)
 
     async def _close_retired_when_idle(
         self, provider, delay: float = _RETIRED_PROVIDER_CLOSE_DELAY,
-    ) -> None:
+    ) -> bool:
         """至少空闲 delay 秒且在途使用清零后才关闭, 防止关掉在途请求的客户端。"""
         while True:
             try:
@@ -246,7 +258,8 @@ class KnowledgeService:
         try:
             await provider.close()
         except Exception:
-            pass
+            return False
+        return True
 
     async def _close_providers(self) -> None:
         providers = [self._embedding, self._rerank, *self._retired_providers]
