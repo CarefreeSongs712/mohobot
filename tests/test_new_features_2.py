@@ -60,6 +60,7 @@ async def test_no_prefix_triggers():
         "bot_001", make_group_event(2003, "随便聊聊"), {},
     )
     assert not handled3
+    await ps.shutdown_plugins()
     print("[+] no_prefix_triggers OK")
 
 
@@ -369,6 +370,7 @@ async def test_no_prefix_global_dedup():
     ev3 = make_private_event(2001, "占卜")
     h_p, _ = await ps.dispatch_observed("bot_002", ev3, {})
     assert h_p, "私聊占卜不受群内去重影响"
+    await ps.shutdown_plugins()
     print("[+] no_prefix 群内去重 OK")
 
 

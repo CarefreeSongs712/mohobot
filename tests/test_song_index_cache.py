@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -116,13 +117,13 @@ def _build_cfg(**kwargs) -> dict:
 
 def _wait_build(matcher, timeout: float = 30.0) -> None:
     """等待后台构建线程结束并断言快照已安装。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        thread = getattr(matcher, "_build_thread", None)
-        if thread is None:
-            break
-        thread.join(0.05)
-    assert matcher.is_ready(), "后台索引构建未完成"
+    deadline = time.monotonic() + timeout
+    with matcher._lock:
+        threads = tuple(matcher._build_threads)
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    assert not any(thread.is_alive() for thread in threads), "后台索引构建未完成"
+    assert matcher.is_ready(), "后台索引快照未安装"
 
 
 def _sig(match) -> tuple:
@@ -644,7 +645,74 @@ def test_close_prevents_new_build() -> None:
     matcher.request_rebuild(reason="after-close")
 
     assert matcher._closing is True
-    assert matcher._build_thread is None
+    assert not matcher._build_threads
+
+
+def test_close_waits_for_previous_builder_to_exit_after_worker_returns() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+
+    folder, filename = _fresh_db("songdrain_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename, build={"mode": "sync"})
+    matcher._build_mode = "thread"
+    first_returned = threading.Event()
+    release_first = threading.Event()
+    second_returned = threading.Event()
+    threads = []
+    worker = matcher._build_worker
+
+    def gated_worker(reason: str) -> None:
+        threads.append(threading.current_thread())
+        worker(reason)
+        if reason == "first":
+            first_returned.set()
+            release_first.wait(10)
+        else:
+            second_returned.set()
+
+    matcher._build_once = lambda reason: None
+    matcher._build_worker = gated_worker
+    try:
+        matcher.request_rebuild(reason="first")
+        assert first_returned.wait(5)
+        matcher.request_rebuild(reason="second")
+        assert second_returned.wait(5)
+        threads[1].join(5)
+        assert not threads[1].is_alive()
+        assert threads[0].is_alive()
+        assert matcher.close(timeout=0) is False
+        matcher.request_rebuild(reason="after-close")
+        assert len(threads) == 2
+    finally:
+        release_first.set()
+        for thread in threads:
+            thread.join(5)
+    assert matcher.close(timeout=0) is True
+
+
+def test_failed_builder_start_allows_retry() -> None:
+    from mohobot.music_knowledge import SongInfoMatcher
+
+    folder, filename = _fresh_db("songstart_")
+    matcher = SongInfoMatcher(db_folder=folder, db_file=filename, build={"mode": "sync"})
+    matcher._build_mode = "thread"
+
+    def fail_start(thread):
+        raise RuntimeError("cannot start thread")
+
+    built = threading.Event()
+    matcher._build_once = lambda reason: built.set()
+    try:
+        with patch.object(threading.Thread, "start", fail_start):
+            try:
+                matcher.request_rebuild(reason="failed")
+            except RuntimeError as exc:
+                assert str(exc) == "cannot start thread"
+            else:
+                raise AssertionError("thread start failure should be reported")
+        matcher.request_rebuild(reason="retry")
+        assert built.wait(5)
+    finally:
+        matcher.close()
 
 
 def test_put_cache_ignores_stale_snapshot() -> None:

@@ -108,13 +108,27 @@ class JSONLWriter:
 # ── JSON Reader / Writer (full-file, lock-protected) ──────────
 
 
-async def json_read(file_path: str | Path) -> Any:
-    """Read and parse a JSON file with lock protection."""
+_NO_INITIAL_VALUE = object()
+
+
+async def json_read(file_path: str | Path, *, create_if_missing: Any = _NO_INITIAL_VALUE) -> Any:
+    """Read under the file lock, optionally seeding only a missing archive."""
     path = Path(file_path)
     lock = _get_lock(str(path.absolute()))
     async with lock:
         if not await aiofiles.os.path.exists(path):
-            return None
+            if create_if_missing is _NO_INITIAL_VALUE:
+                return None
+            content = json.dumps(create_if_missing, ensure_ascii=False, indent=2)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # The small initial write cannot outlive a cancelled startup's lock.
+            try:
+                with path.open("x", encoding="utf-8") as f:
+                    f.write(content)
+            except FileExistsError:
+                pass  # Another process created it; read it rather than overwrite it.
+            else:
+                return create_if_missing
         async with aiofiles.open(path, "r", encoding="utf-8") as f:
             content = await f.read()
         if not content.strip():

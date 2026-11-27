@@ -340,7 +340,7 @@ class SongInfoMatcher:
         self._snapshot: Optional[_IndexSnapshot] = None
         self._snapshot_source = "pending"
         self._ready = threading.Event()
-        self._build_thread: Optional[threading.Thread] = None
+        self._build_threads: set[threading.Thread] = set()
         self._building = False
         self._dirty = False
         self._build_reason = ""
@@ -623,12 +623,18 @@ class SongInfoMatcher:
                 name=f"song-index-build-{reason}",
                 daemon=True,
             )
-            self._build_thread = thread
+            # Retain threads until they exit, even after the worker clears _building.
+            self._build_threads = {t for t in self._build_threads if t.is_alive()}
+            try:
+                thread.start()
+            except Exception:
+                self._building = False
+                raise
+            self._build_threads.add(thread)
         logger.info(
             f"歌曲索引后台构建已调度(reason={reason}, mode={self._build_mode}, "
             f"yield_every={self._yield_every})"
         )
-        thread.start()
 
     def request_rebuild(self, *, reason: str = "manual") -> None:
         """非阻塞地请求重建索引。
@@ -667,22 +673,25 @@ class SongInfoMatcher:
         snap = self._snapshot
         return len(snap.index) if snap is not None else 0
 
-    def close(self, timeout: float = 5.0) -> None:
-        """请求后台构建停止并等待线程退出(进程内重启时避免双构建)。
+    def close(self, timeout: float = 5.0) -> bool:
+        """停止接收后台构建请求，返回所有构建线程是否已退出。
 
-        构建线程是纯 CPU 循环, 只能在每 ``yield_every`` 首的让出点响应取消;
-        超时后不杀线程(daemon), 但会在下一个让出点抛 _BuildCancelled 退出。
+        构建线程在让出点响应取消。关闭超时后可以再次调用以等待剩余线程。
         """
-        self._closing = True
+        deadline = time.monotonic() + timeout
         with self._lock:
-            thread = self._build_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout)
-        if thread is not None and thread.is_alive():
-            logger.warning(
-                f"歌曲索引构建线程未在 {timeout:.1f}s 内退出, "
-                "将在下一个让出点取消"
-            )
+            self._closing = True
+            threads = tuple(self._build_threads)
+        current = threading.current_thread()
+        for thread in threads:
+            if thread is not current:
+                thread.join(max(0.0, deadline - time.monotonic()))
+        with self._lock:
+            self._build_threads = {t for t in self._build_threads if t.is_alive()}
+            remaining = len(self._build_threads)
+        if remaining:
+            logger.warning(f"歌曲索引仍有 {remaining} 个构建线程未在 {timeout:.1f}s 内退出")
+        return remaining == 0
 
     def _build_worker(self, reason: str) -> None:
         current = reason
@@ -707,7 +716,6 @@ class SongInfoMatcher:
             with self._lock:
                 if self._closing or not self._dirty:
                     self._building = False
-                    self._build_thread = None
                     return
                 self._dirty = False
                 current = "dirty"

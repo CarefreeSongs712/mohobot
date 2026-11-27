@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -30,6 +31,48 @@ class Plugin:
 
 def _schema_names() -> list[str]:
     return [schema["function"]["name"] for schema in registry.schemas()]
+
+
+def test_preloaded_tools_are_removed_after_import_failure_and_replaced_on_reload(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        for index, failure in enumerate(("raise RuntimeError('load failed')\n", "invalid Python !\n")):
+            plugin_name = f"preloaded_import_failure_{index}"
+            tool_name = f"preloaded_import_failure_tool_{index}"
+            plugins_dir = tmp_path / str(index) / "plugins"
+            entry = _write_plugin(
+                plugins_dir, plugin_name, _tool_plugin_source(tool_name, "preloaded"),
+            )
+            module_name = f"plugins.{plugin_name}"
+            spec = importlib.util.spec_from_file_location(module_name, entry)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            system = PluginSystem(str(plugins_dir), str(tmp_path / str(index) / "data"))
+            try:
+                spec.loader.exec_module(module)
+                assert await registry.execute(tool_name, {}) == "preloaded"
+                entry.write_text(
+                    _tool_plugin_source(tool_name, "failed candidate") + failure,
+                    encoding="utf-8",
+                )
+                await system.load_plugins()
+                assert system.list_plugins()[0]["loaded"] is False
+                assert tool_name not in _schema_names()
+                assert "error" in json.loads(await registry.execute(tool_name, {}))
+
+                entry.write_text(_tool_plugin_source(tool_name, "reloaded handler"), encoding="utf-8")
+                assert await system.reload_plugin(plugin_name) is True
+                assert _schema_names().count(tool_name) == 1
+                assert registry._owners[tool_name] == plugin_name
+                assert await registry.execute(tool_name, {}) == "reloaded handler"
+            finally:
+                await system.shutdown_plugins()
+                registry.unregister(tool_name)
+                sys.modules.pop(module_name, None)
+
+    asyncio.run(run())
 
 
 def test_rejected_plugin_import_discards_registered_tools(tmp_path: Path) -> None:
