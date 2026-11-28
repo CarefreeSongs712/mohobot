@@ -381,15 +381,24 @@ class MessageHandler:
             barrier.register_closer(self.close_history_writers)
 
     async def close_history_writers(self) -> None:
-        """关闭并清空全部 history writer(不删文件), 使下次写入重开新 inode。"""
+        """退休并排空全部 history writer; 解冻后的事件使用新 writer。"""
         writers = list(self._writer_registry.items())
+        for _path, writer in writers:
+            writer.retire()
         self._writer_registry.clear()
+        cancelled = None
         for path, writer in writers:
             try:
                 await writer.close()
+            except asyncio.CancelledError as exc:
+                # close has drained this writer. Finish the others before
+                # freeze rolls back its flag and permits fresh archive owners.
+                cancelled = exc
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"关闭 history writer 失败({path}): {exc}")
         logger.info(f"[History] 已关闭 {len(writers)} 个 history writer")
+        if cancelled is not None:
+            raise cancelled
 
     def _history_frozen(self) -> bool:
         barrier = getattr(self, "_history_barrier", None)
