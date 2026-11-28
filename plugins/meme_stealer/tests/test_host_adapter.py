@@ -214,6 +214,30 @@ def test_rewrite_and_embedding_resolution():
     assert _gateway({}).embedding_provider() is None
 
 
+def test_embedding_provider_fingerprint_tracks_key_without_changing_vector_space():
+    gw = _gateway({
+        "embedding_model": "emb-m",
+        "embedding_base_url": "https://embedding.example/v1",
+        "embedding_api_key": "test-old-key",
+    })
+    signature = gw.describe("embedding")
+    fingerprint = gw.provider_fingerprint("embedding")
+    assert "test-old-key" not in fingerprint
+    gw._plugin_cfg().embedding_api_key = "test-new-key"
+    assert gw.provider_fingerprint("embedding") != fingerprint
+    assert "test-new-key" not in gw.provider_fingerprint("embedding")
+    assert gw.embedding_provider().signature == signature
+    assert _gateway({}).provider_fingerprint("embedding") == ""
+
+
+def test_embedding_provider_fingerprint_tracks_global_fallback_key():
+    gw = _gateway({"embedding_model": "emb-m"})
+    fingerprint = gw.provider_fingerprint("embedding")
+    gw._global_llm().chat_api_key = "test-rotated-global-key"
+    assert gw.provider_fingerprint("embedding") != fingerprint
+    assert gw.embedding_provider().endpoint.api_key == "test-rotated-global-key"
+
+
 @pytest.mark.asyncio
 async def test_embed_passes_dimensions_and_tracks_vector_size():
     gw = _gateway({"embedding_model": "emb-m", "embedding_dimensions": 4})

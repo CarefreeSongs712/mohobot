@@ -33,7 +33,7 @@ class EmbeddingService:
         # Provider 负缓存：同一配置下未找到时不再重复探测/打印日志
         self._provider_not_found: bool = False
         self._last_enable_embedding_search: bool | None = None
-        self._last_embedding_sig: str | None = None
+        self._last_provider_fingerprint: str | None = None
 
         # 内存矩阵：原始向量 + 归一化副本（检索用）
         self._raw_matrix: np.ndarray | None = None
@@ -61,19 +61,23 @@ class EmbeddingService:
         return models.describe("embedding") if models is not None else ""
 
     def _reset_provider_state_if_changed(self) -> None:
-        """配置开关或嵌入模型变化时重置 provider 探测状态。"""
+        """模型或凭据变化时重建 provider，保留同一空间的持久化向量。"""
         current_enable = self._embedding_enabled()
-        current_sig = self._current_signature()
+        models = getattr(self.plugin, "models", None)
+        fingerprint = getattr(models, "provider_fingerprint", None)
+        current_fingerprint = (
+            fingerprint("embedding") if callable(fingerprint) else self._current_signature()
+        )
         if (
             self._last_enable_embedding_search != current_enable
-            or self._last_embedding_sig != current_sig
+            or self._last_provider_fingerprint != current_fingerprint
         ):
             self._provider = None
             self._provider_dim = 0
             self._provider_not_found = False
             self.invalidate_cache()
             self._last_enable_embedding_search = current_enable
-            self._last_embedding_sig = current_sig
+            self._last_provider_fingerprint = current_fingerprint
 
     def _get_provider(self) -> Any | None:
         """获取嵌入接口；未开启、已关闭或未配置嵌入模型时返回 None。"""
