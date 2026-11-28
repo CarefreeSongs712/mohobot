@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -145,6 +146,14 @@ class ModelGateway:
     def describe(self, role: str) -> str:
         endpoint = self.endpoint(role)
         return endpoint.signature if endpoint else ""
+
+    def provider_fingerprint(self, role: str) -> str:
+        """供运行时 provider 失效检测；凭据变化不改变持久化向量空间签名。"""
+        endpoint = self.endpoint(role)
+        if endpoint is None:
+            return ""
+        credential_digest = hashlib.sha256(endpoint.api_key.encode("utf-8")).hexdigest()
+        return f"{endpoint.signature}#{credential_digest}"
 
     def _client(self, endpoint: ModelEndpoint) -> Any:
         cache_key = (endpoint.base_url, endpoint.api_key)
