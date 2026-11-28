@@ -149,6 +149,7 @@ class MemeSmartSelectService:
         *, require_files: bool = False,
     ) -> tuple[list[str], dict[str, float]]:
         """全文召回，分类只作先验。顺序：图上文字 → 文本嵌入 → BM25 → 分类桶兜底。"""
+        idx = self._search_engine.current_index(idx)
         recalled: list[str] = []
         embedding_paths: dict[str, float] = {}
         seen: set[str] = set()
@@ -166,6 +167,16 @@ class MemeSmartSelectService:
                 seen.add(canon)
                 recalled.append(path)
 
+        def _refresh_snapshot():
+            nonlocal idx
+            latest = self._search_engine.current_index(idx)
+            if latest is not idx:
+                previous = recalled[:]
+                recalled.clear()
+                seen.clear()
+                idx = latest
+                _add(previous)
+
         _add(self._overlay_recall_paths(idx, context_text, event, self.SMART_OVERLAY_RECALL_LIMIT))
         _add(self._character_recall_paths(idx, context_text, event, self.SMART_OVERLAY_RECALL_LIMIT))
         _add(self._scene_recall_paths(idx, context_text, event, self.SMART_OVERLAY_RECALL_LIMIT))
@@ -175,6 +186,7 @@ class MemeSmartSelectService:
                 emb_results = await self._embedding_service.search(
                     context_text, k=self.SMART_RECALL_K
                 )
+                _refresh_snapshot()
                 emb_paths: list[str] = []
                 for path, score in emb_results:
                     embedding_paths[canonicalize_path(path)] = score
@@ -189,10 +201,12 @@ class MemeSmartSelectService:
         elif not self._is_embedding_ready():
             logger.debug("[Embedding] auto-emoji: 嵌入未就绪，改走 BM25/分类兜底")
 
+        _refresh_snapshot()  # Also refresh when an awaited embedding request failed.
         if len(recalled) < self.SMART_RECALL_K and context_text.strip():
             try:
                 if self._search_engine.bm25_index_stale(idx):
                     await self._search_engine._build_bm25_index(idx)
+                    _refresh_snapshot()
                 tokens = tokenize_for_bm25(context_text)
                 if tokens and self._search_engine._bm25_index is not None:
                     top = self._search_engine._bm25_index.get_top_k(
@@ -281,13 +295,14 @@ class MemeSmartSelectService:
             )
             if not recalled_paths:
                 return []
+            idx = self._search_engine.current_index(idx)
 
             prefiltered_entries: list[
                 tuple[str, dict[str, Any], str, list[str], list[str], tuple[str, ...], float]
             ] = []
             for file_path in recalled_paths:
                 data = idx.get(file_path) or idx.get(canonicalize_path(file_path))
-                if not isinstance(data, dict):
+                if not isinstance(data, dict) or not self._scope_service._is_entry_allowed_for_event(data, event):
                     continue
                 item_category = entry_category(data)
                 tags = parse_tags(data.get("tags", []))
@@ -463,15 +478,14 @@ class MemeSmartSelectService:
     ) -> list[tuple[str, str, str, str]]:
         """根据查询词搜索图片（图上文字/角色 → 嵌入 → BM25）。"""
         try:
-            if idx is None:
-                idx = self._search_engine.get_index()
+            idx = self._search_engine.current_index(idx)
             results: list[tuple[str, str, str, str]] = []
             seen_paths: set[str] = set()
 
             def _append_path(file_path: str) -> bool:
                 if not file_path or file_path in seen_paths:
                     return len(results) >= limit
-                data = idx.get(file_path, {}) if idx else {}
+                data = idx.get(file_path) if idx else None
                 if not isinstance(data, dict):
                     return False
                 if not self._scope_service._is_entry_allowed_for_event(data, event):
@@ -482,6 +496,17 @@ class MemeSmartSelectService:
                 tags = parse_tags(data.get("tags", []))
                 results.append((file_path, desc, category, ", ".join(tags)))
                 return len(results) >= limit
+
+            def _refresh_snapshot():
+                nonlocal idx
+                latest = self._search_engine.current_index(idx)
+                if latest is not idx:
+                    previous = [item[0] for item in results]
+                    results.clear()
+                    seen_paths.clear()
+                    idx = latest
+                    for path in previous:
+                        _append_path(path)
 
             if idx and query.strip():
                 for path in self._overlay_recall_paths(idx, query, event, self.SMART_OVERLAY_RECALL_LIMIT):
@@ -494,6 +519,7 @@ class MemeSmartSelectService:
             # ── 嵌入检索路径 ──
             if self._is_embedding_ready():
                 embedding_results = await self._embedding_service.search(query, limit * 5)
+                _refresh_snapshot()
                 if embedding_results:
 
                     recently_used_paths: set[str] = set()
@@ -521,6 +547,7 @@ class MemeSmartSelectService:
             # 代次/签名与当前语料不一致时强制重建；代次未变则跳过 O(n) 签名计算。
             if self._search_engine.bm25_index_stale(idx):
                 await self._search_engine._build_bm25_index(idx)
+                _refresh_snapshot()
 
             if self._search_engine._bm25_index is None or not self._search_engine._bm25_doc_paths:
                 return await self._search_images_fallback(query, limit, idx, event)
@@ -557,6 +584,7 @@ class MemeSmartSelectService:
 
         except Exception as e:
             logger.error(f"BM25 搜索图片失败: {e}")
+            idx = self._search_engine.current_index(idx)
             return await self._search_images_fallback(query, limit, idx, event)
 
     async def _search_images_fallback(

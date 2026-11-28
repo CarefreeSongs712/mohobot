@@ -85,10 +85,13 @@ async def test_recovery_preserves_conflicting_claim(env, conflict):
 @pytest.mark.parametrize("cancel_first", [False, True])
 async def test_same_id_operation_waits_for_active_approval(env, action, cancel_first):
     pid, src, cat, _ = await pending(env)
-    # Hold the real DB write gate, after the filesystem move but before insert.
+    # Hold admission before any file move; the same-id operation guard stays held.
     await env.db._write_lock.acquire()
     first = asyncio.create_task(env.api._approve_one(env.db, pid))
-    await moved(cat)
+    async with asyncio.timeout(5):
+        while not getattr(env.db, "_pending_operation_locks", {}).get(pid):
+            await asyncio.sleep(0)
+    assert src.is_file() and not cat.exists()
     entered = asyncio.Event()
     async def followup():
         entered.set()

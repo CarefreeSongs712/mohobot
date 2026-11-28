@@ -218,48 +218,43 @@ class PendingRoutes:
         return future.result(), cancelled, None
 
     async def _rollback_approval(
-        self,
-        db,
-        pending_id: int,
-        src_path: str,
-        cat_path: str,
-        *,
-        inserted: bool,
-        expected_hash: str = "",
+        self, db, pending_id: int, src_path: str, cat_path: str, *,
+        inserted: bool, expected_hash: str = "", _writer_locked: bool = False,
     ) -> bool:
-        """审核失败/取消后的补偿：删掉本次写入的图库记录，把文件移回 pending。
+        if _writer_locked:
+            return await self._rollback_approval_locked(
+                db, pending_id, src_path, cat_path, inserted=inserted, expected_hash=expected_hash,
+            )
+        async with db._write_lock:
+            result = await self._rollback_approval_locked(
+                db, pending_id, src_path, cat_path, inserted=inserted, expected_hash=expected_hash,
+            )
+        if result and inserted:
+            await refresh_search_entry(self.plugin, cat_path)
+        return result
 
-        只处理哈希与 pending 行一致的记录；哈希不匹配说明同名路径已被其他
-        并发写入占用，此时文件与 DB 都保持原样，避免误删他人数据或让图库
-        记录指向被移走的文件(issue #132 review)。返回 False 表示已跳过。
-        """
-        if not inserted and db.get_emoji(cat_path) is not None:
-            # An insert-only failure has no ownership of the competing gallery file.
-            # Discard our marker so retry cannot claim that competing row as our commit.
-            self._clear_approve_marker(pending_id)
-            return False
-        if inserted:
-            try:
-                emoji = db.get_emoji(cat_path)
-                if emoji and (not expected_hash or str(emoji.get("hash") or "") != expected_hash):
-                    logger.warning(f"审核回滚冲突 id={pending_id}: 图库记录哈希已变化")
-                    return False
-                if emoji:
-                    await db.delete_paths([cat_path])
-                # 不能仅凭 delete 返回值判断；确认记录已不存在才允许移动文件。
-                if db.get_emoji(cat_path) is not None:
-                    return False
-            except Exception as exc:
-                logger.warning(f"审核回滚删除图库记录失败 id={pending_id}: {exc}")
-                return False
-            try:
-                await refresh_search_entry(self.plugin, cat_path)
-            except Exception as exc:
-                # 索引是可重建缓存，与持久 DB 删除分开处理。
-                logger.warning(f"审核回滚刷新索引失败 id={pending_id}: {exc}")
+    async def _rollback_approval_locked(
+        self, db, pending_id: int, src_path: str, cat_path: str, *,
+        inserted: bool, expected_hash: str,
+    ) -> bool:
+        # The gallery gate covers owner validation, conditional DELETE and file
+        # compensation. Never clear a conflict marker merely because a row exists.
         try:
+            emoji = db.get_emoji(cat_path)
+            if emoji and (not inserted or not expected_hash
+                          or str(emoji.get("hash") or "") != expected_hash):
+                return False
+            if os.path.exists(cat_path) and (
+                not os.path.isfile(cat_path) or not expected_hash
+                or self._file_hash(cat_path) != expected_hash
+            ):
+                return False
+            if emoji:
+                await db.delete_paths([cat_path], expected_hash=expected_hash, _writer_locked=True)
+            if db.get_emoji(cat_path) is not None:
+                return False
             if cat_path and os.path.exists(cat_path):
-                if os.path.exists(src_path):
+                if os.path.exists(src_path) or self._file_hash(cat_path) != expected_hash:
                     return False
                 parent = os.path.dirname(src_path)
                 if parent:
@@ -268,7 +263,7 @@ class PendingRoutes:
             if not os.path.isfile(src_path):
                 return False
         except Exception as exc:
-            logger.warning(f"审核回滚移动文件失败 id={pending_id}: {exc}")
+            logger.warning(f"Approval rollback retained for retry id={pending_id}: {exc}")
             return False
         self._clear_approve_marker(pending_id)
         return True
@@ -338,34 +333,38 @@ class PendingRoutes:
             return result
 
     async def _recover_approve_locked(self, db, pending_id: int) -> bool:
-        """调用方持有同 id 锁；冲突/失败保留标记与 pending 供重试。"""
-        marker = self._read_approve_marker(pending_id)
-        if not marker:
+        if not self._read_approve_marker(pending_id):
             return False
-        row = db.get_pending(pending_id)
-        if row is None:
-            self._clear_approve_marker(pending_id)
-            return False
-        src_path, cat_path, expected_hash = self._approval_identity(marker, row, pending_id)
-        emoji = db.get_emoji(cat_path)
-        if emoji is not None:
+        async with db._write_lock:
+            marker = self._read_approve_marker(pending_id)
+            if not marker:
+                return False
+            row = db.get_pending(pending_id)
+            if row is None:
+                self._clear_approve_marker(pending_id)
+                return False
+            src_path, cat_path, expected_hash = self._approval_identity(marker, row, pending_id)
+            emoji = db.get_emoji(cat_path)
+            if emoji is None:
+                if not await self._rollback_approval(
+                    db, pending_id, src_path, cat_path, inserted=False,
+                    expected_hash=expected_hash, _writer_locked=True,
+                ):
+                    raise RuntimeError("Approval recovery failed; marker retained")
+                return False
             if (str(emoji.get("hash") or "") != expected_hash
                     or not os.path.isfile(cat_path) or os.path.exists(src_path)):
                 raise RuntimeError("审核恢复冲突: 图库记录不属于本次审批")
-            if hasattr(db, "promote_source_pending_path"):
-                await db.promote_source_pending_path(src_path, cat_path)
             db.delete_pending(pending_id)
             self._clear_approve_marker(pending_id)
-            try:
-                await refresh_search_entry(self.plugin, cat_path, emoji)
-            except Exception as exc:
-                logger.warning(f"恢复审核刷新检索索引失败 id={pending_id}: {exc}")
-            return True
-        if not await self._rollback_approval(
-            db, pending_id, src_path, cat_path, inserted=False, expected_hash=expected_hash,
-        ):
-            raise RuntimeError("审核恢复失败: 文件未能安全回到 pending")
-        return False
+        # Provenance/cache operations acquire their own gates and may do I/O.
+        try:
+            if hasattr(db, "promote_source_pending_path"):
+                await db.promote_source_pending_path(src_path, cat_path)
+            await refresh_search_entry(self.plugin, cat_path, emoji)
+        except Exception as exc:
+            logger.warning(f"Recovered approval index refresh failed id={pending_id}: {exc}")
+        return True
 
     async def _recover_interrupted_reject(self, db, pending_id: int) -> None:
         async with self._pending_operation(db, pending_id):
@@ -465,103 +464,100 @@ class PendingRoutes:
         if os.path.abspath(src_path) != os.path.abspath(cat_path) and os.path.exists(cat_path):
             return False, "目标分类目录已存在同名文件"
 
+        emoji_entry: dict[str, Any] = {
+            "path": cat_path,
+            "hash": str(row.get("hash", "") or ""),
+            "phash": row.get("phash") or "",
+            "category": category,
+            "desc": str(row.get("desc", "") or ""),
+            "source": str(row.get("source", "") or ""),
+            "origin_target": str(row.get("origin_target", "") or ""),
+            "scope_mode": scope_mode or "public",
+            "created_at": int(time.time()),
+            "use_count": 0,
+            "last_used_at": 0,
+            "reviewed_at": int(time.time()),
+            "tags": list(row.get("tags", []) or []),
+            "scenes": list(row.get("scenes", []) or []),
+            "overlay_text": str(row.get("overlay_text", "") or ""),
+            "emotions": list(row.get("emotions", []) or []),
+            "character": str(row.get("character", "") or ""),
+            # v5：从 pending 继承元数据（宽高/格式/字节/来源/入库方式）
+            "source_url": row.get("source_url"),
+            "original_name": row.get("original_name"),
+            "width": row.get("width"),
+            "height": row.get("height"),
+            "format": row.get("format"),
+            "bytes": row.get("bytes"),
+            "add_method": row.get("add_method"),
+            "retention_class": str(row.get("retention_class", "native") or "native"),
+            # REQ-3: 适用 bot 白名单(空串 = 全部 bot 可用)
+            "allowed_bots": str(row.get("allowed_bots", "") or ""),
+        }
         inserted = False
-        committed = False
+        failure = None
         cancelled_any = False
-        if not self._write_approve_marker(pending_id, src_path, cat_path):
-            return False, "无法写入审核恢复标记，本次审核未做任何修改"
-        try:
-            if os.path.abspath(src_path) != os.path.abspath(cat_path):
-                _, cancelled, error = await self._run_step(
-                    asyncio.to_thread(shutil.move, src_path, cat_path)
+        async with db._write_lock:
+            # Recheck admission after waiting for the gallery gate, before the
+            # first file move. Other writers cannot enter until commit/rollback.
+            if db.hash_exists(str(row.get("hash") or "")) or db.get_emoji(cat_path) is not None:
+                return False, "gallery ownership conflict"
+            if os.path.abspath(src_path) != os.path.abspath(cat_path) and os.path.exists(cat_path):
+                return False, "gallery destination already exists"
+            if not os.path.isfile(src_path) or self._file_hash(src_path) != str(row.get("hash") or ""):
+                return False, "pending file hash mismatch"
+            if not self._write_approve_marker(pending_id, src_path, cat_path):
+                return False, "无法写入审核恢复标记，本次审核未做任何修改"
+            try:
+                if os.path.abspath(src_path) != os.path.abspath(cat_path):
+                    _, cancelled, error = await self._run_step(
+                        asyncio.to_thread(shutil.move, src_path, cat_path)
+                    )
+                    if error is not None:
+                        raise error
+                    if cancelled:
+                        raise asyncio.CancelledError()
+                result, cancelled, error = await self._run_step(
+                    db.insert_batch([emoji_entry], overwrite=False, _writer_locked=True)
                 )
-                cancelled_any = cancelled_any or cancelled
                 if error is not None:
                     raise error
+                if not result:
+                    raise RuntimeError("insert emoji returned 0")
+                inserted = True
                 if cancelled:
                     raise asyncio.CancelledError()
-
-            emoji_entry: dict[str, Any] = {
-                "path": cat_path,
-                "hash": str(row.get("hash", "") or ""),
-                "phash": row.get("phash") or "",
-                "category": category,
-                "desc": str(row.get("desc", "") or ""),
-                "source": str(row.get("source", "") or ""),
-                "origin_target": str(row.get("origin_target", "") or ""),
-                "scope_mode": scope_mode or "public",
-                "created_at": int(time.time()),
-                "use_count": 0,
-                "last_used_at": 0,
-                "reviewed_at": int(time.time()),
-                "tags": list(row.get("tags", []) or []),
-                "scenes": list(row.get("scenes", []) or []),
-                "overlay_text": str(row.get("overlay_text", "") or ""),
-                "emotions": list(row.get("emotions", []) or []),
-                "character": str(row.get("character", "") or ""),
-                # v5：从 pending 继承元数据（宽高/格式/字节/来源/入库方式）
-                "source_url": row.get("source_url"),
-                "original_name": row.get("original_name"),
-                "width": row.get("width"),
-                "height": row.get("height"),
-                "format": row.get("format"),
-                "bytes": row.get("bytes"),
-                "add_method": row.get("add_method"),
-                "retention_class": str(row.get("retention_class", "native") or "native"),
-                # REQ-3: 适用 bot 白名单(空串 = 全部 bot 可用)
-                "allowed_bots": str(row.get("allowed_bots", "") or ""),
-            }
-            result, cancelled, error = await self._run_step(db.insert_batch([emoji_entry], overwrite=False))
-            cancelled_any = cancelled_any or cancelled
-            if error is not None:
-                raise error
-            if not result:
-                raise RuntimeError("insert emoji returned 0")
-            inserted = True
-            if cancelled:
-                raise asyncio.CancelledError()
-
-            # 提交点：删除 pending 行；此后文件与图库记录已一致
-            db.delete_pending(pending_id)
-            committed = True
-            self._clear_approve_marker(pending_id)
-
-            if hasattr(db, "promote_source_pending_path"):
-                _, cancelled, error = await self._run_step(
-                    db.promote_source_pending_path(src_path, cat_path)
-                )
+                # Commit: all physical and database ownership checks remain gated.
+                db.delete_pending(pending_id)
+                self._clear_approve_marker(pending_id)
+            except (Exception, asyncio.CancelledError) as exc:
+                failure = exc
+                _, cancelled, _error = await self._run_step(self._rollback_approval(
+                    db, pending_id, src_path, cat_path, inserted=inserted,
+                    expected_hash=str(row.get("hash") or ""), _writer_locked=True,
+                ))
+                cancelled_any = cancelled
+        if failure is not None:
+            if inserted:
+                _, cancelled, _error = await self._run_step(refresh_search_entry(self.plugin, cat_path))
                 cancelled_any = cancelled_any or cancelled
-                if error is not None:
-                    logger.warning(f"审核通过同步来源记录失败 id={pending_id}: {error}")
-            _, cancelled, error = await self._run_step(
-                refresh_search_entry(self.plugin, cat_path, emoji_entry)
-            )
+            if isinstance(failure, asyncio.CancelledError) or cancelled_any:
+                raise asyncio.CancelledError()
+            logger.error(f"Approval failed id={pending_id}: {failure}")
+            return False, str(failure)
+
+        if hasattr(db, "promote_source_pending_path"):
+            _, cancelled, error = await self._run_step(db.promote_source_pending_path(src_path, cat_path))
             cancelled_any = cancelled_any or cancelled
             if error is not None:
-                logger.warning(f"审核通过刷新检索索引失败 id={pending_id}: {error}")
-
-            if cancelled_any:
-                raise asyncio.CancelledError()
-            return True, ""
-        except asyncio.CancelledError:
-            if not committed:
-                await self._run_step(
-                    self._rollback_approval(
-                        db, pending_id, src_path, cat_path, inserted=inserted,
-                        expected_hash=str(row.get("hash", "") or ""),
-                    )
-                )
-            raise
-        except Exception as e:
-            if not committed:
-                await self._run_step(
-                    self._rollback_approval(
-                        db, pending_id, src_path, cat_path, inserted=inserted,
-                        expected_hash=str(row.get("hash", "") or ""),
-                    )
-                )
-            logger.error(f"审核通过失败 id={pending_id}: {e}", exc_info=True)
-            return False, str(e)
+                logger.warning(f"Approval provenance refresh failed id={pending_id}: {error}")
+        _, cancelled, error = await self._run_step(refresh_search_entry(self.plugin, cat_path, emoji_entry))
+        cancelled_any = cancelled_any or cancelled
+        if error is not None:
+            logger.warning(f"Approval index refresh failed id={pending_id}: {error}")
+        if cancelled_any:
+            raise asyncio.CancelledError()
+        return True, ""
 
     async def handle_pending_approve(self):
         """POST /pending/approve —— 批量通过 {id} 或 {ids:[]}。"""

@@ -293,6 +293,7 @@ def test_generation_advance_without_signature_change_aligns_cache(env, monkeypat
         await engine._build_bm25_index(idx)
 
         db._bump_index_generation()  # 代次推进, 语料签名不变
+        idx = db.get_index_cache_readonly()  # A new request captures current metadata.
         calls = {"n": 0}
         original = engine._compute_bm25_signature
 

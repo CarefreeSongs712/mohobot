@@ -83,7 +83,9 @@ class MemeSelector:
             recent = self._recently_sent_paths()
             fresh: list[tuple[str, dict, float | None]] = []
             stale: list[tuple[str, dict, float | None]] = []
-            for path, score in await service.search(description, k=limit * 4 + 10):
+            embedding_results = await service.search(description, k=limit * 4 + 10)
+            idx = self._search_engine.current_index(idx)
+            for path, score in embedding_results:
                 data = _usable(path)
                 if data is None:
                     continue
@@ -97,6 +99,7 @@ class MemeSelector:
             logger.debug("[语义检索] 向量无可用结果，退回关键词检索")
 
         fallback = await self.search_images(description, limit=limit, idx=idx, event=event)
+        idx = self._search_engine.current_index(idx)
         results = []
         for path, *_rest in fallback:
             data = _usable(path)

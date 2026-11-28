@@ -29,6 +29,14 @@ from .pending_repository import PendingRepository
 from .embedding_repository import EmbeddingRepository
 
 
+class GalleryIndex(dict[str, Any]):
+    """A request snapshot carrying the database generation captured before reading."""
+
+    def __init__(self, generation: int):
+        super().__init__()
+        self.generation = generation
+
+
 class DatabaseService(
     DatabaseSchema,
     SourceRepository,
@@ -74,26 +82,33 @@ class DatabaseService(
     def _bump_index_generation(self) -> None:
         self._index_generation += 1
 
-    async def _run_index_write(self, operation, *args, always_bump=False):
-        """持锁结清线程写入并推进语料代次，然后再传播调用方取消。"""
+    async def _run_index_write(self, operation, *args, always_bump=False, _writer_locked=False):
+        if _writer_locked:
+            if not self._write_lock.locked():
+                raise RuntimeError("gallery writer gate is not held")
+            return await self._finish_index_write(operation, *args, always_bump=always_bump)
         async with self._write_lock:
-            future = asyncio.create_task(asyncio.to_thread(operation, *args))
-            cancelled = False
-            while not future.done():
-                try:
-                    await asyncio.shield(future)
-                except asyncio.CancelledError:
-                    cancelled = True
-                except Exception:
-                    break
+            return await self._finish_index_write(operation, *args, always_bump=always_bump)
+
+    async def _finish_index_write(self, operation, *args, always_bump=False):
+        """Settle a write while the caller retains the gallery writer gate."""
+        future = asyncio.create_task(asyncio.to_thread(operation, *args))
+        cancelled = False
+        while not future.done():
             try:
-                result = future.result()
-                if result or always_bump:
-                    self._bump_index_generation()
-            finally:
-                if cancelled:
-                    raise asyncio.CancelledError()
-            return result
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            result = future.result()
+            if result or always_bump:
+                self._bump_index_generation()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError()
+        return result
 
     def _ensure_db_dir(self) -> None:
         """确保数据库目录存在。"""
@@ -404,7 +419,11 @@ class DatabaseService(
                 current_values=current.get("scenes") or [],
                 desired_values=desired.get("scenes") or [],
             )
-        return search_metadata_changed
+        # Request snapshots also carry access-control metadata. Changes to it
+        # must retire the snapshot generation even when BM25 tokens are unchanged.
+        return search_metadata_changed or any(
+            field in changed_fields for field in ("scope_mode", "origin_target", "allowed_bots")
+        )
 
     def _build_search_signature_from_index(self, idx: dict[str, dict[str, Any]]) -> str:
         if not idx:
@@ -603,13 +622,15 @@ class DatabaseService(
             )
             return updated.rowcount == 1
 
-    async def delete_paths(self, paths: list[str]) -> int:
+    async def delete_paths(self, paths: list[str], *, expected_hash: str | None = None,
+                           _writer_locked: bool = False) -> int:
         clean_paths = [p for p in paths if isinstance(p, str) and p]
         if not clean_paths:
             return 0
-        return await self._run_index_write(self._delete_paths_sync, clean_paths)
+        return await self._run_index_write(self._delete_paths_sync, clean_paths, expected_hash,
+                                           _writer_locked=_writer_locked)
 
-    def _delete_paths_sync(self, paths: list[str]) -> int:
+    def _delete_paths_sync(self, paths: list[str], expected_hash: str | None = None) -> int:
         deleted = 0
         with self._get_connection() as conn:
             transaction_started = False
@@ -617,7 +638,11 @@ class DatabaseService(
                 conn.execute("BEGIN IMMEDIATE")
                 transaction_started = True
                 for path in paths:
-                    cur = conn.execute("DELETE FROM emoji WHERE path = ?", (path,))
+                    if expected_hash is None:
+                        cur = conn.execute("DELETE FROM emoji WHERE path = ?", (path,))
+                    else:
+                        cur = conn.execute("DELETE FROM emoji WHERE path = ? AND hash = ?",
+                                           (path, expected_hash))
                     deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
                 conn.execute("COMMIT")
             except Exception:
@@ -687,11 +712,13 @@ class DatabaseService(
         new_path: str,
         category: str,
         updates: dict[str, Any] | None = None,
+        *, _writer_locked: bool = False,
     ) -> bool:
         if not old_path or not new_path or old_path == new_path:
             return False
         return await self._run_index_write(
-            self._move_path_sync, old_path, new_path, category, updates or {}
+            self._move_path_sync, old_path, new_path, category, updates or {},
+            _writer_locked=_writer_locked,
         )
 
     def _move_path_sync(
@@ -772,7 +799,8 @@ class DatabaseService(
 
     # ── 批量操作 ──
 
-    async def insert_batch(self, emojis: list[dict[str, Any]], *, overwrite: bool = True) -> int:
+    async def insert_batch(self, emojis: list[dict[str, Any]], *, overwrite: bool = True,
+                           _writer_locked: bool = False) -> int:
         """批量插入表情包记录。
 
         Args:
@@ -786,7 +814,8 @@ class DatabaseService(
             return 0
 
         try:
-            return await self._run_index_write(self._insert_batch_sync, emojis, overwrite)
+            return await self._run_index_write(self._insert_batch_sync, emojis, overwrite,
+                                               _writer_locked=_writer_locked)
         except Exception as e:
             logger.error(f"[DB] 批量插入失败: {e}")
             return 0
@@ -855,7 +884,7 @@ class DatabaseService(
         注意：此方法返回全量数据，仅用于兼容过渡，
         新代码应使用具体的搜索方法。
         """
-        result: dict[str, Any] = {}
+        result: dict[str, Any] = GalleryIndex(self._index_generation)
 
         with self._get_connection() as conn:
             # 单次查询获取所有表情包
