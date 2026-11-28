@@ -381,15 +381,24 @@ class MessageHandler:
             barrier.register_closer(self.close_history_writers)
 
     async def close_history_writers(self) -> None:
-        """关闭并清空全部 history writer(不删文件), 使下次写入重开新 inode。"""
+        """退休并排空全部 history writer; 解冻后的事件使用新 writer。"""
         writers = list(self._writer_registry.items())
+        for _path, writer in writers:
+            writer.retire()
         self._writer_registry.clear()
+        cancelled = None
         for path, writer in writers:
             try:
                 await writer.close()
+            except asyncio.CancelledError as exc:
+                # close has drained this writer. Finish the others before
+                # freeze rolls back its flag and permits fresh archive owners.
+                cancelled = exc
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"关闭 history writer 失败({path}): {exc}")
         logger.info(f"[History] 已关闭 {len(writers)} 个 history writer")
+        if cancelled is not None:
+            raise cancelled
 
     def _history_frozen(self) -> bool:
         barrier = getattr(self, "_history_barrier", None)
@@ -793,11 +802,15 @@ class MessageHandler:
                 "content": full_reply,
                 "timestamp": int(time_module.time()),
             }
-            session_options = ({"session_id": session["id"], "generation": session["generation"]}
-                               if session is not None else {})
-            written = await self._ctx_mgr.append_context(
-                bot_id, chat_type, chat_id, [user_msg, ai_msg], **session_options,
-            )
+            if session is not None:
+                written = await self._ctx_mgr.append_context(
+                    bot_id, chat_type, chat_id, [user_msg, ai_msg],
+                    validated_session=session,
+                )
+            else:
+                written = await self._ctx_mgr.append_context(
+                    bot_id, chat_type, chat_id, [user_msg, ai_msg],
+                )
             if ab_record is not None:
                 await ab_service.note_context(ab_record, written is not False)
             if written is False:
@@ -1195,7 +1208,6 @@ class MessageHandler:
     @staticmethod
     def _is_ping_text(event) -> bool:
         """去除首尾空白后完全匹配 ping(忽略大小写)。"""
-        from mohobot.utils.cq_code import extract_plain_text as _ept
         text = ""
         if isinstance(event.message, str):
             text = event.message
@@ -1313,9 +1325,13 @@ class MessageHandler:
         感知与情感使用专用 role, 由 LLMService 并入主系统提示。
         event 供情感系统注入当前用户的好感度/态度块。
         """
-        session_options = ({"session_id": session["id"], "generation": session["generation"]}
-                           if session is not None else {})
-        context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id, **session_options)
+        # issue #137: 复用 capture 阶段已校验的会话快照, 避免再读一次 session_index.json。
+        if session is not None:
+            context = await self._ctx_mgr.load_context(
+                bot_id, chat_type, chat_id, validated_session=session,
+            )
+        else:
+            context = await self._ctx_mgr.load_context(bot_id, chat_type, chat_id)
         context = list(context)
         if chat_type == "group":
             recent = await self._format_group_recent(bot_id, chat_id)
