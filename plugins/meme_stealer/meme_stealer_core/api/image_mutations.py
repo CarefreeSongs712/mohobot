@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,6 @@ from typing import Any
 from ..web.http import jsonify, request
 
 from ..host import logger
-
-from ..core.db.index_manager import delete_index_paths
-from ..core.util.safe_io import safe_remove_file
 
 class ImageMutationRoutes:
     # ── Upload / Update / Delete ──────────────────────────────
@@ -115,19 +111,9 @@ class ImageMutationRoutes:
                 if not old_path.exists():
                     return jsonify({"success": False, "error": "Source file not found"})
                 target_dir = self._cfg.ensure_category_dir(new_cat)
-                new_path = self._unique_path(target_dir, old_path.name)
-                await asyncio.to_thread(shutil.move, str(old_path), str(new_path))
-                moved = False
-                try:
-                    moved = await self._move_index_path(target, str(new_path), new_cat, updates)
-                finally:
-                    if not moved and new_path.exists() and not old_path.exists():
-                        try:
-                            await asyncio.to_thread(shutil.move, str(new_path), str(old_path))
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"rollback moved image failed: {new_path} -> {old_path}, {rollback_error}"
-                            )
+                moved = await self._move_gallery_file(
+                    target, target_dir, new_cat, updates, expected_hash=str(img_hash),
+                )
                 if not moved:
                     return jsonify({"success": False, "error": "Update index failed"})
             elif updates:
@@ -146,28 +132,11 @@ class ImageMutationRoutes:
                 return jsonify({"success": False, "error": "缺少 hash"})
             blacklist = data.get("blacklist", False)
 
-            index = self._get_index()
-            removed: list[str] = []
-            for p, m in index.items():
-                if isinstance(m, dict) and m.get("hash") == img_hash:
-                    removed.append(p)
-
-            if removed:
-                if blacklist and not await self._add_blacklist_hash(img_hash):
-                    return jsonify({"success": False, "error": "write blacklist failed"})
-                deleted_paths: list[str] = []
-                for target in removed:
-                    try:
-                        if await safe_remove_file(target):
-                            deleted_paths.append(target)
-                    except Exception as e:
-                        logger.warning(f"删除文件失败: {e}")
-                if not deleted_paths:
-                    return jsonify({"success": False, "error": "delete file failed"})
-                await delete_index_paths(self.plugin, deleted_paths)
-                if hasattr(self.plugin, "image_processor_service"):
-                    self.plugin.image_processor_service.invalidate_cache(img_hash)
-                return jsonify({"success": True, "count": len(deleted_paths)})
+            if blacklist and self._find_index_entry_by_hash(img_hash) and not await self._add_blacklist_hash(img_hash):
+                return jsonify({"success": False, "error": "write blacklist failed"})
+            deleted = await self._delete_gallery_entries(hashes={img_hash})
+            if deleted:
+                return jsonify({"success": True, "count": len(deleted)})
             return jsonify({"success": False, "error": "图片未找到"})
         except Exception as e:
             logger.error(f"删除图片失败: {e}", exc_info=True)
@@ -181,20 +150,8 @@ class ImageMutationRoutes:
             hashes = set(data.get("hashes", []))
             if not hashes:
                 return jsonify({"success": True, "count": 0})
-            index = self._get_index()
-            removed_paths = [
-                p for p, m in index.items() if isinstance(m, dict) and m.get("hash") in hashes
-            ]
-            deleted_paths: list[str] = []
-            for p in removed_paths:
-                try:
-                    if await safe_remove_file(p):
-                        deleted_paths.append(p)
-                except Exception as e:
-                    logger.warning(f"删除文件失败 {p}: {e}")
-            if deleted_paths:
-                await delete_index_paths(self.plugin, deleted_paths)
-            return jsonify({"success": True, "count": len(deleted_paths)})
+            deleted = await self._delete_gallery_entries(hashes=hashes)
+            return jsonify({"success": True, "count": len(deleted)})
         except Exception as e:
             logger.error(f"批量删除失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
@@ -218,19 +175,9 @@ class ImageMutationRoutes:
                 old = Path(p)
                 if not old.exists():
                     continue
-                new = self._unique_path(target_dir, old.name)
-                await asyncio.to_thread(shutil.move, str(old), str(new))
-                moved = False
-                try:
-                    moved = await self._move_index_path(p, str(new), target_cat)
-                finally:
-                    if not moved and new.exists() and not old.exists():
-                        try:
-                            await asyncio.to_thread(shutil.move, str(new), str(old))
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"rollback batch move failed: {new} -> {old}, {rollback_error}"
-                            )
+                moved = await self._move_gallery_file(
+                    p, target_dir, target_cat, expected_hash=str(m.get("hash") or ""),
+                )
                 if moved:
                     moved_count += 1
             return jsonify({"success": True, "count": moved_count})

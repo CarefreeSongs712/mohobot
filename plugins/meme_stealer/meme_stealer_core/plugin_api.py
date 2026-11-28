@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
@@ -177,6 +178,107 @@ class PluginAPI(
         if ok:
             await refresh_search_entry(self.plugin, new_path, previous_path=old_path)
         return ok
+
+    async def _move_gallery_file(
+        self, old_path: str, target_dir: Path, category: str,
+        updates: dict[str, Any] | None = None, *, expected_hash: str,
+    ) -> bool:
+        """Settle the physical move and SQLite ownership while holding one gate."""
+        db = self._db
+        if db is None:
+            return False
+
+        async def move_locked():
+            current = db.get_emoji(old_path)
+            old = Path(old_path)
+            if (not current or str(current.get("hash") or "") != expected_hash
+                    or not old.is_file() or self._file_hash(str(old)) != expected_hash):
+                return None
+            new = self._unique_path(target_dir, old.name)
+            committed = False
+            try:
+                await asyncio.to_thread(shutil.move, str(old), str(new))
+                committed = await db.move_path(
+                    str(old), str(new), category, updates or {}, _writer_locked=True,
+                )
+                return str(new) if committed else None
+            finally:
+                if not committed and new.exists() and not old.exists():
+                    _, _, error = await self._run_step(asyncio.to_thread(shutil.move, str(new), str(old)))
+                    if error:
+                        logger.error(f"rollback moved image failed: {new} -> {old}, {error}")
+
+        async with db._write_lock:
+            new_path, cancelled, error = await self._run_step(move_locked())
+        if new_path:
+            _, refresh_cancelled, _ = await self._run_step(
+                refresh_search_entry(self.plugin, new_path, previous_path=old_path)
+            )
+            cancelled = cancelled or refresh_cancelled
+        if cancelled:
+            raise asyncio.CancelledError()
+        if error:
+            raise error
+        return bool(new_path)
+
+    async def _delete_gallery_entries(
+        self, *, hashes: set[str] | None = None, category: str | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Select and delete gallery-owned files under the same gate as approval."""
+        db = self._db
+        if db is None:
+            return []
+        deleted = []
+
+        async def delete_locked():
+            for path, meta in db.get_index_cache_readonly().items():
+                if not isinstance(meta, dict):
+                    continue
+                if hashes is not None and meta.get("hash") not in hashes:
+                    continue
+                if category is not None and meta.get("category") != category:
+                    continue
+                try:
+                    expected_hash = str(meta.get("hash") or "")
+                    if Path(path).exists() and self._file_hash(path) != expected_hash:
+                        logger.warning(f"删除图库文件跳过哈希冲突: {path}")
+                        continue
+                    file_removed = await safe_remove_file(path)
+                except Exception as exc:
+                    logger.warning(f"删除图库文件失败 {path}: {exc}")
+                    continue
+                if file_removed:
+                    # A failed SQLite delete must reach the route's failure
+                    # response. Keep earlier successes available for refresh.
+                    removed = await db.delete_paths(
+                        [path], expected_hash=expected_hash, _writer_locked=True,
+                    )
+                    if removed:
+                        deleted.append((path, meta))
+            if category is not None:
+                # Unknown files may be an importer still registering its output.
+                # Only remove an empty directory; never erase unowned files.
+                directory = Path(self._data_dir) / "categories" / category
+                try:
+                    directory.rmdir()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    logger.warning(f"分类目录保留（仍有未确认归属的文件或无法清理）: {directory}: {exc}")
+
+        async with db._write_lock:
+            _, cancelled, error = await self._run_step(delete_locked())
+        for path, meta in deleted:
+            processor = getattr(self.plugin, "image_processor_service", None)
+            if processor is not None and meta.get("hash"):
+                processor.invalidate_cache(meta["hash"])
+            _, refresh_cancelled, _ = await self._run_step(refresh_search_entry(self.plugin, path))
+            cancelled = cancelled or refresh_cancelled
+        if cancelled:
+            raise asyncio.CancelledError()
+        if error:
+            raise error
+        return deleted
 
     @staticmethod
     def _unique_path(target_dir: Path, filename: str) -> Path:

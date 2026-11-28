@@ -193,12 +193,9 @@ async def test_cancel_while_waiting_db_write_lock_rolls_back(env, monkeypatch):
 
     async with env.db._write_lock:
         task = asyncio.create_task(env.api._approve_one(env.db, pending_id))
-        # 等任务完成 move 并阻塞在 insert_batch 拿写锁
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            if not src.exists():
-                break
-        assert not src.exists()
+        # The writer gate is acquired before moving the pending file.
+        await asyncio.sleep(0.02)
+        assert src.is_file() and not _cat_path(env).exists()
         task.cancel()
         await asyncio.sleep(0.05)
     with pytest.raises(asyncio.CancelledError):
@@ -564,7 +561,7 @@ async def test_rollback_skips_record_and_files_with_mismatched_hash(env):
 
     # 匹配时仍正常回滚: 删记录 + 文件移回 pending
     src.unlink()
-    entry["hash"] = "expected-hash"
+    entry["hash"] = hashlib.sha256(b"pending-bytes").hexdigest()
     await env.db.insert_batch([entry])
     rolled_back = await env.api._rollback_approval(
         env.db,
@@ -572,7 +569,7 @@ async def test_rollback_skips_record_and_files_with_mismatched_hash(env):
         str(src),
         str(cat_path),
         inserted=True,
-        expected_hash="expected-hash",
+        expected_hash=entry["hash"],
     )
     assert rolled_back is True
     assert env.db.get_emoji(str(cat_path)) is None
