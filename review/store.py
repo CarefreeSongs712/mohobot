@@ -80,13 +80,16 @@ class ReviewStore:
         self._statuses_cache: dict[str, dict[str, dict[str, Any]]] | None = None
         self._counts_cache: dict[str, tuple[int, int]] | None = None
         self._statuses_stamp: tuple = ()
+        # 审核状态修订号: 每次缓存重建/本地判定/撤销自增。供 loader 的
+        # 待审计数缓存判断"审核结论是否变化"(issue #136), 避免全量重扫。
+        self._revision: int = 0
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
 
     def _db_stamp(self) -> tuple:
-        """review.db 与 -wal 的 (mtime_ns, size) 戳记 — 检测外部写入。"""
-        out = []
+        """连接 data_version + 文件戳记; 外部提交不依赖文件系统时钟精度。"""
+        out = [int(self._conn.execute("PRAGMA data_version").fetchone()[0])]
         for suffix in ("", "-wal"):
             try:
                 st = Path(str(self._path) + suffix).stat()
@@ -96,6 +99,8 @@ class ReviewStore:
         return tuple(out)
 
     def _build_statuses_locked(self) -> dict[str, dict[str, dict[str, Any]]]:
+        # 在 SELECT 前取戳记: SELECT 后的外部提交不能被标成已包含在本快照中。
+        stamp = self._db_stamp()
         rows = self._conn.execute(
             "SELECT session_key, fingerprint, status, reviewer, reviewed_at FROM reviewed_entries"
         ).fetchall()
@@ -111,7 +116,8 @@ class ReviewStore:
             c[0 if r["status"] == "normal" else 1] += 1
         self._statuses_cache = result
         self._counts_cache = {k: (v[0], v[1]) for k, v in counts.items()}
-        self._statuses_stamp = self._db_stamp()
+        self._statuses_stamp = stamp
+        self._revision += 1
         return result
 
     def _ensure_statuses_locked(self) -> dict[str, dict[str, dict[str, Any]]]:
@@ -119,6 +125,13 @@ class ReviewStore:
                 and self._db_stamp() == self._statuses_stamp):
             return self._statuses_cache
         return self._build_statuses_locked()
+
+    @property
+    def revision(self) -> int:
+        """审核状态修订号(判定/撤销/外部 DB 重建时自增, 只增不减)。"""
+        with self._lock:
+            self._ensure_statuses_locked()
+            return self._revision
 
     def close(self) -> None:
         with self._lock:
@@ -187,7 +200,18 @@ class ReviewStore:
         removed = removed or []
         if self._statuses_cache is None or (not updates and not removed):
             return
-        bucket = self._statuses_cache.setdefault(session_key, {})
+        stamp = self._db_stamp()
+        if stamp[0] != self._statuses_stamp[0]:
+            # 本地提交不改变 data_version; 外部曾写入时不能用局部补丁掩盖它。
+            self._build_statuses_locked()
+            return
+        # 写时复制: 锁外正在使用的旧 statuses/计数必须仍属于原 revision。
+        statuses = dict(self._statuses_cache)
+        bucket = dict(statuses.get(session_key, {}))
+        statuses[session_key] = bucket
+        self._statuses_cache = statuses
+        if self._counts_cache is not None:
+            self._counts_cache = dict(self._counts_cache)
         counts = None
         if self._counts_cache is not None:
             prev_counts = self._counts_cache.get(session_key, (0, 0))
@@ -205,7 +229,8 @@ class ReviewStore:
                 counts[0 if status == "normal" else 1] += 1
         if counts is not None and self._counts_cache is not None:
             self._counts_cache[session_key] = (counts[0], counts[1])
-        self._statuses_stamp = self._db_stamp()
+        self._statuses_stamp = stamp
+        self._revision += 1
 
     def skip(self, session_key: str, reviewer: str, detail: str = "") -> None:
         """跳过: 只留痕, 不改任何审核状态。"""
@@ -230,22 +255,41 @@ class ReviewStore:
         with self._lock:
             return self._ensure_statuses_locked()
 
+    def statuses_snapshot(self) -> tuple[
+        dict[str, dict[str, dict[str, Any]]], dict[str, tuple[int, int]], int,
+    ]:
+        """同一锁内取得状态、计数及 revision; 返回的旧代数据不会被本地补丁改写。"""
+        with self._lock:
+            statuses = self._ensure_statuses_locked()
+            return statuses, dict(self._counts_cache or {}), self._revision
+
     def counts_by_session(self) -> dict[str, tuple[int, int]]:
         """{session_key: (normal 数, abnormal 数)} — 与 statuses_by_session 同一次构建。"""
         with self._lock:
             self._ensure_statuses_locked()
             return dict(self._counts_cache or {})
 
-    def abnormal_by_fingerprint(self) -> dict[str, dict[str, Any]]:
+    def abnormal_by_fingerprint(
+        self, session_key: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """{fingerprint: 最新一条异常记录} — 会话明细里给 abnormal 条目附带标签/备注。
 
         tags 必须解析成数组(前端按列表渲染; 原始行里是 JSON 文本, 直接透传
         会让前端 .map 抛错 → 整个会话渲染失败, 表现为"会话打不开")。
+
+        session_key 传入时只查该会话(走 idx_abnormal_session), 避免会话明细
+        每次把整张异常表读进内存(issue #136)。
         """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM abnormal_records ORDER BY id ASC"
-            ).fetchall()
+            if session_key is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM abnormal_records ORDER BY id ASC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM abnormal_records WHERE session_key=? ORDER BY id ASC",
+                    (session_key,),
+                ).fetchall()
         result: dict[str, dict[str, Any]] = {}
         for r in rows:
             item = dict(r)

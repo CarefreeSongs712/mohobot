@@ -105,6 +105,68 @@ _SEG_PLACEHOLDERS = {
     "file": "[文件]",
 }
 
+# Windows NTFS ChangeTime 查询(issue #133): st_ctime 在 Windows 上是创建时间,
+# 保持 mtime 的等长就地重写没有任何 stat 信号; ChangeTime 在数据写入与元数据
+# 修改时更新且不会因 os.utime 恢复 mtime 而回退, 可作为文件身份的一项。
+# 非 Windows 平台返回 -1, 同样的职责由 POSIX st_ctime_ns 承担。
+if os.name == "nt":
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+                ("_pad", wintypes.DWORD),
+            ]
+
+        _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _k32.CreateFileW.restype = wintypes.HANDLE
+        _k32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        _GetFileInformationByHandleEx = _k32.GetFileInformationByHandleEx
+        _GetFileInformationByHandleEx.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        _GetFileInformationByHandleEx.restype = wintypes.BOOL
+        _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        _k32.CloseHandle.restype = wintypes.BOOL
+        _WIN_CHANGE_TIME_OK = True
+    except Exception:  # pragma: no cover - 受限环境无法加载 kernel32
+        _WIN_CHANGE_TIME_OK = False
+else:
+    _WIN_CHANGE_TIME_OK = False
+
+
+def _file_change_time_ns(path: str | Path) -> int:
+    """文件的变更时间(ns 级); 非 Windows 或查询失败返回 -1。
+
+    Windows 上返回 NTFS ChangeTime(100ns ticks since 1601); 该值在写入
+    内容或修改元数据时变化, 用于发现"等长就地重写 + 恢复 mtime"这种没有
+    其它 stat 信号的非追加更新(issue #133)。
+    """
+    if not _WIN_CHANGE_TIME_OK:
+        return -1
+    handle = _k32.CreateFileW(str(path), 0, 0x7, None, 3, 0x80, None)
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        return -1
+    try:
+        info = _FileBasicInfo()
+        ok = _GetFileInformationByHandleEx(
+            handle, 0, ctypes.byref(info), ctypes.sizeof(info),
+        )
+        return int(info.ChangeTime) if ok else -1
+    except Exception:
+        return -1
+    finally:
+        _k32.CloseHandle(handle)
+
 
 def _render_message(message: Any) -> tuple[str, str]:
     """把消息段渲染为 (展示文本, 第一张照片 url)。
@@ -149,11 +211,37 @@ def _render_message(message: Any) -> tuple[str, str]:
 class _FileIndex:
     """单个 history JSONL 的增量解析缓存。"""
 
-    __slots__ = ("mtime", "size", "offset", "inode", "rows", "bot_mids",
-                 "seen_mids", "bot_mids_by_bot", "bot_self_ids", "bots")
+    __slots__ = ("mtime", "mtime_ns", "ctime_ns", "change_ns", "generation",
+                 "tail_anchor", "head_anchor", "verified_identity", "size",
+                 "offset", "inode", "prefix_digest", "prefix_hasher",
+                 "rows", "bot_mids", "seen_mids",
+                 "bot_mids_by_bot", "bot_self_ids", "bots")
 
     def __init__(self) -> None:
         self.mtime: float = -1.0
+        # 高精度文件身份(issue #133): float mtime 在部分文件系统上精度不足,
+        # 等长替换/就地重写可能保持 (mtime, size) 不变。identity() 同时纳入
+        # mtime_ns/size/inode/ctime_ns, 派生缓存一律按 identity 失效。
+        self.mtime_ns: int = -1
+        self.ctime_ns: int = -1
+        # Windows NTFS ChangeTime(其它平台 -1): 发现保持 mtime 的就地改写。
+        self.change_ns: int = -1
+        # 内容代次: 每次实际解析(追加/重读)自增, 供派生缓存做二级失效。
+        self.generation: int = 0
+        # 已消费前缀的完整摘要: 增长时必须逐块校验, 首尾采样不能证明纯追加。
+        # hasher 仅驻内存; sidecar 保存 digest, 重启后校验时重建 hasher。
+        self.prefix_hasher: Any = hashlib.sha256()
+        self.prefix_digest: str = self.prefix_hasher.hexdigest()
+        # 首尾锚点只用于同身份下的轻量兜底, 不作为纯追加证明。
+        self.tail_anchor: bytes = b""
+        # 头/尾锚点最近一次复核通过时的文件身份(issue #136 review N4):
+        # 身份完全一致时复用复核结论, 避免每次读索引都重新打开文件 seek;
+        # 大文件另行跳过锚点(见 MohobotData._ANCHOR_VERIFY_MAX_BYTES)。
+        self.verified_identity: tuple[int, int, int, int, int] | None = None
+        # 头/尾锚点各只覆盖 _TAIL_ANCHOR_BYTES(64) 字节: 文件身份(含
+        # ChangeTime/ctime)不变时用它复核首尾内容; 落在两者之间的"中段
+        # 等长改写"发现不了, 需依赖 change_ns/ctime 的推进(见 identity())。
+        self.head_anchor: bytes = b""
         self.size: int = -1
         # 文件身份(inode): 等长替换 + 保守 mtime 时仅靠 (mtime,size) 无法发现,
         # 会继续复用旧解析结果导致漏审(issue #8 第 2 点)。
@@ -191,9 +279,52 @@ class _FileIndex:
             str(k): str(v) for k, v in (d.get("bot_self_ids") or {}).items()
         }
         idx.bots = [str(x) for x in (d.get("bots") or [])]
+        idx.mtime_ns = int(d.get("mtime_ns") or -1)
+        idx.ctime_ns = int(d.get("ctime_ns") or -1)
+        idx.change_ns = int(d.get("change_ns") or -1)
+        idx.prefix_digest = str(d.get("prefix_digest") or "")
+        idx.prefix_hasher = None
+        anchor = d.get("tail_anchor") or ""
+        try:
+            idx.tail_anchor = anchor.encode("latin-1") if isinstance(anchor, str) else b""
+        except UnicodeEncodeError:
+            idx.tail_anchor = b""
+        head = d.get("head_anchor") or ""
+        try:
+            idx.head_anchor = head.encode("latin-1") if isinstance(head, str) else b""
+        except UnicodeEncodeError:
+            idx.head_anchor = b""
         idx.rows = [dict(zip(_ROW_FIELDS, r)) for r in (d.get("rows") or [])]
         idx.seen_mids = {r["mid"] for r in idx.rows if r["mid"]}
         return idx
+
+    def identity(self) -> tuple[int, int, int, int, int]:
+        """文件身份: (mtime_ns, size, inode, ctime_ns, change_ns)。
+
+        任一项变化 → 派生缓存必须失效(issue #133)。ctime 在 POSIX 上随
+        inode 元数据变化; Windows 的 st_ctime 是创建时间, 改由 NTFS
+        ChangeTime(change_ns) 发现"保持 mtime 的等长就地重写"。头/尾锚点
+        只覆盖首尾各 64B, 仅作为首尾内容微改的兜底, 不覆盖中段等长改写
+        (需靠 change_ns/ctime 推进发现)。
+        """
+        return (self.mtime_ns, self.size, self.inode, self.ctime_ns,
+                self.change_ns)
+
+    def reset(self) -> None:
+        """丢弃已解析行, 回到全量重读状态(文件被截断/替换/改写)。"""
+        self.rows = []
+        self.bot_mids = set()
+        self.seen_mids = set()
+        self.bot_mids_by_bot = {}
+        self.bot_self_ids = {}
+        self.bots = []
+        self.offset = 0
+        self.prefix_hasher = hashlib.sha256()
+        self.prefix_digest = self.prefix_hasher.hexdigest()
+        self.tail_anchor = b""
+        self.head_anchor = b""
+        self.verified_identity = None
+        self.generation += 1
 
 
 class MohobotData:
@@ -205,8 +336,16 @@ class MohobotData:
 
     # v6: bot 发言增加 source 标记(llm/auto), 机械内容不参与审核; 旧缓存作废
     # v8: offset 改为字节偏移; v7 缓存里存的是字符偏移(含中文时错位), 必须作废
-    _CACHE_VERSION = 8
+    # v9: 文件身份加入高精度 mtime_ns/ctime_ns + 尾部锚点(issue #133 缓存失效)
+    # v10: 已消费前缀完整 SHA-256, 不再把旧尾部 64B 相同当作纯追加证明。
+    _CACHE_VERSION = 10
+    _PREFIX_READ_CHUNK = 1 << 20  # 增长时流式校验前缀, 不复制整个旧文件
     _SAVE_MIN_INTERVAL = 30.0  # sidecar 保存节流(秒)
+    _TAIL_ANCHOR_BYTES = 64    # 已消费字节的尾部锚点长度(非追加更新探测)
+    # 超过该大小的文件不再做锚点内容复核(issue #136 review N4): 大归档每次
+    # 请求都多一次 open+seek, 而元数据(ChangeTime/ctime)已覆盖真实写入路径;
+    # 该兜底只针对"同 tick 内等长改写", 对 1MB+ 文件收益不成比例。
+    _ANCHOR_VERIFY_MAX_BYTES = 1 << 20
 
     def __init__(self, data_dir: str | Path, cache_path: str | Path | None = None,
                  exempt_uids=None):
@@ -226,8 +365,12 @@ class MohobotData:
         self._dirty = False
         self._saving = False
         self._save_thread: threading.Thread | None = None
-        # 群聊合并行缓存: group_id -> ((文件, mtime, size), 排序去重后的行)
+        # 群聊合并行缓存: group_id -> ((文件, 身份, 代次), 排序去重后的行)
+        # 身份包含 inode/ctime(issue #133), 等长替换也能让缓存失效。
         self._merged_cache: dict[str, tuple[tuple, list[dict[str, Any]]]] = {}
+        # 待审计数缓存: 键 = (文件身份快照, 审核状态快照, store 修订号) ->
+        # {session_key: 待审条数}。避免每次列表请求都逐条扫描全部历史行。
+        self._pending_cache: tuple[tuple, dict[str, int]] | None = None
 
     @property
     def exempt_uids(self) -> set[str]:
@@ -308,7 +451,9 @@ class MohobotData:
             if not force and now - self._last_save < self._SAVE_MIN_INTERVAL:
                 return
             snapshot = [
-                (path, idx.mtime, idx.size, idx.offset, idx.inode,
+                (path, idx.mtime, idx.mtime_ns, idx.ctime_ns, idx.change_ns,
+                 idx.size, idx.offset, idx.inode, idx.tail_anchor, idx.head_anchor,
+                 idx.prefix_digest,
                  sorted(idx.bot_mids), list(idx.rows),
                  {k: sorted(v) for k, v in idx.bot_mids_by_bot.items()},
                  dict(idx.bot_self_ids), list(idx.bots))
@@ -318,8 +463,9 @@ class MohobotData:
             self._last_save = now
 
         files: dict[str, Any] = {}
-        for (path, mtime, size, offset, inode, bot_mids, rows,
-             bot_mids_by_bot, bot_self_ids, bots) in snapshot:
+        for (path, mtime, mtime_ns, ctime_ns, change_ns, size, offset, inode,
+             tail_anchor, head_anchor, prefix_digest, bot_mids, rows, bot_mids_by_bot,
+             bot_self_ids, bots) in snapshot:
             try:
                 if not Path(path).exists():
                     continue  # 文件已删除 → 不再缓存
@@ -328,9 +474,15 @@ class MohobotData:
                 continue
             files[rel] = {
                 "mtime": mtime,
+                "mtime_ns": mtime_ns,
+                "ctime_ns": ctime_ns,
+                "change_ns": change_ns,
                 "size": size,
                 "offset": offset,
                 "inode": inode,
+                "tail_anchor": tail_anchor.decode("latin-1"),
+                "head_anchor": head_anchor.decode("latin-1"),
+                "prefix_digest": prefix_digest,
                 "bot_mids": bot_mids,
                 "bot_mids_by_bot": bot_mids_by_bot,
                 "bot_self_ids": bot_self_ids,
@@ -402,14 +554,124 @@ class MohobotData:
 
     # ── history 增量解析 ─────────────────────────────────────
 
+    @staticmethod
+    def _anchors_match(path: Path, idx: _FileIndex) -> bool:
+        """身份元数据完全相同时, 用头/尾小锚点复核内容是否真的没变。"""
+        head, tail = idx.head_anchor, idx.tail_anchor
+        if not head and not tail:
+            return True
+        try:
+            with open(path, "rb") as fh:
+                if head and fh.read(len(head)) != head:
+                    return False
+                if tail:
+                    fh.seek(max(0, idx.offset - len(tail)))
+                    if fh.read(len(tail)) != tail:
+                        return False
+        except OSError:
+            return False
+        return True
+
+    def _content_unchanged(self, path: Path, idx: _FileIndex) -> bool:
+        """身份未变时确认内容未变(锚点复核 + 按身份缓存, 大文件跳过)。
+
+        同一身份(含 ChangeTime)下重复读索引时直接复用上次复核结论, 不再
+        为每个请求打开文件 seek 首尾; 超过 _ANCHOR_VERIFY_MAX_BYTES 的文件
+        不做锚点复核。缓存随 reset()/identity 变化失效(issue #136 review N4)。
+        """
+        ident = idx.identity()
+        if idx.verified_identity == ident:
+            return True
+        if idx.size > self._ANCHOR_VERIFY_MAX_BYTES:
+            idx.verified_identity = ident
+            return True
+        if self._anchors_match(path, idx):
+            idx.verified_identity = ident
+            return True
+        return False
+
+    def _is_append_only(
+        self, idx: _FileIndex, path: Path, size: int, inode: int,
+    ) -> bool:
+        """新文件状态是否只是在已解析前缀后"纯追加"。
+
+        返回 False → 必须全量重读, 否则复用旧 rows 会漏审(issue #133):
+          - 截断/变短: 前缀可能已变;
+          - inode 变化: os.replace/rename 等长替换;
+          - 长度不变但 mtime/ctime 变化: 就地等长重写;
+          - 长度变长但已消费前缀的 SHA-256 不匹配: 前缀被改写(伪追加)。
+
+        无外部写入协议时, 仅凭 metadata/首尾采样无法证明中段没有改写。
+        因此每次增长都流式校验整个已消费前缀(O(offset) I/O, 有界内存),
+        只有校验通过后才增量解析新字节; 相同身份的热读仍不回读文件。
+        """
+        if idx.mtime_ns < 0 or idx.size < 0:
+            return False  # 从未解析过
+        if size < idx.size or size < idx.offset:
+            return False  # 截断/变短
+        if idx.inode and inode and idx.inode != inode:
+            return False  # 替换为另一个文件, 即使长度相同
+        if size == idx.size:
+            # 身份前面已确认不同; 长度不变 → 内容/元数据被改写。
+            return False
+        if not idx.prefix_digest:
+            return False  # 缺少完整前缀摘要时不能证明纯追加
+        hasher = hashlib.sha256()
+        remaining = idx.offset
+        try:
+            with open(path, "rb") as fh:
+                while remaining:
+                    block = fh.read(min(self._PREFIX_READ_CHUNK, remaining))
+                    if not block:
+                        return False
+                    hasher.update(block)
+                    remaining -= len(block)
+        except OSError:
+            return False
+        if hasher.hexdigest() != idx.prefix_digest:
+            return False
+        idx.prefix_hasher = hasher
+        return True
+
+    @staticmethod
+    def _same_identity(
+        idx: _FileIndex, mtime_ns: int, size: int, inode: int,
+        ctime_ns: int, change_ns: int,
+    ) -> bool:
+        """身份是否未变; ChangeTime 不可得(非 Windows/权限受限)时忽略该项。"""
+        if (idx.mtime_ns, idx.size, idx.inode, idx.ctime_ns) != (
+            mtime_ns, size, inode, ctime_ns,
+        ):
+            return False
+        if idx.change_ns >= 0 and change_ns >= 0:
+            return idx.change_ns == change_ns
+        return True
+
+    def _forget_file(self, path: Path) -> None:
+        """已观察到删除时撤销该文件及派生缓存, 不依赖重建后的 inode/时钟。"""
+        with self._lock:
+            if self._file_cache.pop(str(path), None) is None:
+                return
+            if path.parent.name == "group" and path.parent.parent.name == "history":
+                self._merged_cache.pop(path.stem, None)
+            self._pending_cache = None
+            self._scan_cache = None
+            self._mark_dirty()
+
     def _read_file_index(self, path: Path) -> _FileIndex | None:
         """读一个 history 文件的过滤行(增量: 只解析新增字节)。损坏返回 None。
 
         首次调用会先加载 sidecar 缓存; 有增量时标脏并按节流落盘。
+        文件身份 = (mtime_ns, size, inode, ctime_ns), 只有确认"纯追加"时才
+        增量解析; 替换/等长重写/截断/前缀改写一律全量重读, 防止 rows 与
+        派生缓存继续复用旧内容(issue #133)。
         """
         self._ensure_cache_loaded()
         try:
             st = path.stat()
+        except FileNotFoundError:
+            self._forget_file(path)
+            return None
         except OSError:
             return None
         key = str(path)
@@ -418,23 +680,30 @@ class MohobotData:
             if idx is None:
                 idx = _FileIndex()
                 self._file_cache[key] = idx
-            mtime, size, inode = st.st_mtime, st.st_size, int(st.st_ino)
-            if idx.mtime == mtime and idx.size == size and idx.inode == inode:
-                return idx
-
-            if (
-                size < idx.offset
-                or idx.mtime < 0
-                or (idx.inode and idx.inode != inode)  # 等长替换 → 旧解析结果作废
+            mtime = st.st_mtime
+            mtime_ns = int(st.st_mtime_ns)
+            ctime_ns = int(st.st_ctime_ns)
+            change_ns = _file_change_time_ns(path)
+            size = int(st.st_size)
+            inode = int(st.st_ino)
+            if idx.mtime_ns >= 0 and self._same_identity(
+                idx, mtime_ns, size, inode, ctime_ns, change_ns,
             ):
-                # 文件被截断/替换 → 全量重读
-                idx.rows = []
-                idx.bot_mids = set()
-                idx.seen_mids = set()
-                idx.bot_mids_by_bot = {}
-                idx.bot_self_ids = {}
-                idx.bots = []
-                idx.offset = 0
+                # 元数据完全一致时, 首次加载/sidecar 载入后先做一次头/尾锚点
+                # 复核(Windows 上保持 mtime 的等长就地重写没有元数据信号);
+                # 复核通过后把当前 identity 记入 verified_identity, 同身份的
+                # 后续读取直接复用结论、不再读锚点(大文件则始终跳过锚点)。
+                # 因此"同一 ChangeTime tick 内、等长且恢复 mtime"的首尾就地
+                # 改写不再被发现, 这是明确接受的取舍(issue #133, #136 N4)。
+                if self._content_unchanged(path, idx):
+                    return idx
+
+            rewrite = not self._is_append_only(
+                idx, path, size, inode,
+            )
+            if rewrite:
+                # 文件被截断/替换/就地改写 → 旧解析结果作废, 全量重读
+                idx.reset()
             new_rows: list[dict[str, Any]] = []
             try:
                 # offset 是字节偏移: 必须二进制读、按字节切分再解码。文本模式下
@@ -452,10 +721,25 @@ class MohobotData:
                 if cut >= 0:
                     new_bytes = new_bytes[: cut + 1]
                     idx.offset = start_offset + cut + 1
+                    idx.prefix_hasher.update(new_bytes)
+                    idx.prefix_digest = idx.prefix_hasher.hexdigest()
+                    if not idx.head_anchor and start_offset == 0:
+                        idx.head_anchor = new_bytes[: self._TAIL_ANCHOR_BYTES]
+                    idx.tail_anchor = (
+                        idx.tail_anchor + new_bytes
+                    )[-self._TAIL_ANCHOR_BYTES:]
                 else:
                     new_bytes = b""
                     idx.offset = start_offset
-                idx.mtime, idx.size, idx.inode = mtime, size, inode
+                idx.mtime = mtime
+                idx.mtime_ns = mtime_ns
+                idx.ctime_ns = ctime_ns
+                idx.change_ns = change_ns
+                idx.size = size
+                idx.inode = inode
+            except FileNotFoundError:
+                self._forget_file(path)
+                return None
             except OSError:
                 return None
             # 换行符在 UTF-8 中不会出现在多字节序列内, 切分点总在字符边界;
@@ -491,7 +775,11 @@ class MohobotData:
                 new_rows.append(row)
             if new_rows:
                 idx.rows.extend(new_rows)
+            if new_rows or rewrite:
+                idx.generation += 1
                 self._mark_dirty()
+            # 刚读过内容, 当前身份下的锚点复核必然成立 → 记录, 下次请求免复核。
+            idx.verified_identity = idx.identity()
             return idx
 
     def _parse_line(
@@ -732,7 +1020,17 @@ class MohobotData:
                         "display_name": f"群 {f.stem}",
                         "bots": list(idx.bots),
                     })
-        self._scan_cache = (now, result)
+        # glob 不会返回已删除路径; 仍须清掉此前索引, 包括从 sidecar 恢复的项。
+        with self._lock:
+            for cached_path in list(self._file_cache):
+                path = Path(cached_path)
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    self._forget_file(path)
+                except OSError:
+                    pass
+            self._scan_cache = (now, result)
         self._maybe_save_cache()
         return result
 
@@ -754,8 +1052,6 @@ class MohobotData:
         if bot_id == MERGED_BOT_ID and chat_type == "group":
             return self._merged_rows(chat_id)
         path = self.history_path(sk)
-        if not path.exists():
-            return []
         idx = self._read_file_index(path)
         if not idx:
             return []
@@ -771,12 +1067,12 @@ class MohobotData:
         bot 发言不做内容级去重。
         """
         path = self._group_file(group_id)
-        if not path.exists():
-            return []
         idx = self._read_file_index(path)
         if not idx:
             return []
-        sig = ((str(path), idx.mtime, idx.size),)
+        # 派生缓存签名包含文件身份与内容代次: 等长替换/inode 变化/就地重写
+        # 都会让 merged 行缓存失效(issue #133, 旧签名只有 path/mtime/size)。
+        sig = ((str(path), idx.identity(), idx.generation),)
         with self._lock:
             cached = self._merged_cache.get(group_id)
             if cached and cached[0] == sig:
@@ -807,26 +1103,45 @@ class MohobotData:
         if bot_id == MERGED_BOT_ID and chat_type == "group":
             return self._merged_rows(chat_id) or []
         path = self.history_path(sk)
-        if not path.exists():
-            return None
         idx = self._read_file_index(path)
-        if not idx:
-            return []
+        if idx is None:
+            return None
         with self._lock:
             return list(idx.rows)
 
-    def unreviewed_counts(self, statuses: dict[str, dict[str, Any]]) -> dict[str, int]:
+    def unreviewed_counts(
+        self, statuses: dict[str, dict[str, Any]], revision: int | None = None,
+    ) -> dict[str, int]:
         """{session_key: 待审条数} —— 对**当前文件里的有效消息集合**求交。
 
         旧实现用 ``total - 已判定数``, 恢复较短备份后 total 变小而 DB 里仍有
         旧判定记录, 相减会得到负数/0, 与明细里的待审条目矛盾(issue #8 第 4 点)。
         这里改为逐条枚举当前索引里的消息, 只要其 fingerprint 不在已判定集合中
         就计为待审, 因此与明细口径一致。
+
+        issue #136: 50k 行规模下逐条求交会拖慢会话列表。传入 ``revision``
+        (ReviewStore.revision) 时按「文件身份快照 + 审核状态快照 + revision」
+        缓存结果; 文件变化/判定/撤销都会让快照变化。revision=None 时禁用缓存,
+        保持旧调用方的实时语义。
         """
         self.list_sessions()  # 确保文件索引已加载(幂等)
-        out: dict[str, int] = {}
         with self._lock:
             files = list(self._file_cache.items())
+            files_sig = tuple(
+                (path, idx.identity(), idx.generation)
+                for path, idx in sorted(files)
+            )
+        sig: tuple | None = None
+        if revision is not None:
+            st_sig = tuple(
+                (sk, frozenset(st)) for sk, st in sorted(statuses.items()) if st
+            )
+            sig = (files_sig, st_sig, int(revision))
+            with self._lock:
+                cached = self._pending_cache
+                if cached is not None and cached[0] == sig:
+                    return dict(cached[1])
+        out: dict[str, int] = {}
         for path_str, idx in files:
             path = Path(path_str)
             merged_group = (
@@ -854,6 +1169,9 @@ class MohobotData:
                     n += 1
             if n:
                 out[sk] = n
+        if sig is not None:
+            with self._lock:
+                self._pending_cache = (sig, dict(out))
         return out
 
     def exempt_pending_counts(self, statuses: dict[str, dict[str, Any]]) -> dict[str, int]:
@@ -867,7 +1185,7 @@ class MohobotData:
         self.list_sessions()  # 确保文件索引已加载(幂等)
         out: dict[str, int] = {}
         with self._lock:
-            for path_str, idx in self._file_cache.items():
+            for path_str, idx in list(self._file_cache.items()):
                 path = Path(path_str)
                 merged_group = (
                     len(path.parts) >= 3
@@ -915,7 +1233,7 @@ class MohobotData:
                 for s in (self._scan_cache[1] if self._scan_cache else [])
             }
             out: list[dict[str, Any]] = []
-            for path_str, idx in self._file_cache.items():
+            for path_str, idx in list(self._file_cache.items()):
                 path = Path(path_str)
                 merged_group = (
                     len(path.parts) >= 3
@@ -990,7 +1308,76 @@ class MohobotData:
             return desc or None
         return None
 
-    # ── 会话明细组装 ─────────────────────────────────────────
+    # ── 会话明细组装 / 分页 ──────────────────────────────────
+
+    def _row_identity(self, sk: str, row: dict[str, Any]) -> str:
+        """单行审核身份(message_id 优先, 无 mid 回退内容指纹)。"""
+        return entry_identity(
+            row["mid"],
+            content_fingerprint(sk, row["kind"], row["time"], row["text"]),
+        )
+
+    def _distinct_rows(self, sk: str) -> list[tuple[dict[str, Any], str]]:
+        """会话去重后的 (行, 身份) 列表 — 明细页与 enrich 共用的稳定顺序。"""
+        out: list[tuple[dict[str, Any], str]] = []
+        seen: set[str] = set()
+        for row in self.filtered_rows(sk):
+            identity = self._row_identity(sk, row)
+            if identity in seen:
+                continue  # 同一消息重复推送时只保留第一条
+            seen.add(identity)
+            out.append((row, identity))
+        return out
+
+    def _row_status(
+        self, row: dict[str, Any], identity: str,
+        statuses: dict[str, dict[str, Any]],
+    ) -> str:
+        st = statuses.get(identity)
+        if st:
+            return st["status"]
+        if row["kind"] == "user" and row["uid"] in self._exempt_uids:
+            return "exempt"  # 管理员免检: 未判定时淡显保留上下文
+        return "unreviewed"
+
+    def _enrich_row(
+        self, row: dict[str, Any], identity: str,
+        statuses: dict[str, dict[str, Any]],
+        abnormal_map: dict[str, dict[str, Any]],
+        nicknames: dict[str, str],
+    ) -> dict[str, Any]:
+        """单行 → 前端展示结构(与旧 enrich_entries 字段完全一致)。"""
+        kind = row["kind"]
+        mid = row["mid"]
+        ts = row["time"]
+        st = statuses.get(identity)
+        abnormal = abnormal_map.get(identity)
+        bot_id = str(row.get("bot") or "")
+        status = self._row_status(row, identity, statuses)
+        return {
+            "fingerprint": identity,
+            "role": "assistant" if kind == "assistant" else (row["uid"] or "user"),
+            "kind": kind,
+            "speaker": row["nick"] if kind == "user" else "",
+            "user_id": row["uid"],
+            "content": row["text"],
+            "timestamp": ts,
+            "time_str": format_ts(ts),
+            "message_id": mid,
+            "image_url": row["image_url"],
+            "vlm": self.vlm_caption(row["image_url"]) if row["image_url"] else None,
+            "status": status,
+            "reviewer": (st or {}).get("reviewer", ""),
+            "reviewed_at": (st or {}).get("reviewed_at"),
+            "bot_id": bot_id,
+            "bot_nickname": (nicknames.get(bot_id, bot_id)
+                             if kind == "assistant" and bot_id else ""),
+            "abnormal": (
+                {"id": abnormal["id"], "tags": abnormal.get("tags", []),
+                 "note": abnormal.get("note", "")}
+                if abnormal else None
+            ),
+        }
 
     def enrich_entries(
         self, sk: str, statuses: dict[str, dict[str, Any]],
@@ -999,48 +1386,97 @@ class MohobotData:
         """把会话的入审行组装为前端展示结构(身份 + 审核状态 + 图片/VLM)。
 
         群聊合并会话里, 每条 bot 发言附带 bot_id/bot_nickname(多 bot 混流)。
+        全量组装仅用于小会话/兼容调用方; 明细分页请用 page_entries(issue #136)。
         """
         nicknames = self.bot_nicknames()
+        return [
+            self._enrich_row(row, identity, statuses, abnormal_map, nicknames)
+            for row, identity in self._distinct_rows(sk)
+        ]
+
+    def page_entries(
+        self, sk: str, statuses: dict[str, dict[str, Any]],
+        abnormal_map: dict[str, dict[str, Any]],
+        page: int = 0, page_size: int = 100,
+    ) -> dict[str, Any] | None:
+        """会话明细分页: 只 enrich 当前窗口, 不组装整会话(issue #136)。
+
+        统计口径与旧实现一致(total/unreviewed/abnormal_count/abnormal_pages
+        都基于整会话), page<=0 自动锚定第一条待审所在页, 无待审则最后一页。
+        会话不存在或没有入审行时返回 None(与旧 404 语义一致)。
+        """
+        distinct = self._distinct_rows(sk)
+        if not distinct:
+            return None
+        total = len(distinct)
+        page_size = max(1, min(int(page_size or 100), 500))
+        pages = max(1, (total + page_size - 1) // page_size)
+        unreviewed = 0
+        abnormal_count = 0
+        first_pending: int | None = None
+        abnormal_idx: list[int] = []
+        for i, (row, identity) in enumerate(distinct):
+            status = self._row_status(row, identity, statuses)
+            if status == "unreviewed":
+                unreviewed += 1
+                if first_pending is None:
+                    first_pending = i
+            elif status == "abnormal":
+                abnormal_count += 1
+                abnormal_idx.append(i)
+        if page <= 0:
+            page = (first_pending // page_size + 1) if first_pending is not None else pages
+        page = min(max(page, 1), pages)
+        start = (page - 1) * page_size
+        nicknames = self.bot_nicknames()
+        window = [
+            self._enrich_row(row, identity, statuses, abnormal_map, nicknames)
+            for row, identity in distinct[start:start + page_size]
+        ]
+        return {
+            "total": total,
+            "unreviewed": unreviewed,
+            "abnormal_count": abnormal_count,
+            "abnormal_pages": sorted({i // page_size + 1 for i in abnormal_idx}),
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "entries": window,
+        }
+
+    def unreviewed_fingerprints(
+        self, sk: str, statuses: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        """会话内全部待审身份(顺序与明细一致)。"""
+        return [
+            identity for row, identity in self._distinct_rows(sk)
+            if self._row_status(row, identity, statuses) == "unreviewed"
+        ]
+
+    def unreviewed_count_session(
+        self, sk: str, statuses: dict[str, dict[str, Any]],
+    ) -> int:
+        """单个会话的待审条数(判定后用, 无需重新 enrich 整会话)。"""
+        return sum(
+            1 for row, identity in self._distinct_rows(sk)
+            if self._row_status(row, identity, statuses) == "unreviewed"
+        )
+
+    def entries_by_fingerprints(
+        self, sk: str, statuses: dict[str, dict[str, Any]],
+        abnormal_map: dict[str, dict[str, Any]], fingerprints: list[str],
+    ) -> list[dict[str, Any]]:
+        """只为指定指纹组装展示结构(异常判定写库只需命中的那几条)。"""
+        wanted = set(fingerprints)
+        if not wanted:
+            return []
+        nicknames = self.bot_nicknames()
         out: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for row in self.filtered_rows(sk):
-            kind = row["kind"]
-            mid = row["mid"]
-            ts = row["time"]
-            identity = entry_identity(mid, content_fingerprint(sk, kind, ts, row["text"]))
-            if identity in seen:
-                continue  # 同一消息重复推送时只保留第一条
-            seen.add(identity)
-            st = statuses.get(identity)
-            abnormal = abnormal_map.get(identity)
-            bot_id = str(row.get("bot") or "")
-            # 管理员免检: 未判定的管理员消息标为 exempt(不计待审, 淡显保留上下文)
-            status = st["status"] if st else (
-                "exempt" if (kind == "user" and row["uid"] in self._exempt_uids)
-                else "unreviewed"
-            )
-            out.append({
-                "fingerprint": identity,
-                "role": "assistant" if kind == "assistant" else (row["uid"] or "user"),
-                "kind": kind,
-                "speaker": row["nick"] if kind == "user" else "",
-                "user_id": row["uid"],
-                "content": row["text"],
-                "timestamp": ts,
-                "time_str": format_ts(ts),
-                "message_id": mid,
-                "image_url": row["image_url"],
-                "vlm": self.vlm_caption(row["image_url"]) if row["image_url"] else None,
-                "status": status,
-                "reviewer": (st or {}).get("reviewer", ""),
-                "reviewed_at": (st or {}).get("reviewed_at"),
-                "bot_id": bot_id,
-                "bot_nickname": (nicknames.get(bot_id, bot_id)
-                                 if kind == "assistant" and bot_id else ""),
-                "abnormal": (
-                    {"id": abnormal["id"], "tags": abnormal.get("tags", []),
-                     "note": abnormal.get("note", "")}
-                    if abnormal else None
-                ),
-            })
+        for row, identity in self._distinct_rows(sk):
+            if identity not in wanted:
+                continue
+            out.append(self._enrich_row(row, identity, statuses, abnormal_map, nicknames))
+            wanted.discard(identity)
+            if not wanted:
+                break
         return out
