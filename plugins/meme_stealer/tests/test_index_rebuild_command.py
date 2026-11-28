@@ -1,5 +1,6 @@
 """Rebuild removes missing records without dropping files outside the scan root."""
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,9 +26,9 @@ async def test_rebuild_prunes_missing_index_and_preserves_existing_external_file
 
     db = DatabaseService(tmp_path / "emojis.db")
     await db.insert_batch([
-        {"path": str(valid), "hash": "valid", "category": "happy", "created_at": 1},
-        {"path": str(missing), "hash": "missing", "category": "happy", "created_at": 2},
-        {"path": str(external), "hash": "external", "category": "happy", "created_at": 3},
+        {"path": str(valid), "hash": hashlib.sha256(b"valid").hexdigest(), "category": "happy", "created_at": 1},
+        {"path": str(missing), "hash": hashlib.sha256(b"missing").hexdigest(), "category": "happy", "created_at": 2},
+        {"path": str(external), "hash": hashlib.sha256(b"external").hexdigest(), "category": "happy", "created_at": 3},
     ])
     plugin = SimpleNamespace(
         db_service=db,

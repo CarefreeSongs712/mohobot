@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -10,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 
 from meme_stealer_core.core.commands.image_mgmt_command import ImageManagementCommand
 from meme_stealer_core.core.commands.index_rebuild_command import IndexRebuildCommand
+from meme_stealer_core.core.db.database_service import DatabaseService
+from meme_stealer_core.core.db.index_manager import IndexManager
 from meme_stealer_core.core.search.meme_selector import MemeSelector
 
 
@@ -564,6 +567,19 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         plugin.db_service.add_blacklist.assert_not_awaited()
 
+    async def _create_rebuild_plugin(self, tmpdir, index_map, rebuilt, cache_dir=None):
+        plugin = DummyPlugin(index_map)
+        plugin.base_dir = Path(tmpdir)
+        plugin.cache_dir = cache_dir
+        plugin.categories_dir = Path(tmpdir)
+        plugin.db_service = DatabaseService(Path(tmpdir) / "emoji.db")
+        await plugin.db_service.insert_batch([
+            {"path": path, **metadata} for path, metadata in index_map.items()
+        ])
+        plugin.index_manager = IndexManager(plugin)
+        plugin.index_manager.rebuild_index_from_files = AsyncMock(return_value=rebuilt)
+        return plugin
+
     async def test_rebuild_index_preserves_scope_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             old_dir = Path(tmpdir) / "old_dir"
@@ -571,12 +587,13 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
             old_path = str(old_dir / "new.png")
             new_path = str(Path(tmpdir) / "new.png")
             Path(new_path).write_bytes(b"new")
+            file_hash = hashlib.sha256(b"new").hexdigest()
 
             old_index = {
                 old_path: {
                     "category": "happy",
                     "created_at": 1,
-                    "hash": "abc",
+                    "hash": hashlib.sha256(b"old").hexdigest(),
                     "desc": "旧描述",
                     "tags": ["旧标签"],
                     "origin_target": "group:100",
@@ -589,28 +606,23 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 new_path: {
                     "category": "happy",
                     "created_at": 2,
-                    "hash": "def",
+                    "hash": file_hash,
                     "desc": "新描述",
                     "tags": ["新标签"],
                 }
             }
 
-            plugin = DummyPlugin(old_index)
-            plugin.base_dir = Path(tmpdir)
-            plugin.categories_dir = Path(tmpdir)
-
-            async def fake_rebuild():
-                return rebuilt
-
-            plugin._rebuild_index_from_files = fake_rebuild
+            plugin = await self._create_rebuild_plugin(tmpdir, old_index, rebuilt)
             handler = IndexRebuildCommand(plugin)
 
             results = await _collect_asyncgen(handler.rebuild_index(DummyEvent()))
             self.assertTrue(any("重建" in str(item) for item in results))
-            self.assertEqual(plugin.saved_index[new_path]["origin_target"], "group:100")
-            self.assertEqual(plugin.saved_index[new_path]["scope_mode"], "local")
-            self.assertEqual(plugin.saved_index[new_path]["source"], "qq_store")
-            self.assertEqual(plugin.saved_index[new_path]["scenes"], ["课堂"])
+            persisted = plugin.db_service.get_emoji(new_path)
+            self.assertEqual(persisted["hash"], file_hash)
+            self.assertEqual(persisted["origin_target"], "group:100")
+            self.assertEqual(persisted["scope_mode"], "local")
+            self.assertEqual(persisted["source"], "qq_store")
+            self.assertEqual(persisted["scenes"], ["课堂"])
 
     async def test_rebuild_index_recovers_from_backup_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -619,12 +631,13 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
             old_path = str(Path(tmpdir) / "legacy" / "new.png")
             new_path = str(Path(tmpdir) / "new.png")
             Path(new_path).write_bytes(b"new")
+            file_hash = hashlib.sha256(b"new").hexdigest()
 
             backup_index = {
                 old_path: {
                     "category": "happy",
                     "created_at": 1,
-                    "hash": "abc",
+                    "hash": file_hash,
                     "desc": "backup-desc",
                     "tags": ["backup-tag"],
                     "origin_target": "group:200",
@@ -642,27 +655,21 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 new_path: {
                     "category": "happy",
                     "created_at": 2,
-                    "hash": "abc",
+                    "hash": file_hash,
                 }
             }
 
-            plugin = DummyPlugin({})
-            plugin.base_dir = Path(tmpdir)
-            plugin.cache_dir = cache_dir
-            plugin.categories_dir = Path(tmpdir)
-
-            async def fake_rebuild():
-                return rebuilt
-
-            plugin._rebuild_index_from_files = fake_rebuild
+            plugin = await self._create_rebuild_plugin(tmpdir, {}, rebuilt, cache_dir)
             handler = IndexRebuildCommand(plugin)
 
             await _collect_asyncgen(handler.rebuild_index(DummyEvent()))
-            self.assertEqual(plugin.saved_index[new_path]["desc"], "backup-desc")
-            self.assertEqual(plugin.saved_index[new_path]["tags"], ["backup-tag"])
-            self.assertEqual(plugin.saved_index[new_path]["origin_target"], "group:200")
-            self.assertEqual(plugin.saved_index[new_path]["scope_mode"], "local")
-            self.assertEqual(plugin.saved_index[new_path]["scenes"], ["backup-scene"])
+            persisted = plugin.db_service.get_emoji(new_path)
+            self.assertEqual(persisted["hash"], file_hash)
+            self.assertEqual(persisted["desc"], "backup-desc")
+            self.assertEqual(persisted["tags"], ["backup-tag"])
+            self.assertEqual(persisted["origin_target"], "group:200")
+            self.assertEqual(persisted["scope_mode"], "local")
+            self.assertEqual(persisted["scenes"], ["backup-scene"])
 
     async def test_rebuild_index_prefers_database_metadata_over_backup_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -671,12 +678,13 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
             old_path = str(Path(tmpdir) / "legacy" / "new.png")
             new_path = str(Path(tmpdir) / "new.png")
             Path(new_path).write_bytes(b"new")
+            file_hash = hashlib.sha256(b"new").hexdigest()
 
             backup_index = {
                 old_path: {
                     "category": "happy",
                     "created_at": 1,
-                    "hash": "abc",
+                    "hash": file_hash,
                     "desc": "backup-desc",
                     "tags": ["backup-tag"],
                     "origin_target": "group:200",
@@ -693,7 +701,7 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 old_path: {
                     "category": "happy",
                     "created_at": 1,
-                    "hash": "abc",
+                    "hash": file_hash,
                     "desc": "current-desc",
                     "tags": ["current-tag"],
                     "origin_target": "group:100",
@@ -705,27 +713,21 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 new_path: {
                     "category": "happy",
                     "created_at": 2,
-                    "hash": "abc",
+                    "hash": file_hash,
                 }
             }
 
-            plugin = DummyPlugin(current_index)
-            plugin.base_dir = Path(tmpdir)
-            plugin.cache_dir = cache_dir
-            plugin.categories_dir = Path(tmpdir)
-
-            async def fake_rebuild():
-                return rebuilt
-
-            plugin._rebuild_index_from_files = fake_rebuild
+            plugin = await self._create_rebuild_plugin(tmpdir, current_index, rebuilt, cache_dir)
             handler = IndexRebuildCommand(plugin)
 
             await _collect_asyncgen(handler.rebuild_index(DummyEvent()))
-            self.assertEqual(plugin.saved_index[new_path]["desc"], "current-desc")
-            self.assertEqual(plugin.saved_index[new_path]["tags"], ["current-tag"])
-            self.assertEqual(plugin.saved_index[new_path]["origin_target"], "group:100")
-            self.assertEqual(plugin.saved_index[new_path]["scope_mode"], "public")
-            self.assertEqual(plugin.saved_index[new_path]["scenes"], ["current-scene"])
+            persisted = plugin.db_service.get_emoji(new_path)
+            self.assertEqual(persisted["hash"], file_hash)
+            self.assertEqual(persisted["desc"], "current-desc")
+            self.assertEqual(persisted["tags"], ["current-tag"])
+            self.assertEqual(persisted["origin_target"], "group:100")
+            self.assertEqual(persisted["scope_mode"], "public")
+            self.assertEqual(persisted["scenes"], ["current-scene"])
 
     async def test_rebuild_index_prefers_legacy_hash_match_over_current_name_match(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -736,12 +738,13 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
             legacy_hash_path = str(Path(tmpdir) / "legacy" / "another.png")
             rebuilt_path = str(Path(tmpdir) / "target.png")
             Path(rebuilt_path).write_bytes(b"new")
+            file_hash = hashlib.sha256(b"new").hexdigest()
 
             backup_index = {
                 legacy_hash_path: {
                     "category": "happy",
                     "created_at": 1,
-                    "hash": "expected-hash",
+                    "hash": file_hash,
                     "desc": "legacy-hash-desc",
                     "tags": ["legacy-hash-tag"],
                     "origin_target": "group:999",
@@ -758,7 +761,7 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 current_same_name_path: {
                     "category": "happy",
                     "created_at": 2,
-                    "hash": "other-hash",
+                    "hash": hashlib.sha256(b"other").hexdigest(),
                     "desc": "current-name-desc",
                     "tags": ["current-name-tag"],
                     "origin_target": "group:100",
@@ -770,27 +773,21 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
                 rebuilt_path: {
                     "category": "happy",
                     "created_at": 3,
-                    "hash": "expected-hash",
+                    "hash": file_hash,
                 }
             }
 
-            plugin = DummyPlugin(current_index)
-            plugin.base_dir = Path(tmpdir)
-            plugin.cache_dir = cache_dir
-            plugin.categories_dir = Path(tmpdir)
-
-            async def fake_rebuild():
-                return rebuilt
-
-            plugin._rebuild_index_from_files = fake_rebuild
+            plugin = await self._create_rebuild_plugin(tmpdir, current_index, rebuilt, cache_dir)
             handler = IndexRebuildCommand(plugin)
 
             await _collect_asyncgen(handler.rebuild_index(DummyEvent()))
-            self.assertEqual(plugin.saved_index[rebuilt_path]["desc"], "legacy-hash-desc")
-            self.assertEqual(plugin.saved_index[rebuilt_path]["tags"], ["legacy-hash-tag"])
-            self.assertEqual(plugin.saved_index[rebuilt_path]["origin_target"], "group:999")
-            self.assertEqual(plugin.saved_index[rebuilt_path]["scope_mode"], "local")
-            self.assertEqual(plugin.saved_index[rebuilt_path]["scenes"], ["legacy-hash-scene"])
+            persisted = plugin.db_service.get_emoji(rebuilt_path)
+            self.assertEqual(persisted["hash"], file_hash)
+            self.assertEqual(persisted["desc"], "legacy-hash-desc")
+            self.assertEqual(persisted["tags"], ["legacy-hash-tag"])
+            self.assertEqual(persisted["origin_target"], "group:999")
+            self.assertEqual(persisted["scope_mode"], "local")
+            self.assertEqual(persisted["scenes"], ["legacy-hash-scene"])
 
 
 if __name__ == "__main__":

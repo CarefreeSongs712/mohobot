@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ...host import logger
+from ..maintenance.retention import is_auto_evictable
+from ..util.safe_io import safe_remove_file
 
 
 
@@ -54,6 +56,99 @@ async def delete_index_paths(plugin, paths: list[str]) -> int:
     for path in paths:
         await refresh_search_entry(plugin, path)
     return removed
+
+
+async def _settle_index_step(coro):
+    """Keep a file/SQLite step alive until its outcome is known after cancellation."""
+    future = asyncio.ensure_future(coro)
+    cancelled = False
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:
+            break
+    try:
+        return future.result(), cancelled, None
+    except BaseException as exc:
+        return None, cancelled, exc
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def delete_owned_index_entry(
+    plugin, path: str, *, expected_hash: str, require_evictable: bool = False,
+    snapshot: dict | None = None,
+) -> tuple[bool, dict | None, list[str]]:
+    """Delete only the exact gallery owner captured by a command or eviction.
+
+    The gallery gate covers revalidation, physical removal and conditional SQL.
+    A caller that will save its snapshot must retire stale owners while gated.
+    Basename/category fallbacks are never evidence of ownership.
+    """
+    db = getattr(plugin, "db_service", None)
+    if db is None:
+        return False, None, []
+    current = None
+    deleted = False
+    removed_files = []
+
+    async def delete_locked():
+        nonlocal current, deleted
+        current = db.get_emoji(path)
+        if not current or str(current.get("hash") or "") != expected_hash:
+            if snapshot is not None:
+                snapshot.pop(path, None)
+            return
+        if snapshot is not None:
+            # Preserve current policy/metadata when deletion is skipped or fails.
+            snapshot[path] = current
+        if len(expected_hash) != 64 or any(c not in "0123456789abcdef" for c in expected_hash):
+            logger.warning(f"图库删除跳过无法验证的历史哈希，请先重建索引: {path}")
+            return
+        if require_evictable and not is_auto_evictable(current):
+            return
+        exists = Path(path).exists()
+        if exists and (not Path(path).is_file()
+                       or await asyncio.to_thread(_file_sha256, path) != expected_hash):
+            logger.warning(f"图库删除跳过文件哈希冲突: {path}")
+            return
+        if not await safe_remove_file(path) or Path(path).exists():
+            logger.warning(f"删除图库文件失败，保留索引: {path}")
+            return
+        if exists:
+            removed_files.append(path)
+        deleted = bool(await db.delete_paths(
+            [path], expected_hash=expected_hash, _writer_locked=True,
+        ))
+        if deleted and snapshot is not None:
+            snapshot.pop(path, None)
+
+    async with db._write_lock:
+        _, cancelled, error = await _settle_index_step(delete_locked())
+    if deleted:
+        processor = getattr(plugin, "image_processor_service", None)
+        if processor is not None:
+            try:
+                processor.invalidate_cache(expected_hash)
+            except Exception as exc:
+                logger.warning(f"删除图库缓存失效失败 [{path}]: {exc}")
+        _, refresh_cancelled, refresh_error = await _settle_index_step(refresh_search_entry(plugin, path))
+        cancelled = cancelled or refresh_cancelled
+        if refresh_error is not None:
+            logger.warning(f"删除图库检索刷新失败 [{path}]: {refresh_error}")
+    if cancelled:
+        raise asyncio.CancelledError()
+    if error is not None:
+        raise error
+    return deleted, current, removed_files
 
 
 class IndexManager:

@@ -1,5 +1,6 @@
 """Command list numbering must resolve to the same files as numeric actions."""
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ from meme_stealer_core.core.commands.image_mgmt_command import ImageManagementCo
 from meme_stealer_core.core.db.database_service import DatabaseService
 from meme_stealer_core.core.db.index_manager import IndexManager
 from meme_stealer_core.core.processing.image_render_service import ImageRenderService
-from meme_stealer_core.core.commands import image_mgmt_command as image_management_module
+from meme_stealer_core.core.db import index_manager as index_manager_module
 
 
 class _Result:
@@ -115,12 +116,13 @@ async def test_delete_removes_only_selected_record_and_file(tmp_path: Path):
     for path in (target, unrelated, same_hash):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"image")
+    unrelated.write_bytes(b"unrelated")
 
     db = DatabaseService(tmp_path / "emojis.db")
     await db.insert_batch([
-        {"path": str(target), "hash": "same", "category": "happy", "created_at": 30},
-        {"path": str(same_hash), "hash": "same", "category": "angry", "created_at": 20},
-        {"path": str(unrelated), "hash": "other", "category": "sad", "created_at": 10},
+        {"path": str(target), "hash": hashlib.sha256(target.read_bytes()).hexdigest(), "category": "happy", "created_at": 30},
+        {"path": str(same_hash), "hash": hashlib.sha256(same_hash.read_bytes()).hexdigest(), "category": "angry", "created_at": 20},
+        {"path": str(unrelated), "hash": hashlib.sha256(unrelated.read_bytes()).hexdigest(), "category": "sad", "created_at": 10},
     ])
     plugin = SimpleNamespace(
         db_service=db,
@@ -149,12 +151,14 @@ async def test_blacklist_deletes_every_file_with_same_hash(tmp_path: Path):
     for path in (first, second, unrelated):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"image")
+    unrelated.write_bytes(b"unrelated")
+    image_hash = hashlib.sha256(first.read_bytes()).hexdigest()
 
     db = DatabaseService(tmp_path / "emojis.db")
     await db.insert_batch([
-        {"path": str(first), "hash": "same", "category": "happy", "created_at": 30},
-        {"path": str(second), "hash": "same", "category": "sad", "created_at": 20},
-        {"path": str(unrelated), "hash": "other", "category": "sad", "created_at": 10},
+        {"path": str(first), "hash": image_hash, "category": "happy", "created_at": 30},
+        {"path": str(second), "hash": image_hash, "category": "sad", "created_at": 20},
+        {"path": str(unrelated), "hash": hashlib.sha256(unrelated.read_bytes()).hexdigest(), "category": "sad", "created_at": 10},
     ])
     plugin = SimpleNamespace(
         db_service=db,
@@ -172,7 +176,7 @@ async def test_blacklist_deletes_every_file_with_same_hash(tmp_path: Path):
     assert db.get_emoji(str(first)) is None
     assert db.get_emoji(str(second)) is None
     assert db.get_emoji(str(unrelated)) is not None
-    assert "same" in db.blacklisted_hashes()
+    assert image_hash in db.blacklisted_hashes()
 
 
 @pytest.mark.asyncio
@@ -181,9 +185,10 @@ async def test_delete_failure_keeps_record_and_blacklist_reports_partial_cleanup
 ):
     image = tmp_path / "stuck.png"
     image.write_bytes(b"image")
+    image_hash = hashlib.sha256(image.read_bytes()).hexdigest()
     db = DatabaseService(tmp_path / "emojis.db")
     await db.insert_batch([
-        {"path": str(image), "hash": "stuck-hash", "category": "happy", "created_at": 1}
+        {"path": str(image), "hash": image_hash, "category": "happy", "created_at": 1}
     ])
     plugin = SimpleNamespace(db_service=db)
     plugin.index_manager = IndexManager(plugin)
@@ -191,7 +196,7 @@ async def test_delete_failure_keeps_record_and_blacklist_reports_partial_cleanup
     async def refuse_remove(_path):
         return False
 
-    monkeypatch.setattr(image_management_module, "safe_remove_file", refuse_remove)
+    monkeypatch.setattr(index_manager_module, "safe_remove_file", refuse_remove)
     command = ImageManagementCommand(plugin)
 
     deleted = [message async for message in command.delete_image(_Event(), "1")]
@@ -201,4 +206,4 @@ async def test_delete_failure_keeps_record_and_blacklist_reports_partial_cleanup
     blacklisted = [message async for message in command.blacklist_image(_Event(), "1")]
     assert blacklisted[0].text.startswith("⚠ 已加入黑名单")
     assert image.exists() and db.get_emoji(str(image)) is not None
-    assert "stuck-hash" in db.blacklisted_hashes()
+    assert image_hash in db.blacklisted_hashes()

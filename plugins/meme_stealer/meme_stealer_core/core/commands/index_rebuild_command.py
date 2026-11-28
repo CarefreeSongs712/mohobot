@@ -1,5 +1,6 @@
 """索引重建命令：负责从文件重建索引并合并旧元数据。"""
 
+import asyncio
 import json
 from collections import Counter
 from pathlib import Path
@@ -10,7 +11,7 @@ from ...host import logger
 from ...host import StealerEvent
 
 from ..db.index_metadata_merge import has_meaningful_metadata, restore_rebuilt_metadata
-from ..db.index_manager import delete_index_paths
+from ..db.index_manager import _file_sha256, _settle_index_step, refresh_search_entry
 from ..maintenance.retention import library_counts
 
 
@@ -20,6 +21,69 @@ class IndexRebuildCommand:
     def __init__(self, plugin_instance: Any) -> None:
         self.plugin = plugin_instance
 
+    async def _run_rebuild_write(self, path: str, operation) -> bool:
+        """Settle storage work under the gallery gate, then refresh outside it."""
+        async with self.plugin.db_service._write_lock:
+            changed, cancelled, error = await _settle_index_step(operation())
+        if changed:
+            _, refresh_cancelled, refresh_error = await _settle_index_step(
+                refresh_search_entry(self.plugin, path)
+            )
+            cancelled = cancelled or refresh_cancelled
+            if refresh_error is not None:
+                logger.warning(f"重建索引检索刷新失败 [{path}]: {refresh_error}")
+        if cancelled:
+            raise asyncio.CancelledError()
+        if error is not None:
+            raise error
+        return bool(changed)
+
+    async def _persist_rebuilt_index(self, rebuilt_index: dict, old_index: dict) -> dict:
+        """Apply verified scan results only while their original owner is unchanged."""
+        db = self.plugin.db_service
+        persisted = {}
+        for path, metadata in rebuilt_index.items():
+            if not isinstance(metadata, dict):
+                continue
+            expected_hash = str(metadata.get("hash") or "")
+            if len(expected_hash) != 64 or any(c not in "0123456789abcdef" for c in expected_hash):
+                continue
+
+            async def save_locked():
+                # Include access-control and retention metadata, not just hash:
+                # a user may have edited the same image while the scan ran.
+                if db.get_emoji(path) != old_index.get(path):
+                    return False
+                if not Path(path).is_file():
+                    return False
+                if await asyncio.to_thread(_file_sha256, path) != expected_hash:
+                    return False
+                await db.sync_index({path: metadata}, _writer_locked=True)
+                return True
+
+            if await self._run_rebuild_write(path, save_locked):
+                persisted[path] = metadata
+        return persisted
+
+    async def _prune_missing_records(self, old_index: dict) -> None:
+        """Never prune a replacement owner or a file that appeared after scanning."""
+        db = self.plugin.db_service
+        for path, metadata in old_index.items():
+            if not isinstance(metadata, dict) or not Path(path).is_absolute():
+                continue
+            expected_hash = str(metadata.get("hash") or "")
+            if len(expected_hash) != 64 or any(c not in "0123456789abcdef" for c in expected_hash):
+                continue
+
+            async def delete_locked():
+                if db.get_emoji(path) != metadata or Path(path).exists():
+                    return False
+                return bool(await db.delete_paths(
+                    [path], expected_hash=expected_hash, _writer_locked=True,
+                ))
+
+            await self._run_rebuild_write(path, delete_locked)
+
     async def rebuild_index(self, event: StealerEvent):
         """重建索引命令，用于从旧版本迁移或修复索引。
 
@@ -27,6 +91,11 @@ class IndexRebuildCommand:
         """
         try:
             yield event.plain_result("🔄 开始重建索引，请稍候...")
+
+            # Capture owners before scanning so later writes cannot inherit a
+            # newly approved image's path or overwrite concurrent policy edits.
+            old_index = self.plugin.db_service.get_index_cache_readonly()
+            logger.info(f"[rebuild_index] 从数据库加载 {len(old_index)} 条旧记录")
 
             # 调用插件的重建索引方法（只重建基础索引，不保存到数据库）
             rebuilt_index = await self.plugin.index_manager.rebuild_index_from_files()
@@ -40,13 +109,6 @@ class IndexRebuildCommand:
                 return
 
             # --- 收集所有旧数据源（JSON + 数据库）---
-            # 1. 尝试从数据库加载（如果有数据）
-            old_index = {}
-            db_count = self.plugin.db_service.count_total()
-            if db_count > 0:
-                old_index = self.plugin.db_service.get_index_cache_readonly()
-                logger.info(f"[rebuild_index] 从数据库加载 {len(old_index)} 条旧记录")
-
             # 2. 尝试加载所有可能的旧版 JSON 文件（不依赖 _load_index 的迁移逻辑）
             legacy_metadata_count = 0
             legacy_data_map = {}
@@ -96,30 +158,20 @@ class IndexRebuildCommand:
             old_count = len(old_index) + len(legacy_data_map)
             restore_rebuilt_metadata(rebuilt_index, old_index, legacy_data_map)
 
-            # 3. 使用新的索引作为最终索引（自动清理了不存在的文件记录）
-            final_index = rebuilt_index
+            # Persist each verified owner before eviction; the scan dictionary
+            # must never be saved wholesale after a concurrent gallery write.
+            final_index = await self._persist_rebuilt_index(rebuilt_index, old_index)
+            await self._prune_missing_records(old_index)
 
             # 重建后若超过容量限制，先执行容量控制清理
             max_reg = getattr(self.plugin.plugin_config, "max_reg_num", getattr(self.plugin, "max_reg_num", 0))
-            if max_reg > 0 and library_counts(final_index)["automatic"] > max_reg:
+            current_index = self.plugin.db_service.get_index_cache_readonly()
+            if max_reg > 0 and library_counts(current_index)["automatic"] > max_reg:
                 logger.info(
-                    f"[rebuild_index] 重建后数量 {len(final_index)} 超过限制 {max_reg}，"
+                    f"[rebuild_index] 重建后数量 {len(current_index)} 超过限制 {max_reg}，"
                     f"执行容量控制清理"
                 )
-                await self.plugin.event_handler._enforce_capacity(final_index)
-
-            # 保存合并后的索引
-            await self.plugin.index_manager.save_index(final_index)
-
-            # save_index 是增量同步，明确移除旧数据库中已丢失的文件记录。
-            stale_paths = [
-                path for path in old_index
-                if path not in final_index
-                and Path(path).is_absolute()
-                and not Path(path).exists()
-            ]
-            if stale_paths:
-                await delete_index_paths(self.plugin, stale_paths)
+                await self.plugin.event_handler._enforce_capacity(current_index)
 
             # 增量同步还会保留扫描目录外的有效记录，统计以数据库为准。
             persisted_index = self.plugin.db_service.get_index_cache_readonly()
