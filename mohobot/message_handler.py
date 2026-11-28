@@ -965,8 +965,10 @@ class MessageHandler:
 
     # ── 引用消息内容解析(用户引用前一条消息) ────────────────────
 
-    # 引用消息解析缓存: {message_id: (过期时间, 展示文本 | None)}
+    # 引用消息解析缓存: {(bot_id, chat_type, chat_id, message_id): (过期时间, 展示文本 | None)}
     # None 为负缓存(get_msg 查不到时短缓存, 防同一 id 反复打接口)
+    # issue #125: OneBot 的 message_id 只在一个账号/会话内唯一, 不同 bot 或
+    # 不同群的同号消息并不相同, 必须带上账号与会话维度, 否则 TTL 内会串内容。
     # (实例属性, 在 __init__ 初始化; 类属性会让多实例/测试间相互污染)
     _QUOTE_CACHE_TTL = 600.0    # 解析成功缓存 10 分钟
     _QUOTE_FAIL_TTL = 60.0      # 解析失败缓存 60 秒
@@ -989,11 +991,23 @@ class MessageHandler:
                     return rid
         return ""
 
+    def _group_message_fingerprint(self, event: MessageEvent) -> str:
+        """跨账号稳定的群消息指纹(全局指令/合并回复去重, issue #127)。
+
+        同一条物理消息会经每个 bot 的连接各推送一次, 各账号看到的
+        message_id 互不相同, 但发送者、时间、消息内容一致。用这三者构造
+        稳定指纹作为抽签/认领 key, 保证同一条消息只被一个 bot 认领。
+        """
+        from mohobot.history_dedup import group_message_fingerprint
+        return group_message_fingerprint(event)
+
     def _cache_quote(
-        self, reply_id: str, display: str | None, *, fail: bool = False,
+        self, bot_id: str, chat_type: str, chat_id: str, reply_id: str,
+        display: str | None, *, fail: bool = False,
     ) -> None:
         ttl = self._QUOTE_FAIL_TTL if fail else self._QUOTE_CACHE_TTL
-        self._quote_cache[reply_id] = (time_module.time() + ttl, display)
+        key = (str(bot_id), str(chat_type), str(chat_id), str(reply_id))
+        self._quote_cache[key] = (time_module.time() + ttl, display)
 
     def _prune_quote_cache(self) -> None:
         """清理过期引用缓存; 超上限时按到期先后丢弃最旧条目。"""
@@ -1017,8 +1031,11 @@ class MessageHandler:
         reply_id = self._extract_reply_id(event)
         if not reply_id:
             return ""
+        chat_type = self._get_chat_type(event)
+        chat_id = self._get_chat_id(event)
+        cache_key = (str(bot_id), chat_type, chat_id, reply_id)
         self._prune_quote_cache()
-        cached = self._quote_cache.get(reply_id)
+        cached = self._quote_cache.get(cache_key)
         if cached is not None:
             return cached[1] or ""
         ws = self._ws
@@ -1043,7 +1060,7 @@ class MessageHandler:
             if status in ("", "ok") and retcode == 0:
                 data = resp.get("data")
         if not isinstance(data, dict) or not data.get("message"):
-            self._cache_quote(reply_id, None, fail=True)
+            self._cache_quote(bot_id, chat_type, chat_id, reply_id, None, fail=True)
             return ""
 
         sender = data.get("sender") or {}
@@ -1065,7 +1082,7 @@ class MessageHandler:
             content = ""
         content = (content or "").strip()
         if not content:
-            self._cache_quote(reply_id, None, fail=True)
+            self._cache_quote(bot_id, chat_type, chat_id, reply_id, None, fail=True)
             return ""
         if len(content) > self._QUOTE_MAX_LEN:
             content = content[: self._QUOTE_MAX_LEN] + "…"
@@ -1073,7 +1090,7 @@ class MessageHandler:
             display = f"{name}({uid}): {content}"
         else:
             display = f"{uid}: {content}"
-        self._cache_quote(reply_id, display)
+        self._cache_quote(bot_id, chat_type, chat_id, reply_id, display)
         return display
 
     async def _build_user_store_content(
@@ -1472,7 +1489,18 @@ class MessageHandler:
             # fallback 必须是玩家实际看到的展示文本(逐段经过填充词清理/OOC 治理),
             # 不能用过滤前的 full_reply, 否则被删掉的段也会被概率朗读。
             display_parts: list[str] = []
-            sent = await self._send_full_text(bot_id, event, full_reply, collected=display_parts)
+            outcome: dict = {}
+            sent = await self._send_full_text(
+                bot_id, event, full_reply, collected=display_parts, outcome=outcome)
+            if self._reply_delivery_failed(outcome):
+                # issue #128: 发送失败时只把用户真正看到的文本交回调用方,
+                # 未被投递的内容不得写入 contexts/DB。
+                sent_text = "\n".join(display_parts)
+                logger.warning(
+                    f"[delivery] 回复部分/全部未发出(bot={bot_id}), "
+                    f"已发 {len(display_parts)} 段"
+                )
+                return sent_text
             # 有展示文本但整条被 OOC 丢弃时不能朗读; 纯 <tts> 标注(没有展示
             # 文本)仍保留原有的“只发语音”行为。
             if sent or not full_reply.strip():
@@ -1493,6 +1521,7 @@ class MessageHandler:
         display_parts: list[str] = []
         first_sent = False
         sent_counter = [0]   # 实际发出的段数; 尝试数由 attempted 单独累计
+        delivery: dict = {"failed": False}  # issue #128: 本轮是否出现发送失败
         attempted = 0
         cap_dropped = 0      # 达到分段熔断上限后被截断、未尝试发送的段数
         cap_warned = False   # 首次熔断告警每回合只打一次
@@ -1532,8 +1561,8 @@ class MessageHandler:
                         _drop_for_cap()
                     else:
                         attempted += 1
-                        first_sent = await self._send_segment(
-                            bot_id, event, buffer, first_sent,
+                        first_sent = await self._send_segment_delivery(
+                            delivery, bot_id, event, buffer, first_sent,
                             collected=display_parts, sent_counter=sent_counter)
                     buffer = ""
                 continue
@@ -1566,8 +1595,8 @@ class MessageHandler:
                     _drop_for_cap()
                     continue
                 attempted += 1
-                first_sent = await self._send_segment(
-                    bot_id, event, seg, first_sent,
+                first_sent = await self._send_segment_delivery(
+                    delivery, bot_id, event, seg, first_sent,
                     collected=display_parts, sent_counter=sent_counter)
 
             if is_final and buffer:
@@ -1577,8 +1606,8 @@ class MessageHandler:
                     _drop_for_cap()
                 else:
                     attempted += 1
-                    first_sent = await self._send_segment(
-                        bot_id, event, buffer, first_sent,
+                    first_sent = await self._send_segment_delivery(
+                        delivery, bot_id, event, buffer, first_sent,
                         collected=display_parts, sent_counter=sent_counter)
                 buffer = ""
 
@@ -1594,45 +1623,55 @@ class MessageHandler:
                     _drop_for_cap()
                 else:
                     attempted += 1
-                    first_sent = await self._send_segment(
-                        bot_id, event, cleaned, first_sent,
+                    first_sent = await self._send_segment_delivery(
+                        delivery, bot_id, event, cleaned, first_sent,
                         collected=display_parts, sent_counter=sent_counter)
             # 清洗后正文若被 OOC 整段丢弃(first_sent 仍为 False), 标注 TTS
             # 也不能念; 但纯 <tts>(cleaned 为空)仍按原行为只发语音。
-            if first_sent or not cleaned:
+            sent_text = "\n".join(display_parts)
+            delivery_failed = self._reply_delivery_failed(delivery)
+            if delivery_failed:
+                logger.warning(
+                    f"[delivery] 流式回复部分/全部未发出(bot={bot_id}), "
+                    f"已发 {sent_counter[0]} 段"
+                )
+            elif first_sent or not cleaned:
                 self._submit_tts(
-                    bot_id, event, tts_text, fallback_text="\n".join(display_parts))
+                    bot_id, event, tts_text, fallback_text=sent_text)
             logger.debug(
                 f"Streamed reply (reasoning-suppressed) done: "
                 f"{len(full_reply)} -> {len(cleaned)} chars"
             )
             if diagnostic is not None:
                 attempted += 1
-                await self._send_segment(
-                    bot_id, event, diagnostic, first_sent, sent_counter=sent_counter)
+                await self._send_segment_delivery(
+                    delivery, bot_id, event, diagnostic, first_sent,
+                    sent_counter=sent_counter)
                 self._log_reply(
                     bot_id, event, segments=sent_counter[0],
                     text=f"{cleaned}\n{diagnostic}" if cleaned else str(diagnostic),
                     note=f" (diagnostic){_cap_note()}", attempted=attempted)
                 return diagnostic
             self._log_reply(
-                bot_id, event, segments=sent_counter[0], text=cleaned,
-                note=_cap_note(), attempted=attempted)
-            return cleaned
+                bot_id, event, segments=sent_counter[0],
+                text=sent_text if delivery_failed else cleaned,
+                note=f" (delivery failed){_cap_note()}" if delivery_failed else _cap_note(),
+                attempted=attempted)
+            return sent_text if delivery_failed else cleaned
         if rest.strip():
             if attempted >= self._MAX_SEGMENTS_PER_TURN:
                 _drop_for_cap()
             else:
                 attempted += 1
-                first_sent = await self._send_segment(
-                    bot_id, event, rest, first_sent,
+                first_sent = await self._send_segment_delivery(
+                    delivery, bot_id, event, rest, first_sent,
                     collected=display_parts, sent_counter=sent_counter)
         if diagnostic is not None:
             # 生成未正常完成: 诊断照常告知用户; 半截正文与诊断都不朗读、不持久化。
             # buffer 已在收到诊断 chunk 时按顺序冲刷, 这里不能重复发送。
             attempted += 1
-            await self._send_segment(
-                bot_id, event, diagnostic, first_sent, sent_counter=sent_counter)
+            await self._send_segment_delivery(
+                delivery, bot_id, event, diagnostic, first_sent, sent_counter=sent_counter)
             logger.debug(f"Streamed reply ended with LLM diagnostic after {sent_counter[0]} segment(s)")
             self._log_reply(
                 bot_id, event, segments=sent_counter[0],
@@ -1641,21 +1680,30 @@ class MessageHandler:
             return diagnostic
         # 所有展示段都被逐段丢弃(first_sent 保持 False)时用户什么都没看到,
         # 标注/无标注朗读都不能念; 纯 <tts>(full_reply 为空)保留只发语音。
-        if first_sent or not full_reply.strip():
+        sent_text = "\n".join(display_parts)
+        delivery_failed = self._reply_delivery_failed(delivery)
+        if delivery_failed:
+            logger.warning(
+                f"[delivery] 流式回复部分/全部未发出(bot={bot_id}), "
+                f"已发 {sent_counter[0]} 段"
+            )
+        elif first_sent or not full_reply.strip():
             self._submit_tts(
-                bot_id, event, tts_text, fallback_text="\n".join(display_parts))
+                bot_id, event, tts_text, fallback_text=sent_text)
 
         # [reply] 可观测性日志: 现有 debug 行不含 bot/会话/正文, "bot 说了什么"
         # 只能翻 history JSONL; 这条 info 版补 120 字预览(与 [llm]/[tool]/[inject] 对齐)。
         self._log_reply(
-            bot_id, event, segments=sent_counter[0], text=full_reply,
-            note=_cap_note(), attempted=attempted)
+            bot_id, event, segments=sent_counter[0],
+            text=sent_text if delivery_failed else full_reply,
+            note=f" (delivery failed){_cap_note()}" if delivery_failed else _cap_note(),
+            attempted=attempted)
 
         logger.debug(
             f"Streamed reply done: {sent_counter[0]} segment(s), "
             f"total {len(full_reply)} chars"
         )
-        return full_reply
+        return sent_text if delivery_failed else full_reply
 
     @staticmethod
     def _chat_label(event) -> str:
@@ -1745,7 +1793,17 @@ class MessageHandler:
                 ]
             else:
                 message = text
-            await self._send_message(bot_id, event, message, source="llm")
+            status = await self._send_message(bot_id, event, message, source="llm")
+            if status in ("failed", "blocked"):
+                # issue #128: 未发出就不朗读、不写记忆(返回空文本由调用方跳过落库)
+                logger.warning(
+                    f"[delivery] 单条回复未发出(bot={bot_id}, "
+                    f"chat={self._chat_label(event)}, status={status})"
+                )
+                self._log_reply(
+                    bot_id, event, segments=0, text=full_reply,
+                    note=" (delivery failed)")
+                return ""
         self._submit_tts(bot_id, event, tts_text, fallback_text=full_reply)
         self._log_reply(bot_id, event, segments=1 if text else 0, text=full_reply)
         logger.debug(f"Single reply sent: {len(full_reply)} chars")
@@ -1835,6 +1893,7 @@ class MessageHandler:
         self, bot_id, event, text: str, *, quote: bool = True,
         collected: list[str] | None = None,
         note: str = "",
+        outcome: dict | None = None,
     ) -> bool:
         """Segment a complete reply text and send with configured delays.
 
@@ -1843,6 +1902,8 @@ class MessageHandler:
 
         collected: 可选列表, 逐段追加**实际发出**的文本(填充词清理/OOC 丢弃后),
         供无标注概率朗读使用; 不用过滤前全文。
+        outcome: 可选 dict(issue #128), 结束时写入
+        ``failed``(是否出现发送失败)、``sent_count``、``sent_text``(实际已发文本)。
 
         分段数量受 _MAX_SEGMENTS_PER_TURN 熔断: 超限的剩余分段不再发送,
         [reply] 日志以 ``(segment cap: -N)`` 标注截断数。
@@ -1868,6 +1929,7 @@ class MessageHandler:
         flushed = self._flush_ready_segments(text)
         attempted = 0
         cap_dropped = 0
+        delivery: dict = {"failed": False}
         for seg in flushed["segments"]:
             if attempted >= self._MAX_SEGMENTS_PER_TURN:
                 if cap_dropped == 0:
@@ -1875,9 +1937,10 @@ class MessageHandler:
                 cap_dropped += 1
                 continue
             attempted += 1
-            first_sent = await self._send_segment(
-                bot_id, event, seg, first_sent, quote=quote, check_foreign=False,
-                collected=collected, sent_counter=sent_counter)
+            first_sent = await self._send_segment_delivery(
+                delivery, bot_id, event, seg, first_sent, quote=quote,
+                check_foreign=False, collected=collected,
+                sent_counter=sent_counter)
         if flushed["rest"].strip():
             if attempted >= self._MAX_SEGMENTS_PER_TURN:
                 if cap_dropped == 0:
@@ -1885,18 +1948,32 @@ class MessageHandler:
                 cap_dropped += 1
             else:
                 attempted += 1
-                first_sent = await self._send_segment(
-                    bot_id, event, flushed["rest"], first_sent, quote=quote,
-                    check_foreign=False, collected=collected, sent_counter=sent_counter)
+                first_sent = await self._send_segment_delivery(
+                    delivery, bot_id, event, flushed["rest"], first_sent, quote=quote,
+                    check_foreign=False, collected=collected,
+                    sent_counter=sent_counter)
         if cap_dropped:
             note = f"{note} (segment cap: -{cap_dropped})"
         if attempted and not sent_counter[0]:
             logger.warning(f"[ooc-guard] 回复全部被丢弃, 未发送任何内容(bot={bot_id})")
+        if self._reply_delivery_failed(delivery):
+            note = f"{note} (delivery failed)"
+        if outcome is not None:
+            outcome["failed"] = bool(delivery.get("failed"))
+            # 失败原因(sent 时为空): 调用方/日志据此区分 failed 与 blocked。
+            outcome["status"] = str(delivery.get("status") or "")
+            outcome["sent_count"] = sent_counter[0]
+            outcome["sent_text"] = "\n".join(collected or [])
         self._log_reply(
             bot_id, event, segments=sent_counter[0], text=text, attempted=attempted,
             note=note if first_sent else note + " (dropped)",
         )
         return first_sent
+
+    @staticmethod
+    def _reply_delivery_failed(delivery: dict | None) -> bool:
+        """一次回复发送过程中是否出现过 failed/blocked 的投递(issue #128)。"""
+        return bool(delivery and delivery.get("failed"))
 
     def _warn_segment_cap(self, bot_id: str, event) -> None:
         """分段熔断首次触发的告警(每回合至多一条); 截断总数只进 [reply] 备注。"""
@@ -1950,7 +2027,8 @@ class MessageHandler:
     async def _send_segment(self, bot_id, event, seg: str, first_sent: bool, *,
                             quote: bool = True, check_foreign: bool = True,
                             collected: list[str] | None = None,
-                            sent_counter: list[int] | None = None) -> bool:
+                            sent_counter: list[int] | None = None,
+                            delivery: dict | None = None) -> bool:
         """Send one segmented message, stripped of whitespace.
 
         quote=False 跳过首条回复引用(主动消息没有真实来消息可引用)。
@@ -1958,6 +2036,9 @@ class MessageHandler:
         供无标注概率朗读取“用户真正看到的文本”。
         sent_counter 可选: 只有真正调用 _send_message 之后才 +1, 供调用方区分
         「尝试发送」与「实际发出」(填充词清空/OOC 丢弃/strip 为空都不会发送)。
+        delivery 可选(issue #128): 发送返回 failed/blocked 时置
+        ``delivery["failed"] = True``, 且不把该段计入 collected/sent_counter
+        — 用户没收到的内容不能当成"已经说过"。
         Returns the updated first_sent flag.
         """
         # OOC 治理: 清理中文回复里突兀的英文话语标记(Well,/Okay so,/As an AI…)。
@@ -1983,6 +2064,7 @@ class MessageHandler:
         if not seg:
             return first_sent  # Empty after strip — skip
 
+        was_sent = first_sent
         if first_sent:
             # Random delay between consecutive messages (config-driven)
             await asyncio.sleep(random.uniform(self._seg_delay_min, self._seg_delay_max))
@@ -1998,21 +2080,54 @@ class MessageHandler:
                 message = seg
             first_sent = True
 
-        await self._send_message(bot_id, event, message, source="llm")
+        status = await self._send_message(bot_id, event, message, source="llm")
+        if status in ("failed", "blocked"):
+            logger.warning(
+                f"[delivery] 回复未发出(bot={bot_id}, chat={self._chat_label(event)}, "
+                f"status={status}), 不计入已发送内容"
+            )
+            if delivery is not None:
+                delivery["failed"] = True
+                delivery["status"] = status
+            # 该段没发出: 返回发送前的状态, 不能把首段失败当成"已发出首条"。
+            return was_sent
         if collected is not None:
             collected.append(seg)
         if sent_counter is not None:
             sent_counter[0] += 1
         return first_sent
 
+    async def _send_segment_delivery(
+        self, delivery: dict | None, *args, **kwargs,
+    ) -> bool:
+        """`_send_segment` 的兼容包装: 携带投递结果容器(delivery)。
+
+        既有测试/子类会把实例上的 `_send_segment` 替换成不接受 delivery 的
+        旧签名; 只有该关键字不匹配时才回退, 其余 TypeError 照常抛出。
+        """
+        try:
+            return await self._send_segment(*args, delivery=delivery, **kwargs)  # type: ignore[call-arg]
+        except TypeError as exc:
+            if "unexpected keyword argument 'delivery'" not in str(exc):
+                raise
+            return await self._send_segment(*args, **kwargs)
+
     async def send_proactive_reply(self, bot_id: str, event: MessageEvent, text: str) -> str:
         """发送 bot 主动发起的回复, 形态与被动回复一致(分段/段延迟/TTS 跟随同一套配置),
         但不做回复引用(主动消息没有可引用的来消息)。
+
+        issue #131: 主动消息在 LLM 生成完成后、真正发送前必须重新确认 bot 仍启用;
+        发送失败(#128)时不返回"已发出"的文本, 避免把用户没收到的内容写回上下文。
 
         Returns 实际发出的展示文本(TTS 标注已剥除), 供调用方写回上下文; 空文本不发送。
         """
         full_reply = (text or "").strip()
         if not full_reply:
+            return ""
+        if not self._bot_enabled_for_send(bot_id):
+            logger.info(
+                f"[proactive] bot={bot_id} 已禁用/离线, 丢弃主动消息 {len(full_reply)} 字符"
+            )
             return ""
         from mohobot.utils.reply_filter import strip_reply_artifacts
         full_reply, tts_text = strip_reply_artifacts(full_reply)
@@ -2022,22 +2137,59 @@ class MessageHandler:
             return ""
         if self._segment_reply:
             display_parts: list[str] = []
-            if not await self._send_full_text(
-                    bot_id, event, full_reply, quote=False,
-                    collected=display_parts, note=" (proactive)"):
-                return ""
+            outcome: dict = {}
+            sent = await self._send_full_text(
+                bot_id, event, full_reply, quote=False,
+                collected=display_parts, note=" (proactive)", outcome=outcome)
             display_text = "\n".join(display_parts)
+            if self._reply_delivery_failed(outcome):
+                # 部分/全部投递失败: 只把用户真正看到的文本交回调用方
+                if not display_text:
+                    return ""
+            elif not sent:
+                return ""
+            # 全部段均发出时保持旧契约(返回完整展示文本); 部分投递时返回实际已发文本
+            result_text = display_text if self._reply_delivery_failed(outcome) else full_reply
         else:
             guarded, drop_reason = self._apply_ooc_guard(full_reply, event)
             if drop_reason:
                 logger.info(f"[ooc-guard] 主动消息丢弃(bot={bot_id}, {drop_reason})")
                 return ""
-            await self._send_message(bot_id, event, guarded, source="llm")
+            status = await self._send_message(bot_id, event, guarded, source="llm")
+            if status in ("failed", "blocked"):
+                logger.warning(
+                    f"[delivery] 主动消息未发出(bot={bot_id}, status={status})"
+                )
+                return ""
             display_text = guarded
+            result_text = guarded
             self._log_reply(
                 bot_id, event, segments=1, text=guarded, note=" (proactive)")
         self._submit_tts(bot_id, event, tts_text, fallback_text=display_text)
-        return full_reply
+        return result_text
+
+    def _bot_enabled_for_send(self, bot_id: str) -> bool:
+        """发送前确认 bot 仍启用/在线(issue #131)。
+
+        没有 bot_manager 的测试桩/旧环境返回 True, 保持既有行为; 真实运行环境
+        以当前实例的 enabled 与 stale 标记为准。禁用中的 bot 出站层也会再次拦截。
+        """
+        ws = getattr(self, "_ws", None)
+        manager = getattr(ws, "_bot_manager", None) if ws is not None else None
+        getter = getattr(manager, "get", None) if manager is not None else None
+        if not callable(getter):
+            return True
+        try:
+            instance = getter(bot_id)
+        except Exception as exc:  # noqa: BLE001 - 状态查询失败时保守不发送
+            logger.warning(f"[proactive] 查询 bot {bot_id} 状态失败: {exc}")
+            return False
+        if instance is None:
+            return True  # 交由发送层给出 not_connected 结果
+        config = getattr(instance, "config", None)
+        if not getattr(config, "enabled", True):
+            return False
+        return not bool(getattr(instance, "stale", False))
 
     def _flush_ready_segments(self, buffer: str) -> dict:
         """Split buffered text into ready-to-send segments.
@@ -2276,15 +2428,37 @@ class MessageHandler:
     async def _send_message(
         self, bot_id: str, event: MessageEvent, message: str | list[dict],
         source: str = "auto",
-    ) -> None:
+    ) -> str:
         """Send a message to the appropriate chat (private or group).
 
         source 写入归档行: "llm"=LLM 生成的回复, "auto"=命令/插件等机械内容。
+
+        Returns 投递状态(sent/failed/blocked/unknown, issue #128): 主链据此
+        决定哪些文本可以写入对话记忆, 未确认发出的内容不得当成"已说过"。
+        WS 未提供 send_message_with_status(旧桩/fake)时按旧路径发送并返回
+        "unknown"(无法确认, 保持既有测试行为)。
         """
+        sender = getattr(self._ws, "send_message_with_status", None)
+        if callable(sender):
+            # ack_timeout=0: 派发即返回, 回执由传输层后台等 echo(≤8s)后归档
+            # 真实 message_id; 主链不再逐段阻塞一个默认 5s 的等待窗口
+            # (issue #128 review: 慢适配器会把流式回复串成 5s/段)。
+            if isinstance(event, PrivateMessageEvent):
+                result = await sender(
+                    bot_id, "private", event.user_id, message,
+                    source=source, ack_timeout=0.0)
+            elif isinstance(event, GroupMessageEvent):
+                result = await sender(
+                    bot_id, "group", event.group_id, message,
+                    source=source, ack_timeout=0.0)
+            else:
+                return "unknown"
+            return str(getattr(result, "status", None) or "unknown")
         if isinstance(event, PrivateMessageEvent):
             await self._ws.send_private_msg(bot_id, event.user_id, message, source=source)
         elif isinstance(event, GroupMessageEvent):
             await self._ws.send_group_msg(bot_id, event.group_id, message, source=source)
+        return "unknown"
 
     async def _send_reply(
         self, bot_id: str, event: MessageEvent, reply: str | list[dict]
@@ -2364,10 +2538,16 @@ class MessageHandler:
         # gate 阶段跳过, 这里不能再抽签削掉其中一部分。
         if self._mentioned_bot_ids(event):
             return False
-        # 随机选中的 bot 才回复(同一条消息多 bot 协程共享同一抽签结果)
-        chosen = self._ws._bot_manager.pick_bot_for_group(
-            str(event.group_id), str(event.message_id),
-        )
+        # 随机选中的 bot 才回复(同一条消息多 bot 协程共享同一抽签结果)。
+        # issue #127: 各账号 message_id 不同, 用跨账号稳定指纹认领, 避免
+        # 同一物理消息被多只 bot 同时执行或全部 defer。
+        bm = self._ws._bot_manager
+        fingerprint = self._group_message_fingerprint(event)
+        claim = getattr(bm, "claim_global_command", None)
+        if claim is not None:
+            chosen = claim(str(event.group_id), fingerprint)
+        else:  # 兼容旧 BotManager / 测试替身
+            chosen = bm.pick_bot_for_group(str(event.group_id), fingerprint)
         if chosen is None or chosen == bot_id:
             return False
         logger.debug(f"全局指令 {text!r} 由 {chosen} 回复, {bot_id} 跳过")
@@ -2406,7 +2586,8 @@ class MessageHandler:
         # (不合并成一条转发, 否则"@ A"却收到包含 A 与 B 的合并消息)。
         if self._mentioned_bot_ids(event):
             return False
-        sender = bm.pick_bot_for_group(group_id, str(event.message_id)) or bots[0]
+        sender = bm.pick_bot_for_group(
+            group_id, self._group_message_fingerprint(event)) or bots[0]
         if bot_id != sender:
             logger.debug(f"合并回复指令 {text!r} 由 {sender} 发送, {bot_id} 跳过")
             return True

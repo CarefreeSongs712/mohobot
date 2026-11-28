@@ -53,10 +53,19 @@ class HttpTTSClient:
 
     def sync_config(self, cfg) -> None:
         """热同步 TTSConfig 字段(原位更新地址/token/超时, 立即生效)。"""
+        new_timeout = float(cfg.timeout)
+        if self._client is not None and new_timeout != self._timeout:
+            # issue #131: httpx transport 的 timeout 在客户端创建时固定,
+            # 只改字段不会影响已建连接池; 丢弃旧客户端, 下次调用用新超时创建。
+            old, self._client = self._client, None
+            try:
+                asyncio.get_running_loop().create_task(old.aclose())
+            except RuntimeError:
+                pass
         self._base_url = (cfg.base_url or "").rstrip("/")
         if cfg.api_key:
             self._api_key = cfg.api_key
-        self._timeout = float(cfg.timeout)
+        self._timeout = new_timeout
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -104,11 +113,11 @@ class HttpTTSClient:
             await self._client.aclose()
 
 
-def _build_client(cfg):
-    """按 cfg.backend 构造合成客户端。"""
+def _build_client(cfg, task_supervisor=None):
+    """按 cfg.backend 构造合成客户端; supervisor 供客户端登记异步关闭任务。"""
     if cfg.backend == "minimax":
         from mohobot.services.minimax_tts import MinimaxTTSClient
-        return MinimaxTTSClient(
+        client: Any = MinimaxTTSClient(
             cfg.base_url,
             cfg.api_key,
             model=cfg.model,
@@ -121,7 +130,34 @@ def _build_client(cfg):
             format=cfg.format,
             timeout=float(cfg.timeout),
         )
-    return HttpTTSClient(cfg.base_url, cfg.api_key, timeout=float(cfg.timeout))
+    else:
+        client = HttpTTSClient(cfg.base_url, cfg.api_key, timeout=float(cfg.timeout))
+    if task_supervisor is not None:
+        try:
+            client.task_supervisor = task_supervisor
+        except Exception:  # noqa: BLE001 - 客户端不支持 supervisor 时忽略
+            pass
+    return client
+
+
+def _client_signature(cfg) -> tuple:
+    """实际后端使用的客户端参数; HTTP 不消费 MiniMax 的音色/编码参数。"""
+    if cfg.backend != "minimax":
+        return (cfg.backend, float(cfg.timeout), cfg.base_url, cfg.api_key)
+    return (
+        cfg.backend,
+        float(cfg.timeout),
+        cfg.base_url,
+        cfg.api_key,
+        cfg.model,
+        cfg.voice_id,
+        cfg.speed,
+        cfg.vol,
+        cfg.pitch,
+        cfg.sample_rate,
+        cfg.bitrate,
+        cfg.format,
+    )
 
 
 @dataclass
@@ -130,6 +166,9 @@ class TTSJob:
 
     voice_id: 仅 minimax 后端生效(per-bot BotConfig.tts_voice_id 解析,
     留空用全局); http 后端音色由服务端固定, 客户端忽略该字段。
+
+    generation: 入队时的配置代次。任务在队列中/合成中遇到配置热切换
+    (尤其 enabled 关闭)后不得继续发送(issue #131)。
     """
 
     bot_id: str
@@ -138,6 +177,7 @@ class TTSJob:
     text: str
     source: str = "llm"  # "llm"(LLM 自动朗读, 失败静默) | "command"(/tts 指令, 失败回文本)
     voice_id: str | None = None
+    generation: int = 0
 
 
 class TTSService:
@@ -154,8 +194,15 @@ class TTSService:
         # config: TTSConfig(models/config.py) — 与 main 持有的 GlobalConfig.tts
         # 是同一对象, sync_config 原位更新字段即全框架热生效
         self.cfg = config
-        self._client = _build_client(config)
+        self._client = _build_client(config, task_supervisor)
         self._backend = config.backend
+        # 影响客户端构造的参数快照 + 配置代次(issue #131):
+        # 代次变化后, 旧代次入队的任务在 worker 中直接丢弃, 不再发送。
+        self._client_signature = _client_signature(config)
+        self._config_generation = 0
+        # 退役客户端关闭任务: sync_config 可能在同一事件循环内连续调用,
+        # stop() 会统一等待它们结束, 避免资源泄漏。
+        self._retiring: set[asyncio.Task] = set()
         self._queue: asyncio.Queue[TTSJob] = asyncio.Queue(maxsize=max(1, int(config.queue_maxsize)))
         self._supervisor = task_supervisor
         self._ws = None
@@ -180,36 +227,70 @@ class TTSService:
         self.cfg 与 main 的 GlobalConfig.tts 为同一对象, 原位 setattr 后
         message_handler._tts_active / CommandHandler._cmd_tts 读到的即新值;
         仅 queue_maxsize(队列构造固定)不生效, 需重启。
-        backend 变化时重建合成客户端(关旧开新, 立即切换)。
+        backend/timeout 等构造参数变化时重建合成客户端(关旧开新, 立即切换)。
+        只有构造参数或 enabled 变化才推进配置代次, 旧代次入队的语音任务不再
+        发送(issue #131); voice/bitrate 等纯请求参数由客户端热生效, 不推进代次。
+        重建失败时保留旧客户端与旧签名, 下次 sync_config 会再次尝试重建。
         """
         import dataclasses
-        backend_changed = cfg.backend != self._backend
+        old_enabled = bool(getattr(self.cfg, "enabled", False))
         for f in dataclasses.fields(cfg):
             setattr(self.cfg, f.name, getattr(cfg, f.name))
-        if backend_changed:
-            self._rebuild_client()
+        new_signature = _client_signature(self.cfg)
+        if new_signature != self._client_signature:
+            # 构造参数(timeout/backend/base_url/...)变化: 重建客户端, 旧代次
+            # 入队的任务作废, 避免用旧 transport 参数继续发送。
+            self._config_generation += 1
+            if self._rebuild_client():
+                self._client_signature = _client_signature(self.cfg)
         else:
+            # 仅 enabled 变化才需要作废旧队列任务; voice/bitrate 等纯请求
+            # 参数变化由 client.sync_config 热生效, 不推进代次(review)。
+            if bool(getattr(self.cfg, "enabled", False)) != old_enabled:
+                self._config_generation += 1
             self._client.sync_config(self.cfg)
-        if cfg.backend != "minimax":
+        if self.cfg.backend != "minimax":
             self._ffmpeg_ok = None  # 后端/转码配置变了, 重探 ffmpeg
-        logger.info(f"TTS 配置已热同步(backend={self.cfg.backend}; 除 queue_maxsize 外立即生效)")
+        logger.info(
+            f"TTS 配置已热同步(backend={self.cfg.backend}, "
+            f"generation={self._config_generation}; 除 queue_maxsize 外立即生效)"
+        )
 
-    def _rebuild_client(self) -> None:
+    def _retire_client(self, old) -> None:
+        """异步关闭被替换的客户端; 关闭任务登记到 stop() 统一等待。"""
+        if old is None:
+            return
         try:
-            old = self._client
-            self._client = _build_client(self.cfg)
-            self._backend = self.cfg.backend
-            logger.info(f"TTS 后端已切换: {self.cfg.backend}")
-            if old is not None:
-                import asyncio as _aio
-                try:
-                    _aio.get_running_loop().create_task(old.close())
-                except RuntimeError:
-                    pass
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _close_old() -> None:
+            try:
+                await old.close()
+            except Exception as e:  # noqa: BLE001 - 旧客户端关闭失败不影响新客户端
+                logger.debug(f"TTS 旧客户端关闭失败: {e}")
+
+        task = loop.create_task(_close_old(), name="tts-client-close")
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
+
+    def _rebuild_client(self) -> bool:
+        """按当前 cfg 重建合成客户端; 成功返回 True, 失败保留旧客户端并返回 False。"""
+        old = self._client
+        try:
+            new_client = _build_client(self.cfg, getattr(self, "_supervisor", None))
         except Exception as e:
             logger.error(f"TTS 后端切换失败(保留原后端 {self._backend}): {e}")
-            # 回滚内存配置中的 backend, 与实际客户端保持一致
+            # 回滚内存配置中的 backend, 与实际客户端保持一致; 调用方不更新
+            # _client_signature, 下次 sync_config 以相同参数重试重建。
             self.cfg.backend = self._backend
+            return False
+        self._client = new_client
+        self._backend = self.cfg.backend
+        self._retire_client(old)
+        logger.info(f"TTS 合成客户端已重建: backend={self.cfg.backend}")
+        return True
 
     # ── 生命周期(mohobot 侧 worker) ──────────────────────────
 
@@ -239,6 +320,9 @@ class TTSService:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        # 等待被热切换替换掉的客户端真正关闭, 避免连接池泄漏
+        if self._retiring:
+            await asyncio.gather(*list(self._retiring), return_exceptions=True)
         await self._client.close()
 
     # ── 入队 ─────────────────────────────────────────────────
@@ -246,6 +330,7 @@ class TTSService:
     def submit(self, job: TTSJob) -> bool:
         """入队一个合成任务; 队列满 → 丢最新, 返回 False。"""
         try:
+            job.generation = self._config_generation
             self._queue.put_nowait(job)
             return True
         except asyncio.QueueFull:
@@ -254,6 +339,12 @@ class TTSService:
                 f"TTS 队列已满({self._queue.maxsize}), 丢弃最新请求: {job.text[:30]!r}"
             )
             return False
+
+    def _job_is_stale(self, job: TTSJob) -> bool:
+        """任务是否已失去发送资格: TTS 被关闭或配置代次已变化(issue #131)。"""
+        if not bool(getattr(self.cfg, "enabled", False)):
+            return True
+        return int(getattr(job, "generation", 0) or 0) != self._config_generation
 
     @property
     def queued(self) -> int:
@@ -366,7 +457,18 @@ class TTSService:
                 self._queue.task_done()
 
     async def _process(self, job: TTSJob) -> None:
+        # issue #131 三时点校验: 任务可能是在 TTS 关闭/改配置前入队的,
+        # worker 取到时配置已变则直接丢弃, 不合成、不发送。
+        if self._job_is_stale(job):
+            self.stats["dropped"] += 1
+            logger.info(f"TTS 任务已过期(取到任务时), 丢弃: {job.text[:30]!r}")
+            return
         audio, usage_chars = await self._client.synthesize(job.text, job.voice_id)
+        # 合成期间被停用/配置代次变化: 不再发送, 也不计用量。
+        if self._job_is_stale(job):
+            self.stats["dropped"] += 1
+            logger.info(f"TTS 任务已过期(合成期间), 丢弃: {job.text[:30]!r}")
+            return
         if audio is None:
             self.stats["failed"] += 1
             logger.warning(f"TTS 合成失败({job.source}): {job.text[:30]!r}")
@@ -382,10 +484,28 @@ class TTSService:
         if self._ws is None:
             logger.warning("TTS 语音发送跳过: ws_server 未注入")
             return
+        # 转码耗时可能跨过一次配置热切换; 发送前最后确认(issue #131)。
+        if self._job_is_stale(job):
+            self.stats["dropped"] += 1
+            logger.info(f"TTS 任务已过期(发送前), 丢弃: {job.text[:30]!r}")
+            return
         b64 = base64.b64encode(audio).decode()
         segment = [{"type": "record", "data": {"file": f"base64://{b64}"}}]
         try:
-            if job.chat_type == "group":
+            send_with_status = getattr(self._ws, "send_message_with_status", None)
+            if callable(send_with_status):
+                result = await send_with_status(
+                    job.bot_id, job.chat_type, job.chat_id, segment,
+                    source="auto", ack_timeout=0,
+                    dispatch_guard=lambda: not self._job_is_stale(job),
+                )
+                if result.status == "blocked":
+                    self.stats["dropped"] += 1
+                    return
+                if result.status == "failed":
+                    raise RuntimeError(result.reason or "speech dispatch failed")
+            elif job.chat_type == "group":
+                # 保留仅提供直接发送方法的嵌入式适配器契约。
                 await self._ws.send_group_msg(job.bot_id, job.chat_id, segment)
             else:
                 await self._ws.send_private_msg(job.bot_id, job.chat_id, segment)

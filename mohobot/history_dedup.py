@@ -19,6 +19,18 @@ from collections import OrderedDict
 from typing import Any
 
 
+def group_message_fingerprint(event: Any) -> str:
+    """共享主链和无前缀命令的跨账号身份, 不使用账号独有的 message_id。"""
+    sender = str(getattr(event, "user_id", "") or "")
+    ts = str(getattr(event, "time", "") or "")
+    message = getattr(event, "message", None)
+    try:
+        signature = message_signature(message)
+    except Exception:
+        signature = f"{getattr(event, 'raw_message', '') or ''}|{message!r}"
+    return f"{sender}:{ts}:{signature}"
+
+
 def message_signature(message: Any, *, strict: bool = False) -> tuple[Any, ...]:
     """消息段列表(或纯文本)的跨账号稳定指纹。
 

@@ -11,6 +11,7 @@ extra_info.usage_characters 为计费字符数。音色为 MiniMax 克隆音色
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 import os
 from typing import Any
@@ -70,6 +71,31 @@ class MinimaxTTSClient:
 
     def sync_config(self, cfg) -> None:
         """热同步 TTSConfig 字段(原位更新请求参数, 立即生效)。"""
+        new_timeout = float(cfg.timeout)
+        if self._client is not None and new_timeout != self._timeout:
+            # issue #131: httpx timeout 在客户端创建时固定, 已建连接池不会
+            # 跟随字段更新; 丢弃旧客户端, 下次调用按新超时重建。
+            old, self._client = self._client, None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                async def _close_old() -> None:
+                    try:
+                        await old.aclose()
+                    except Exception as e:  # noqa: BLE001 - 关闭失败不影响新客户端
+                        logger.debug(f"MiniMax 旧客户端关闭失败: {e}")
+
+                scheduler = getattr(self, "task_supervisor", None)
+                if scheduler is not None:
+                    try:
+                        scheduler.create_task(
+                            _close_old(), name="minimax-client-close", owner="tts")
+                    except Exception:  # noqa: BLE001 - supervisor 关闭时降级裸 task
+                        loop.create_task(_close_old())
+                else:
+                    loop.create_task(_close_old())
         self._base_url = (cfg.base_url or "https://api.minimax.cn").rstrip("/")
         if cfg.api_key:
             self._api_key = cfg.api_key
@@ -83,7 +109,7 @@ class MinimaxTTSClient:
         a["format"] = cfg.format
         self._model = cfg.model
         self._voice_id = cfg.voice_id
-        self._timeout = float(cfg.timeout)
+        self._timeout = new_timeout
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
