@@ -8,10 +8,9 @@ from typing import Any
 
 from ...host import Image, MessageChain, Plain, StealerEvent, logger
 from ...host.components import is_inline_image
-from ..db.index_manager import delete_index_paths
+from ..db.index_manager import delete_owned_index_entry
 
 from ..util.normalization import bounded_int
-from ..util.safe_io import safe_remove_file
 from ..maintenance.retention import (
     eviction_candidates,
     library_counts,
@@ -240,63 +239,6 @@ class EventHandler:
         logger.info("[容量控制] 无可用语义向量，退回按使用次数和入库时间淘汰")
         return eviction_candidates(image_index, limit)
 
-    def _resolve_index_file_path(self, path_str: str, image_info: dict | None) -> str | None:
-        candidates: list[Path] = []
-        if path_str:
-            candidates.append(Path(path_str))
-
-        category = ""
-        if isinstance(image_info, dict):
-            category = str(image_info.get("category", "") or "").strip()
-
-        categories_dir = getattr(self.plugin, "categories_dir", None)
-        if category and categories_dir:
-            candidates.append(Path(categories_dir) / category / Path(path_str).name)
-
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                if candidate.is_file():
-                    return str(candidate)
-            except OSError:
-                continue
-        return None
-
-    def _normalize_capacity_index_paths(self, image_index: dict) -> tuple[int, int]:
-        rekeyed = 0
-        stale_removed = 0
-
-        for path_str, image_info in list(image_index.items()):
-            if not isinstance(path_str, str):
-                image_index.pop(path_str, None)
-                stale_removed += 1
-                continue
-
-            resolved = self._resolve_index_file_path(
-                path_str, image_info if isinstance(image_info, dict) else None
-            )
-            if resolved is None:
-                image_index.pop(path_str, None)
-                stale_removed += 1
-                continue
-
-            if resolved != path_str:
-                image_index.pop(path_str, None)
-                existing = image_index.get(resolved)
-                if not isinstance(existing, dict) or (
-                    isinstance(image_info, dict)
-                    and int(image_info.get("created_at", 0) or 0)
-                    < int(existing.get("created_at", 0) or 0)
-                ):
-                    image_index[resolved] = image_info
-                rekeyed += 1
-
-        return rekeyed, stale_removed
-
     async def _enforce_capacity(self, image_index: dict) -> list[str]:
         """容量控制，按加权排序删除超出通用库限制的表情包（文件+索引一起清理）。
 
@@ -304,18 +246,11 @@ class EventHandler:
             image_index: 索引字典
 
         Returns:
-            list[str]: 成功删除的文件路径列表
+            list[str]: 成功清理的图库条目路径列表（包括文件已丢失的条目）
         """
         files_actually_deleted: list[str] = []
 
         try:
-            rekeyed, stale_removed = self._normalize_capacity_index_paths(image_index)
-            if rekeyed or stale_removed:
-                logger.info(
-                    f"[capacity] Normalized {rekeyed} index paths and removed "
-                    f"{stale_removed} stale records before enforcing capacity"
-                )
-
             items_to_remove = self._select_items_for_removal(image_index)
             if not items_to_remove:
                 return files_actually_deleted
@@ -327,51 +262,15 @@ class EventHandler:
                 if remove_path not in image_index:
                     continue
 
-                # 收集该条目对应的所有物理文件路径
-                entry_files: list[str] = [remove_path]
-                if isinstance(image_index[remove_path], dict):
-                    category = image_index[remove_path].get("category", "")
-                    if category and self.plugin.base_dir:
-                        file_name = Path(remove_path).name
-                        category_file_path = str(
-                            Path(self.plugin.base_dir) / "categories" / category / file_name
-                        )
-                        # 避免重复添加（正常流程中 remove_path 就是 categories 下的路径）
-                        if category_file_path != remove_path:
-                            entry_files.append(category_file_path)
-
-                # 先尝试删除文件；只要至少一个文件被删除（或已不存在），就从索引中移除
-                file_gone = False
-                seen_paths: set[str] = set()
-                for file_path in entry_files:
-                    if file_path in seen_paths:
-                        continue
-                    seen_paths.add(file_path)
-
-                    if Path(file_path).exists():
-                        try:
-                            removed = await safe_remove_file(file_path)
-                            if removed:
-                                files_actually_deleted.append(file_path)
-                                file_gone = True
-                            else:
-                                logger.warning(f"[容量控制] 删除文件失败: {file_path}")
-                        except Exception as e:
-                            logger.warning(f"[容量控制] 删除文件异常 {file_path}: {e}")
-                    else:
-                        # Alternate candidates may be absent; only remove the index
-                        # after the primary indexed file is confirmed gone.
-                        logger.debug(f"[capacity] Candidate file is already missing: {file_path}")
-
-                if not Path(remove_path).exists():
-                    file_gone = True
-
-                # 只有文件确实被清理后才从索引中删除，避免产生新的"僵尸文件"
-                if file_gone:
-                    await delete_index_paths(self.plugin, [remove_path])
-                    del image_index[remove_path]
-                else:
-                    logger.warning(f"[容量控制] 文件删除失败，保留索引条目: {remove_path}")
+                info = image_index[remove_path]
+                if not isinstance(info, dict):
+                    continue
+                removed, _, _ = await delete_owned_index_entry(
+                    self.plugin, remove_path, expected_hash=str(info.get("hash") or ""),
+                    require_evictable=True, snapshot=image_index,
+                )
+                if removed:
+                    files_actually_deleted.append(remove_path)
 
         except Exception as e:
             logger.error(f"同步容量控制失败: {e}")

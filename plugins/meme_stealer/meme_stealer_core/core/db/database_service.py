@@ -925,13 +925,15 @@ class DatabaseService(
         await self.clear_all()
         await self.insert_batch(emojis)
 
-    async def sync_index(self, idx: dict[str, Any]) -> list[str]:
+    async def sync_index(self, idx: dict[str, Any], *, _writer_locked: bool = False) -> list[str]:
         """增量同步索引到数据库（仅插入/更新，不删除）。
 
         删除已移交 MaintenanceService 通过孤儿扫描处理，
         避免并发 on_message 时误删其他消息刚入库的条目。
         """
-        return await self._run_index_write(self._sync_index_sync, idx)
+        return await self._run_index_write(
+            self._sync_index_sync, idx, _writer_locked=_writer_locked,
+        )
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> list[str]:
         desired_index = {

@@ -77,7 +77,6 @@ class MaintenanceService:
                     handler = getattr(self.plugin, "event_handler", None)
                     if handler:
                         await handler._enforce_capacity(idx)
-                    await self.plugin.index_manager.save_index(idx)
             except asyncio.CancelledError:
                 break
             except Exception as e:
