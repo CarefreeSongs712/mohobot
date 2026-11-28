@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from meme_stealer_core.api import pending as pending_module
+from meme_stealer_core.api import taxonomy as taxonomy_module
 from meme_stealer_core.core.config.config import PluginConfig
 from meme_stealer_core.core.db.database_service import DatabaseService
 from meme_stealer_core.core.search.meme_search_engine import MemeSearchEngine
@@ -154,6 +155,76 @@ async def test_embedding_wait_cannot_permanently_hide_new_bm25_content(env):
     results = await smart.search_images("dolphin")
     assert results and results[0][0] == path and results[0][1] == "new dolphin"
     assert engine._bm25_signature == engine._search_signature_from_index(engine.get_index())
+
+
+@pytest.mark.asyncio
+async def test_character_deletion_retires_search_snapshot_waiting_for_embedding(env, monkeypatch):
+    path, engine = await seed_search(env)
+    await env.db.update_path(path, {"character": "alice"})
+    await engine._build_bm25_index()
+    env.cfg.characters = ["alice"]
+    env.cfg.character_info = {"alice": {"name": "Alice"}}
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Embedding:
+        def is_available(self):
+            return True
+
+        def invalidate_cache(self):
+            pass
+
+        async def search(self, query, limit):
+            started.set()
+            await release.wait()
+            return []
+
+    smart = MemeSmartSelectService(env.plugin, engine, Selection(), Scope())
+    smart._embedding_service = Embedding()
+    env.plugin.meme_selector = SimpleNamespace(
+        _invalidate_bm25_index=engine._invalidate_bm25_index,
+        _smart_select_service=smart,
+    )
+
+    async def get_json():
+        return {"key": "alice"}
+
+    monkeypatch.setattr(taxonomy_module, "request", SimpleNamespace(get_json=get_json))
+    monkeypatch.setattr(taxonomy_module, "jsonify", lambda value: value)
+    task = asyncio.create_task(smart.search_images("cactus"))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        response = await env.api.handle_delete_character()
+        assert response["success"]
+        assert env.db.get_emoji(path)["character"] == ""
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 5)
+
+    assert engine._bm25_signature == engine._search_signature_from_index(engine.get_index())
+    assert engine._bm25_generation == env.db.get_index_generation()
+    assert not engine.bm25_index_stale(engine.get_index())
+
+
+@pytest.mark.asyncio
+async def test_clear_character_bumps_generation_only_for_gallery_changes(env):
+    start = env.db.get_index_generation()
+    assert env.db.clear_character("") == 0
+    assert env.db.clear_character("missing") == 0
+    pending_id = await env.db.insert_pending({
+        "path": str(env.cfg.pending_dir / "pending.png"),
+        "hash": "pending-only-hash", "category": "happy", "character": "alice",
+    })
+    assert env.db.clear_character("alice") == 0
+    assert env.db.get_pending(pending_id)["character"] == ""
+    assert env.db.get_index_generation() == start
+
+    path, _engine = await seed_search(env)
+    await env.db.update_path(path, {"character": "alice"})
+    generation = env.db.get_index_generation()
+    assert env.db.clear_character("alice") == 1
+    assert env.db.get_index_generation() == generation + 1
+    assert env.db.clear_character("alice") == 0
+    assert env.db.get_index_generation() == generation + 1
 
 
 @pytest.mark.asyncio

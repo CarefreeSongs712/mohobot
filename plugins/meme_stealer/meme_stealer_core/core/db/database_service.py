@@ -205,10 +205,14 @@ class DatabaseService(
             cur = conn.execute(
                 "UPDATE emoji SET character = '' WHERE character = ?", (key,)
             )
+            changed = int(cur.rowcount or 0)
+            if changed:
+                # Retire in-flight snapshots as well as already-built indexes.
+                self._bump_index_generation()
             conn.execute(
                 "UPDATE emoji_pending SET character = '' WHERE character = ?", (key,)
             )
-            return int(cur.rowcount or 0)
+            return changed
 
     def _row_get(self, row: Any, column: str, default: Any = None) -> Any:
         try:
