@@ -231,12 +231,13 @@ class CommandHandler:
                 return
 
             # 执行容量控制
-            await self.plugin.event_handler._enforce_capacity(image_index)
-            await self.plugin.index_manager.save_index(image_index)
+            removed_paths = await self.plugin.event_handler._enforce_capacity(image_index)
 
             # 重新统计
-            new_count = library_counts(image_index)["automatic"]
-            removed_count = max(0, current_count - new_count)
+            db = getattr(self.plugin, "db_service", None)
+            current_index = db.get_index_cache_readonly() if db is not None else image_index
+            new_count = library_counts(current_index)["automatic"]
+            removed_count = len(removed_paths)
 
             yield event.plain_result(
                 f"容量控制完成\n"

@@ -1,5 +1,6 @@
 """Capacity ranking, library isolation, and real-file deletion regressions."""
 
+import hashlib
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -68,6 +69,7 @@ def test_removing_protection_returns_entry_to_quota_with_history():
 
 @pytest.mark.asyncio
 async def test_enforcement_removes_only_ranked_general_files(tmp_path):
+    db = DatabaseService(tmp_path / "retention.db")
     index = {}
     for name, meta in {
         "old_popular": {"use_count": 100, "created_at": 1},
@@ -77,30 +79,44 @@ async def test_enforcement_removes_only_ranked_general_files(tmp_path):
         "external": {"retention_class": "external"},
     }.items():
         path = tmp_path / name
-        path.write_bytes(b"image")
-        index[str(path)] = meta
-    handler = EventHandler(SimpleNamespace(plugin_config=SimpleNamespace(max_reg_num=1, eviction_usage_weight=0.7)))
+        path.write_bytes(name.encode())
+        index[str(path)] = {"hash": hashlib.sha256(path.read_bytes()).hexdigest(), **meta}
+    await db.insert_batch([{"path": path, **meta} for path, meta in index.items()])
+    handler = EventHandler(SimpleNamespace(
+        db_service=db,
+        plugin_config=SimpleNamespace(max_reg_num=1, eviction_usage_weight=0.7),
+    ))
     removed = await handler._enforce_capacity(index)
     assert removed == [str(tmp_path / "new_unused")]
     assert not (tmp_path / "new_unused").exists()
     assert len(index) == 4
     assert all(Path(path).exists() for path in index)
+    assert db.get_emoji(str(tmp_path / "new_unused")) is None
+    assert db.count_total() == 4
 
 
 @pytest.mark.asyncio
 async def test_failed_file_delete_keeps_index(tmp_path, monkeypatch):
-    from meme_stealer_core.core.events import event_handler
+    from meme_stealer_core.core.db import index_manager
     async def fail(_):
         return False
-    monkeypatch.setattr(event_handler, "safe_remove_file", fail)
+    monkeypatch.setattr(index_manager, "safe_remove_file", fail)
+    db = DatabaseService(tmp_path / "retention.db")
     index = {}
     for i in range(2):
         path = tmp_path / str(i)
-        path.write_bytes(b"image")
-        index[str(path)] = {"created_at": i}
-    handler = EventHandler(SimpleNamespace(plugin_config=SimpleNamespace(max_reg_num=1)))
+        path.write_bytes(str(i).encode())
+        index[str(path)] = {
+            "created_at": i, "hash": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    await db.insert_batch([{"path": path, **meta} for path, meta in index.items()])
+    handler = EventHandler(SimpleNamespace(
+        db_service=db, plugin_config=SimpleNamespace(max_reg_num=1),
+    ))
     assert await handler._enforce_capacity(index) == []
     assert len(index) == 2
+    assert db.count_total() == 2
+    assert all(Path(path).exists() for path in index)
 
 
 @pytest.mark.asyncio
@@ -162,24 +178,32 @@ async def test_list_api_library_contract(tmp_path, monkeypatch, use_db, library,
 async def test_rebuild_preserves_protection_and_usage_before_capacity(tmp_path):
     from unittest.mock import AsyncMock
     from meme_stealer_core.core.commands.index_rebuild_command import IndexRebuildCommand
-    old = {
+    db = DatabaseService(tmp_path / "rebuild.db")
+    old = {}
+    for name, metadata in {
         "fav.png": {"hash": "f", "is_favorite": True, "use_count": 9, "created_at": 10},
         "char.png": {"hash": "c", "character": "alice", "last_used_at": 20},
         "external.png": {"hash": "e", "retention_class": "external"},
         "general.png": {"hash": "g", "use_count": 7, "created_at": 30},
-    }
+    }.items():
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        old[str(path)] = {**metadata, "hash": hashlib.sha256(path.read_bytes()).hexdigest()}
+    await db.insert_batch([{"path": path, **meta} for path, meta in old.items()])
     rebuilt = {path: {"hash": meta["hash"]} for path, meta in old.items()}
     manager = SimpleNamespace(rebuild_index_from_files=AsyncMock(return_value=rebuilt), save_index=AsyncMock())
     handler = SimpleNamespace(_enforce_capacity=AsyncMock())
     plugin = SimpleNamespace(
         index_manager=manager, event_handler=handler, cache_dir=None, base_dir=None,
         plugin_config=SimpleNamespace(max_reg_num=1),
-        db_service=SimpleNamespace(count_total=lambda: len(old), get_index_cache_readonly=lambda: old),
+        db_service=db,
     )
     messages = [message async for message in IndexRebuildCommand(plugin).rebuild_index(SimpleNamespace(plain_result=lambda text: text))]
     assert "索引重建完成" in messages[-1]
     handler._enforce_capacity.assert_not_awaited()
-    manager.save_index.assert_awaited_once()
+    manager.save_index.assert_not_awaited()
+    assert db.count_total() == len(old)
     for path, meta in old.items():
         for key, value in meta.items():
             assert rebuilt[path][key] == value
+            assert db.get_emoji(path)[key] == value

@@ -66,18 +66,42 @@ def _tool_schema(name, description, properties, required):
 
 
 class FakeWS:
+    """最小 WSServer 替身：消息类 action 记录到 sent 并返回 OneBot 回执。"""
+
     def __init__(self):
         self.sent = []
         self._on_event = None
+        self.group_response = {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
+        self.private_response = {
+            "status": "ok",
+            "retcode": 0,
+            "delivery_status": "success",
+            "data": {"message_id": 1},
+        }
 
     async def send_group_msg(self, bot_id, group_id, message, source="auto"):
         self.sent.append(("group", bot_id, str(group_id), message))
+        return self.group_response
 
-    async def send_private_msg(self, bot_id, user_id, message, source="auto"):
+    async def send_private_msg(
+        self, bot_id, user_id, message, source="auto", *, wait_response=False
+    ):
         self.sent.append(("private", bot_id, str(user_id), message))
+        return self.private_response if wait_response else None
 
     async def send_to_bot(self, bot_id, action, params=None, wait_response=False, timeout=10.0):
-        return {"status": "ok", "data": {}}
+        params = dict(params or {})
+        if action == "send_group_msg":
+            self.sent.append(
+                ("group", bot_id, str(params.get("group_id")), params.get("message"))
+            )
+            return self.group_response
+        if action == "send_private_msg":
+            self.sent.append(
+                ("private", bot_id, str(params.get("user_id")), params.get("message"))
+            )
+            return self.private_response
+        return {"status": "ok", "retcode": 0, "data": {}}
 
 
 class FakeBotInstance:

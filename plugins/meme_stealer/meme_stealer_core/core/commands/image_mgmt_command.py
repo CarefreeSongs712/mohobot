@@ -7,10 +7,9 @@ from ...host import logger
 from ...host import StealerEvent
 
 from ..util.blacklist import add_blacklist_hash
-from ..db.index_manager import delete_index_paths
+from ..db.index_manager import delete_owned_index_entry
 from ..util.meme_presentation import image_display_title, image_source_label
 from ..util.normalization import normalize_scope_mode
-from ..util.safe_io import safe_remove_file
 
 
 class ImageManagementCommand:
@@ -283,20 +282,18 @@ class ImageManagementCommand:
         yield event.plain_result(result_text).stop_event()
 
     async def _delete_indexed_image(self, image_index: dict, target: dict) -> bool:
-        if not await self._delete_image_files(
-            target["path"], target.get("category", ""), image_index
-        ):
-            return False
         path = target["path"]
         try:
-            removed = await delete_index_paths(self.plugin, [path])
+            removed, _, _ = await delete_owned_index_entry(
+                self.plugin, path, expected_hash=str(target.get("hash") or ""),
+                snapshot=image_index,
+            )
         except Exception as exc:
             logger.error(f"删除图片索引失败 [{path}]: {exc}")
             return False
-        if removed != 1:
-            logger.warning(f"删除文件后未能移除索引: {path}")
+        if not removed:
+            logger.warning(f"未删除图库条目（归属已变化或文件无法清理）: {path}")
             return False
-        image_index.pop(path, None)
         return True
 
     async def delete_image(self, event: StealerEvent, identifier: str = ""):
@@ -369,6 +366,7 @@ class ImageManagementCommand:
                 "path": path,
                 "name": Path(path).name,
                 "category": meta.get("category", ""),
+                "hash": target_hash,
             }
             for path, meta in image_index.items()
             if isinstance(meta, dict) and str(meta.get("hash") or "").strip() == target_hash
@@ -490,54 +488,3 @@ class ImageManagementCommand:
             return exact[0] if len(exact) == 1 else None
         prefix = [img for img in valid_images if img["name"].startswith(identifier)]
         return prefix[0] if len(prefix) == 1 else None
-
-    async def _delete_image_files(
-        self, img_path: str, category: str = "", image_index: dict | None = None
-    ) -> bool:
-        """删除索引文件及同一分类中的旧版副本。
-
-        Args:
-            img_path: 图片路径
-
-        Returns:
-            bool: 是否删除成功
-        """
-        try:
-            config = getattr(self.plugin, "plugin_config", None)
-            categories_root = getattr(self.plugin, "categories_dir", None) or getattr(
-                config, "categories_dir", None
-            )
-            raw_root = getattr(self.plugin, "raw_dir", None) or getattr(
-                config, "raw_dir", None
-            )
-            category_name = str(category or "").strip()
-            if (
-                categories_root
-                and raw_root
-                and Path(img_path).resolve().parent == Path(raw_root).resolve()
-                and category_name
-                and not any(
-                    separator in category_name for separator in ("/", "\\")
-                )
-                and category_name not in {".", ".."}
-            ):
-                root = Path(categories_root).resolve()
-                category_dir = Path(categories_root) / category_name
-                if category_dir.resolve().parent == root:
-                    category_file = category_dir / Path(img_path).name
-                    if (
-                        category_file != Path(img_path)
-                        and str(category_file) not in (image_index or {})
-                        and category_file.exists()
-                    ):
-                        if not await safe_remove_file(str(category_file)):
-                            return False
-
-            if not await safe_remove_file(img_path):
-                return False
-            logger.info(f"已删除图片文件: {img_path}")
-            return True
-
-        except Exception as e:
-            logger.error(f"删除图片文件失败: {e}")
-            return False

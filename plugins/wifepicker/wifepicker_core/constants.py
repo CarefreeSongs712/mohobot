@@ -1,6 +1,6 @@
 """关键词路由表(原样移植自 astrbot-plugin-wifepicker src/constants.py)。"""
 
-from .keyword_trigger import KeywordRoute, PermissionLevel
+from .keyword_trigger import KeywordRoute
 
 _DEFAULT_KEYWORD_ROUTES: tuple[KeywordRoute, ...] = (
     KeywordRoute(keyword="今日老婆", action="draw_wife"),

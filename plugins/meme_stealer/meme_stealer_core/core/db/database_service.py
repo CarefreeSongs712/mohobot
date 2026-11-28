@@ -29,6 +29,14 @@ from .pending_repository import PendingRepository
 from .embedding_repository import EmbeddingRepository
 
 
+class GalleryIndex(dict[str, Any]):
+    """A request snapshot carrying the database generation captured before reading."""
+
+    def __init__(self, generation: int):
+        super().__init__()
+        self.generation = generation
+
+
 class DatabaseService(
     DatabaseSchema,
     SourceRepository,
@@ -62,6 +70,45 @@ class DatabaseService(
 
         # 异步锁，保护并发写入
         self._write_lock = asyncio.Lock()
+
+        # 语料代次：每次 emoji 写入成功 +1。BM25 签名计算成本 O(n)，
+        # 搜图路径据此做代次校验，代次未变时无需重算签名(issue #129)。
+        self._index_generation = 0
+
+    def get_index_generation(self) -> int:
+        """返回当前 emoji 语料代次(只读, 供 BM25 签名缓存校验)。"""
+        return self._index_generation
+
+    def _bump_index_generation(self) -> None:
+        self._index_generation += 1
+
+    async def _run_index_write(self, operation, *args, always_bump=False, _writer_locked=False):
+        if _writer_locked:
+            if not self._write_lock.locked():
+                raise RuntimeError("gallery writer gate is not held")
+            return await self._finish_index_write(operation, *args, always_bump=always_bump)
+        async with self._write_lock:
+            return await self._finish_index_write(operation, *args, always_bump=always_bump)
+
+    async def _finish_index_write(self, operation, *args, always_bump=False):
+        """Settle a write while the caller retains the gallery writer gate."""
+        future = asyncio.create_task(asyncio.to_thread(operation, *args))
+        cancelled = False
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            result = future.result()
+            if result or always_bump:
+                self._bump_index_generation()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError()
+        return result
 
     def _ensure_db_dir(self) -> None:
         """确保数据库目录存在。"""
@@ -158,10 +205,14 @@ class DatabaseService(
             cur = conn.execute(
                 "UPDATE emoji SET character = '' WHERE character = ?", (key,)
             )
+            changed = int(cur.rowcount or 0)
+            if changed:
+                # Retire in-flight snapshots as well as already-built indexes.
+                self._bump_index_generation()
             conn.execute(
                 "UPDATE emoji_pending SET character = '' WHERE character = ?", (key,)
             )
-            return int(cur.rowcount or 0)
+            return changed
 
     def _row_get(self, row: Any, column: str, default: Any = None) -> Any:
         try:
@@ -372,7 +423,11 @@ class DatabaseService(
                 current_values=current.get("scenes") or [],
                 desired_values=desired.get("scenes") or [],
             )
-        return search_metadata_changed
+        # Request snapshots also carry access-control metadata. Changes to it
+        # must retire the snapshot generation even when BM25 tokens are unchanged.
+        return search_metadata_changed or any(
+            field in changed_fields for field in ("scope_mode", "origin_target", "allowed_bots")
+        )
 
     def _build_search_signature_from_index(self, idx: dict[str, dict[str, Any]]) -> str:
         if not idx:
@@ -571,14 +626,15 @@ class DatabaseService(
             )
             return updated.rowcount == 1
 
-    async def delete_paths(self, paths: list[str]) -> int:
+    async def delete_paths(self, paths: list[str], *, expected_hash: str | None = None,
+                           _writer_locked: bool = False) -> int:
         clean_paths = [p for p in paths if isinstance(p, str) and p]
         if not clean_paths:
             return 0
-        async with self._write_lock:
-            return await asyncio.to_thread(self._delete_paths_sync, clean_paths)
+        return await self._run_index_write(self._delete_paths_sync, clean_paths, expected_hash,
+                                           _writer_locked=_writer_locked)
 
-    def _delete_paths_sync(self, paths: list[str]) -> int:
+    def _delete_paths_sync(self, paths: list[str], expected_hash: str | None = None) -> int:
         deleted = 0
         with self._get_connection() as conn:
             transaction_started = False
@@ -586,7 +642,11 @@ class DatabaseService(
                 conn.execute("BEGIN IMMEDIATE")
                 transaction_started = True
                 for path in paths:
-                    cur = conn.execute("DELETE FROM emoji WHERE path = ?", (path,))
+                    if expected_hash is None:
+                        cur = conn.execute("DELETE FROM emoji WHERE path = ?", (path,))
+                    else:
+                        cur = conn.execute("DELETE FROM emoji WHERE path = ? AND hash = ?",
+                                           (path, expected_hash))
                     deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
                 conn.execute("COMMIT")
             except Exception:
@@ -598,8 +658,7 @@ class DatabaseService(
     async def update_path(self, path: str, updates: dict[str, Any]) -> bool:
         if not path or not updates:
             return False
-        async with self._write_lock:
-            return await asyncio.to_thread(self._update_path_sync, path, updates)
+        return await self._run_index_write(self._update_path_sync, path, updates)
 
     def _update_path_sync(self, path: str, updates: dict[str, Any]) -> bool:
         scalar_fields = self._EMOJI_SCALAR_COLUMNS
@@ -657,13 +716,14 @@ class DatabaseService(
         new_path: str,
         category: str,
         updates: dict[str, Any] | None = None,
+        *, _writer_locked: bool = False,
     ) -> bool:
         if not old_path or not new_path or old_path == new_path:
             return False
-        async with self._write_lock:
-            return await asyncio.to_thread(
-                self._move_path_sync, old_path, new_path, category, updates or {}
-            )
+        return await self._run_index_write(
+            self._move_path_sync, old_path, new_path, category, updates or {},
+            _writer_locked=_writer_locked,
+        )
 
     def _move_path_sync(
         self, old_path: str, new_path: str, category: str, updates: dict[str, Any]
@@ -743,11 +803,13 @@ class DatabaseService(
 
     # ── 批量操作 ──
 
-    async def insert_batch(self, emojis: list[dict[str, Any]]) -> int:
+    async def insert_batch(self, emojis: list[dict[str, Any]], *, overwrite: bool = True,
+                           _writer_locked: bool = False) -> int:
         """批量插入表情包记录。
 
         Args:
             emojis: 表情包数据列表，每个元素包含 path, hash, category 等字段
+            overwrite: False rejects existing gallery paths/hashes in the insert transaction.
 
         Returns:
             int: 成功插入的数量
@@ -755,15 +817,14 @@ class DatabaseService(
         if not emojis:
             return 0
 
-        async with self._write_lock:
-            try:
-                count = await asyncio.to_thread(self._insert_batch_sync, emojis)
-                return count
-            except Exception as e:
-                logger.error(f"[DB] 批量插入失败: {e}")
-                return 0
+        try:
+            return await self._run_index_write(self._insert_batch_sync, emojis, overwrite,
+                                               _writer_locked=_writer_locked)
+        except Exception as e:
+            logger.error(f"[DB] 批量插入失败: {e}")
+            return 0
 
-    def _insert_batch_sync(self, emojis: list[dict[str, Any]]) -> int:
+    def _insert_batch_sync(self, emojis: list[dict[str, Any]], overwrite: bool = True) -> int:
         """同步批量插入。"""
         now = int(time.time())
         count = 0
@@ -777,8 +838,17 @@ class DatabaseService(
                     if not path:
                         continue
 
+                    # Approval is insert-only: check path/hash under BEGIN IMMEDIATE,
+                    # after waiting for the async writer gate, before changing metadata.
+                    if not overwrite and conn.execute(
+                        "SELECT 1 FROM emoji WHERE path = ? OR (hash != '' AND hash = ?) LIMIT 1",
+                        (path, str(emoji.get("hash") or "")),
+                    ).fetchone():
+                        raise ValueError("gallery ownership conflict")
                     conn.execute(
-                        self._INSERT_EMOJI_SQL,
+                        self._INSERT_EMOJI_SQL if overwrite else self._INSERT_EMOJI_SQL.replace(
+                            "INSERT OR REPLACE", "INSERT", 1,
+                        ),
                         self._emoji_insert_values(path, emoji, now=now),
                     )
 
@@ -818,7 +888,7 @@ class DatabaseService(
         注意：此方法返回全量数据，仅用于兼容过渡，
         新代码应使用具体的搜索方法。
         """
-        result: dict[str, Any] = {}
+        result: dict[str, Any] = GalleryIndex(self._index_generation)
 
         with self._get_connection() as conn:
             # 单次查询获取所有表情包
@@ -859,14 +929,15 @@ class DatabaseService(
         await self.clear_all()
         await self.insert_batch(emojis)
 
-    async def sync_index(self, idx: dict[str, Any]) -> list[str]:
+    async def sync_index(self, idx: dict[str, Any], *, _writer_locked: bool = False) -> list[str]:
         """增量同步索引到数据库（仅插入/更新，不删除）。
 
         删除已移交 MaintenanceService 通过孤儿扫描处理，
         避免并发 on_message 时误删其他消息刚入库的条目。
         """
-        async with self._write_lock:
-            return await asyncio.to_thread(self._sync_index_sync, idx)
+        return await self._run_index_write(
+            self._sync_index_sync, idx, _writer_locked=_writer_locked,
+        )
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> list[str]:
         desired_index = {
@@ -958,11 +1029,10 @@ class DatabaseService(
 
     async def clear_all(self) -> None:
         """清空所有数据。"""
-        async with self._write_lock:
-            try:
-                await asyncio.to_thread(self._clear_all_sync)
-            except Exception as e:
-                logger.error(f"[DB] 清空数据失败: {e}")
+        try:
+            await self._run_index_write(self._clear_all_sync, always_bump=True)
+        except Exception as e:
+            logger.error(f"[DB] 清空数据失败: {e}")
 
     def _clear_all_sync(self) -> None:
         """同步清空所有数据。"""

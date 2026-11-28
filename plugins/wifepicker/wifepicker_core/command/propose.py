@@ -24,7 +24,6 @@ from ..utils import (
     extract_target_id,
     get_group_id,
     get_sender_id,
-    get_self_id,
     get_text,
     is_allowed_group,
     text_segment,
@@ -62,6 +61,8 @@ async def _member_name(plugin, bot_id: str, group_id: str, user_id: str) -> str:
 
 async def cmd_propose(plugin, bot_id: str, event, rest: str):
     """发起求婚(/求婚 @某人)。"""
+    if getattr(plugin, "_stopped", False):
+        return None
     group_id = get_group_id(event)
     if not group_id:
         return "求婚只能在群聊中进行哦~"
@@ -99,7 +100,11 @@ async def cmd_propose(plugin, bot_id: str, event, rest: str):
 
     now = time.time()
     target_name = await _member_name(plugin, bot_id, group_id, target_id)
+    if getattr(plugin, "_stopped", False):
+        return None
     proposer_name = await _member_name(plugin, bot_id, group_id, user_id)
+    if getattr(plugin, "_stopped", False):
+        return None
 
     pending[target_id] = {
         "proposer_id": user_id,
@@ -110,8 +115,19 @@ async def cmd_propose(plugin, bot_id: str, event, rest: str):
     }
     plugin._propose_requests[group_id] = pending
 
-    # 30 秒后超时提醒(后台任务, 不阻塞回复)
-    asyncio.create_task(_propose_timeout(plugin, bot_id, group_id, target_id, user_id))
+    # 30 秒后超时提醒(后台任务, 不阻塞回复): 交给 TaskSupervisor 登记,
+    # 插件禁用/卸载时按 owner 前缀取消, 避免停用后仍发提醒(issue #155)。
+    task = plugin._spawn_task(
+        _propose_timeout(plugin, bot_id, group_id, target_id, user_id),
+        name=f"propose-timeout:{group_id}:{target_id}",
+        owner="propose",
+    )
+    if task is None:
+        # 宿主正在关闭/无法登记任务时, 请求没有超时清理, 不能留下"已发起"状态。
+        pending.pop(target_id, None)
+        if not pending:
+            plugin._propose_requests.pop(group_id, None)
+        return "后台计时器不可用，本次求婚未生效，请稍后重试。"
 
     return (
         f"🌹 @{proposer_name} 向【{target_name}】发起了求婚！\n"

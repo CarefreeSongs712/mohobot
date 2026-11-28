@@ -20,7 +20,6 @@ import random
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -47,7 +46,7 @@ from wifepicker_core.core import (
     upsert_user_wife_record,
 )
 from wifepicker_core.keyword_trigger import KeywordRouter, MatchMode
-from wifepicker_core.store import TRIM_INTERVAL_SECONDS, WifeStore
+from wifepicker_core.store import WifeStore
 from wifepicker_core.utils import (
     api_call,
     at_segment,
@@ -120,6 +119,7 @@ class Plugin:
     _ws_server = None
     _data_dir = "./data"
     _admin_ids: list[str] = []
+    _task_supervisor: Any = None
 
     @classmethod
     def inject_ws_server(cls, ws_server) -> None:
@@ -133,6 +133,10 @@ class Plugin:
     def inject_admin_ids(cls, admin_ids: list[str]) -> None:
         cls._admin_ids = [str(a) for a in (admin_ids or [])]
 
+    @classmethod
+    def inject_task_supervisor(cls, supervisor) -> None:
+        cls._task_supervisor = supervisor
+
     def __init__(self):
         self.plugin_config = {}
         self._plugin_dir = _PLUGIN_DIR
@@ -143,6 +147,64 @@ class Plugin:
         self._keyword_router = KeywordRouter(routes=_DEFAULT_KEYWORD_ROUTES)
         self._maintenance_task: asyncio.Task | None = None
         self._last_maintenance_at = 0.0
+        # 后台任务(求婚超时提醒等): 优先交给 TaskSupervisor 按插件归属管理,
+        # 无 supervisor 时本地持有引用, on_shutdown 统一取消(issue #155)。
+        self._background_tasks: set[asyncio.Task] = set()
+        self._stopped = False
+
+    def _spawn_task(self, coro, *, name: str, owner: str = "application"):
+        """登记后台任务: 优先 TaskSupervisor(owner 归一为 plugin:wifepicker:*)。
+
+        插件被禁用/卸载时 PluginSystem 会按 owner 前缀取消任务, 因此计时器
+        不会再在插件停用后发送提醒。无 supervisor 的环境(单元测试/旧宿主)
+        退回本地任务集合, 由 on_shutdown 取消。
+        """
+        if self._stopped:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+        supervisor = self._task_supervisor
+        if supervisor is not None:
+            try:
+                task = supervisor.create_task(
+                    coro, name=f"wifepicker:{name}", owner=owner,
+                )
+            except Exception as e:  # TaskSupervisorClosed: 宿主正在关闭
+                logger.warning(f"wifepicker 后台任务未能登记: {e}")
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
+        else:
+            try:
+                task = asyncio.get_running_loop().create_task(
+                    coro, name=f"wifepicker:{name}",
+                )
+            except RuntimeError as e:
+                logger.warning(f"wifepicker 后台任务未能创建: {e}")
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def _cancel_background_tasks(self) -> None:
+        """取消并等待本实例登记的后台任务, 然后清理待处理交互状态。"""
+        tasks = [t for t in self._background_tasks if not t.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+        # 插件停用后不得再持有待处理求婚/强娶确认, 重启也不重发旧计时。
+        self._propose_requests.clear()
+        self._force_confirm_requests.clear()
 
     @property
     def store(self) -> WifeStore:
@@ -158,10 +220,14 @@ class Plugin:
         logger.info("wifepicker 插件配置已热更新")
 
     async def on_shutdown(self) -> None:
+        # Set before the first await so in-flight handlers cannot revive timers.
+        self._stopped = True
         if self._maintenance_task is not None and not self._maintenance_task.done():
             self._maintenance_task.cancel()
             await asyncio.gather(self._maintenance_task, return_exceptions=True)
         self._maintenance_task = None
+        # 取消求婚超时提醒等后台任务; 插件禁用/卸载后不得再发送群提醒(issue #155)。
+        await self._cancel_background_tasks()
         from wifepicker_core.renderer import shutdown
         await shutdown()
 

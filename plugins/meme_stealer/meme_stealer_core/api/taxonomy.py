@@ -1,18 +1,13 @@
 """TaxonomyRoutes methods for PluginAPI."""
 
-import asyncio
-import shutil
-from pathlib import Path
-
 from ..web.http import jsonify, request
 
 from ..host import logger
 
-from ..core.db.index_manager import delete_index_paths, invalidate_search
+from ..core.db.index_manager import invalidate_search
 from ..core.util.normalization import (
     normalize_category_key,
 )
-from ..core.util.safe_io import safe_remove_file
 
 class TaxonomyRoutes:
     # ── Categories ────────────────────────────────────────────
@@ -109,33 +104,7 @@ class TaxonomyRoutes:
                 return jsonify({"success": False, "error": "至少需要保留1个分类"})
 
             updated = [c for c in cur_cats if c != key]
-            deleted = 0
-
-            index = self._get_index()
-            deleted_paths: list[str] = []
-            for p, m in list(index.items()):
-                if not isinstance(m, dict) or m.get("category") != key:
-                    continue
-                old = Path(p)
-                try:
-                    if not old.exists() or await safe_remove_file(str(old)):
-                        deleted_paths.append(p)
-                        deleted += 1
-                        h = m.get("hash")
-                        if h and hasattr(self.plugin, "image_processor_service"):
-                            self.plugin.image_processor_service.invalidate_cache(h)
-                except Exception as ex:
-                    logger.warning(f"删除分类文件失败: {old}, {ex}")
-
-            if deleted_paths:
-                await delete_index_paths(self.plugin, deleted_paths)
-
-            cat_dir = self._data_dir / "categories" / key
-            try:
-                if cat_dir.exists():
-                    await asyncio.to_thread(shutil.rmtree, cat_dir, True)
-            except Exception as e:
-                logger.warning(f"删除分类目录失败: {cat_dir}, {e}")
+            deleted = len(await self._delete_gallery_entries(category=key))
 
             if key in getattr(self._cfg, "category_info", {}):
                 del self._cfg.category_info[key]

@@ -58,6 +58,30 @@ jobs:
       - name: Run concurrency regression
         run: timeout --kill-after=30s 5m python tests/test_concurrency.py
 
+  minimum-dependencies:
+    # requirements 只写范围时 CI 默认装最新版, 下限破了也看不出来。
+    # 这里钉住 websockets 声明的最低版本(13.0, asyncio.server 引入版本),
+    # 实际导入并构造 WsServer, 防止再次写出不可启动的下限(issue #134)。
+    name: Minimum dependency floor (websockets 13.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies and pin floor version
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip install "websockets==13.0"
+          python -m pip check
+      - name: Verify lowest supported websockets imports and constructs
+        run: python -m pytest -q tests/test_ws_websockets_floor.py
+
   syntax:
     name: Syntax and control-flow checks
     runs-on: ubuntu-24.04

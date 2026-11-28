@@ -47,7 +47,11 @@ def _private_raw(mid: int, user_id: int = 10001, self_id: int = 111) -> dict:
 def _read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _make_handler(tmp: Path):
@@ -391,7 +395,7 @@ def test_migrate_script():
         # 用参数调用 main 的逻辑: 直接以 argv 方式跑
         sys_argv = sys.argv
         try:
-            sys.argv = ["migrate", "--data-dir", str(data)]
+            sys.argv = ["migrate", "--data-dir", str(data), "--yes"]
             rc = mod.main()
         finally:
             sys.argv = sys_argv

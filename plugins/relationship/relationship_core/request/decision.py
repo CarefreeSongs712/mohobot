@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from relationship_core.config import PluginConfig
@@ -22,6 +22,9 @@ class RequestResult:
     approve: Optional[bool] = None
     block_group: Optional[bool] = None
     block_user: Optional[bool] = None
+    # 自动规则的描述: 实际审批确认成功后才由调用方拼进管理员卡片。
+    # 预置"已自动同意/拒绝"曾导致协议端失败时仍发完成文案(issue #151)。
+    auto_note: str = ""
 
 
 class RequestDecision:
@@ -73,18 +76,18 @@ class RequestDecision:
             if cfg.auto_reject_friend:
                 result.approve = False
                 result.user_reply = "已自动拒绝好友请求"
-                result.admin_reply += "\n自动处理：已自动拒绝"
+                result.auto_note = "已自动拒绝"
                 return True
             if uid in cfg.user_blacklist:
                 result.approve = False
                 result.user_reply = "你已被加入黑名单，无法添加好友"
                 result.block_user = True
-                result.admin_reply += "\n自动处理：该用户在黑名单中"
+                result.auto_note = "该用户在黑名单中"
                 return True
             if cfg.auto_agree_friend:
                 result.approve = True
                 result.user_reply = "已自动同意好友请求"
-                result.admin_reply += "\n自动处理：已自动同意"
+                result.auto_note = "已自动同意"
                 return True
 
         if isinstance(self.req, GroupRequest):
@@ -92,18 +95,18 @@ class RequestDecision:
             if cfg.auto_reject_group:
                 result.approve = False
                 result.user_reply = "已自动拒绝群邀请"
-                result.admin_reply += "\n自动处理：已自动拒绝"
+                result.auto_note = "已自动拒绝"
                 return True
             if gid in cfg.group_blacklist:
                 result.approve = False
                 result.user_reply = "该群已被列入黑名单，自动拒绝"
                 result.block_group = True
-                result.admin_reply += "\n自动处理：该群在黑名单中"
+                result.auto_note = "该群在黑名单中"
                 return True
             if cfg.auto_agree_group:
                 result.approve = True
                 result.user_reply = "已自动同意群邀请"
-                result.admin_reply += "\n自动处理：已自动同意"
+                result.auto_note = "已自动同意"
                 return True
 
         return False

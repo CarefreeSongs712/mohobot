@@ -6,7 +6,20 @@ import time
 from typing import Any
 
 
-from ..util.normalization import normalize_scope_mode
+from ..util.normalization import is_valid_origin_target, normalize_scope_mode
+
+
+LOCAL_SCOPE_ORIGIN_ERROR = (
+    "local 作用域缺少有效来源（需 group:<id> 或 user:<id>）"
+)
+
+
+def _validate_local_origin(scope_mode: object, origin_target: object) -> None:
+    """local 作用域必须有可验证的来源，否则拒绝写入（issue #132 part 2）。"""
+    if normalize_scope_mode(scope_mode) != "local":
+        return
+    if not is_valid_origin_target(origin_target):
+        raise ValueError(LOCAL_SCOPE_ORIGIN_ERROR)
 
 
 class PendingRepository:
@@ -36,6 +49,7 @@ class PendingRepository:
         """
         if not meta or not meta.get("path"):
             return None
+        _validate_local_origin(meta.get("scope_mode"), meta.get("origin_target"))
         async with self._write_lock:
             return await asyncio.to_thread(self._insert_pending_sync, meta)
 
@@ -219,6 +233,15 @@ class PendingRepository:
             item["scenes"] = scenes
             return self._hydrate_entry(item)
 
+    def _get_pending_scope_row(self, pending_id: int) -> dict[str, Any] | None:
+        """读取作用域校验所需的 pending 列。"""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT origin_target, scope_mode FROM emoji_pending WHERE id = ?",
+                (pending_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_pending_by_hash(self, hash_val: str) -> dict[str, Any] | None:
         """按内容哈希查一条待审核记录（用于缩略图回退）。返回含 path 字段。"""
         if not hash_val:
@@ -283,9 +306,17 @@ class PendingRepository:
                 clean_fields.get("emotions_json")
             )
 
-        # scope_mode 兜底
+        # scope_mode 兜底；切到 local 时必须已有合法来源（origin_target 不在
+        # 可更新白名单里，只能来自抓取时的原始会话记录）
         if "scope_mode" in clean_fields:
             clean_fields["scope_mode"] = normalize_scope_mode(clean_fields["scope_mode"])
+            if clean_fields["scope_mode"] == "local":
+                row = self._get_pending_scope_row(pending_id)
+                if row is None:
+                    return None
+                _validate_local_origin(
+                    clean_fields["scope_mode"], row.get("origin_target")
+                )
 
         # category 不能为空
         if "category" in clean_fields:

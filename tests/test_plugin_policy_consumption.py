@@ -269,10 +269,25 @@ async def test_meme_bridge_reports_success_when_online():
         _bot_manager = SimpleNamespace(get=lambda bot_id: object())
 
         @staticmethod
-        async def send_group_msg(bot_id, chat_id, segments):
-            sent.append((bot_id, chat_id))
+        async def send_to_bot(
+            bot_id, action, params=None, wait_response=False, timeout=10.0
+        ):
+            sent.append((bot_id, action, params, wait_response))
+            return {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
 
     module.Plugin._ws_server = _Ws()
     bridge = module._MohobotBridge()
+
+    # issue #128: 0 段不得报告成功, 也不应调用发送接口
     ok = await bridge.send_segments("bot_001", "group", "20002", [])
-    assert ok is True and sent == [("bot_001", "20002")]
+    assert ok is False and sent == []
+
+    ok = await bridge.send_segments(
+        "bot_001", "group", "20002", [{"type": "text", "data": {"text": "hi"}}]
+    )
+    assert ok is True
+    assert len(sent) == 1
+    assert sent[0][0] == "bot_001"
+    assert sent[0][1] == "send_group_msg"
+    assert sent[0][2]["group_id"] == 20002
+    assert sent[0][3] is True

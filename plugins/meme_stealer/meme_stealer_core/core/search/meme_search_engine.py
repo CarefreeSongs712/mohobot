@@ -36,6 +36,8 @@ class MemeSearchEngine:
         self._bm25_doc_paths: list[str] = []
         self._bm25_dirty: bool = True
         self._bm25_signature: str = ""
+        # 构建索引时对应的语料代次；用于避免每次搜图都重算 O(n) 签名(issue #129)
+        self._bm25_generation: int = -1
         cache_dir = getattr(plugin_instance, "cache_dir", None)
         self._cache_path = Path(cache_dir) / "bm25_cache.json" if cache_dir else None
 
@@ -95,25 +97,104 @@ class MemeSearchEngine:
         # Fallback
         return self._search_signature_from_index(idx)
 
-    async def _build_bm25_index(self, idx: dict | None = None) -> None:
+    def _db_index_generation(self) -> int | None:
+        """数据库语料代次；无 DatabaseService 时返回 None。"""
+        db_service = getattr(self.plugin, "db_service", None)
+        getter = getattr(db_service, "get_index_generation", None)
+        if not callable(getter):
+            return None
+        try:
+            return int(getter())
+        except Exception:
+            return None
+
+    def current_index(self, idx: dict[str, Any] | None = None) -> dict[str, Any]:
+        generation = self._db_index_generation()
+        if idx is None or (generation is not None and getattr(idx, "generation", None) != generation):
+            return self.get_index()
+        return idx
+
+    def bm25_index_stale(self, idx: dict[str, Any] | None = None) -> bool:
+        """BM25 索引是否过期。
+
+        先看脏标记；未脏时用数据库语料代次做一次 O(1) 校验，
+        代次一致就认为签名未变，不再重算 O(n) 语料签名(issue #129)。
+        若没有代次信息(旧 plugin/测试替身)，退化为计算签名比对。
+        """
+        if self._bm25_dirty or self._bm25_index is None:
+            return True
+        generation = self._db_index_generation()
+        snapshot_generation = getattr(idx, "generation", None)
+        if (generation is not None and snapshot_generation is not None
+                and snapshot_generation != generation):
+            return True
+        if generation is not None and generation == self._bm25_generation:
+            if idx is None or snapshot_generation == generation:
+                return False
+            return self._compute_bm25_signature(idx, prefer_db_signature=False) != self._bm25_signature
+        # An explicit snapshot may predate an embedding await. Only live data
+        # can certify that an unchanged signature belongs to the new generation.
+        target = self.get_index() if generation is not None else (
+            idx if idx is not None else self.get_index()
+        )
+        try:
+            current_sig = self._compute_bm25_signature(
+                target, prefer_db_signature=False
+            )
+        except Exception as e:
+            logger.warning(f"[BM25] 代次/签名校验失败, 暂按未过期处理: {e}")
+            return False
+        if not current_sig:
+            return False
+        if current_sig == self._bm25_signature:
+            # 代次变了但语料签名未变(如 move 后描述字段相同): 对齐代次,
+            # 避免每次搜索都重算 O(n) 签名(#129 review)。
+            self._bm25_generation = generation if generation is not None else -1
+            return False
+        return True
+
+    async def _build_bm25_index(self, idx: dict | None = None, *, _use_cache: bool = True) -> None:
         if BM25 is None:
             return
 
-        # 优先使用数据库服务
-        explicit_idx = idx is not None
-
-        if idx is None:
-            idx = self.get_index()
-
-        if not idx:
-            return
-
-        signature = self._compute_bm25_signature(idx, prefer_db_signature=not explicit_idx)
+        original_idx = idx
+        idx = self.current_index(idx)
+        generation = self._db_index_generation()
+        if generation is not None:
+            generation = getattr(idx, "generation", generation)
+        if (original_idx is not None and idx is not original_idx
+                and self._bm25_generation == generation and not self._bm25_dirty
+                and self._bm25_index is not None):
+            return  # An old request must not downgrade an already current shared index.
+        signature = self._compute_bm25_signature(idx, prefer_db_signature=False)
 
         # 优先尝试从持久化缓存加载 BM25 文档语料。
-        if self._cache_path and self._cache_path.is_file():
+        cached = None
+        if _use_cache and self._cache_path and self._cache_path.is_file():
             try:
                 cached = json.loads(await asyncio.to_thread(self._cache_path.read_text, encoding="utf-8"))
+            except Exception as e:
+                logger.debug(f"[BM25] 读取缓存失败，改为重建: {e}")
+
+        # Refresh once after the only pre-build await. The remaining build is
+        # synchronous, so it cannot publish an older request's documents.
+        latest = self.current_index(idx)
+        if latest is not idx:
+            idx = latest
+            generation = getattr(idx, "generation", self._db_index_generation())
+            if (self._bm25_generation == generation and not self._bm25_dirty
+                    and self._bm25_index is not None):
+                return
+            signature = self._compute_bm25_signature(idx, prefer_db_signature=False)
+        if not idx:
+            self._bm25_index = BM25([])
+            self._bm25_doc_paths = []
+            self._bm25_signature = signature
+            self._bm25_generation = generation if generation is not None else -1
+            self._bm25_dirty = False
+            return
+        if cached is not None:
+            try:
                 if (
                     isinstance(cached, dict)
                     and cached.get("signature") == signature
@@ -127,9 +208,12 @@ class MemeSearchEngine:
                             if isinstance(item, (list, tuple)):
                                 normalized_docs.append([str(tok) for tok in item if str(tok)])
                         if normalized_docs and len(normalized_docs) == len(cached_doc_paths):
+                            if generation is not None and self._db_index_generation() != generation:
+                                return
                             self._bm25_index = BM25(normalized_docs)
                             self._bm25_doc_paths = [str(p) for p in cached_doc_paths]
                             self._bm25_signature = signature
+                            self._bm25_generation = generation if generation is not None else -1
                             self._bm25_dirty = False
                             logger.debug(f"[BM25] 从缓存恢复索引: {len(normalized_docs)} 文档")
                             return
@@ -149,13 +233,16 @@ class MemeSearchEngine:
                 doc_paths.append(file_path)
 
         if documents:
+            if generation is not None and self._db_index_generation() != generation:
+                return
             self._bm25_index = BM25(documents)
             self._bm25_doc_paths = doc_paths
             self._bm25_signature = signature
+            self._bm25_generation = generation if generation is not None else -1
             self._bm25_dirty = False
             logger.debug(f"[BM25] 索引构建完成: {len(documents)} 文档, 示例: {documents[:3]}")
 
-            if self._cache_path:
+            if _use_cache and self._cache_path:
                 try:
                     await asyncio.to_thread(
                         self._save_bm25_cache,
@@ -168,6 +255,10 @@ class MemeSearchEngine:
                     )
                 except Exception as e:
                     logger.debug(f"[BM25] 持久化缓存失败: {e}")
+                if generation is not None and self._db_index_generation() != generation:
+                    # One bounded, I/O-free rebuild handles a write during cache
+                    # persistence. No recursive cache reads or retry loop.
+                    await self._build_bm25_index(_use_cache=False)
 
     def _save_bm25_cache(self, data: dict) -> None:
         """原子替换缓存文件，保留现有 JSON 格式供重启复用。"""
@@ -187,6 +278,7 @@ class MemeSearchEngine:
         self._bm25_dirty = True
         self._bm25_index = None
         self._bm25_doc_paths = []
+        self._bm25_generation = -1
 
     def _score_entry(
         self,
