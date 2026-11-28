@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import websockets  # 类型注解用(运行时只做注解, 不直接调用)
 
@@ -69,15 +69,29 @@ class BotInstance:
 
     async def send(self, data: dict[str, Any]) -> None:
         """Send a JSON message to this bot via WebSocket (thread-safe)."""
+        await self.send_guarded(data)
+
+    async def send_guarded(
+        self, data: dict[str, Any], dispatch_guard: Callable[[], bool] | None = None,
+        *, on_dispatch: Callable[[], None] | None = None,
+    ) -> bool:
+        """Revalidate a queued operation under the final socket-send lock."""
         if self.stale or self.client_role == "Event":
             raise RuntimeError("connection cannot dispatch API calls")
         async with self._send_lock:
+            if self.stale or self.client_role == "Event":
+                raise RuntimeError("connection cannot dispatch API calls")
+            if dispatch_guard is not None and not dispatch_guard():
+                return False
             try:
                 payload = json.dumps(data, ensure_ascii=False)
+                if on_dispatch is not None:
+                    on_dispatch()
                 await self.ws.send(payload)
             except Exception as e:
                 logger.error(f"Failed to send to bot {self.bot_id}: {e}")
                 raise
+        return True
 
     async def call_api(self, action: str, params: dict[str, Any] | None = None,
                        echo: str | None = None) -> dict[str, Any]:

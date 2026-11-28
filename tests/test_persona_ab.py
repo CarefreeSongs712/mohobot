@@ -368,7 +368,7 @@ async def _assert_delayed_echo_route():
         ws._ARCHIVE_ECHO_TIMEOUT = .08
         payloads = []
         archive_tasks = []
-        async def guarded(instance, payload):
+        async def guarded(instance, payload, dispatch_guard=None, *, attempt=None):
             payloads.append(payload)
         async def direct(address, callback, **kwargs):
             return await callback()

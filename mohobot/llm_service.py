@@ -32,10 +32,12 @@ from mohobot.utils.llm_diagnostic import LLMDiagnostic
 # 历史符号条目在占位文本里最多复现的原文长度(超出截断)
 _HISTORY_SYMBOL_MAX_CHARS = 40
 
-# 图片转述总预算(issue #128): 下载 + phash 去重 + 视觉描述整体有界;
+# 图片转述预算(issue #128): 下载 + phash 去重 + 视觉描述整体有界;
 # 视觉回调本身 30s 超时, 这里覆盖下载/排队等前置等待, 防止一条坏图把
 # 整轮对话无限期挂起。
 _IMAGE_DESCRIBE_TIMEOUT = 75.0
+# 描述超时后只读探测缓存的额外小预算, 不无限等待文件锁/I/O。
+_IMAGE_CACHE_PEEK_TIMEOUT = 0.1
 
 # 用量明细内存窗口(#137): 只常驻最近 7 天(且不超过 5 万条)的记录。更早的记录
 # 仍完整落在 llm_usage.jsonl, 长范围聚合时流式回读文件, 避免全历史常驻内存。
@@ -1872,7 +1874,9 @@ class LLMService:
                 peek = getattr(self._image_cache, "peek_description", None)
                 if callable(peek):
                     try:
-                        return await peek(url) or ""
+                        return await asyncio.wait_for(
+                            peek(url), timeout=_IMAGE_CACHE_PEEK_TIMEOUT,
+                        ) or ""
                     except Exception:  # noqa: BLE001 - 降级路径不掩盖主流程
                         pass
                 return ""

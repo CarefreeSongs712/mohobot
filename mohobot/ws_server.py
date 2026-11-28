@@ -22,7 +22,7 @@ from loguru import logger
 
 from mohobot.models.onebot import Event
 from mohobot.models.config import is_external_service_group
-from mohobot.bot_manager import BotManager
+from mohobot.bot_manager import BotInstance, BotManager
 from mohobot.file_store import JSONLWriter
 from mohobot.history_dedup import SentMessageClaims, signature_for_send
 from mohobot.services.outbound import ChatAddress, DispatchAttempt, OutboundScheduler, ReplySender
@@ -359,12 +359,42 @@ class WSServer:
 
     async def _send_guarded(
         self, instance, payload: dict[str, Any], dispatch_guard: Callable[[], bool] | None = None,
+        *, attempt: DispatchAttempt | None = None,
     ):
-        """Recheck the live config when the scheduler actually dispatches a send."""
-        if dispatch_guard is not None and not dispatch_guard():
-            return _BLOCKED_DISPATCH
-        if self._blocks_group_send(payload["action"], payload["params"]):
-            return _BLOCKED_GROUP_SEND
+        """Recheck live guards at scheduler dispatch and after socket-lock waits."""
+        blocked = None
+
+        def allowed():
+            nonlocal blocked
+            if dispatch_guard is not None and not dispatch_guard():
+                blocked = _BLOCKED_DISPATCH
+            elif self._blocks_group_send(payload["action"], payload["params"]):
+                blocked = _BLOCKED_GROUP_SEND
+            return blocked is None
+
+        if not allowed():
+            return blocked
+        guarded_send = getattr(instance, "send_guarded", None)
+        if (
+            isinstance(instance, BotInstance)
+            and getattr(instance.send, "__func__", None) is not BotInstance.send
+        ):
+            # Existing adapters may override send() instead of owning a socket.
+            guarded_send = None
+        if callable(guarded_send):
+            # Native transport can distinguish operation-start from socket-start.
+            # Cancellation while merely waiting on its lock is still unsent.
+            if attempt is not None:
+                attempt.dispatched = False
+
+            def started():
+                if attempt is not None:
+                    attempt.dispatched = True
+
+            if not await guarded_send(payload, allowed, on_dispatch=started):
+                return blocked
+            return None
+        # Lightweight embedded adapters retain their existing send(payload) API.
         return await instance.send(payload)
 
     async def send_to_bot(
@@ -486,11 +516,34 @@ class WSServer:
         # 发送前登记指纹: 其他 bot 会收到这条消息的入站副本(message_id 按
         # 账号分配, 无法靠 id 判重), 据此跳过, 避免同一句 bot 发言存两行。
         claimed = self._claim_sent_signature(instance, chat_type, chat_id, action, params)
-        operation = (
-            (lambda: self._send_guarded(instance, payload))
-            if dispatch_guard is None
-            else (lambda: self._send_guarded(instance, payload, dispatch_guard))
-        )
+        discarded = False
+
+        def discard_unsent():
+            nonlocal discarded
+            if discarded:
+                return
+            discarded = True
+            self._release_sent_signature(claimed)
+            self._bot_manager.drop_pending_sent(echo)
+            self._bot_manager.remove_response_future(bot_id, echo)
+            future.cancel()
+
+        async def operation():
+            result = await self._send_guarded(
+                instance, payload,
+                lambda: (
+                    not future.cancelled()
+                    and getattr(getattr(instance, "config", None), "enabled", True)
+                    and (dispatch_guard is None or dispatch_guard())
+                ),
+                attempt=attempt,
+            )
+            if result is _BLOCKED_GROUP_SEND or result is _BLOCKED_DISPATCH:
+                # The caller may already have cancelled while this operation
+                # waited for the socket lock. Release tracking here as well so
+                # its archive handoff cannot later invent a local sent message.
+                discard_unsent()
+            return result
         try:
             result = await self._reply_sender.send(
                 ChatAddress(bot_id, chat_type, chat_id),
@@ -511,27 +564,22 @@ class WSServer:
                     owns_response=True,
                 ))
             else:
-                self._release_sent_signature(claimed)
-                self._bot_manager.drop_pending_sent(echo)
-                self._bot_manager.remove_response_future(bot_id, echo)
-                future.cancel()
+                discard_unsent()
             raise
         except Exception as e:
             # Send failed — don't leave the tracked entry dangling
             if outcome is not None:
                 outcome.update(status="failed", reason=f"send_error: {e}")
-            self._release_sent_signature(claimed)
-            self._bot_manager.drop_pending_sent(echo)
-            self._bot_manager.remove_response_future(bot_id, echo)
+            discard_unsent()
             raise
         if result is _BLOCKED_GROUP_SEND or result is _BLOCKED_DISPATCH:
             if outcome is not None:
-                reason = "dispatch_guard" if result is _BLOCKED_DISPATCH else "external_service_group"
+                reason = (
+                    "external_service_group" if result is _BLOCKED_GROUP_SEND else
+                    "bot_disabled" if not getattr(getattr(instance, "config", None), "enabled", True) else
+                    "dispatch_guard"
+                )
                 outcome.update(status="blocked", reason=reason)
-            self._release_sent_signature(claimed)
-            self._bot_manager.drop_pending_sent(echo)
-            self._bot_manager.remove_response_future(bot_id, echo)
-            future.cancel()
             return None  # Not sent: no reply tracking, timeout, or speech archive.
         if not wait_response:
             # 不等待回执: 后台等 echo(或 8s 兜底)写归档, 默认无法确认送达。

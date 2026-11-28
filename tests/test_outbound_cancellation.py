@@ -190,7 +190,7 @@ async def test_send_cancelled_before_dispatch_leaves_no_tracking_and_no_archive(
         server, manager, spawned = _make_server(td)
         gate = asyncio.Event()
 
-        async def blocking(instance, payload):
+        async def blocking(instance, payload, dispatch_guard=None, *, attempt=None):
             await gate.wait()
             return {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
 
@@ -224,7 +224,7 @@ async def test_send_cancelled_after_dispatch_transfers_archive_ownership():
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow(instance, payload):
+        async def slow(instance, payload, dispatch_guard=None, *, attempt=None):
             entered.set()
             await release.wait()
             return {"status": "ok", "retcode": 0, "data": {"message_id": 2}}
