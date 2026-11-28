@@ -379,7 +379,10 @@ class BotManager:
         instance = self._bots.get(bot_id)
         if instance is None or getattr(instance, "stale", False):
             return False
-        if (getattr(instance, "client_role", "Universal") == "API"
+        role = getattr(instance, "client_role", "Universal")
+        if role == "Event":
+            return False  # Event 连接无法发送 API, 不能认领需要回复的全局指令。
+        if (role == "API"
                 and "Event" not in self._connections.get(str(instance.qq), {})):
             return False  # 只有 API 连接时无法收到群事件, 不能抢占全局指令。
         config = getattr(instance, "config", None)
