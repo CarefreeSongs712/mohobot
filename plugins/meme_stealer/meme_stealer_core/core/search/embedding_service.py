@@ -33,7 +33,7 @@ class EmbeddingService:
         # Provider 负缓存：同一配置下未找到时不再重复探测/打印日志
         self._provider_not_found: bool = False
         self._last_enable_embedding_search: bool | None = None
-        self._last_embedding_sig: str | None = None
+        self._last_provider_fingerprint: str | None = None
 
         # 内存矩阵：原始向量 + 归一化副本（检索用）
         self._raw_matrix: np.ndarray | None = None
@@ -41,6 +41,11 @@ class EmbeddingService:
         self._paths: list[str] = []
         self._dim: int = 0
         self._loaded: bool = False
+
+        # 索引代次：provider/向量库每次失效自增，用于 await 前后校验快照，
+        # 避免用旧代次的 query 向量去检索新代次的矩阵（issue #129）。
+        self._generation: int = 0
+        self._closed: bool = False
 
     # ═══════════════════════════════════════════════════
     #  Provider
@@ -56,23 +61,27 @@ class EmbeddingService:
         return models.describe("embedding") if models is not None else ""
 
     def _reset_provider_state_if_changed(self) -> None:
-        """配置开关或嵌入模型变化时重置 provider 探测状态。"""
+        """模型或凭据变化时重建 provider，保留同一空间的持久化向量。"""
         current_enable = self._embedding_enabled()
-        current_sig = self._current_signature()
+        models = getattr(self.plugin, "models", None)
+        fingerprint = getattr(models, "provider_fingerprint", None)
+        current_fingerprint = (
+            fingerprint("embedding") if callable(fingerprint) else self._current_signature()
+        )
         if (
             self._last_enable_embedding_search != current_enable
-            or self._last_embedding_sig != current_sig
+            or self._last_provider_fingerprint != current_fingerprint
         ):
             self._provider = None
             self._provider_dim = 0
             self._provider_not_found = False
             self.invalidate_cache()
             self._last_enable_embedding_search = current_enable
-            self._last_embedding_sig = current_sig
+            self._last_provider_fingerprint = current_fingerprint
 
     def _get_provider(self) -> Any | None:
-        """获取嵌入接口；未开启或未配置嵌入模型时返回 None。"""
-        if not self._embedding_enabled():
+        """获取嵌入接口；未开启、已关闭或未配置嵌入模型时返回 None。"""
+        if self._closed or not self._embedding_enabled():
             return None
 
         self._reset_provider_state_if_changed()
@@ -88,10 +97,27 @@ class EmbeddingService:
             logger.info("[Embedding] 未配置嵌入模型（embedding_model），语义检索与冗余淘汰将降级")
             self._provider_not_found = True
             return None
+        # 用 provider 捕获的签名校验已存向量空间：同名换端点/地址也会清空旧向量，
+        # 避免同维不同空间的向量混入同一矩阵（issue #129）。
+        signature = self._provider_signature(provider)
+        self._check_model_signature(signature)
         self._provider = provider
         self._provider_dim = self._get_provider_dim(provider)
-        logger.info(f"[Embedding] 使用嵌入模型: {self._current_signature()}")
+        logger.info(f"[Embedding] 使用嵌入模型: {signature or self._current_signature()}")
         return self._provider
+
+    @staticmethod
+    def _provider_signature(provider: Any) -> str:
+        """provider 创建时捕获的嵌入签名；取不到时回退当前配置签名。"""
+        signature = getattr(provider, "signature", None)
+        if isinstance(signature, str) and signature.strip():
+            return signature.strip()
+        config = getattr(provider, "provider_config", None)
+        if isinstance(config, dict):
+            value = config.get("id")
+            if value:
+                return str(value).strip()
+        return ""
 
     @staticmethod
     def _get_provider_dim(provider: Any) -> int:
@@ -111,6 +137,7 @@ class EmbeddingService:
         return self._get_provider() is not None
 
     async def initialize(self) -> None:
+        self._closed = False
         if not self._embedding_enabled():
             return
         self._remove_legacy_faiss_files()
@@ -122,7 +149,7 @@ class EmbeddingService:
         probe = getattr(provider, "probe", None)
         if callable(probe):
             self._provider_dim = int(await probe() or 0)
-        self._check_model_signature()
+        self._check_model_signature(self._provider_signature(provider))
         self._load_matrix()
         self._check_dimension()
         count = len(self._paths)
@@ -193,6 +220,8 @@ class EmbeddingService:
         return False
 
     def invalidate_cache(self) -> None:
+        """使内存矩阵失效；代次自增，让在途请求能发现引擎已换代。"""
+        self._generation += 1
         self._loaded = False
         self._raw_matrix = None
         self._unit_matrix = None
@@ -224,6 +253,12 @@ class EmbeddingService:
         provider = self._get_provider()
         if provider is None or not str(text or "").strip():
             return None
+        return await self._embed_via(provider, text)
+
+    async def _embed_via(self, provider: Any, text: str) -> np.ndarray | None:
+        """用指定 provider 快照生成向量；异常/空结果返回 None。"""
+        if provider is None or not str(text or "").strip():
+            return None
         try:
             vec = await provider.get_embedding(str(text)[:4000])
         except Exception as e:
@@ -234,20 +269,39 @@ class EmbeddingService:
         return np.asarray(vec, dtype=np.float32)
 
     async def insert_emoji(self, path: str, entry: dict[str, Any]) -> bool:
-        """写入单条表情向量；失败不阻塞入库流程。"""
+        """写入单条表情向量；失败不阻塞入库流程。
+
+        向量生成在 ``await`` 期间可能发生模型切换，此时丢弃旧代次向量并重试
+        一次，绝不把 A 向量空间的向量写进 B 空间（issue #129）。
+        """
         if not self._embedding_enabled():
             return False
-        vec = await self.embed_text(self._build_search_text(entry))
+        text = self._build_search_text(entry)
         db = getattr(self.plugin, "db_service", None)
-        if vec is None or db is None or not hasattr(db, "upsert_embedding"):
+        if db is None or not hasattr(db, "upsert_embedding"):
             return False
-        try:
-            db.upsert_embedding(path, vec.tobytes(), dim=len(vec), model_sig=STORE_SIG)
-            self._loaded = False
-            return True
-        except Exception as e:
-            logger.debug(f"[Embedding] upsert_embedding 失败: {e}")
-            return False
+        for attempt in range(2):
+            provider = self._get_provider()
+            if provider is None:
+                return False
+            generation = self._generation
+            vec = await self._embed_via(provider, text)
+            if vec is None:
+                return False
+            if generation != self._generation or provider is not self._provider:
+                if attempt == 0:
+                    logger.debug("[Embedding] 向量生成期间模型已切换，按新代次重试")
+                    continue
+                logger.debug("[Embedding] 向量生成期间模型持续切换，跳过本条向量")
+                return False
+            try:
+                db.upsert_embedding(path, vec.tobytes(), dim=len(vec), model_sig=STORE_SIG)
+                self._loaded = False
+                return True
+            except Exception as e:
+                logger.debug(f"[Embedding] upsert_embedding 失败: {e}")
+                return False
+        return False
 
     async def delete_by_path(self, path: str) -> bool:
         db = getattr(self.plugin, "db_service", None)
@@ -274,31 +328,54 @@ class EmbeddingService:
         return list(self._paths), self._raw_matrix
 
     async def search(self, query: str, k: int = 80) -> list[tuple[str, float]]:
-        """余弦相似度 top-K。Returns: [(path, similarity)]，按相似度降序。"""
+        """余弦相似度 top-K。Returns: [(path, similarity)]，按相似度降序。
+
+        嵌入调用是 ``await`` 点：期间可能发生模型切换、缓存失效、回填重建。
+        每次尝试都固定 provider/矩阵/路径/代次快照，await 归来后若快照已失效
+        则用新代次重试一次，避免旧 query 向量命中新矩阵（issue #129）。
+        """
         if not query or not query.strip():
             return []
-        self._load_matrix()
-        if self._unit_matrix is None or not self._paths:
-            return []
-        qv = await self.embed_text(query[:2000])
-        if qv is None:
-            return []
-        if len(qv) != self._unit_matrix.shape[1]:
-            logger.warning(
-                f"[Embedding] 维度不匹配: matrix={self._unit_matrix.shape[1]}, query={len(qv)}，"
-                "请重建索引"
-            )
-            return []
-        q_norm = float(np.linalg.norm(qv))
-        if q_norm == 0:
-            return []
-        scores = self._unit_matrix @ (qv / q_norm)
-        top_idx = np.argsort(scores)[::-1][: max(1, int(k))]
-        return [
-            (self._paths[int(i)], float(scores[i]))
-            for i in top_idx
-            if float(scores[i]) >= MIN_SEARCH_SIMILARITY
-        ]
+        for attempt in range(2):
+            provider = self._get_provider()
+            if provider is None:
+                return []
+            self._load_matrix()
+            matrix = self._unit_matrix
+            paths = self._paths
+            if matrix is None or not paths:
+                return []
+            generation = self._generation
+            qv = await self._embed_via(provider, query[:2000])
+            if qv is None:
+                return []
+            if (
+                generation != self._generation
+                or matrix is not self._unit_matrix
+                or provider is not self._provider
+            ):
+                if attempt == 0:
+                    logger.debug("[Embedding] 检索期间索引或模型已切换，按新代次重试")
+                    continue
+                logger.debug("[Embedding] 检索期间索引持续变化，放弃本次检索")
+                return []
+            if len(qv) != matrix.shape[1]:
+                logger.warning(
+                    f"[Embedding] 维度不匹配: matrix={matrix.shape[1]}, query={len(qv)}，"
+                    "请重建索引"
+                )
+                return []
+            q_norm = float(np.linalg.norm(qv))
+            if q_norm == 0:
+                return []
+            scores = matrix @ (qv / q_norm)
+            top_idx = np.argsort(scores)[::-1][: max(1, int(k))]
+            return [
+                (paths[int(i)], float(scores[i]))
+                for i in top_idx
+                if float(scores[i]) >= MIN_SEARCH_SIMILARITY
+            ]
+        return []
 
     # ═══════════════════════════════════════════════════
     #  回填
@@ -375,10 +452,14 @@ class EmbeddingService:
         except Exception as e:
             logger.debug(f"[Embedding] 写入语料版本失败: {e}")
 
-    def _check_model_signature(self) -> None:
-        """嵌入模型换了（即使维度相同，向量空间也不同）时清空旧向量，由回填重建。"""
+    def _check_model_signature(self, current: str | None = None) -> None:
+        """嵌入模型换了（即使维度相同，向量空间也不同）时清空旧向量，由回填重建。
+
+        ``current`` 传入 provider 捕获的签名，避免检查期间配置再次变化导致
+        把另一代次的向量当成本代次数据。
+        """
         db = getattr(self.plugin, "db_service", None)
-        current = self._current_signature()
+        current = current or self._current_signature()
         if not db or not current or not hasattr(db, "get_meta_value"):
             return
         try:
@@ -412,4 +493,5 @@ class EmbeddingService:
                 pass
 
     async def close(self) -> None:
+        self._closed = True
         self.invalidate_cache()

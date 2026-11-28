@@ -214,6 +214,30 @@ def test_rewrite_and_embedding_resolution():
     assert _gateway({}).embedding_provider() is None
 
 
+def test_embedding_provider_fingerprint_tracks_key_without_changing_vector_space():
+    gw = _gateway({
+        "embedding_model": "emb-m",
+        "embedding_base_url": "https://embedding.example/v1",
+        "embedding_api_key": "test-old-key",
+    })
+    signature = gw.describe("embedding")
+    fingerprint = gw.provider_fingerprint("embedding")
+    assert "test-old-key" not in fingerprint
+    gw._plugin_cfg().embedding_api_key = "test-new-key"
+    assert gw.provider_fingerprint("embedding") != fingerprint
+    assert "test-new-key" not in gw.provider_fingerprint("embedding")
+    assert gw.embedding_provider().signature == signature
+    assert _gateway({}).provider_fingerprint("embedding") == ""
+
+
+def test_embedding_provider_fingerprint_tracks_global_fallback_key():
+    gw = _gateway({"embedding_model": "emb-m"})
+    fingerprint = gw.provider_fingerprint("embedding")
+    gw._global_llm().chat_api_key = "test-rotated-global-key"
+    assert gw.provider_fingerprint("embedding") != fingerprint
+    assert gw.embedding_provider().endpoint.api_key == "test-rotated-global-key"
+
+
 @pytest.mark.asyncio
 async def test_embed_passes_dimensions_and_tracks_vector_size():
     gw = _gateway({"embedding_model": "emb-m", "embedding_dimensions": 4})
@@ -227,6 +251,95 @@ async def test_embed_passes_dimensions_and_tracks_vector_size():
     assert create.await_args.kwargs == {"model": "emb-m", "input": "文本", "dimensions": 4}
     assert provider.get_dim() == 4
     assert await provider.probe() == 4
+
+
+@pytest.mark.asyncio
+async def test_embedding_provider_uses_captured_endpoint_after_config_switch():
+    """provider 创建后配置切到另一服务，旧 provider 仍须调用原端点（issue #129）。"""
+    gw = _gateway(
+        {
+            "embedding_model": "emb-a",
+            "embedding_base_url": "https://a.example/v1",
+            "embedding_api_key": "key-a",
+        }
+    )
+    create = AsyncMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(embedding=[0.5, 1.0])], usage=None)
+    )
+    used = []
+    gw._client = lambda endpoint: (
+        used.append(endpoint.signature)
+        or SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    )
+
+    provider = gw.embedding_provider()
+    assert provider.signature == "emb-a@https://a.example/v1"
+
+    # 运行时配置切到 B（同维度、不同服务来源）
+    config = gw._config_getter()
+    config.embedding_model = "emb-b"
+    config.embedding_base_url = "https://b.example/v1"
+    config.embedding_api_key = "key-b"
+    assert gw.describe("embedding") == "emb-b@https://b.example/v1"
+
+    assert await provider.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs["model"] == "emb-a"
+    assert used == ["emb-a@https://a.example/v1"]
+    # 维度缓存同样按捕获端点查询，不会被 B 的配置串扰
+    assert provider.get_dim() == 2
+    assert gw.embedding_dim() == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_provider_snapshots_dimensions_after_config_switch():
+    """端点与 dimensions 同时热切换时，在途旧 provider 仍按旧维度请求（审查 N2）。"""
+    gw = _gateway(
+        {
+            "embedding_model": "emb-a",
+            "embedding_base_url": "https://a.example/v1",
+            "embedding_api_key": "key-a",
+            "embedding_dimensions": 1024,
+        }
+    )
+    create = AsyncMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(embedding=[0.5, 1.0])], usage=None)
+    )
+    used = []
+    gw._client = lambda endpoint: (
+        used.append(endpoint.signature)
+        or SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    )
+
+    provider = gw.embedding_provider()
+    assert provider.signature == "emb-a@https://a.example/v1#1024"
+
+    # 运行时同时切换端点与维度：A=1024 → B=768
+    config = gw._config_getter()
+    config.embedding_model = "emb-b"
+    config.embedding_base_url = "https://b.example/v1"
+    config.embedding_api_key = "key-b"
+    config.embedding_dimensions = 768
+    assert gw.describe("embedding") == "emb-b@https://b.example/v1#768"
+
+    # 旧 provider 的维度查询仍返回捕获值，不读取实时配置的 768
+    assert provider.get_dim() == 1024
+    assert await provider.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs == {
+        "model": "emb-a",
+        "input": "文本",
+        "dimensions": 1024,
+    }
+    assert used == ["emb-a@https://a.example/v1#1024"]
+
+    # 新 provider 使用新端点与新维度，维度缓存按新签名隔离
+    provider_b = gw.embedding_provider()
+    assert provider_b.signature == "emb-b@https://b.example/v1#768"
+    assert provider_b.get_dim() == 768
+    assert await provider_b.get_embedding("文本") == [0.5, 1.0]
+    assert create.await_args.kwargs["model"] == "emb-b"
+    assert create.await_args.kwargs["dimensions"] == 768
+    assert gw._embedding_dims["emb-a@https://a.example/v1#1024"] == 2
+    assert gw._embedding_dims["emb-b@https://b.example/v1#768"] == 2
 
 
 @pytest.mark.asyncio
