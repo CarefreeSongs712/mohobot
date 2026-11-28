@@ -347,8 +347,9 @@ class KnowledgeService:
             self._store.get_meta, "embedding_fingerprint",
         )
         model_changed = bool(stored_model) and stored_model != embed_model
-        # 同名模型换服务端点(甚至同维)也是不同向量空间, 必须全量重嵌。
-        identity_changed = bool(stored_fingerprint) and stored_fingerprint != fingerprint
+        # 旧索引只有模型名时无法证明服务来源；缺失指纹也必须重嵌，不能把
+        # 来源不明的旧向量直接标成当前空间。同名换端点(甚至同维)同样重嵌。
+        identity_changed = stored_fingerprint != fingerprint
         reembed_all = model_changed or identity_changed
 
         # 待重嵌文件: 新文件 / mtime+size 变化 / 强制 / embedding 向量空间变更
@@ -723,13 +724,12 @@ class KnowledgeService:
             # 重建指纹 = 实际服务来源 + 模型: 同名模型换端点(向量空间不同)也必须重建,
             # 不能只看配置里的模型名。
             current_fingerprint = self._identity_fingerprint(self._embedding_identity())
-            if stored_fingerprint:
-                need_reindex = (
-                    self._embedding is not None
-                    and stored_fingerprint != current_fingerprint
-                )
-            else:
-                need_reindex = declared_model != (stored_model or "")
+            # 缺失身份的旧索引不能仅凭模型同名跳过重建；key-only 轮换不改变
+            # (model, endpoint)，因此已有正确指纹的向量仍可直接复用。
+            need_reindex = (
+                self._embedding is not None
+                and stored_fingerprint != current_fingerprint
+            )
         else:
             # 注入 provider(测试/外部装配): 保持按声明模型变更触发重建的既有语义
             need_reindex = declared_model != (stored_model or "")
