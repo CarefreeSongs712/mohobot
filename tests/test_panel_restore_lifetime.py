@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from test_panel_context_consistency import (
-    _backup, _build_panel, _client, _login, _restore, _zip_bytes,
+    _backup, _build_panel, _client, _login, _make_wal_db, _restore, _zip_bytes,
 )
 from mohobot.context_manager import ContextManager
 from mohobot.db.sqlite_snapshot import restore_sqlite, snapshot_sqlite
@@ -25,20 +25,15 @@ from mohobot.web_panel.app import _data_thread, _settle_data_task
 
 
 def _database(path, name="before", *, wal=False):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=1)
-    if wal:
-        connection.execute("PRAGMA journal_mode=WAL")
-    connection.executescript("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);"
-                             "CREATE TABLE conversations(id INTEGER PRIMARY KEY);")
-    connection.execute("INSERT INTO users(name) VALUES (?)", (name,))
-    connection.commit()
+    connection = _make_wal_db(path, [name])
+    if not wal:
+        connection.execute("PRAGMA journal_mode=DELETE")
     return connection
 
 
 def _names(path):
     with closing(sqlite3.connect(path, timeout=1)) as connection:
-        return [row[0] for row in connection.execute("SELECT name FROM users ORDER BY id")]
+        return [row[0] for row in connection.execute("SELECT username FROM users ORDER BY rowid")]
 
 
 async def _until(predicate):
@@ -165,7 +160,8 @@ async def _cancel_locked_restore(*, snapshot=False, backup=False):
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 8)
                 await asyncio.wait_for(waiter, 8)
-                connection.execute("INSERT INTO users(name) VALUES ('after-cancel')")
+                connection.execute("INSERT INTO users(uuid, username, password) "
+                                   "VALUES ('after-cancel', 'after-cancel', '')")
                 connection.commit()
                 assert _names(live) == ["before", "after-cancel"]
                 assert not panel._data_maintenance_lock.locked()

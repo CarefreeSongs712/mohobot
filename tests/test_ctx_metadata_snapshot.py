@@ -1,15 +1,12 @@
 """issue #137: capture_session 快照复用与写回 generation 校验的一致性测试。
 
-一轮私聊 turn 内 capture_session/load_context/append_context 会各读一次
-``session_index.json`` (sessions 越多越慢)。load/append 接受已校验快照后,
-load 不再重复读索引; append 仍必须在写回前重新校验 generation, 否则清空/
-重置/删除/恢复期间的在途回复会被写回, 破坏 issue #126 的语义。
+快照固定本轮选中的 id/generation，但不能作为跨 await 的读写凭据。
+load/append 都必须重新校验 generation，避免删除重建同名会话后，旧请求
+读到新会话数据或把在途回复写回。
 """
 
 import asyncio
 from pathlib import Path
-
-import pytest
 
 from mohobot.context_manager import ContextManager
 
@@ -34,23 +31,28 @@ def make_cm(tmp_path: Path) -> ContextManager:
     return ContextManager(data_dir=str(tmp_path))
 
 
-async def test_load_uses_validated_snapshot_without_reading_index(tmp_path):
+async def test_load_revalidates_snapshot_without_switching_to_new_active_session(tmp_path):
     cm = make_cm(tmp_path)
     await cm.append_context(BOT, "private", CHAT, [{"role": "user", "content": "hi"}])
     session = await cm.capture_session(BOT, "private", CHAT)
 
-    async def _fail(*args, **kwargs):
-        raise AssertionError("load_context 不应再读 session_index.json")
+    await cm.create_session(BOT, "private", CHAT, "other active session")
+    reads = []
+    read_index = cm._read_index_unlocked
 
-    with _patch_attr(cm, "_read_index_unlocked", _fail):
+    async def counted_read(*args, **kwargs):
+        reads.append(True)
+        return await read_index(*args, **kwargs)
+
+    with _patch_attr(cm, "_read_index_unlocked", counted_read):
         context = await cm.load_context(BOT, "private", CHAT, validated_session=session)
         assert context == [{"role": "user", "content": "hi"}]
-        # 写回路径必须保留一次 generation 校验(仍读索引), 快照不能作为写入凭据。
-        with pytest.raises(AssertionError, match="session_index"):
-            await cm.append_context(
-                BOT, "private", CHAT, [{"role": "assistant", "content": "x"}],
-                validated_session=session,
-            )
+        assert len(reads) == 1
+        assert await cm.append_context(
+            BOT, "private", CHAT, [{"role": "assistant", "content": "x"}],
+            validated_session=session,
+        )
+        assert len(reads) == 2
 
 
 async def test_stale_snapshot_rejected_after_clear_and_reset(tmp_path):
@@ -100,6 +102,48 @@ async def test_stale_snapshot_rejected_after_delete(tmp_path):
         validated_session=first,
     ) is False
     assert await cm.load_context(BOT, "private", CHAT, validated_session=first) == []
+
+
+async def test_snapshot_read_rejects_deleted_and_recreated_session(tmp_path):
+    cm = make_cm(tmp_path)
+    victim = await cm.create_session(BOT, "private", CHAT, "victim")
+    captured = asyncio.Event()
+    continue_read = asyncio.Event()
+    snapshot = {}
+
+    async def delayed_read():
+        snapshot.update(await cm.capture_session(BOT, "private", CHAT))
+        captured.set()
+        await continue_read.wait()  # 主链在捕获后解析引用消息的 await 点。
+        return await cm.load_context(BOT, "private", CHAT, validated_session=snapshot)
+
+    reader = asyncio.create_task(delayed_read())
+    try:
+        await asyncio.wait_for(captured.wait(), 2)
+        assert await cm.delete_session(BOT, "private", CHAT, victim)
+        replacement = await cm.create_session(BOT, "private", CHAT, "replacement")
+        assert replacement == victim
+        fresh = await cm.capture_session(BOT, "private", CHAT)
+        assert fresh["generation"] != snapshot["generation"]
+        private_content = [{"role": "user", "content": "new-session-only"}]
+        assert await cm.append_context(BOT, "private", CHAT, private_content,
+                                       validated_session=fresh)
+        continue_read.set()
+        assert await asyncio.wait_for(reader, 2) == []
+        assert await cm.load_context(BOT, "private", CHAT, validated_session=fresh) == private_content
+    finally:
+        continue_read.set()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_old_group_snapshot_cannot_read_new_generation(tmp_path):
+    cm = make_cm(tmp_path)
+    old = await cm.capture_session(BOT, "group", "789")
+    await cm.clear_context(BOT, "group", "789")
+    fresh = await cm.capture_session(BOT, "group", "789")
+    assert await cm.append_context(BOT, "group", "789", [{"role": "user", "content": "new"}],
+                                   validated_session=fresh)
+    assert await cm.load_context(BOT, "group", "789", validated_session=old) == []
 
 
 async def test_concurrent_clear_and_append_never_resurrects(tmp_path):

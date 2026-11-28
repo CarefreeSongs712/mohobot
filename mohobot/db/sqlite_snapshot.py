@@ -56,6 +56,37 @@ def snapshot_sqlite(
     validate_sqlite(dst, required_tables)
 
 
+def prepare_sqlite_restore(path: Path) -> None:
+    """只在上传的隔离副本迁移旧结构，再校验当前 ORM 所需表和列。
+
+    使用独立引擎，不能调用 init_sql_db 替换运行中的全局引擎/会话工厂。
+    未知或不兼容的结构在发布到在线数据库之前拒绝。
+    """
+    from sqlalchemy import create_engine, inspect
+    from sqlalchemy.engine import URL
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from mohobot.db.sql_database import Base, _migrate_sqlite_schema
+
+    validate_sqlite(path, REQUIRED_TABLES)
+    engine = create_engine(URL.create("sqlite", database=str(path)))
+    try:
+        # 与正常启动保持一致：补新表，再执行已有的幂等增量列迁移。
+        Base.metadata.create_all(bind=engine)
+        _migrate_sqlite_schema(engine)
+        inspector = inspect(engine)
+        for table in Base.metadata.sorted_tables:
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            missing = sorted(set(table.columns.keys()) - present)
+            if missing:
+                raise ValueError(f"SQLite 数据结构不兼容，{table.name} 缺少列: {', '.join(missing)}")
+    except SQLAlchemyError as exc:
+        raise ValueError(f"SQLite 数据结构迁移失败，拒绝恢复: {exc}") from exc
+    finally:
+        engine.dispose()
+    validate_sqlite(path, REQUIRED_TABLES)
+
+
 def restore_sqlite(
     snapshot: Path, target: Path, *, required_tables: tuple[str, ...] = REQUIRED_TABLES
 ) -> None:
@@ -71,4 +102,5 @@ def restore_sqlite(
     validate_sqlite(target, required_tables)
 
 
-__all__ = ["REQUIRED_TABLES", "snapshot_sqlite", "restore_sqlite", "validate_sqlite"]
+__all__ = ["REQUIRED_TABLES", "snapshot_sqlite", "restore_sqlite", "validate_sqlite",
+           "prepare_sqlite_restore"]
