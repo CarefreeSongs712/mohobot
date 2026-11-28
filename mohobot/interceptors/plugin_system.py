@@ -212,6 +212,8 @@ class PluginSystem(Interceptor):
         return namespace_conflict(module_name, replacing)
 
     def _unload_plugin(self, meta: dict[str, Any]) -> None:
+        from mohobot.services.llm_tools import registry
+
         name = meta.get("name", "")
         entry_dir = meta.get("entry_dir") or ""
         imports = meta.pop("_imports", None)
@@ -230,6 +232,12 @@ class PluginSystem(Interceptor):
                 for cache_file in cache_dir.glob(f"{name}.*.pyc"):
                     cache_file.unlink(missing_ok=True)
         importlib.invalidate_caches()
+        stage = meta.pop("_llm_tool_stage", None)
+        if stage is not None:
+            registry.discard_plugin_stage(stage)
+        # Import/constructor tools may bind instance methods. Retain this
+        # snapshot only while the imported instance can still be retried.
+        meta.pop("_llm_tool_import_tools", None)
         meta["instance"] = None
         meta["loaded"] = False
 
@@ -322,6 +330,10 @@ class PluginSystem(Interceptor):
         except Exception as exc:
             logger.warning(f"Plugin {plugin_name} config schema load failed: {exc}")
         if not meta["enabled"]:
+            # llm_tools preloads built-in plugin modules before this system is
+            # constructed.  Disabled plugins must not leave those unowned
+            # tools callable outside the lifecycle registry.
+            registry.take_unowned_plugin_tools(plugin_name)
             logger.info(f"Plugin {plugin_name} skipped (disabled)")
             return meta
 
@@ -334,6 +346,7 @@ class PluginSystem(Interceptor):
         module = None
         tool_stage = registry.new_plugin_stage(plugin_name, self._state_file)
         meta["_llm_tool_stage"] = tool_stage
+        tool_stage.tools.update(registry.take_unowned_plugin_tools(plugin_name))
         try:
             imports.attach()
             spec = importlib.util.spec_from_file_location(
@@ -377,6 +390,7 @@ class PluginSystem(Interceptor):
                 )
                 if schema:
                     meta["config_schema"] = schema
+                meta["_llm_tool_import_tools"] = dict(tool_stage.tools)
                 logger.info(f"Loaded plugin: {plugin_name}")
         except BaseException as e:
             registry.discard_plugin_stage(tool_stage)
@@ -828,6 +842,9 @@ class PluginSystem(Interceptor):
         stage = meta.get("_llm_tool_stage")
         if stage is None:
             stage = registry.new_plugin_stage(str(meta.get("name", "")), self._state_file)
+            import_tools = meta.get("_llm_tool_import_tools")
+            if isinstance(import_tools, dict):
+                stage.tools.update(import_tools)
             meta["_llm_tool_stage"] = stage
         cancelled = None
         try:
@@ -1665,6 +1682,7 @@ class PluginSystem(Interceptor):
         old_instance = None
         old_imports = None
         old_tools: dict[str, Any] = {}
+        old_import_tools: dict[str, Any] = {}
         # on_startup 失败的候选 loaded=False 但仍持有 "_imports" 以便
         # startup_plugins() 重试。重新加载前必须先释放它占用的命名空间,
         # 否则 _load_one 会把它自己的旧模块判为冲突, 且旧模块残留在
@@ -1678,6 +1696,7 @@ class PluginSystem(Interceptor):
                 if can_restore:
                     old_instance = meta.get("instance")
                     old_imports = meta.get("_imports")
+                    old_import_tools = meta.get("_llm_tool_import_tools", {})
             self._unload_plugin(meta)
         entry_path, _, entry_dir, source = entry
         try:
@@ -1690,7 +1709,7 @@ class PluginSystem(Interceptor):
             candidate["enabled"] = was_enabled
         # Keep the snapshot reachable while the candidate still owns resources.
         if old_instance is not None:
-            candidate["_rollback"] = (meta, old_instance, old_imports, old_tools)
+            candidate["_rollback"] = (meta, old_instance, old_imports, old_tools, old_import_tools)
         self._plugins[index:index + 1] = [candidate]
         try:
             if candidate.get("loaded") and await self._activate_plugin(candidate, persist_enable=enable):
@@ -1721,7 +1740,7 @@ class PluginSystem(Interceptor):
         # A failed candidate may still own imported modules even without _ready.
         self._unload_plugin(candidate)
 
-        meta, instance, imports, old_tools = candidate.pop("_rollback")
+        meta, instance, imports, old_tools, import_tools = candidate.pop("_rollback")
         name = meta["name"]
         if not imports.restore():
             candidate["error"] = f"{candidate['error']}; previous plugin modules are occupied"
@@ -1729,7 +1748,7 @@ class PluginSystem(Interceptor):
             return
         meta.update(
             instance=instance, loaded=True, _imports=imports, _ready=False,
-            _retiring=False, _shutdown_done=False,
+            _retiring=False, _shutdown_done=False, _llm_tool_import_tools=import_tools,
         )
         self._plugins[index] = meta
         if await self._activate_plugin(meta):
