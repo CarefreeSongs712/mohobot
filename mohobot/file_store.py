@@ -74,6 +74,7 @@ class JSONLWriter:
         self._path = Path(file_path)
         self._lock = _get_lock(str(self._path.absolute()))
         self._file = None  # Lazy-open for append
+        self._retired = False
 
     async def _ensure_open(self):
         if self._file is None or self._file.closed:
@@ -82,7 +83,11 @@ class JSONLWriter:
 
     async def append(self, data: dict[str, Any]) -> None:
         """Append one JSON line to the file (thread-safe)."""
+        if self._retired:
+            return
         async with self._lock:
+            if self._retired:
+                return
             await self._ensure_open()
             line = json.dumps(data, ensure_ascii=False) + "\n"
             await self._file.write(line)
@@ -90,15 +95,50 @@ class JSONLWriter:
 
     async def append_batch(self, batch: list[dict[str, Any]]) -> None:
         """Append multiple lines atomically."""
+        if self._retired:
+            return
         async with self._lock:
+            if self._retired:
+                return
             await self._ensure_open()
             lines = "\n".join(json.dumps(d, ensure_ascii=False) for d in batch) + "\n"
             await self._file.write(lines)
             await self._file.flush()
 
+    def retire(self) -> None:
+        """Permanently skip queued/new appends; close() still drains active I/O.
+
+        This synchronous admission fence lets archive owners retire every cached
+        writer before yielding. A retired writer must never reopen after thaw.
+        Ordinary close() deliberately leaves non-retired writers reusable.
+        """
+        self._retired = True
+
+    async def _close_locked(self) -> None:
+        async with self._lock:
+            if self._file is not None:
+                if not self._file.closed:
+                    await self._file.close()
+                self._file = None
+
     async def close(self) -> None:
-        if self._file and not self._file.closed:
-            await self._file.close()
+        """Drain accepted writes and close, even if the caller is cancelled."""
+        import asyncio
+
+        closing = asyncio.create_task(self._close_locked())
+        cancelled = False
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            closing.result()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError()
 
     @property
     def path(self) -> Path:

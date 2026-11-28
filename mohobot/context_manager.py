@@ -185,9 +185,11 @@ class ContextManager:
 
     def _group_generation(self, bot_id: str, chat_id: str) -> str:
         """群聊会话当前 generation(未推进过时为兼容值 group-main)。"""
-        return (self._group_generations.get((bot_id, chat_id))
-                or self._group_generations.get((bot_id, ""))
-                or "group-main")
+        # First captures need tracking even before append creates a directory;
+        # cleanup must invalidate these in-memory requests as well.
+        return self._group_generations.setdefault(
+            (bot_id, chat_id), self._group_generations.get((bot_id, "")) or "group-main",
+        )
 
     def known_group_bots(self) -> list[str]:
         """返回内存中记录过群聊 generation 的 bot(数据管理失败路径也要失效)。"""

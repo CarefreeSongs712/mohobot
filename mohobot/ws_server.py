@@ -623,15 +623,22 @@ class WSServer:
             barrier.register_closer(self.close_archive_writers)
 
     async def close_archive_writers(self) -> None:
-        """关闭并清空 bot 发言归档 writer(不删文件)。"""
+        """退休并排空 bot 发言归档 writer, 不让旧追加跨越维护窗口。"""
         writers = list(self._archive_writers.items())
+        for _path, writer in writers:
+            writer.retire()
         self._archive_writers.clear()
+        cancelled = None
         for path, writer in writers:
             try:
                 await writer.close()
+            except asyncio.CancelledError as exc:
+                cancelled = exc
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"关闭 archive writer 失败({path}): {exc}")
         logger.info(f"[History] 已关闭 {len(writers)} 个 bot 发言归档 writer")
+        if cancelled is not None:
+            raise cancelled
 
     def _get_archive_writer(self, path: str) -> JSONLWriter:
         writer = self._archive_writers.get(path)

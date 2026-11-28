@@ -20,6 +20,7 @@ import secrets
 import shutil
 import sqlite3
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -308,6 +309,83 @@ async def test_cleanup_contexts_advances_group_generation(tmp_path):
     assert await cm.append_context(
         "bot_001", "group", "999", [{"role": "assistant", "content": "new"}],
         session_id=fresh["id"], generation=fresh["generation"]) is True
+
+
+async def _check_cleanup_captures_new_group_under_maintenance(*, write_context):
+    from mohobot.context_manager import ContextManager
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cm = ContextManager(data_dir=str(root / "data"))
+        panel, data_dir = _build_panel(root, context_manager=cm)
+        gate, waiting = asyncio.Lock(), asyncio.Event()
+        await gate.acquire()
+
+        class PausedPanelMaintenance:
+            async def __aenter__(self):
+                waiting.set()
+                await gate.acquire()
+
+            async def __aexit__(self, *args):
+                gate.release()
+
+        panel._data_maintenance_lock = PausedPanelMaintenance()
+        cleanup_locked = []
+        original_cleanup = panel._cleanup_data
+
+        def cleanup(bots, dirs):
+            cleanup_locked.append(cm.maintenance_lock.locked())
+            return original_cleanup(bots, dirs)
+
+        panel._cleanup_data = cleanup
+        async with _client(panel) as client:
+            auth = await _login(client)
+            task = asyncio.create_task(client.post(
+                "/api/data/cleanup", headers=auth,
+                json={"data": {"password": PASSWORD,
+                               "scope": {"bots": "all", "dirs": ["contexts"]}}},
+            ))
+            try:
+                # The real ASGI request has reached panel maintenance. A group
+                # appears while it waits, after the old code's candidate scan.
+                await asyncio.wait_for(waiting.wait(), 2)
+                captured = await cm.capture_session("bot_new", "group", "999")
+                if write_context:
+                    assert await cm.append_context(
+                        "bot_new", "group", "999", [{"role": "user", "content": "before"}],
+                        validated_session=captured,
+                    )
+                else:
+                    assert not (data_dir / "contexts" / "bot_new").exists()
+                gate.release()
+                response = await asyncio.wait_for(task, 3)
+                assert response.status_code == 200, response.text
+                assert await cm.append_context(
+                    "bot_new", "group", "999", [{"role": "assistant", "content": "stale"}],
+                    validated_session=captured,
+                ) is False
+                assert cleanup_locked == [True]
+                fresh = await cm.capture_session("bot_new", "group", "999")
+                assert fresh["generation"] != captured["generation"]
+                assert await cm.append_context(
+                    "bot_new", "group", "999", [{"role": "assistant", "content": "fresh"}],
+                    validated_session=fresh,
+                )
+            finally:
+                if gate.locked():
+                    gate.release()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await panel.stop()
+
+
+async def test_cleanup_rechecks_new_disk_group_after_waiting_for_maintenance():
+    await _check_cleanup_captures_new_group_under_maintenance(write_context=True)
+
+
+async def test_cleanup_invalidates_first_memory_only_group_capture():
+    await _check_cleanup_captures_new_group_under_maintenance(write_context=False)
 
 
 async def test_cleanup_failure_still_advances_generations(tmp_path):
