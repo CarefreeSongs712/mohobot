@@ -217,8 +217,8 @@ async def test_cancel_after_insert_compensates(env, monkeypatch):
     inserted_event, release = asyncio.Event(), asyncio.Event()
     original_insert = env.db.insert_batch
 
-    async def slow_insert(entries):
-        result = await original_insert(entries)
+    async def slow_insert(entries, **kwargs):
+        result = await original_insert(entries, **kwargs)
         inserted_event.set()
         await release.wait()
         return result

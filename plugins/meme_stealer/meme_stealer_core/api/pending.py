@@ -233,6 +233,11 @@ class PendingRoutes:
         并发写入占用，此时文件与 DB 都保持原样，避免误删他人数据或让图库
         记录指向被移走的文件(issue #132 review)。返回 False 表示已跳过。
         """
+        if not inserted and db.get_emoji(cat_path) is not None:
+            # An insert-only failure has no ownership of the competing gallery file.
+            # Discard our marker so retry cannot claim that competing row as our commit.
+            self._clear_approve_marker(pending_id)
+            return False
         if inserted:
             try:
                 emoji = db.get_emoji(cat_path)
@@ -270,7 +275,7 @@ class PendingRoutes:
 
     def _find_orphan_by_hash(self, hash_val: str, basename: str) -> str:
         """文件已不在 pending 路径时，按内容哈希在分类目录里找回孤儿文件。"""
-        if not hash_val or not basename:
+        if not hash_val or not basename or self._db.hash_exists(hash_val):
             return ""
         categories_dir = getattr(self._cfg, "categories_dir", None)
         if not categories_dir or not os.path.isdir(str(categories_dir)):
@@ -281,7 +286,7 @@ class PendingRoutes:
             return ""
         for entry in entries:
             candidate = os.path.join(entry.path, basename)
-            if not os.path.isfile(candidate):
+            if not os.path.isfile(candidate) or self._db.get_emoji(candidate) is not None:
                 continue
             try:
                 with open(candidate, "rb") as handle:
@@ -290,6 +295,14 @@ class PendingRoutes:
             except Exception:
                 continue
         return ""
+
+    async def _restore_orphan_file(self, db, orphan: str, src_path: str, hash_val: str):
+        # Share the gallery writer gate: a queued/completing registration must
+        # settle before a candidate can be claimed and moved back to pending.
+        async with db._write_lock:
+            if db.hash_exists(hash_val) or db.get_emoji(orphan) is not None:
+                raise RuntimeError("orphan file is already owned by the gallery")
+            return await asyncio.to_thread(shutil.move, orphan, src_path)
 
     @staticmethod
     def _file_hash(path: str) -> str:
@@ -406,6 +419,9 @@ class PendingRoutes:
         if not row:
             return False, "pending not found"
 
+        # Valid marker recovery completed above; ordinary approvals cannot claim library content.
+        if db.hash_exists(str(row.get("hash") or "")):
+            return False, "gallery content already registered"
         src_path = str(row.get("path", "") or "")
         if not src_path or not os.path.isfile(src_path):
             orphan = self._find_orphan_by_hash(
@@ -417,7 +433,7 @@ class PendingRoutes:
                     if parent:
                         os.makedirs(parent, exist_ok=True)
                     _, cancelled, error = await self._run_step(
-                        asyncio.to_thread(shutil.move, orphan, src_path)
+                        self._restore_orphan_file(db, orphan, src_path, str(row.get("hash") or ""))
                     )
                     if error:
                         raise error
@@ -444,6 +460,8 @@ class PendingRoutes:
 
         cat_dir = self._cfg.ensure_category_dir(category)
         cat_path = str(cat_dir / os.path.basename(src_path))
+        if db.get_emoji(cat_path) is not None:
+            return False, "gallery path already registered"
         if os.path.abspath(src_path) != os.path.abspath(cat_path) and os.path.exists(cat_path):
             return False, "目标分类目录已存在同名文件"
 
@@ -493,7 +511,7 @@ class PendingRoutes:
                 # REQ-3: 适用 bot 白名单(空串 = 全部 bot 可用)
                 "allowed_bots": str(row.get("allowed_bots", "") or ""),
             }
-            result, cancelled, error = await self._run_step(db.insert_batch([emoji_entry]))
+            result, cancelled, error = await self._run_step(db.insert_batch([emoji_entry], overwrite=False))
             cancelled_any = cancelled_any or cancelled
             if error is not None:
                 raise error

@@ -120,12 +120,14 @@ class MemeSearchEngine:
         generation = self._db_index_generation()
         if generation is not None and generation == self._bm25_generation:
             return False
-        # 与 _build_bm25_index 保持签名口径一致: 显式 idx 用索引签名,
-        # 否则优先用数据库语料签名。
-        target = idx if idx is not None else self.get_index()
+        # An explicit snapshot may predate an embedding await. Only live data
+        # can certify that an unchanged signature belongs to the new generation.
+        target = self.get_index() if generation is not None else (
+            idx if idx is not None else self.get_index()
+        )
         try:
             current_sig = self._compute_bm25_signature(
-                target, prefer_db_signature=idx is None
+                target, prefer_db_signature=False
             )
         except Exception as e:
             logger.warning(f"[BM25] 代次/签名校验失败, 暂按未过期处理: {e}")
@@ -145,6 +147,8 @@ class MemeSearchEngine:
 
         # 优先使用数据库服务
         explicit_idx = idx is not None
+        # Capture before any await (including persistent-cache reads).
+        generation = self._db_index_generation()
 
         if idx is None:
             idx = self.get_index()
@@ -152,7 +156,10 @@ class MemeSearchEngine:
         if not idx:
             return
 
-        signature = self._compute_bm25_signature(idx, prefer_db_signature=not explicit_idx)
+        signature = self._compute_bm25_signature(idx, prefer_db_signature=False)
+        if explicit_idx and generation is not None:
+            if self._search_signature_from_index(self.get_index()) != signature:
+                generation = None  # A supplied old snapshot cannot certify live data.
 
         # 优先尝试从持久化缓存加载 BM25 文档语料。
         if self._cache_path and self._cache_path.is_file():
@@ -174,7 +181,6 @@ class MemeSearchEngine:
                             self._bm25_index = BM25(normalized_docs)
                             self._bm25_doc_paths = [str(p) for p in cached_doc_paths]
                             self._bm25_signature = signature
-                            generation = self._db_index_generation()
                             self._bm25_generation = generation if generation is not None else -1
                             self._bm25_dirty = False
                             logger.debug(f"[BM25] 从缓存恢复索引: {len(normalized_docs)} 文档")
@@ -198,7 +204,6 @@ class MemeSearchEngine:
             self._bm25_index = BM25(documents)
             self._bm25_doc_paths = doc_paths
             self._bm25_signature = signature
-            generation = self._db_index_generation()
             self._bm25_generation = generation if generation is not None else -1
             self._bm25_dirty = False
             logger.debug(f"[BM25] 索引构建完成: {len(documents)} 文档, 示例: {documents[:3]}")

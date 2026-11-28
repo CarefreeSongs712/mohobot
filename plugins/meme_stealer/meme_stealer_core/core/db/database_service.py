@@ -772,11 +772,12 @@ class DatabaseService(
 
     # ── 批量操作 ──
 
-    async def insert_batch(self, emojis: list[dict[str, Any]]) -> int:
+    async def insert_batch(self, emojis: list[dict[str, Any]], *, overwrite: bool = True) -> int:
         """批量插入表情包记录。
 
         Args:
             emojis: 表情包数据列表，每个元素包含 path, hash, category 等字段
+            overwrite: False rejects existing gallery paths/hashes in the insert transaction.
 
         Returns:
             int: 成功插入的数量
@@ -785,12 +786,12 @@ class DatabaseService(
             return 0
 
         try:
-            return await self._run_index_write(self._insert_batch_sync, emojis)
+            return await self._run_index_write(self._insert_batch_sync, emojis, overwrite)
         except Exception as e:
             logger.error(f"[DB] 批量插入失败: {e}")
             return 0
 
-    def _insert_batch_sync(self, emojis: list[dict[str, Any]]) -> int:
+    def _insert_batch_sync(self, emojis: list[dict[str, Any]], overwrite: bool = True) -> int:
         """同步批量插入。"""
         now = int(time.time())
         count = 0
@@ -804,8 +805,17 @@ class DatabaseService(
                     if not path:
                         continue
 
+                    # Approval is insert-only: check path/hash under BEGIN IMMEDIATE,
+                    # after waiting for the async writer gate, before changing metadata.
+                    if not overwrite and conn.execute(
+                        "SELECT 1 FROM emoji WHERE path = ? OR (hash != '' AND hash = ?) LIMIT 1",
+                        (path, str(emoji.get("hash") or "")),
+                    ).fetchone():
+                        raise ValueError("gallery ownership conflict")
                     conn.execute(
-                        self._INSERT_EMOJI_SQL,
+                        self._INSERT_EMOJI_SQL if overwrite else self._INSERT_EMOJI_SQL.replace(
+                            "INSERT OR REPLACE", "INSERT", 1,
+                        ),
                         self._emoji_insert_values(path, emoji, now=now),
                     )
 
