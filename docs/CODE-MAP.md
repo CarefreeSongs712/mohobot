@@ -41,6 +41,8 @@ mohobot/
 ├─ music_knowledge/        歌曲事实库、匹配、多源同步、索引缓存
 ├─ news/                   新闻/动态库（审核门禁、工具、采集器，默认关）
 ├─ web_panel/              FastAPI 管理面板（app.py + static/index.html）
+├─ plugin_market/          插件市场：索引/来源、安装更新卸载事务（journal）与启动恢复
+├─ plugins/                插件导入跟踪（imports.py）、安装器与来源记录
 ├─ models/                 OneBot 事件模型与 GlobalConfig/BotConfig
 └─ utils/                  日志、CQ 码、回复过滤、卡片渲染等工具
 ```
@@ -62,6 +64,7 @@ mohobot/
 | 想做的事情 | 改哪里 |
 |---|---|
 | 加插件 | `plugins/<name>/` + `_conf_schema.json`；流程见 [DEVELOPMENT §6](DEVELOPMENT.md) 与 [PLUGINS](PLUGINS.md) |
+| 改插件市场 | `mohobot/plugin_market/`（journal 事务/恢复）、`mohobot/plugins/`（安装器/来源/导入跟踪）、`docs/PLUGIN-MARKET.md` |
 | 加配置项 | `mohobot/models/config.py` 的 dataclass/load/save/to_dict + 面板白名单/前端/示例（8 处清单见 DEVELOPMENT §5.2） |
 | 加 LLM 工具 | `mohobot/services/llm_tools.py` 的 registry（任意名称均可路由） |
 | 加 DB 字段 | `mohobot/db/sql_database.py` 迁移守卫（增量迁移，不重建表） |
