@@ -44,6 +44,8 @@ QQ 协议端(NapCat 等) ──反向WS──▶ WSServer ──▶ MessageHandl
 | `mohobot/knowledge/` | 虚拟歌手知识库（RAG 文档分块 + 向量索引 + 语义检索与 Rerank） |
 | `mohobot/db/` | 独立 SQLite（`conversations` 表） |
 | `mohobot/web_panel/` | 主管理面板（FastAPI + 单文件前端 `static/index.html`） |
+| `mohobot/plugin_market/` | 插件市场：索引/来源、安装更新卸载事务（journal）与启动恢复 |
+| `mohobot/plugins/` | 插件导入跟踪（`imports.py`）、安装器与来源记录 |
 | `plugins/` | 动态加载插件 |
 | `review/` | 聊天记录审核面板（半独立进程） |
 | `tests/` | 原生 runner 与 pytest 双入口回归测试 |
@@ -534,6 +536,8 @@ OOC 治理分两层: `reply.ooc_guard_enabled` 在发送口(含 TTS 文案)删�
 - 导入方式：入口以 `mohobot_plugin_{name}` 载入 `sys.modules`；类必须是该入口模块内定义的、字面名为 `Plugin` 的类。
 - 目录插件的导入根是包根，即使入口在子目录，也可用根相对导入或现有的 `import xxx_core` 形式（wifepicker / relationship / qzone 都这样组织）。
 - **热重载**：`reload_plugins()` 退役旧实例后重新扫描；`reload_plugin(name)` 只针对指定插件。冷启动和热重载都先注入，再运行 `on_startup`；成功的实例才开始接收事件和运行 tick。**没有文件监听 watchdog**，由面板操作触发。
+- **子模块与导入跟踪**：`mohobot/plugins/imports.py` 按插件包根记录其导入的模块；卸载/重载时从 `sys.modules` 移除该插件自有模块（改 helper/core 子模块后重载即可生效），只共享同一根路径且仍被其它插件引用的模块，不全局清理无关依赖。
+- **市场安装**：`data/plugins/` 中的外置插件优先于主仓库 `plugins/` 的同名内置副本。安装/更新/卸载由 `mohobot/plugin_market/` 的 journal 事务承载，未完成操作在插件发现前恢复，证据不可调和时拒绝加载并报错（面板映射 409）。索引格式、来源、信任边界与发布流程见[插件市场](PLUGIN-MARKET.md)。
 - **启停状态**：`data/plugins_state.json`，格式 `{plugin_name: {"enabled": bool}}`，缺省为启用。
 
 ### 6.2 钩子契约全表
@@ -574,7 +578,7 @@ self._daily_task = self._task_supervisor.create_task(
 | `help_category` | 可选，`/help` 分类：`内置/会话/情感/封禁/工具/娱乐/管理`；不声明时按内置映射表兜底（未知插件归「工具」）。 |
 | `interval_sec` | 配合 `on_tick`。 |
 
-**群内多 bot 去重机制**：`message_handler._should_defer_global_command` 收集内置 `{"/help","/tts"}` + 所有插件的 `global_triggers` + 前缀集 `("/ban","/pass","/dec-")`，命中后调 `BotManager.pick_bot_for_group(group_id, message_id)` 抽签 —— 抽签结果按 `(群号, message_id)` 缓存 60 秒，所以同一条消息触发的多个 bot 协程得到**同一个**结果，不会出现都回或都不回。
+**群内多 bot 去重机制**：`message_handler._should_defer_global_command` 收集内置 `{"/help","/tts"}` + 所有插件的 `global_triggers` + 前缀集 `("/ban","/pass","/dec-")`，命中后调 `BotManager.claim_global_command(group_id, group_message_fingerprint(event))` 认领 —— 指纹由「发送者+时间+消息签名」组成，不含账号独有的 `message_id`，因此同一条物理消息经多个账号推送时得到**同一个 owner**，不会出现都回或都不回。认领结果在 TTL 内复用；owner 离线/被禁用/离开该群时按实时候选重选。只有具备发送能力（Event+API，或 Universal）的 bot 才进入候选，Event-only 连接不参与，避免选中后发送必然失败。
 
 **@ 定向优先于抽签**：消息里只要 @ 了具体 bot（`at` 段的 `qq` 不是 `all`），就只由被 @ 的 bot 执行指令；@ 多只则多只都执行；未被 @ 的 bot 静默。此时不抽签、不合并回复。未 @ 任何 bot 时才走上面的抽签。`qq=0`（未绑定）的 bot 不会被 `@0` 命中。
 
@@ -987,7 +991,8 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 | 配置文件 | `GET/PUT /api/config`；bot `GET/POST /api/bots`、`PUT /api/bots/{id}/bind`、`POST .../unbind`、`GET/PUT .../config` |
 | 模型配置 | `GET/PUT /api/models` |
 | TTS 语音 | `GET /api/tts/{status,config}`、`PUT /api/tts/config` |
-| 插件管理 | `GET /api/plugins`、`POST /api/plugins/{toggle,reload}`、`GET/POST /api/plugins/{name}/config` |
+| 插件管理 | `GET /api/plugins`、`POST /api/plugins/{toggle,reload}`、`POST /api/plugins/{name}/reload`、`DELETE /api/plugins/{name}`、`GET/POST /api/plugins/{name}/config` |
+| 插件市场 | `GET /api/plugins/market`、`POST /api/plugins/market/{refresh,install,update}`、`GET/POST /api/plugin-sources`、`DELETE /api/plugin-sources/{id}` |
 | 对话数据 | `GET /api/contexts`、`.../{bot}/{type}/{id}`、session 增删切、message 编辑、reset |
 | 实时日志 | `POST /api/logs/ticket`、`GET /api/logs/stream` |
 | 系统设置 | `PUT /api/settings/password`、`POST /api/settings/restart` |
@@ -1007,7 +1012,8 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 - **群聊审核范围（面板侧过滤，归档保持完整）**：只审 bot 发言（`message_sent`）与用户 @ 某只 bot（`at` 段 qq == 该 bot 的 self_id）或引用某只 bot 发言（`reply` 段 id ∈ 该 bot 已归档发言 mid 集合）的消息；私聊全部审（按 bot 独立会话）。
 - **群聊单文件会话**：群聊归档本身已合并存储（`history/group/{群号}.jsonl`，见 §4.6），session_key 仍固定 `"_merged/group/{群号}"`（兼容 review.db 既有结论）。bot 发言按行内 `bot_id` 归属（旧数据无该字段时按 self_id 反查 bots 配置）；用户消息命中 @/引用 时归属到对应 bot（同时命中多只取 bot_id 排序最前者）。按 bot 的 mid 集合（`bot_mids_by_bot`）与 self_id（文件内 message_sent 行自带 ∪ bots 配置）做过滤。用户消息无 id 时按 time+uid+text 兜底去重；bot 发言不做内容级去重。
 - `WSServer` 出站层把 bot 发送的消息以 `post_type: "message_sent"` 追加进同一个 history JSONL（`ws_server._write_archive_line`，echo 超时用 `local:` id 兜底；发送明确失败不归档；`base64://` 大字段净化为占位）。
-- 加载器对 history 文件做**增量解析**（记录 offset，只读新增字节，mtime/size 失效；文件被截断时全量重读）。
+- 加载器对 history 文件做**增量解析**（记录 offset，只读新增字节）。增长时先流式校验已消费前缀的完整 SHA-256，摘要不符（截断/替换/就地改写）即全量重读，纯追加才继续增量；已观察到删除时主动撤销该文件及派生缓存。等长且落在同一时间戳粒度内的就地改写仍属已披露的检测边界。
+- 待审列表/统计/明细使用同一把 store 锁内的 `statuses_snapshot`（状态、计数、revision 同代返回；写时复制 + `PRAGMA data_version` 检测外部提交），计数缓存 key 含各会话的 fingerprint 集合，避免“同条数换 fingerprint”后持续返回旧计数。大文件尾读按逻辑非空行计数并有界读取，兼容 CR/LF/CRLF。
 - 会话明细接口分页（`?page=&page_size=`，默认锚定第一条待审所在页；判定后重开自动跳下一批）。
 - 审核状态存自己的库（`reviewed_entries` / `abnormal_records` / `review_log`）。
 - 多用户支持，改密码时**按行替换 `config.yaml` 的 `password_hash:` 行以保留注释**（`_write_user_password`，结构不符时兜底整体重写、注释会丢）。
@@ -1035,6 +1041,9 @@ Anysearch MCP JSON-RPC over httpx。`safe_search()` 失败返回 `""`（不阻�
 8. **`config.log_dir` 不生效**：`main.py` 固定以 `./logs` 初始化日志，改配置不会移动日志目录；需要别的路径时改装配代码。
 9. **`GlobalConfig.save()` 会重写配置并丢失注释**：保存走 `yaml.dump`，手写的注释与字段顺序不会保留；手改 `global.yaml` 后若经面板保存，内容会变成纯序列化输出。
 10. **`plugins/feed/` 是已移除插件的空目录**：只存在于工作区、不入库，可直接删除。
+11. **插件工具 owner/stage 生命周期**：预加载的内置插件工具在入口执行前被接管进当前加载 attempt 的 stage；禁用、卸载、关闭与失败重载必须清理 stage、import 工具快照与绑定实例，否则会出现工具残留、旧 handler 被复用或插件实例无法回收（见 `llm_tools.py`、`plugin_system.py` 的统一卸载路径）。
+12. **出站最终门控**：TTS、主动聊天等排队操作不仅要在 scheduler 派发前重验 `enabled`/generation，还要在实际 socket 发送取得连接发送锁后再次校验；已进入 socket 写入的消息不可撤回，取消只应影响尚未开始写入的消息，且不能产生幽灵归档或残留发送指纹。
+13. **审核缓存身份是完整前缀 SHA-256**：增长时逐块校验已消费前缀（`review/loader.py`，`_CACHE_VERSION=10`），旧 sidecar 会作废；不要再用“尾部 64B 相同”推断纯追加。等长且同一时间戳粒度内的就地改写仍是已披露边界。
 
 源码与配置会持续演进；本节仅保留稳定约束，具体行为以相应实现为准。
 
