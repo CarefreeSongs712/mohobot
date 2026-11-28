@@ -102,7 +102,7 @@ TOOLS = [
 
 def _register() -> None:
     for tool in TOOLS:
-        if tool.name not in {schema["function"]["name"] for schema in registry.schemas()}:
+        if not registry.contains(tool.name):
             registry.register(tool)
 
 

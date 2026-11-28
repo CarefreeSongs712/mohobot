@@ -1,7 +1,10 @@
 import asyncio
+import gc
 import importlib.util
 import json
+import subprocess
 import sys
+import weakref
 from pathlib import Path
 
 from mohobot.interceptors.plugin_system import PluginSystem
@@ -31,6 +34,151 @@ class Plugin:
 
 def _schema_names() -> list[str]:
     return [schema["function"]["name"] for schema in registry.schemas()]
+
+
+def test_builtin_song_tools_survive_cold_load_and_lifecycle(tmp_path: Path) -> None:
+    # A new interpreter exercises llm_tools' eager imports before PluginSystem
+    # adopts them; copying both real entries avoids loading unrelated plugins.
+    subprocess.run(
+        [sys.executable, "-c", '''import asyncio
+import json
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from mohobot.interceptors.plugin_system import PluginSystem
+from mohobot.music_knowledge import pool
+from mohobot.music_knowledge.song_database import Song
+from mohobot.services.llm_tools import registry
+
+async def run():
+    plugins = Path("plugins")
+    plugins.mkdir()
+    for name in ("song_tools", "snitch"):
+        shutil.copyfile(root / "plugins" / (name + ".py"), plugins / (name + ".py"))
+    system = PluginSystem(str(plugins.resolve()), str(Path("data").resolve()))
+    songs = {"song_search", "song_get_detail", "song_get_lyrics"}
+    expected = songs | {"snitch"}
+
+    def assert_tools():
+        names = [schema["function"]["name"] for schema in registry.schemas()]
+        assert set(names) == expected, names
+        assert all(names.count(name) == 1 for name in expected)
+        assert all(registry._owners[name] == "song_tools" for name in songs)
+        assert registry._owners["snitch"] == "snitch"
+
+    try:
+        assert await system.load_plugins() == 2, system.list_plugins()
+        assert_tools()
+        pool.ensure_init(str(Path("song-db").resolve()), "songs.db")
+        with pool.get_session() as db:
+            db.add(Song(name="test song", safe_name="test song", lyrics="test lyrics"))
+            db.commit()
+        result = json.loads(await registry.execute("song_search", {"query": "test"}))
+        assert result["songs"] == ["test song"], result
+
+        previous = registry._tools["song_search"].handler
+        assert await system.reload_plugin("song_tools")
+        assert_tools()
+        assert registry._tools["song_search"].handler is not previous
+        assert await system.set_enabled("song_tools", False)
+        assert not songs & {s["function"]["name"] for s in registry.schemas()}
+        assert "error" in json.loads(await registry.execute("song_search", {"query": "test"}))
+        assert await system.set_enabled("song_tools", True)
+        assert_tools()
+        assert json.loads(await registry.execute("song_get_lyrics", {"song_name": "test song"}))["lyrics"] == "test lyrics"
+    finally:
+        await system.shutdown_plugins()
+        pool.close_all()
+    assert not expected & {s["function"]["name"] for s in registry.schemas()}
+
+asyncio.run(run())
+''', str(Path(__file__).resolve().parents[1])],
+        cwd=tmp_path,
+        check=True,
+        timeout=30,
+    )
+
+
+def test_constructor_tool_handlers_are_released_on_disable_and_shutdown(tmp_path: Path) -> None:
+    async def run(action: str) -> None:
+        name = f"constructor_release_{action}"
+        tool_name = f"{name}_tool"
+        plugins = tmp_path / action / "plugins"
+        _write_plugin(
+            plugins, name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            "class Plugin:\n"
+            "    def __init__(self):\n"
+            "        self.cache = bytearray(1024 * 1024)\n"
+            f"        registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), self.handle))\n"
+            "    def handle(self): return str(len(self.cache))\n",
+        )
+        system = PluginSystem(str(plugins), str(tmp_path / action / "data"))
+        try:
+            assert await system.load_plugins() == 1
+            reference = weakref.ref(system._plugins[0]["instance"])
+            assert await registry.execute(tool_name, {}) == str(1024 * 1024)
+            if action == "disable":
+                assert await system.set_enabled(name, False)
+            else:
+                await system.shutdown_plugins()
+            assert tool_name not in _schema_names()
+            # Keep the system and unloaded metadata alive: neither may retain
+            # bound constructor handlers after the instance has retired.
+            gc.collect()
+            assert reference() is None
+            assert system._plugins[0]["instance"] is None
+        finally:
+            await system.shutdown_plugins()
+            registry.unregister(tool_name)
+
+    for action in ("disable", "shutdown"):
+        asyncio.run(run(action))
+
+
+def test_constructor_tools_survive_startup_retry_and_reload_rollback(tmp_path: Path) -> None:
+    async def run() -> None:
+        name = "constructor_retry_rollback"
+        tool_name = "constructor_retry_rollback_tool"
+        plugins = tmp_path / "plugins"
+        entry = _write_plugin(
+            plugins, name,
+            "from mohobot.api import LLMTool, registry, tool_schema\n"
+            "class Plugin:\n"
+            "    def __init__(self):\n"
+            "        self.attempts = 0\n"
+            f"        registry.register(LLMTool(tool_schema({tool_name!r}, 'probe', {{}}, []), self.handle))\n"
+            "    def handle(self): return str(self.attempts)\n"
+            "    def on_startup(self):\n"
+            "        self.attempts += 1\n"
+            f"        assert registry.contains({tool_name!r}), 'constructor tool missing during startup'\n"
+            "        if self.attempts == 1: raise RuntimeError('first startup failed')\n",
+        )
+        system = PluginSystem(str(plugins), str(tmp_path / "data"))
+        try:
+            assert await system.load_plugins() == 0
+            assert tool_name not in _schema_names()
+            await system.startup_plugins()
+            assert await registry.execute(tool_name, {}) == "2"
+            original = weakref.ref(system._plugins[0]["instance"])
+
+            entry.write_text("invalid Python !\n", encoding="utf-8")
+            assert await system.reload_plugin(name) is False
+            assert system.list_plugins()[0]["loaded"]
+            assert system._plugins[0]["instance"] is original()
+            assert await registry.execute(tool_name, {}) == "3"
+            assert registry._owners[tool_name] == name
+            assert await system.set_enabled(name, False)
+            gc.collect()
+            assert original() is None
+        finally:
+            await system.shutdown_plugins()
+            registry.unregister(tool_name)
+
+    asyncio.run(run())
 
 
 def test_preloaded_tools_are_removed_after_import_failure_and_replaced_on_reload(
