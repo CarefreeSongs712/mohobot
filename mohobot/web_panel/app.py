@@ -2024,13 +2024,13 @@ class WebPanel:
                 if not isinstance(library, dict) or not isinstance(library.get("personas"), list):
                     raise ValueError("备份人设库格式非法，拒绝恢复")
             if "database" in dir_set:
-                from mohobot.db.sqlite_snapshot import validate_sqlite
+                from mohobot.db.sqlite_snapshot import prepare_sqlite_restore
                 db_dir = tmp_dir / "database"
                 candidates = (sorted(p for p in db_dir.iterdir() if p.is_file())
                               if db_dir.exists() else [])
                 if len(candidates) != 1:
                     raise ValueError("备份缺少数据库文件，拒绝恢复")
-                validate_sqlite(candidates[0], ("users", "conversations"))
+                prepare_sqlite_restore(candidates[0])
 
         def _restore_database_paths(tmp_dir: Path) -> tuple[Path, Path]:
             """Resolve the target once, shared by restore and compensation."""
@@ -2124,7 +2124,7 @@ class WebPanel:
 
                 # 恢复前全量校验: contexts JSON/索引/引用、人设库、SQLite 快照。
                 # 校验失败直接 400, 现有数据一个字节都不会被替换(issue #126 第 1 点)。
-                _validate_restore_payload(tmp_dir, bot_list, dir_set)
+                await _data_thread(_validate_restore_payload, tmp_dir, bot_list, dir_set)
 
                 barrier = self._history_barrier if "history" in dir_set else None
                 async with self._data_maintenance_lock:

@@ -285,11 +285,9 @@ class ContextManager:
     ) -> list[dict[str, Any]]:
         """Read the captured session, or the active session for legacy callers.
 
-        ``validated_session`` is a snapshot returned by :meth:`capture_session`;
-        passing it avoids re-reading ``session_index.json`` (issue #137). Reads
-        are safe to serve from the snapshot because clear/reset empty the file
-        and delete removes the path; the write path still revalidates the
-        generation before appending.
+        ``validated_session`` pins the selected id/generation, but is not a
+        read credential: deleted session IDs can be reused. Revalidate under
+        the chat lock before reading, just as the append path does.
         """
         if validated_session is not None:
             metadata = dict(validated_session)
@@ -297,6 +295,11 @@ class ContextManager:
                 return []
             if generation is not None and metadata.get("generation") != generation:
                 return []
+            if not metadata.get("id") or not metadata.get("generation"):
+                return []
+            metadata = await self._metadata_unlocked(
+                bot_id, chat_type, chat_id, metadata["id"], metadata["generation"],
+            )
         else:
             metadata = await self._metadata_unlocked(
                 bot_id, chat_type, chat_id, session_id, generation,

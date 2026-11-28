@@ -565,13 +565,21 @@ async def test_tombstone_files_excluded_from_backup(tmp_path):
 
 def _make_wal_db(path: Path, names: list[str]) -> sqlite3.Connection:
     """创建 WAL 模式的真实 SQLite 库并保持连接, 让提交留在 WAL 中未 checkpoint。"""
+    from sqlalchemy import create_engine
+
+    from mohobot.db.sql_database import Base
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        Base.metadata.create_all(bind=engine)
+    finally:
+        engine.dispose()
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY)")
     for name in names:
-        conn.execute("INSERT INTO users(name) VALUES (?)", (name,))
+        conn.execute("INSERT INTO users(uuid, username, password) VALUES (?, ?, '')",
+                     (secrets.token_hex(16), name))
     conn.commit()
     return conn
 
@@ -581,7 +589,7 @@ def _sqlite_reader(blob: bytes, temp_root: Path) -> list[str]:
     path.write_bytes(blob)
     conn = sqlite3.connect(str(path))
     try:
-        return [row[0] for row in conn.execute("SELECT name FROM users ORDER BY name")]
+        return [row[0] for row in conn.execute("SELECT username FROM users ORDER BY username")]
     finally:
         conn.close()
 
@@ -610,7 +618,8 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
                 assert zf.namelist() == ["database/mohobot.db"]
 
             # 恢复前再写入一行, 恢复后应回到备份时的状态
-            live.execute("INSERT INTO users(name) VALUES (?)", ("after-backup",))
+            live.execute("INSERT INTO users(uuid, username, password) VALUES (?, ?, '')",
+                         (secrets.token_hex(16), "after-backup"))
             live.commit()
             r = await _restore(client, auth, payload, ["database"])
             assert r.status_code == 200, r.text
@@ -618,7 +627,7 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
             check = sqlite3.connect(str(db_path))
             try:
                 assert [row[0] for row in check.execute(
-                    "SELECT name FROM users ORDER BY name")] == ["wal-live"]
+                    "SELECT username FROM users ORDER BY username")] == ["wal-live"]
             finally:
                 check.close()
 
@@ -629,7 +638,7 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
             check = sqlite3.connect(str(db_path))
             try:
                 assert [row[0] for row in check.execute(
-                    "SELECT name FROM users ORDER BY name")] == ["wal-live"]
+                    "SELECT username FROM users ORDER BY username")] == ["wal-live"]
             finally:
                 check.close()
 
@@ -659,3 +668,62 @@ async def test_database_scope_backup_restore_and_validation(tmp_path):
             assert r.json()["restored"] == 3
     finally:
         live.close()
+
+
+async def test_database_restore_migrates_isolated_legacy_schema_before_publish(tmp_path):
+    from contextlib import closing
+
+    from mohobot.db import sql_database as sqldb
+    from mohobot.db.database_manager import DatabaseManager
+
+    original_engine, original_factory = sqldb._engine, sqldb._SessionLocal
+    source = tmp_path / "legacy" / "mohobot.db"
+    source_manager = DatabaseManager(str(source.parent), source.name)
+    live_manager = panel = None
+    try:
+        source_manager.add_conversation("1001", "bot_001", "user", "valid old backup data")
+        source_manager._engine.dispose()
+        with closing(sqlite3.connect(source)) as connection:
+            connection.execute("ALTER TABLE conversations DROP COLUMN speaker_nickname")
+            connection.commit()
+            assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        legacy_bytes = source.read_bytes()
+
+        target = tmp_path / "runtime" / "mohobot.db"
+        live_manager = DatabaseManager(str(target.parent), target.name)
+        live_manager.add_conversation("1001", "bot_001", "user", "live data")
+        runtime_engine, runtime_factory = sqldb._engine, sqldb._SessionLocal
+        panel, _ = _build_panel(tmp_path / "panel", database=(target.parent, target.name))
+        async with _client(panel) as client:
+            auth = await _login(client)
+            response = await _restore(client, auth, _zip_bytes({
+                "database/mohobot.db": legacy_bytes,
+            }), ["database"])
+            assert response.status_code == 200, response.text
+            assert sqldb._engine is runtime_engine and sqldb._SessionLocal is runtime_factory
+            assert [row["content"] for row in live_manager.get_recent_conversations(
+                "1001", "bot_001")] == ["valid old backup data"]
+            live_manager.add_conversation("1001", "bot_001", "agent", "new live turn",
+                                          speaker_nickname="test speaker")
+            assert live_manager.get_recent_conversations("1001", "bot_001")[-1][
+                "speaker_nickname"] == "test speaker"
+            # 只迁移上传的隔离副本，原备份不变。
+            assert source.read_bytes() == legacy_bytes
+
+            with closing(sqlite3.connect(source)) as connection:
+                connection.execute("ALTER TABLE users DROP COLUMN preferences")
+                connection.commit()
+            incompatible = _zip_bytes({"database/mohobot.db": source.read_bytes()})
+            before = live_manager.get_recent_conversations("1001", "bot_001")
+            response = await _restore(client, auth, incompatible, ["database"])
+            assert response.status_code == 400, response.text
+            assert "preferences" in response.text
+            assert live_manager.get_recent_conversations("1001", "bot_001") == before
+            assert sqldb._engine is runtime_engine and sqldb._SessionLocal is runtime_factory
+    finally:
+        if panel is not None:
+            await panel.stop()
+        source_manager._engine.dispose()
+        if live_manager is not None:
+            live_manager._engine.dispose()
+        sqldb._engine, sqldb._SessionLocal = original_engine, original_factory
