@@ -114,6 +114,40 @@ async def test_disabling_cached_winner_refreshes_candidates():
         assert bm.pick_bot_for_group("500", "same-mid") == "bot_002"
 
 
+async def test_event_only_bot_cannot_keep_or_claim_global_command():
+    """Losing API transport invalidates an owner while Event remains connected."""
+    with tempfile.TemporaryDirectory() as td:
+        bm = _make_manager(Path(td))
+        event = bm.register(111, _FakeSock(), client_role="Event")
+        api = bm.register(111, _FakeSock(), client_role="API")
+        healthy = bm.register(222, _FakeSock())
+        bm.note_group_message("bot_001", "500")
+        bm.note_group_message("bot_002", "500")
+        healthy.config.enabled = False
+        fingerprint = "owner-before-disconnect"
+        assert bm.claim_global_command("500", fingerprint) == "bot_001"
+        healthy.config.enabled = True
+        bm.unregister(api)
+
+        assert bm.get("bot_001") is event and bm.is_current(event)
+        assert bm.bots_in_group("500") == ["bot_002"]
+        assert bm.claim_global_command("500", fingerprint) == "bot_002"
+        for index in range(8):
+            assert bm.pick_bot_for_group("500", f"after-disconnect-{index}") == "bot_002"
+        handler = _handler(bm)
+        assert handler._should_defer_global_command(
+            "bot_001", _group_event("/help", message_id=1),
+        )
+        assert not handler._should_defer_global_command(
+            "bot_002", _group_event("/help", message_id=2),
+        )
+        await healthy.send({"action": "send_group_msg", "params": {"group_id": 500}})
+        assert len(healthy.ws.sent) == 1
+
+        replacement = bm.register(111, _FakeSock(), client_role="API")
+        assert bm.is_current(replacement) and bm._is_eligible("bot_001")
+
+
 async def test_claim_global_command_is_stable_across_accounts():
     """各账号 message_id 不同, 但同一物理消息认领到同一个 owner。"""
     with tempfile.TemporaryDirectory() as td:

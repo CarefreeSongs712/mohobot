@@ -1872,7 +1872,7 @@ class LLMService:
                 peek = getattr(self._image_cache, "peek_description", None)
                 if callable(peek):
                     try:
-                        return peek(url) or ""
+                        return await peek(url) or ""
                     except Exception:  # noqa: BLE001 - 降级路径不掩盖主流程
                         pass
                 return ""
